@@ -235,6 +235,35 @@ test("foreign：有端口在监听但不是我们的桥 → 端口被占用", as
   assert.equal(decideState({ probe: result, online: true, token: "opn_x", pendingCount: 0 }), STATE.PORT_BUSY);
 });
 
+test("starting（端口已绑定但接口没就绪，答得比 300ms 慢）→ 本地接口未开启 + 可重试，绝不显示已连接", async (t) => {
+  const bridge = await bootstrap({ mode: "starting" });
+  t.after(() => bridge.close());
+  const started = Date.now();
+  const probe = await probeHealth(bridge.port, { timeoutMs: 300 });
+  const elapsed = Date.now() - started;
+  assert.equal(probe.kind, "timeout", `300ms 内答不完就该判超时，实际 ${probe.kind}`);
+  assert.ok(elapsed < 900, `探测必须按 300ms 预算收手，实际 ${elapsed}ms`);
+  const result = await discover({ ports: [bridge.port], timeoutMs: 300 });
+  assert.equal(result.hit, null);
+  const stateId = decideState({ probe: result, online: true, token: "opn_x", pendingCount: 0 });
+  assert.notEqual(stateId, STATE.CONNECTED, "启动中绝不能显示已连接");
+  assert.equal(stateId, STATE.INTERFACE_OFF);
+});
+
+test("origin-denied（403 IMP-3001 来源未被信任）→ 需要配对，绝不能显示已连接", async (t) => {
+  const bridge = await bootstrap({ mode: "origin-denied" });
+  t.after(() => bridge.close());
+  const probe = await probeHealth(bridge.port);
+  assert.equal(probe.code, "IMP-3001");
+  const result = await discover({ ports: [bridge.port] });
+  assert.equal(result.hit, null);
+  assert.equal(result.originRejected, true);
+  // 即便本地已经有令牌，也不能显示已连接
+  const stateId = decideState({ probe: result, online: true, token: bridge.token, pendingCount: 0 });
+  assert.notEqual(stateId, STATE.CONNECTED);
+  assert.equal(stateId, STATE.NEEDS_PAIRING);
+});
+
 test("rate-limit：IMP-4015 带 Retry-After，客户端只重试一次且不空转", async (t) => {
   const probeBridge = await bootstrap({ mode: "rate-limit" });
   const retryBridge = await bootstrap({ mode: "rate-limit" });

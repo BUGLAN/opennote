@@ -15,6 +15,8 @@
  *   node tools/mock-bridge.mjs --mode healthy --port 8787 --code 482913
  *   node tools/mock-bridge.mjs --mode no-window      # 桥在跑但窗口不在场 → IMP-4006
  *   node tools/mock-bridge.mjs --mode foreign        # 端口有程序监听但不是 Opennote → 端口被占用
+ *   node tools/mock-bridge.mjs --mode starting       # 端口已绑定但接口没就绪（答得比 300ms 慢）→ 本地接口未开启 + 重试
+ *   node tools/mock-bridge.mjs --mode origin-denied  # /v1/health 直接 403 IMP-3001 → 需要配对（绝不能显示已连接）
  *   node tools/mock-bridge.mjs --mode no-workspace   # 没打开笔记本 → IMP-4007
  *   node tools/mock-bridge.mjs --mode folder-denied  # 落点被拒 → IMP-4009
  *   node tools/mock-bridge.mjs --mode rate-limit     # 第一次 429 IMP-4015
@@ -79,8 +81,7 @@ function downgradeLeadingH1(body) {
   return lines.join("\n");
 }
 
-export function makeToken(random = Math.random) {
-  let body = "";
+export function makeToken(random = Math.random) {  let body = "";
   for (let i = 0; i < 43; i += 1) body += TOKEN_ALPHABET[Math.floor(random() * TOKEN_ALPHABET.length)];
   return `opn_${body}`;
 }
@@ -97,7 +98,7 @@ const TAG_RE = /^[\p{L}\p{N}_\-/]+$/u;
 
 /**
  * @param {object} options
- * @param {string} [options.mode] healthy | no-window | foreign | no-workspace | folder-denied | rate-limit | auth-required
+ * @param {string} [options.mode] healthy | no-window | foreign | starting | origin-denied | no-workspace | folder-denied | rate-limit | auth-required
  * @param {number} [options.port] 0 = 随机空闲端口
  * @param {string} [options.token] 认的令牌（默认随机生成）
  * @param {string} [options.code] 6 位配对码（默认 482913）
@@ -105,6 +106,8 @@ const TAG_RE = /^[\p{L}\p{N}_\-/]+$/u;
  * @param {string} [options.outDir] 落盘目录（默认 os.tmpdir()/opennote-mock-notes）
  * @param {boolean} [options.log] 是否打印请求日志
  */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export function startMockBridge(options = {}) {
   const mode = options.mode || "healthy";
   const token = options.token || makeToken();
@@ -119,6 +122,8 @@ export function startMockBridge(options = {}) {
     code,
     port: null,
     started: Date.now(),
+    // 「正在启动」模式的时间基准（MOCK_STARTING_MS 之后接口才就绪）
+    startedAt: Date.now(),
     imports: [],
     pairs: [],
     rejections: [],
@@ -215,7 +220,7 @@ export function startMockBridge(options = {}) {
     }
   }
 
-  const server = createServer((request, response) => {
+  const server = createServer(async (request, response) => {
     const chunks = [];
     let size = 0;
     request.on("data", (chunk) => {
@@ -223,7 +228,7 @@ export function startMockBridge(options = {}) {
       if (size > 16 * 1024 * 1024) request.destroy();
       else chunks.push(chunk);
     });
-    request.on("end", () => {
+    request.on("end", async () => {
       const url = new URL(request.url, `http://127.0.0.1:${state.port}`);
       const path = url.pathname;
       state.requests.push({
@@ -253,8 +258,21 @@ export function startMockBridge(options = {}) {
         response.end(DEMO_PAGE);
         return;
       }
+      // 「正在启动」：端口已绑定但接口还没就绪，/v1/health 答得比插件 300ms 探测预算还慢。
+      // 复现应用侧「正在启动」这一态：插件必须如实说「本地接口未开启」+重试，绝不能显示「已连接」。
+      if (mode === "starting" && Date.now() - state.startedAt < Number(process.env.MOCK_STARTING_MS || 4000)) {
+        await sleep(600);
+        send(200, { ok: true, result: { bridge: "starting", spec: SPEC } });
+        return;
+      }
       if (mode === "no-window") {
         send(409, errorBody("IMP-4006", "renderer not available", "Opennote 的窗口已关闭。请重新打开 Opennote，再试一次。", { retryable: true }));
+        return;
+      }
+      // 「来源未被信任」：02 §5.2.4 第 2 道闸门，403 IMP-3001。插件只能显示「需要配对」，
+      // 绝不能显示「已连接」（Lead 硬要求）。
+      if (mode === "origin-denied") {
+        send(403, errorBody("IMP-3001", "origin not allowed", "（不显示给用户，仅进设置面板拒绝日志）来源未被允许。", { retryable: false }));
         return;
       }
       if (mode === "rate-limit" && !state.rateLimited) {
