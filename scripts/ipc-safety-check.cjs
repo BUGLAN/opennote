@@ -385,6 +385,14 @@ function createHarness(options = {}) {
     getPath: () => state.userData,
     setAppUserModelId() {},
     whenReady: () => Promise.resolve(),
+    /**
+     * 0.3.0 新增：`main.cjs` 用单实例锁把第二个实例挡掉，并注册 `opennote://` 协议
+     * （00 号 §6.14㉛）。stub **必须**提供这两个 API —— 不然护栏会在 require
+     * main.cjs 时直接抛异常，从而**静默跳过**其对 IPC 面的全部检查。
+     * 这里返回 `true`（拿到锁）以保证护栏走的是正常启动分支。
+     */
+    requestSingleInstanceLock: () => true,
+    setAsDefaultProtocolClient: () => true,
     on(event, handler) {
       const list = state.appEvents.get(event) || []
       list.push(handler)

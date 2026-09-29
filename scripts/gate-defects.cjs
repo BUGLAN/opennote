@@ -8,17 +8,25 @@
  *   node scripts/gate-defects.cjs                  # 6 条逐条判定（默认）
  *   node scripts/gate-defects.cjs --verbose        # 追加子进程原始输出
  *   node scripts/gate-defects.cjs --full           # 额外跑**全量** vitest 套件
- *   node scripts/gate-defects.cjs --no-mutants     # 跳过变异灵敏度检查（快 ~40s）
+ *   node scripts/gate-defects.cjs --no-mutants     # 跳过变异灵敏度检查（快 ~20s）
+ *   node scripts/gate-defects.cjs --self-test      # 自检：崩溃的 harness 必须判 CRASHED 而不是 MISSED
  *   node scripts/gate-defects.cjs --keep           # 保留临时目录
  *
- * 退出码：0 = 6 条全部 PASS；1 = 任一 FAIL（含变异检查「护栏不灵敏」）。
+ * 退出码：0 = 6 条全部 PASS；1 = 任一 FAIL（含变异检查「护栏不灵敏」与「无法判定」）。
  *
  * 这个脚本**不改任何源码**，它做三件事：
  *   1. 静态取证：在真实源码里核对每条缺陷的修复符号与调用点（含「不得退回旧实现」的反向断言）。
  *   2. 行为取证：跑 `scripts/ipc-safety-check.cjs --verbose`（真实 electron/main.cjs + stub electron）
  *      与 vitest（真实 src/fs、src/data 模块），按**用例名**强制要求对应分组的用例存在且全绿。
- *   3. 变异灵敏度：把 main.cjs 复制到临时目录并注回「修复前」的写法，确认护栏会变红。
- *      护栏对回归不敏感 = 证据无效，所以这一步失败同样算 FAIL。
+ *   3. 变异灵敏度：在**编译期**把 main.cjs 的源码改回「修复前」写法（不落任何 main.cjs 副本），
+ *      确认护栏会变红。护栏对回归不敏感 = 证据无效；**harness 崩溃 = 无法判定**，两者都算 FAIL。
+ *
+ * 变异运行的结果是**三态**，措辞刻意不同：
+ *   DETECTED  护栏因该回归变红（有 PASS/FAIL 摘要，退出码非 0，FAIL > 0）——期望结果
+ *   MISSED    护栏跑完了但没红（有摘要，退出码 0 或 FAIL 0）——「对该回归不敏感」
+ *   CRASHED   子进程没有任何 PASS/FAIL 摘要（加载期崩溃 / 锚点未命中 / 超时）——「无法判定」
+ *   另有 M0 零变异对照：同样的接线、零变异，必须逐字复现基线判定，否则接线本身不可信。
+ *   CRASHED 与 MISSED 绝不能混为一谈：前者是「我们什么都不知道」，把它说成后者是静默减少覆盖。
  *
  * 已知限制（脚本会在输出里显式标注，不得当成等价）：
  *   - D31：FSA / OPFS 没有 realpath 可用，浏览器端**无法**做链接越界校验，只能文档化。
@@ -38,10 +46,16 @@ const VERBOSE = process.argv.includes('--verbose')
 const FULL = process.argv.includes('--full')
 const NO_MUTANTS = process.argv.includes('--no-mutants')
 const KEEP = process.argv.includes('--keep')
+/** 自检：故意让变异 harness 在加载阶段崩溃，验证「崩溃」不会被误判成 MISSED。 */
+const SELF_TEST = process.argv.includes('--self-test')
 
 const IPC_SCRIPT = path.join(REPO_ROOT, 'scripts', 'ipc-safety-check.cjs')
+const MAIN_PATH = path.join(REPO_ROOT, 'electron', 'main.cjs')
 const VITEST_BIN = path.join(REPO_ROOT, 'node_modules', 'vitest', 'vitest.mjs')
 const EVIDENCE_DOC = path.join(REPO_ROOT, 'docs', 'verify', 'A0-缺陷门禁-作者证据.md')
+
+/** 变异 harness 的接线锚点：必须逐字存在于 ipc-safety-check.cjs。 */
+const IPC_REPO_ROOT_ANCHOR = "const REPO_ROOT = path.resolve(__dirname, '..')"
 
 /** 默认只跑与本线 6 条缺陷相关的用例文件（确定性）；`--full` 时跑全量。 */
 const DEFECT_TEST_FILES = [
@@ -93,36 +107,115 @@ function countOf(text, pattern) {
 }
 
 /** 跑 `scripts/ipc-safety-check.cjs`（可指向一个变异的 main.cjs 副本）。 */
-function runIpcCheck(options = {}) {
-  let script = IPC_SCRIPT
-  const env = { ...process.env }
-  if (options.mutantMain) {
-    const runner = path.join(tmpRoot, `ipc-check-${options.id}.cjs`)
-    const source = fs
-      .readFileSync(IPC_SCRIPT, 'utf8')
-      .replace(
-        "const REPO_ROOT = path.resolve(__dirname, '..')",
-        `const REPO_ROOT = ${JSON.stringify(REPO_ROOT)}`,
-      )
-      .replace(
-        "const MAIN_PATH = path.join(REPO_ROOT, 'electron', 'main.cjs')",
-        'const MAIN_PATH = process.env.OPENNOTE_GATE_MAIN',
-      )
-    assert.notEqual(source, fs.readFileSync(IPC_SCRIPT, 'utf8'), '无法改写 ipc-safety-check 副本（锚点漂移）')
-    fs.writeFileSync(runner, source, 'utf8')
-    script = runner
-    env.OPENNOTE_GATE_MAIN = options.mutantMain
+/**
+ * 把变异注入**编译期**：`Module.prototype._compile` 在 main.cjs 被 require 的那一刻改它的源码。
+ *
+ * 为什么不再「复制 main.cjs 到临时目录再改」：CJS 的相对 require 是按**文件真实路径**解析的。
+ * main.cjs 现在有 `require('./deeplink.cjs')`（0.3.1 的单实例锁 / 协议注册），副本一旦离开
+ * `electron/`，这条 require 立刻 `MODULE_NOT_FOUND`，harness 在**加载阶段**就崩：
+ * 退出码 1、但没有任何 `PASS/FAIL` 行。这正是 0.3.1 上 M1/M2/M3 被误判成 MISSED 的原因
+ * （2026-09-29 实测，见 docs/verify/A0-缺陷门禁-作者证据.md §3.1）。
+ *
+ * 编译期注入让 main.cjs 始终从它自己的目录加载，`__dirname`、`require('./x.cjs')`、
+ * `path.join(__dirname, 'preload.cjs')` 全部保持真实——不再有任何路径漂移。
+ */
+function buildRunner(id, mutations) {
+  const original = fs.readFileSync(IPC_SCRIPT, 'utf8')
+  assert.ok(original.includes(IPC_REPO_ROOT_ANCHOR), `ipc-safety-check.cjs 锚点漂移（找不到 ${IPC_REPO_ROOT_ANCHOR}）`)
+  let source = original.replace(IPC_REPO_ROOT_ANCHOR, `const REPO_ROOT = ${JSON.stringify(REPO_ROOT)}`)
+  if (mutations.length > 0) {
+    source = source.replace("'use strict'", `'use strict'\n${compileHook(mutations)}`)
+    assert.ok(source.includes('installGateMutationHook'), '变异钩子未能注入 runner 副本（接线断了）')
   }
+  const runner = path.join(tmpRoot, `ipc-check-${id}.cjs`)
+  fs.writeFileSync(runner, source, 'utf8')
+  return runner
+}
+
+/**
+ * 注入到 runner 副本里的编译钩子源码。
+ * - 锚点未命中 → **抛错**（绝不静默放行未变异的 main.cjs）；
+ * - 每次真正改写了 main.cjs 就打印 `[gate-mutation] applied …`（**正向证据**：
+ *   证明变异确实落地了，而不是「跑了原始代码、恰好没红」）。
+ */
+function compileHook(mutations) {
+  return `
+;(function installGateMutationHook() {
+  const Module = require('node:module')
+  const fsMod = require('node:fs')
+  const pathMod = require('node:path')
+  const MUTATIONS = ${JSON.stringify(mutations)}
+  const TARGET = pathMod.resolve(${JSON.stringify(MAIN_PATH)})
+  const originalCompile = Module.prototype._compile
+  Module.prototype._compile = function (content, filename) {
+    if (pathMod.resolve(String(filename)) !== TARGET) return originalCompile.call(this, content, filename)
+    let text = String(content)
+    for (const item of MUTATIONS) {
+      if (!text.includes(item.anchor)) throw new Error('gate-mutation-anchor-missing: ' + item.id)
+      text = text.replace(item.anchor, item.mutated)
+    }
+    console.log('[gate-mutation] applied ' + MUTATIONS.map((item) => item.id).join(',') + ' to ' + pathMod.basename(String(filename)))
+    return originalCompile.call(this, text, filename)
+  }
+})()
+`
+}
+
+function runIpcCheck(options = {}) {
+  const script = options.mutations ? buildRunner(options.id, options.mutations) : IPC_SCRIPT
   const started = Date.now()
   const result = spawnSync(process.execPath, [script, '--verbose'], {
     cwd: REPO_ROOT,
-    env,
+    env: { ...process.env },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 300000,
   })
   const stdout = `${result.stdout || ''}${result.stderr || ''}`
   return { code: result.status, stdout, ms: Date.now() - started }
+}
+
+const VERDICT_RE = /PASS (\d+) \/ FAIL (\d+) \/ SKIP (\d+)/
+/** 变异的正向证据：钩子真的改写 main.cjs 时才会打印这一行。 */
+const MUTATION_APPLIED_RE = /\[gate-mutation\] applied /
+
+/**
+ * 判定一次子进程运行的结果。**四态，崩溃与「没生效」都不许降级成 MISSED。**
+ *
+ * 「护栏没红」「护栏根本没跑起来」「护栏跑了但变异压根没注进去」在输出上长得几乎一样，
+ * 但含义天差地别：只有第一种是「确认对该回归不敏感」。把后两种说成 MISSED 是
+ * 「静默减少覆盖」——比直接报错更容易骗过 reviewer。
+ */
+function classifyRun(run, options = {}) {
+  const verdict = VERDICT_RE.exec(run.stdout)
+  const applied = MUTATION_APPLIED_RE.test(run.stdout)
+  if (!verdict) {
+    return { status: 'CRASHED', pass: null, fail: null, skip: null, applied, reason: errorLineOf(run.stdout) }
+  }
+  const result = {
+    status: 'VERDICT',
+    pass: Number(verdict[1]),
+    fail: Number(verdict[2]),
+    skip: Number(verdict[3]),
+    applied,
+  }
+  if (options.expectMutation && !applied) {
+    result.status = 'NO_EFFECT'
+    result.reason = '变异从未被应用到 main.cjs（runner 接线断了，跑的是未变异代码）——这次运行没有证明力'
+  }
+  return result
+}
+
+/** 从崩溃输出里挑一行最能说明原因的（自测脚本自身异常 / MODULE_NOT_FOUND / 锚点未命中 …）。 */
+function errorLineOf(stdout) {
+  const lines = String(stdout || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const hit = lines.find((line) =>
+    /自测脚本自身异常|Cannot find module|gate-mutation-anchor-missing|MODULE_NOT_FOUND|Error:/.test(line),
+  )
+  return hit || lines[lines.length - 1] || '子进程无任何输出'
 }
 
 /** 解析 ipc-safety-check 的 PASS/FAIL/SKIP 与 `── 分组 ──`。 */
@@ -207,17 +300,173 @@ const MUTANTS = [
   },
 ]
 
-function writeMutant(mutant) {
+/** 零变异对照：用**与变异完全相同的接线**跑一遍，结果必须与基线逐字一致。
+ * 它是「变异接线可用」的证据——接线一坏，后面三行 MISSED 全是假象。
+ */
+const IDENTITY_SPEC = { id: 'M0', label: '零变异对照（同样的接线，必须逐字复现基线判定）', mutations: [] }
+
+/**
+ * `--self-test` 用的合成变异：只把 main.cjs 的**兄弟模块 require** 打断。
+ * 它复刻的正是 0.3.1 上真实发生过的失败形态——harness 在加载阶段崩溃、
+ * 退出码 1、却没有任何 PASS/FAIL 行。用来证明这种形态会被判成 CRASHED 而不是 MISSED。
+ */
+const SELF_TEST_MUTANT = {
+  id: 'X1',
+  defect: 'self-test',
+  label: '故意打断 main.cjs 的兄弟模块 require',
+  anchor: "require('./deeplink.cjs')",
+  mutated: "require('./__gate_self_test_missing__.cjs')",
+  expectFailure: /这个正则永远不会命中/,
+}
+
+/** 变异锚点必须先在真实源码里命中一次，避免「锚点漂移 → 静默跑了个未变异的 main.cjs」。 */
+function assertAnchorsPresent() {
   const source = read('electron/main.cjs')
-  assert.ok(source.includes(mutant.anchor), `${mutant.id} 锚点未命中（源码漂移）：${mutant.anchor.split('\n')[0]}`)
-  // 变异副本放在临时目录里，__dirname 会跟着变（main.cjs 用它拼 preload 路径）。
-  // 指回仓库的 electron/，否则每次变异运行都会多出一条与缺陷无关的「preload 路径基线」失败，
-  // 让「护栏为什么变红」变得不可读。
-  const pinned = `__dirname = ${JSON.stringify(path.join(REPO_ROOT, 'electron'))}\n`
-  const mutated = (pinned + source).replace(mutant.anchor, mutant.mutated)
-  const file = path.join(tmpRoot, `main-${mutant.id}.cjs`)
-  fs.writeFileSync(file, mutated, 'utf8')
-  return file
+  for (const mutant of MUTANTS) {
+    assert.ok(
+      source.includes(mutant.anchor),
+      `${mutant.id} 锚点未命中（源码漂移），无法构造变异：${mutant.anchor.split('\n')[0]}`,
+    )
+  }
+  return `${MUTANTS.length} 个锚点全部命中`
+}
+
+/**
+ * 把一次变异结果转成「通过详情」或抛出明确错误。
+ * **崩溃与「不敏感」必须措辞不同**：前者是「我们什么都不知道」，后者是「确认检不出来」。
+ */
+function describeMutantVerdict(id, item) {
+  assert.ok(item, `${id} 未执行`)
+  if (item.status === 'CRASHED') {
+    throw new Error(
+      `变异 harness 崩溃：**无法判定**是否检出（不是「护栏对该回归不敏感」）— ${item.reason}` +
+        `（退出码 ${item.run.code}，无 PASS/FAIL 摘要）`,
+    )
+  }
+  if (item.status === 'NO_EFFECT') {
+    throw new Error(
+      `变异从未被应用：**无法判定**是否检出（不是「护栏对该回归不敏感」）— ${item.reason}` +
+        `（退出码 ${item.run.code}，FAIL ${item.fail} 是未变异代码的结果）`,
+    )
+  }
+  if (item.status !== 'DETECTED') {
+    throw new Error(
+      `${id} 未被护栏检测到（退出码 ${item.run.code}，FAIL ${item.fail}）——护栏对该回归不敏感`,
+    )
+  }
+  return `退出码 ${item.run.code}，FAIL ${item.fail}`
+}
+
+/**
+ * `--self-test`：故意让变异 harness 在**加载阶段**崩溃（把 main.cjs 的兄弟模块 require 打断），
+ * 验证三件事：① 判定为 CRASHED 而不是 MISSED；② 报错措辞写明「无法判定」；
+ * ③ 零变异对照仍然可用。这是对「静默减少覆盖」这条守卫的自证。
+ */
+function selfTest() {
+  console.log('gate-defects --self-test：验证「harness 崩溃」不会被降级成 MISSED')
+  console.log(`node=${process.version} platform=${process.platform} 临时目录：${tmpRoot}${KEEP ? '（--keep）' : ''}`)
+
+  section('对照 1/3：零变异对照必须可用（接线自检的正常路径）')
+  const identityRun = runIpcCheck({ id: 'M0', mutations: [] })
+  fs.writeFileSync(path.join(tmpRoot, 'M0.log'), identityRun.stdout, 'utf8')
+  const identityVerdict = classifyRun(identityRun)
+  console.log(
+    `  ${identityVerdict.status === 'VERDICT' ? 'WIRING  ' : 'CRASHED '} M0 零变异对照 — ` +
+      (identityVerdict.status === 'VERDICT'
+        ? `PASS ${identityVerdict.pass} / FAIL ${identityVerdict.fail} / SKIP ${identityVerdict.skip}，退出码 ${identityRun.code}`
+        : `无摘要，退出码 ${identityRun.code}：${identityVerdict.reason}`),
+  )
+  check('零变异对照可用（status=VERDICT 且退出码 0）', () => {
+    assert.equal(identityVerdict.status, 'VERDICT', `对照本身崩溃：${identityVerdict.reason}`)
+    assert.equal(identityRun.code, 0, `对照退出码应为 0，实际 ${identityRun.code}`)
+    return `PASS ${identityVerdict.pass} / FAIL ${identityVerdict.fail}`
+  })
+
+  section('对照 2/3：故意打断兄弟模块 require，必须判 CRASHED 并写明「无法判定」')
+  const broken = { ...SELF_TEST_MUTANT, status: classifyRun({ stdout: '' }).status }
+  const brokenRun = runIpcCheck({ id: SELF_TEST_MUTANT.id, mutations: [SELF_TEST_MUTANT] })
+  fs.writeFileSync(path.join(tmpRoot, `${SELF_TEST_MUTANT.id}.log`), brokenRun.stdout, 'utf8')
+  const brokenVerdict = classifyRun(brokenRun)
+  const brokenItem = { ...broken, run: brokenRun, status: brokenVerdict.status, reason: brokenVerdict.reason }
+  console.log(
+    `  ${brokenVerdict.status.padEnd(8)} ${SELF_TEST_MUTANT.id}（故意打断 require）— ` +
+      `退出码 ${brokenRun.code}：${brokenVerdict.reason}`,
+  )
+
+  let thrown = ''
+  try {
+    describeMutantVerdict(SELF_TEST_MUTANT.id, brokenItem)
+  } catch (error) {
+    thrown = error.message
+  }
+
+  check('崩溃被判定为 CRASHED（而不是 VERDICT/MISSED）', () => {
+    assert.equal(brokenVerdict.status, 'CRASHED', `期望 CRASHED，实际 ${brokenVerdict.status}`)
+    assert.notEqual(brokenRun.code, 0, '故意打断的 harness 应以非 0 退出')
+    return `退出码 ${brokenRun.code}`
+  })
+  check('报错措辞写明「无法判定」，且**不**使用 MISSED 的说法', () => {
+    assert.ok(thrown, 'describeMutantVerdict 竟然没有抛错——崩溃被当成了通过')
+    assert.match(thrown, /harness 崩溃/, `措辞缺少「harness 崩溃」：${thrown}`)
+    assert.match(thrown, /无法判定/, `措辞缺少「无法判定」：${thrown}`)
+    assert.doesNotMatch(thrown, /未被护栏检测到/, `崩溃被误写成 MISSED：${thrown}`)
+    return thrown.slice(0, 120)
+  })
+
+  section('对照 3/3：声明了变异却零注入（跑的是未变异代码）→ 必须判 NO_EFFECT，不能算 MISSED')
+  // 这正是 2026-09-29 真实踩到的坑：runOne 传了 spec.mutations（undefined），
+  // runIpcCheck 于是回落到未变异的 IPC_SCRIPT，三次变异全部「退出码 0 / FAIL 0」。
+  // M0 零变异对照**发现不了**它（接线本身是对的），只有「变异是否真的落地」的正向证据能发现。
+  const noEffectRun = runIpcCheck({ id: 'X2', mutations: [] })
+  fs.writeFileSync(path.join(tmpRoot, 'X2.log'), noEffectRun.stdout, 'utf8')
+  const noEffectVerdict = classifyRun(noEffectRun, { expectMutation: true })
+  const noEffectItem = {
+    ...SELF_TEST_MUTANT,
+    id: 'X2',
+    run: noEffectRun,
+    status: noEffectVerdict.status,
+    reason: noEffectVerdict.reason,
+    fail: noEffectVerdict.fail,
+  }
+  console.log(
+    `  ${noEffectVerdict.status.padEnd(8)} X2（声明变异、零注入）— 退出码 ${noEffectRun.code}，` +
+      `FAIL ${noEffectVerdict.fail}：${noEffectVerdict.reason}`,
+  )
+
+  let noEffectThrown = ''
+  try {
+    describeMutantVerdict('X2', noEffectItem)
+  } catch (error) {
+    noEffectThrown = error.message
+  }
+
+  check('零注入被判定为 NO_EFFECT（而不是 MISSED / VERDICT）', () => {
+    assert.equal(noEffectVerdict.status, 'NO_EFFECT', `期望 NO_EFFECT，实际 ${noEffectVerdict.status}`)
+    assert.equal(noEffectRun.code, 0, '零注入的运行本身应当是绿的（这正是它危险的地方）')
+    return `退出码 ${noEffectRun.code}，FAIL ${noEffectVerdict.fail}`
+  })
+  check('零注入的报错写成「变异从未被应用」，且**不**使用 MISSED 的说法', () => {
+    assert.ok(noEffectThrown, 'describeMutantVerdict 没有抛错——零注入被当成了通过')
+    assert.match(noEffectThrown, /变异从未被应用/, `措辞缺少「变异从未被应用」：${noEffectThrown}`)
+    assert.doesNotMatch(noEffectThrown, /未被护栏检测到/, `零注入被误写成 MISSED：${noEffectThrown}`)
+    return noEffectThrown.slice(0, 120)
+  })
+
+  console.log(`\nPASS ${passCount} / FAIL ${failCount}`)
+  if (failCount > 0) {
+    console.log('\n失败项：')
+    for (const item of failures) console.log(`  - ${item}`)
+  }
+  if (!KEEP) {
+    try {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    } catch {
+      /* 清理失败无妨 */
+    }
+  } else {
+    console.log(`\n临时目录保留在：${tmpRoot}`)
+  }
+  if (failCount > 0) process.exitCode = 1
 }
 
 // ---------------------------------------------------------------------------
@@ -254,44 +503,117 @@ function main() {
   if (VERBOSE) console.log(suite.stdout.trimEnd().split('\n').map((line) => `  | ${line}`).join('\n'))
 
   // ------------------------------------------------------------ 变异灵敏度
+  const baselinePass = parsed.summary ? Number(parsed.summary[1]) : null
+  const baselineFail = parsed.summary ? Number(parsed.summary[2]) : null
   let mutants = []
+  let identity = null
   if (NO_MUTANTS) {
     warn('已跳过变异灵敏度检查（--no-mutants）：本次不含「护栏对回归敏感」的证据')
   } else {
-    section('变异灵敏度：把「修复前」的写法注回 main.cjs 副本，护栏必须变红')
-    mutants = MUTANTS.map((mutant) => {
-      const file = writeMutant(mutant)
-      const run = runIpcCheck({ id: mutant.id, mutantMain: file })
-      const parsedMutant = parseIpcOutput(run.stdout)
-      // 变异运行的原始输出留档，供人工核对「护栏确实因为该回归变红」
-      fs.writeFileSync(path.join(tmpRoot, `${mutant.id}.log`), run.stdout, 'utf8')
-      const detected = run.code !== 0 && mutant.expectFailure.test(run.stdout)
-      console.log(
-        `  ${detected ? 'DETECTED' : 'MISSED  '} ${mutant.id} ${mutant.defect}：${mutant.label}` +
-          `（退出码 ${run.code}，FAIL ${parsedMutant.summary ? parsedMutant.summary[2] : '?'}）`,
-      )
-      if (VERBOSE) {
-        const hits = [...parsedMutant.sections.entries()].flatMap(([title, group]) =>
-          group.fail.map((name) => `      ${title} › ${name}`),
-        )
-        for (const line of hits) console.log(line)
+    section('变异灵敏度：编译期把「修复前」的写法注回 main.cjs，护栏必须变红')
+
+    /** 跑一次变异/对照并给出四态判定。 */
+    const runOne = (spec) => {
+      // MUTANTS 用 anchor/mutated 描述变异；编译钩子要的是 [{id, anchor, mutated}]
+      const mutations = spec.mutations ?? [{ id: spec.id, anchor: spec.anchor, mutated: spec.mutated }]
+      const run = runIpcCheck({ id: spec.id, mutations })
+      // 原始输出留档，供人工核对「护栏确实因为该回归变红」/「harness 为什么崩」
+      fs.writeFileSync(path.join(tmpRoot, `${spec.id}.log`), run.stdout, 'utf8')
+      const classified = classifyRun(run, { expectMutation: mutations.length > 0 })
+      const parsedRun = parseIpcOutput(run.stdout)
+      let status = classified.status
+      // 只有**真的注入了变异**的运行才谈「检出/未检出」；M0 零变异对照保持原始 VERDICT 态，
+      // 它的判据是「与基线逐字一致」，不是「有没有变红」。
+      if (status === 'VERDICT' && mutations.length > 0) {
+        const detected =
+          run.code !== 0 && classified.fail > 0 && Boolean(spec.expectFailure) && spec.expectFailure.test(run.stdout)
+        status = detected ? 'DETECTED' : 'MISSED'
       }
-      return { ...mutant, detected, run, parsed: parsedMutant }
-    })
+      // 注意顺序：classified.status 是「跑完后的原始态」，必须放在后面用最终态覆盖它，
+      // 否则 DETECTED / MISSED 会被刚算出来的 VERDICT 覆盖掉。
+      return { ...spec, run, parsed: parsedRun, ...classified, status }
+    }
+
+    // 先跑零变异对照：它坏了就没有任何结论可信
+    identity = runOne(IDENTITY_SPEC)
+    const identityLine =
+      identity.status === 'VERDICT'
+        ? `PASS ${identity.pass} / FAIL ${identity.fail} / SKIP ${identity.skip}` +
+          `（基线 PASS ${baselinePass} / FAIL ${baselineFail}）`
+        : `无 PASS/FAIL 摘要或接线异常，status=${identity.status}，退出码 ${identity.run.code}` +
+          `${identity.reason ? `：${identity.reason}` : ''}`
+    console.log(`  ${identity.status === 'VERDICT' ? 'WIRING  ' : 'BROKEN '} M0 零变异对照 — ${identityLine}`)
+
+    const wiringOk =
+      identity.status === 'VERDICT' &&
+      identity.run.code === 0 &&
+      identity.pass === baselinePass &&
+      identity.fail === baselineFail
+
+    if (!wiringOk) {
+      // 接线不可用：其余变异运行**不再执行**，全部按「崩溃 / 无法判定」上报，绝不报 MISSED
+      console.log('  → 变异接线对照失败，M1/M2/M3 不再执行（无法判定是否检出）')
+      mutants = MUTANTS.map((mutant) => ({
+        ...mutant,
+        run: { code: null, stdout: '' },
+        status: 'CRASHED',
+        reason: '变异接线对照（M0）已失败，未执行本次变异',
+        parsed: { sections: new Map(), summary: null },
+      }))
+    } else {
+      mutants = MUTANTS.map((mutant) => {
+        const item = runOne(mutant)
+        const tail =
+          item.status === 'CRASHED'
+            ? `无 PASS/FAIL 摘要（harness 崩溃），退出码 ${item.run.code}：${item.reason}`
+            : item.status === 'NO_EFFECT'
+              ? `变异未生效，退出码 ${item.run.code}，FAIL ${item.fail}：${item.reason}`
+              : `退出码 ${item.run.code}，FAIL ${item.fail}（变异已应用于 main.cjs）`
+        console.log(`  ${item.status.padEnd(8)} ${item.id} ${item.defect}：${mutant.label}（${tail}）`)
+        if (VERBOSE && item.status !== 'CRASHED') {
+          for (const [title, group] of item.parsed.sections.entries()) {
+            for (const name of group.fail) console.log(`      ${title} › ${name}`)
+          }
+        }
+        return item
+      })
+    }
+
+    const inconclusive = mutants.filter((item) => item.status === 'CRASHED' || item.status === 'NO_EFFECT')
+    if (inconclusive.length > 0) {
+      warn(
+        `有 ${inconclusive.length} 个变异运行**没有产出可信判定**（harness 崩溃 / 变异未生效）——` +
+          '这不是「检不出来」，而是「无法判定」，已按 FAIL 上报；原始输出留档于临时目录 <id>.log',
+      )
+    }
   }
 
   const mutant = (id) => mutants.find((item) => item.id === id)
-  /** 变异检查的断言：必须被检测到；跳过时明确降级成 WARN。 */
+  /** 变异检查的断言：崩溃一律是 FAIL，措辞必须与 MISSED 区分开。 */
   const assertMutantDetected = (id) => {
     if (NO_MUTANTS) return '已跳过（--no-mutants）'
-    const item = mutant(id)
-    assert.ok(item, `${id} 未执行`)
-    assert.ok(
-      item.detected,
-      `${id} 未被护栏检测到（退出码 ${item.run.code}，FAIL ${item.parsed.summary ? item.parsed.summary[2] : '?'}）——护栏对该回归不敏感`,
-    )
-    return `退出码 ${item.run.code}，FAIL ${item.parsed.summary ? item.parsed.summary[2] : '?'}`
+    return describeMutantVerdict(id, mutant(id))
   }
+
+  check('变异锚点全部命中真实 main.cjs（防「锚点漂移 → 静默跑未变异的代码」）', () => assertAnchorsPresent())
+  check('变异接线对照（M0：零变异必须逐字复现基线；崩溃即接线不可用，不是 MISSED）', () => {
+    if (NO_MUTANTS) return '已跳过（--no-mutants）'
+    assert.ok(identity, 'M0 未执行')
+    if (identity.status === 'CRASHED') {
+      throw new Error(
+        `变异 harness 崩溃：**无法判定**任何变异结果（这次不是「检不出来」）— ${identity.reason}` +
+          `（退出码 ${identity.run.code}，无 PASS/FAIL 摘要）`,
+      )
+    }
+    assert.equal(identity.run.code, 0, `M0 对照退出码应为 0，实际 ${identity.run.code}`)
+    assert.equal(
+      identity.pass,
+      baselinePass,
+      `M0 对照 PASS 数 ${identity.pass} 与基线 ${baselinePass} 不一致——变异接线改变了 harness 行为`,
+    )
+    assert.equal(identity.fail, baselineFail, `M0 对照 FAIL 数 ${identity.fail} 与基线 ${baselineFail} 不一致`)
+    return `PASS ${identity.pass} / FAIL ${identity.fail} / SKIP ${identity.skip}，与基线逐字一致`
+  })
 
   /** ipc-safety-check 的分组断言。 */
   const requireSection = (title, minPass, options = {}) => {
@@ -519,7 +841,8 @@ function main() {
 }
 
 try {
-  main()
+  if (SELF_TEST) selfTest()
+  else main()
 } catch (error) {
   console.error('门禁脚本自身异常：', error)
   process.exitCode = 1

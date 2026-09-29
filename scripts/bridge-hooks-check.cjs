@@ -10,8 +10,8 @@
  *   1. `bridgeStatusPayload()` 逐字段重建 → `address/error/lastRejectedOrigin/
  *      startPort/portRange/lastPairing` 6 个字段被截断，R4b 轮换警告、R8 拒绝
  *      记录、S4/S5「下一步」三处 UI 成为死代码。
- *   2. `getWorkspaceInfo` 从未传给桥 → `workspace.open` 恒 false → 插件对着
- *      一本开着的笔记本显示 `IMP-4007「还没有打开笔记本」`。
+ *   2. `getWorkspaceInfo` 从未传给桥 → `workspace.open` 恒 false → 插件对着一本
+ *      开着的笔记本报 `IMP-4007`（「笔记本文件夹没打开」）。
  *
  * 两次都是**两侧各自单测全绿、断在中间的缝**，所以必须有一条跨文件的静态
  * 断言：桥读了哪些 `options.*`，装配处就得传哪些。

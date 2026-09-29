@@ -43,7 +43,10 @@ const evidence = {};
 
 function record(status, id, title, detail) {
   results.push({ status, id, title, detail: detail == null ? "" : String(detail) });
-  const mark = status === "PASS" ? "PASS" : status === "FAIL" ? "FAIL" : "UNVERIFIED";
+  // 注意：这里**必须**给 INFO 单独一支。原来写成「非 PASS 非 FAIL 一律打 UNVERIFIED」，
+  // 于是 `info4b()` 的观测行全被印成 `UNVERIFIED` —— 计数是对的（摘要按 status 统计），
+  // 但**行首标签在撒谎**：4 条纯观测看起来像 4 条「未验证」。标签撒谎就是验证器的缺陷。
+  const mark = status === "PASS" ? "PASS" : status === "FAIL" ? "FAIL" : status === "INFO" ? "INFO" : "UNVERIFIED";
   console.log(`  ${mark}  [${id}] ${title}${detail ? `\n              ${String(detail).split("\n").join("\n              ")}` : ""}`);
 }
 const pass = (id, t, d) => record("PASS", id, t, d);
@@ -343,6 +346,8 @@ async function main() {
     await scenario6(env);
     await scenario7(env);
     await scenario8(env);
+    await scenario9(env);
+    await scenario10(env);
   } catch (error) {
     fail("SCENARIO-CRASH", "场景执行中断", error && error.stack ? error.stack.split("\n").slice(0, 4).join(" | ") : String(error));
   } finally {
@@ -1245,10 +1250,22 @@ function createElectronStub(userData) {
     getLocale: () => "zh-CN",
     setAppUserModelId() {},
     whenReady: () => Promise.resolve(),
+    /**
+     * 单实例锁（`02:1118`：拿不到锁的进程立即退出，命令行参数交给已运行实例）。
+     * 打桩返回 `true` = 本进程拿到锁，于是 `main.cjs` 走正常启动分支。
+     * 由 `S7.0` 静态核对保证「main.cjs 用到而打桩没有」不会再发生。
+     */
+    requestSingleInstanceLock: () => true,
+    releaseSingleInstanceLock() {},
+    /** `opennote://` 协议注册（`00` §6.14㉛）。 */
+    setAsDefaultProtocolClient: () => true,
     on(event, handler) {
       const list = state.appEvents.get(event) || [];
       list.push(handler);
       state.appEvents.set(event, list);
+    },
+    emit(event, ...args) {
+      for (const handler of [...(state.appEvents.get(event) || [])]) handler(...args);
     },
     quit() {
       state.quitCalls += 1;
@@ -1262,6 +1279,7 @@ function createElectronStub(userData) {
     dialog: {
       showOpenDialog: async () => state.openDialog,
       showSaveDialog: async () => state.saveDialog,
+      showMessageBox: async () => ({ response: 0, checkboxChecked: false }),
     },
     ipcMain,
     session: {
@@ -1292,6 +1310,113 @@ function createElectronStub(userData) {
     sentOn: (channel) =>
       state.windows.flatMap((w) => w.webContents.sent).filter((m) => m.channel === channel).map((m) => m.args[0]),
   };
+}
+
+/**
+ * 打桩与 `main.cjs` 的 **Electron API 面**静态对照（V5 新增护栏）。
+ *
+ * 为什么需要它：`main.cjs` 加了 `app.requestSingleInstanceLock()` 之后，我的打桩没有这个方法，
+ * 于是 `require main.cjs` **直接抛 TypeError**，S7/S7B 的检查**被静默跳过**（PASS 从 81 掉到 67，
+ * 而摘要只显示 1 条 FAIL）。这类「打桩没跟上生产代码新增的 API」不是产品缺陷，是**打桩缺口**，
+ * 但它会**悄悄删掉覆盖**。所以这里在加载 main.cjs **之前**先静态比对：
+ * 凡是 `main.cjs` 里出现的 `<命名空间>.<成员>`，打桩必须有同名成员，否则报出**精确的 API 名**。
+ */
+const ELECTRON_NAMESPACES = ["app", "BrowserWindow", "Menu", "dialog", "ipcMain", "session", "shell", "nativeTheme", "protocol", "screen", "clipboard", "net", "powerMonitor"];
+function electronApiGaps(stub) {
+  const source = fs.readFileSync(path.join(ROOT, "electron", "main.cjs"), "utf8");
+  const nsAlt = ELECTRON_NAMESPACES.join("|");
+  const used = new Set(); // "<ns>.<a>" 与 "<ns>.<a>.<b>" 两种形态
+  for (const line of source.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue;
+    let m;
+    const twoRe = new RegExp(`\\b(${nsAlt})\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\.\\s*([A-Za-z_$][\\w$]*)`, "g");
+    while ((m = twoRe.exec(line)) !== null) used.add(`${m[1]}.${m[2]}.${m[3]}`);
+    const oneRe = new RegExp(`\\b(${nsAlt})\\s*\\.\\s*([A-Za-z_$][\\w$]*)`, "g");
+    while ((m = oneRe.exec(line)) !== null) used.add(`${m[1]}.${m[2]}`);
+  }
+  const missing = [];
+  for (const api of used) {
+    const parts = api.split(".");
+    const [ns, ...rest] = parts;
+    if (!stub[ns]) {
+      missing.push(api);
+      continue;
+    }
+    let cursor = stub[ns];
+    let ok = true;
+    for (let i = 0; i < rest.length; i += 1) {
+      if (cursor == null || typeof cursor[rest[i]] === "undefined") {
+        // 中间段是**函数**时（例如 `Menu.getApplicationMenu().x`），后续属性来自返回值，
+        // 静态不可判 —— 跳过而不是误报。
+        if (i > 0 && typeof cursor === "function") break;
+        ok = false;
+        break;
+      }
+      cursor = cursor[rest[i]];
+    }
+    if (!ok) missing.push(api);
+  }
+  return { missing: missing.sort(), total: used.size };
+}
+
+/**
+ * 覆盖守卫：跑 `body`，然后核对 `expectedIds` 是否**全部被报告**过（PASS/FAIL/UNVERIFIED 都算）。
+ *
+ * 没有它，场景中途抛异常或提前 `return` 就等于「这些检查不存在」——
+ * 本轮就真实发生过：打桩缺 `app.requestSingleInstanceLock` → `require main.cjs` 抛异常 →
+ * S7/S7B 的 14 条检查**静默消失**，摘要只显示 1 条 FAIL，PASS 从 81 掉到 67。
+ * **静默减少覆盖比报错更危险**，所以缺失的检查在这里被显式报成 FAIL。
+ */
+async function withCoverageGuard(label, expectedIds, body) {
+  try {
+    await body();
+  } catch (error) {
+    fail(`${label}-crash`, `${label} 场景中途抛异常（已显式记录，不让检查静默消失）`,
+      error && error.stack ? error.stack.split("\n").slice(0, 3).join(" | ") : String(error));
+  }
+  const reported = new Set(results.map((r) => r.id));
+  const missing = expectedIds.filter((id) => !reported.has(id));
+  if (missing.length) {
+    fail(`${label}-coverage`, `覆盖守卫：${missing.length} 条检查未被报告（**不是通过**）`,
+      `缺失：${missing.join(", ")}`);
+  }
+}
+
+/**
+ * 接线侧真源断言（V5 新增）：**读真实文件** `src/App.tsx`，而不是在探针里复刻它。
+ *
+ * 为什么必须咬真文件：本检查的第一版是在探针里「复刻」`onImportReceipt` 的写法，
+ * 于是 Lead 修好 `src/App.tsx` 之后它**仍然红** —— 它已经与真代码脱钩，
+ * 一条永远红的断言只会被当噪声。判据必须落在真源上。
+ *
+ * 判据（**顺序必须判**：把声明放在 `receiveEnvelopeOutcome()` 之后等于没生效）：
+ *   `onImportReceipt((` 回调体之内、`receiveEnvelopeOutcome(` 之前，
+ *   必须出现 `setImportChannelContext(` 且实参含 `"local-bridge"`。
+ *
+ * @param mutate `"drop-channel-declaration"` 时**只在内存里**删掉那一行（不写盘），
+ *   用于变异验证：证明本断言对「有没有那一行」敏感，不是恒绿。
+ */
+function appChannelWiring(mutate = null) {
+  const file = path.join(ROOT, "src", "App.tsx");
+  let source = fs.readFileSync(file, "utf8");
+  const mutated = mutate === "drop-channel-declaration";
+  if (mutated) {
+    source = source.replace(/^[ \t]*setImportChannelContext\(\s*\{[^}]*\}\s*\);[ \t]*$/gm, "");
+  }
+  const sub = source.indexOf("onImportReceipt((") >= 0 ? source.indexOf("onImportReceipt((") : source.indexOf("onImportReceipt(");
+  if (sub < 0) return { ok: false, why: "未找到 onImportReceipt( 订阅点", mutated };
+  const call = source.indexOf("receiveEnvelopeOutcome(", sub);
+  if (call < 0) return { ok: false, why: "onImportReceipt 回调里未找到 receiveEnvelopeOutcome(", mutated };
+  const body = source.slice(sub, call);
+  const decl = /setImportChannelContext\s*\(\s*\{([\s\S]*?)\}\s*\)/.exec(body);
+  if (!decl) {
+    return { ok: false, why: "回调体内、receiveEnvelopeOutcome() **之前**没有 setImportChannelContext(...)（顺序也要对）", mutated, bodyLength: body.length };
+  }
+  if (!/local-bridge/.test(decl[1])) {
+    return { ok: false, why: `声明了通道但实参不含 "local-bridge"：{${decl[1].trim()}}`, mutated };
+  }
+  return { ok: true, why: `回调体内、receiveEnvelopeOutcome() 之前声明了 {${decl[1].trim().replace(/\s+/g, " ")}}`, mutated };
 }
 
 function loadMainWithStub(stub, options = {}) {
@@ -1342,11 +1467,26 @@ function loadMainWithStub(stub, options = {}) {
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function scenario7(env) {
+  const EXPECTED_S7 = ["S7.0", "S7.1", "S7.2", "S7.3", "S7.4", "S7.5", "S7.6", "S7.7", "S7.8", "S7.9", "S7.9b", "S7.10", "S7.11"];
+  return withCoverageGuard("S7", EXPECTED_S7, () => scenario7Body(env));
+}
+
+async function scenario7Body(env) {
   stanza("场景 7 · App 渲染层 ↔ 主进程转交链路（真实 electron/main.cjs）");
   const root = await freshWorkspace(env);
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "opennote-userdata-"));
   scenarioRoots.add(userData);
   const harness = createElectronStub(userData);
+
+  // ── S7.0 打桩与 main.cjs 的 Electron API 面一致（在 require 之前先查） ─────
+  const gap = electronApiGaps(harness.stub);
+  if (gap.missing.length === 0) {
+    pass("S7.0", "打桩与 main.cjs 的 Electron API 面一致（不会再因缺 API 而崩掉整段场景）",
+      `main.cjs 用到 ${gap.total} 个 <命名空间>.<成员>，打桩全部具备`);
+  } else {
+    fail("S7.0", "打桩缺少 main.cjs 用到的 Electron API（会导致整段场景崩溃并静默丢失覆盖）",
+      `缺少 ${gap.missing.length} 个：${gap.missing.join(", ")}`);
+  }
 
   let mainLoaded = null;
   try {
@@ -1471,7 +1611,94 @@ async function scenario7(env) {
     fail("S7.6", "② 域错误 → HTTP 错误码", JSON.stringify(badCall).slice(0, 260));
   }
 
-  // ── ③ 渲染层 5 秒不应答 → IMP-4006（不假成功） ─────────────────────────
+  // ── ②c 通道保真：桥投递的信封必须走 `local-bridge` 通道 ──────────────────
+  //
+  // 契约 `00` §6.13⑧：「本地桥转交前设 `"local-bridge"`，收件箱入库设 `"inbox"`，
+  // 应用内保持 `"in-app"`」；§6.14㉕：`importConflict === "inbox"`（0.3.0 默认）
+  // **且外部通道**时强制 `pending`（`receive.ts:367`）。
+  //
+  // 这里分**两条互补证据**：
+  //   · S7.9  **接线侧**（静态，咬真文件 `src/App.tsx`）：声明必须存在且**在调用之前**；
+  //   · S7.10 **行为侧**（动态，经真实转交链路）：声明之后 `pending` / 202 / path=null / 无新 .md / 收件箱 1 条。
+  // 第一版 S7.9 是在探针里「复刻」App.tsx 的写法 —— 修好真文件后它仍红（与真源脱钩），
+  // 已改为读真文件；`S7.9b` 再用**内存变异**证明这条断言红得起来。
+
+  // ── S7.9 接线侧真源断言（读 src/App.tsx 的真实文本，判顺序） ────────────
+  const wiring = appChannelWiring();
+  if (wiring.ok) {
+    pass("S7.9", "接线侧：`src/App.tsx` 的 `onImportReceipt` 在 `receiveEnvelopeOutcome()` **之前**声明 `local-bridge`",
+      `${wiring.why}（读真文件，非复刻）`);
+  } else {
+    fail("S7.9", "接线侧：`src/App.tsx` 未在 `receiveEnvelopeOutcome()` 之前声明 `local-bridge` 通道",
+      `${wiring.why}；不声明的后果：通道停在模块默认 "in-app" → receive.ts:367 的 `
+      + `isExternalDeliveryChannel("in-app")=false → ㉕ 的强制 pending 被跳过（外部剪藏直接写进笔记本），`
+      + `且 receive.ts:646 的 overwrite 通道闸门永不成立（同一个根因、两个假开关）`);
+  }
+
+  // ── S7.9b 变异自检：把那一行**在内存里**删掉，断言必须变红（不写盘、不动产品文件） ──
+  const wiringMutated = appChannelWiring("drop-channel-declaration");
+  if (!wiringMutated.ok) {
+    pass("S7.9b", "变异自检：内存中删掉那一行后 S7.9 的判据如期变红（证明它不是恒绿）",
+      `变异后判定=不通过（${wiringMutated.why}）—— 与未变异时的「通过」形成对照`);
+  } else {
+    fail("S7.9b", "变异自检失败：删掉通道声明后判据**仍然通过**（说明 S7.9 是恒绿的，必须修）",
+      `变异后判定=通过（${wiringMutated.why}）`);
+  }
+
+  // ── S7.10 行为侧：显式声明 `local-bridge` → 契约语义必须成立 ──────────────
+  const chanRoot2 = await freshWorkspace(env);
+  const mdBeforeBridge = listWorkspace(chanRoot2).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/"));
+  const bridgeEnvelope = envelope({ source: { ...envelope({}).source, url: "https://example.com/s7-channel-bridge" } });
+  const bridgePromise = env.plugin.postImport(port, token, bridgeEnvelope, { timeoutMs: 12000 });
+  await delay(150);
+  const bridgePayload = harness.sentOn("opennote:import:receipt").slice(-1)[0];
+  let bridgeStatus = null;
+  let bridgeOutcome = null;
+  if (bridgePayload) {
+    env.clip.setImportChannelContext({ channel: "local-bridge" });
+    bridgeOutcome = await env.clip.receiveEnvelopeOutcome(bridgePayload.envelope);
+    env.clip.setImportChannelContext({ channel: "in-app" });
+    harness.sendToMain("opennote:import:reply", { reqId: bridgePayload.reqId, outcome: bridgeOutcome });
+    bridgeStatus = bridgeOutcome.ok ? bridgeOutcome.result.status : `error:${bridgeOutcome.error.code}`;
+  }
+  const bridgeCall = await bridgePromise;
+  // 注意：新工作区**自带 1 个 .md**（脚手架），所以必须比**增量**，不能比绝对值。
+  const bridgeMdDelta = listWorkspace(chanRoot2).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/") && !mdBeforeBridge.includes(f));
+  const bridgeInbox = env.inbox.inboxDetails();
+  const bridgeIdOk = Boolean(bridgeOutcome && bridgeOutcome.ok && /^\d{8}T\d{6}-.{8}$/.test(String(bridgeOutcome.result.inboxId)));
+  if (bridgeStatus === "pending" && bridgeCall.http === 202 && bridgeOutcome.result.path === null && bridgeIdOk && bridgeMdDelta.length === 0 && bridgeInbox.length === 1) {
+    pass("S7.10", "行为侧：显式 `channel=\"local-bridge\"` + 默认设置 → `pending`（202 / path=null / 无新 .md / 收件箱 1 条）",
+      `status=${bridgeStatus} http=${bridgeCall.http} inboxId=${bridgeOutcome.result.inboxId} path=${bridgeOutcome.result.path} 新增 .md=${bridgeMdDelta.length} 收件箱=${bridgeInbox.length}`);
+  } else {
+    fail("S7.10", "行为侧：显式 local-bridge 通道的契约语义", `status=${bridgeStatus} http=${bridgeCall.http} inboxId=${bridgeOutcome?.result?.inboxId} path=${bridgeOutcome?.result?.path} 新增 .md=${bridgeMdDelta.length} 收件箱=${bridgeInbox.length}`);
+  }
+
+  // ── S7.11 行为侧反向对照：**不声明**通道 → 退回 `created`（这就是 D-V09 的机制） ──
+  // 它既证明「S7.10 的 pending 确实来自通道声明」，也把「漏声明会造成什么」钉成可复跑的证据。
+  const chanRoot3 = await freshWorkspace(env);
+  const mdBeforeControl = listWorkspace(chanRoot3).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/"));
+  env.clip.resetImportChannelContext();
+  const controlEnvelope = envelope({ source: { ...envelope({}).source, url: "https://example.com/s7-channel-control" } });
+  const controlPromise = env.plugin.postImport(port, token, controlEnvelope, { timeoutMs: 12000 });
+  await delay(150);
+  const controlPayload = harness.sentOn("opennote:import:receipt").slice(-1)[0];
+  let controlStatus = null;
+  if (controlPayload) {
+    // 刻意**不**声明通道 = 复现 D-V09 的旧行为（模块默认 "in-app"）
+    const controlOutcome = await env.clip.receiveEnvelopeOutcome(controlPayload.envelope);
+    harness.sendToMain("opennote:import:reply", { reqId: controlPayload.reqId, outcome: controlOutcome });
+    controlStatus = controlOutcome.ok ? controlOutcome.result.status : `error:${controlOutcome.error.code}`;
+  }
+  const controlCall = await controlPromise;
+  const controlMdDelta = listWorkspace(chanRoot3).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/") && !mdBeforeControl.includes(f));
+  if (controlStatus === "created" && controlMdDelta.length === 1) {
+    pass("S7.11", "反向对照：不声明通道 → 退回 `created` 并写笔记（漏声明的实际后果，与 S7.10 形成对照）",
+      `status=${controlStatus} http=${controlCall.http} 新增 .md=${controlMdDelta.length}（同一链路、只差一行通道声明）`);
+  } else {
+    fail("S7.11", "反向对照：不声明通道时应退回 created", `status=${controlStatus} http=${controlCall.http} 新增 .md=${controlMdDelta.length}`);
+  }
+
+
   const silentEnvelope = envelope({ source: { ...envelope({}).source, url: "https://example.com/s7-silent" } });
   const t0 = Date.now();
   const silentCall = await env.plugin.postImport(port, token, silentEnvelope, { timeoutMs: 12000 });
@@ -1581,18 +1808,30 @@ async function bootSecondaryMain(bridgeModule) {
 async function scenario7b(env) {
   stanza("场景 7B · `bridgeStatusPayload()` 重建桥状态时是否吃掉可选字段（c3-bridge 缺陷的独立复核）");
 
-  // ── (1) 真实桥：6 个可选字段必须在 IPC 边界上存活 ─────────────────────
-  const REAL_KEYS = ["address", "error", "lastRejectedOrigin", "startPort", "portRange", "lastPairing"];
+  // ── (1) 真实桥：可选字段必须在 IPC 边界上存活 ─────────────────────────
+  // 0.3.1（00 §6.15㉞）：**配对整体删除** → `lastPairing` 不再是状态字段（`pairingCode`/`newPairCode`/
+  // `pendingPlaintext` 同理）。这条断言随之从「6 个可选字段」收敛为「5 个」，并**新加**一条反向断言：
+  // 配对字段必须**不再出现**（否则说明删除只做了一半）。
+  const REAL_KEYS = ["address", "error", "lastRejectedOrigin", "startPort", "portRange"];
+  const PAIRING_KEYS = ["lastPairing", "pairingCode", "pendingPlaintext", "newPairCode", "pairExpiresAt"];
   try {
     const { harness, restore } = await bootSecondaryMain(undefined);
     await harness.invoke("opennote:bridge:newToken", {});
     const status = await harness.invoke("opennote:bridge:start", {});
     const missing = REAL_KEYS.filter((k) => !(k in status));
+    // `inboxWatch` / `logPath` 也在契约里，但与本次「配对删除」无关，仍单独断言在 S7B.2。
+    const pairingLeft = PAIRING_KEYS.filter((k) => k in status);
     if (!missing.length) {
-      pass("S7B.1", "真实桥：`bridgeStatusPayload()` 带着 6 个可选字段",
-        `键数=${Object.keys(status).length}；address=${JSON.stringify(status.address)} startPort=${JSON.stringify(status.startPort)} portRange=${JSON.stringify(status.portRange)} lastPairing=${JSON.stringify(status.lastPairing)}`);
+      pass("S7B.1", "真实桥：`bridgeStatusPayload()` 带着全部可选字段",
+        `键数=${Object.keys(status).length}；address=${JSON.stringify(status.address)} startPort=${JSON.stringify(status.startPort)} portRange=${JSON.stringify(status.portRange)}`);
     } else {
-      fail("S7B.1", "真实桥：6 个可选字段被重建逻辑吃掉", `缺少 ${missing.join(", ")}；实有键=${Object.keys(status).join(", ")}`);
+      fail("S7B.1", "真实桥：可选字段被重建逻辑吃掉", `缺少 ${missing.join(", ")}；实有键=${Object.keys(status).join(", ")}`);
+    }
+    if (pairingLeft.length === 0) {
+      pass("S7B.1b", "0.3.1（㉞）配对删除彻底：桥状态里没有任何配对字段",
+        `已确认不存在 ${PAIRING_KEYS.join(", ")}；实有键=${Object.keys(status).join(", ")}`);
+    } else {
+      fail("S7B.1b", "配对字段应已随 ㉞ 删除", `仍存在 ${pairingLeft.join(", ")}`);
     }
     const watch = status.inboxWatch;
     if (typeof watch === "string" && ["watch", "poll", "off"].includes(watch)) {
@@ -1668,10 +1907,10 @@ async function scenario7b(env) {
     const failedOk = status.state === "failed";
     const errorOk = typeof status.error === "string" && status.error.length > 0;
     if (keysOk && failedOk && errorOk) {
-      pass("S7B.6", "(2) `!controller` 分支：state='failed' + 可执行的 error 文案 + 6 个键仍在",
-        `state=${JSON.stringify(status.state)} error=${JSON.stringify(status.error)} 键数=${Object.keys(status).length}`);
+      pass("S7B.6", "(2) `!controller` 分支：state='failed' + 可执行的 error 文案 + 可选字段仍在",
+        `state=${JSON.stringify(status.state)} error=${JSON.stringify(status.error)} 键数=${Object.keys(status).length}（必查 ${REAL_KEYS.length} 个可选字段）`);
     } else {
-      fail("S7B.6", "(2) `!controller` 分支", `state=${JSON.stringify(status.state)} error=${JSON.stringify(status.error)} typeof(error)=${typeof status.error} 6 键齐=${keysOk}`);
+      fail("S7B.6", "(2) `!controller` 分支", `state=${JSON.stringify(status.state)} error=${JSON.stringify(status.error)} typeof(error)=${typeof status.error} 可选字段齐=${keysOk}（缺 ${REAL_KEYS.filter((k) => !(k in status)).join(", ") || "无"}）`);
     }
     restore();
   } catch (error) {
@@ -1882,6 +2121,527 @@ async function scenario8(env) {
   } catch (error) {
     fail("S8.6", "轮询降级", error && error.message ? error.message : String(error));
   }
+}
+
+/* --- S9 通道保真（0.3.0 默认落点：外部导入 → 进收件箱） --------------------- */
+
+/**
+ * 场景 9 · 通道 × 落点偏好（`00` §6.14㉕㉖）。
+ *
+ * **为什么单独成场景**（C1 的发现）：本脚本此前**从不调用** `setImportChannelContext()`，
+ * 于是所有直接投递都跑在模块默认通道 `"in-app"` 上 —— 0.3.0 的核心新行为
+ * 「默认设置 → 外部导入进收件箱」在 E2E 里**完全看不见**（`S1.x` 仍报 `created`）。
+ * 这不是产品缺陷，是**驱动侧的通道保真缺口**；本场景把它补上并单独钉住。
+ */
+async function scenario9(env) {
+  const EXPECTED_S9 = ["S9.0", "S9.1", "S9.2", "S9.3"];
+  return withCoverageGuard("S9", EXPECTED_S9, () => scenario9Body(env));
+}
+
+async function scenario9Body(env) {
+  stanza("场景 9 · 通道保真：默认设置 + 外部通道 → 进收件箱（0.3.0 核心语义）");
+  const root = await freshWorkspace(env);
+  env.clip.resetImportChannelContext();
+
+  // ── S9.0 前提自检：落点偏好确实是 0.3.0 的默认值 "inbox"（**没有**任何测试代码改过它） ──
+  const pref = env.clip.getImportLandingPreference();
+  const chanDefault = env.clip.getImportChannelContext();
+  if (pref === "inbox" && chanDefault.channel === "in-app") {
+    pass("S9.0", "前提：落点偏好默认 `inbox`、通道默认 `in-app`（未被任何前置用例改动）",
+      `getImportLandingPreference()="${pref}"、默认通道="${chanDefault.channel}"、overwriteEnabled=${chanDefault.overwriteEnabled}`);
+  } else {
+    fail("S9.0", "前提自检：默认落点偏好应为 `inbox`", `pref="${pref}" 通道="${chanDefault.channel}"`);
+  }
+
+  // ── S9.1 默认设置 + 外部通道（local-bridge）→ 强制 pending，且**不写笔记文件** ──
+  // 注意：新工作区**自带 1 个 .md**（脚手架），所以「不出现新 .md」要比**增量**。
+  const mdBefore = listWorkspace(root).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/"));
+  const notesBefore = Object.keys(env.lib.libraryStore.get().notes).length;
+  const src = envelope({ source: { ...envelope({}).source, url: "https://example.com/s9-external" } });
+  env.clip.setImportChannelContext({ channel: "local-bridge" });
+  const out = await env.clip.receiveEnvelopeOutcome(src);
+  env.clip.setImportChannelContext({ channel: "in-app" });
+  await env.inbox.refreshInbox();
+
+  const notesAfter = Object.keys(env.lib.libraryStore.get().notes).length;
+  const inbox = env.inbox.inboxDetails();
+  const mdDelta = listWorkspace(root).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/") && !mdBefore.includes(f));
+  const status = out.ok ? out.result.status : `error:${out.error.code}`;
+  const inboxIdOk = out.ok && /^\d{8}T\d{6}-.{8}$/.test(String(out.result.inboxId));
+  if (status === "pending" && out.ok && out.result.path === null && inboxIdOk && mdDelta.length === 0 && inbox.length === 1 && notesAfter === notesBefore) {
+    pass("S9.1", "默认设置 + `local-bridge` 投递 → `pending`、`path=null`、无新 .md、收件箱恰好 1 条",
+      `status=${status} inboxId=${out.result.inboxId}（匹配 /^\\d{8}T\\d{6}-.{8}$/=${inboxIdOk}）path=${out.result.path}`
+      + ` 新增 .md=${mdDelta.length} 收件箱=${inbox.length} 笔记数 ${notesBefore} → ${notesAfter}`);
+  } else {
+    fail("S9.1", "默认设置 + 外部通道应强制进收件箱",
+      `status=${status} path=${out.ok ? out.result.path : "-"} inboxId=${out.ok ? out.result.inboxId : "-"}（正则=${inboxIdOk}）`
+      + ` 新增 .md=${mdDelta.length} 收件箱=${inbox.length} 笔记数 ${notesBefore} → ${notesAfter}`);
+  }
+
+  // ── S9.2 同 importId 重投 → 幂等：收件箱**仍恰好 1 条** ────────────────────
+  // 契约 ㉕ 第二点要求重投同一 importId 幂等。这里如实记录实际回执状态：
+  // 「索引命中 → deduped」与「收件箱按 entry.id 幂等 → 再次 pending」都能满足「不产生第二条」，
+  // 但**只有前者**是严格意义的 `deduped` —— 两种都打印，不做无根据的断言。
+  env.clip.setImportChannelContext({ channel: "local-bridge" });
+  const again = await env.clip.receiveEnvelopeOutcome(src);
+  env.clip.setImportChannelContext({ channel: "in-app" });
+  await env.inbox.refreshInbox();
+  const inbox2 = env.inbox.inboxDetails();
+  const againStatus = again.ok ? again.result.status : `error:${again.error.code}`;
+  const mdDelta2 = listWorkspace(root).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/") && !mdBefore.includes(f));
+  if (inbox2.length === 1 && mdDelta2.length === 0) {
+    pass("S9.2", "同 `importId` 重投幂等：收件箱仍恰好 1 条、磁盘仍 0 个新增 .md",
+      `重投回执 status=${againStatus}${againStatus === "deduped" ? "（严格 deduped —— 命中第 1 步幂等索引）" : "（非 deduped —— 幂等由收件箱按 entry.id 保证）"}`
+      + ` 收件箱=${inbox2.length} 新增 .md=${mdDelta2.length}`);
+  } else {
+    fail("S9.2", "同 importId 重投应幂等（不得产生第二条）",
+      `重投 status=${againStatus} 收件箱=${inbox2.length}（期望 1）新增 .md=${mdDelta2.length}（期望 0）`);
+  }
+
+  // ── S9.3 对照组：`in-app` 通道 → 走判定链，正常 `created` 并写笔记 ─────────
+  const notesBefore3 = Object.keys(env.lib.libraryStore.get().notes).length;
+  const src3 = envelope({ source: { ...envelope({}).source, url: "https://example.com/s9-in-app" } });
+  env.clip.setImportChannelContext({ channel: "in-app" });
+  const out3 = await env.clip.receiveEnvelopeOutcome(src3);
+  env.clip.setImportChannelContext({ channel: "in-app" });
+  const notesAfter3 = Object.keys(env.lib.libraryStore.get().notes).length;
+  const mdFiles3 = listWorkspace(root).filter((f) => f.endsWith(".md"));
+  const status3 = out3.ok ? out3.result.status : `error:${out3.error.code}`;
+  if (status3 === "created" && out3.ok && out3.result.path && notesAfter3 === notesBefore3 + 1) {
+    pass("S9.3", "对照组：`in-app` 通道 → 仍是 `created`（外部通道规则不误伤应用内剪藏）",
+      `status=${status3} path=${out3.result.path} 笔记数 ${notesBefore3} → ${notesAfter3} 磁盘 .md=${mdFiles3.length}`);
+  } else {
+    fail("S9.3", "对照组：in-app 通道应仍是 created",
+      `status=${status3} path=${out3.ok ? out3.result.path : "-"} 笔记数 ${notesBefore3} → ${notesAfter3}`);
+  }
+}
+
+/* --- S10 · 0.3.1 语义攻击：删掉配对之后，网络面防线还在不在 ---------------- */
+//
+// Lead 0.3.1 派单里标了「⚠️ 最重要的一条」：配对删除后，**普通网页 Origin 仍必须被拒**。
+// 令牌是长期有效的明文凭据（就存在扩展 storage 里），所以 `Origin` 这一道是去掉配对之后
+// **唯一的网络面防线**：任何网站只要能让用户浏览器发出请求，就必须在这一道被挡下。
+//
+// 这一组**全部走真 HTTP**（`http.request`，不是 `fetch` —— 只有原始请求才能自由设置 `Origin`），
+// 并且每一条都配了**内存变异自检**：把桥的对应防线改成失效，断言必须变红。
+
+/** 原始 HTTP 调用：可自由设置 `Origin`（`fetch` 会拦这个头）。 */
+function httpCall(port, options = {}) {
+  return new Promise((resolve, reject) => {
+    const body =
+      options.body == null ? null : typeof options.body === "string" ? options.body : JSON.stringify(options.body);
+    const headers = { ...(options.headers || {}) };
+    if (options.origin !== undefined) headers.Origin = options.origin;
+    if (options.token !== undefined && options.token !== null) headers.Authorization = `Bearer ${options.token}`;
+    if (body != null) {
+      headers["Content-Type"] = headers["Content-Type"] || "application/json; charset=utf-8";
+      headers["Content-Length"] = Buffer.byteLength(body);
+    }
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: options.method || "POST",
+        path: options.path || "/v1/import",
+        headers,
+        // 一次性连接（不复用 keep-alive socket）：桥被 `stop()` 关掉时，
+        // 留着的长连接会抛 `read ECONNRESET`，把一次成功的请求变成场景崩溃。
+        agent: false,
+      },
+      (res) => {
+        let text = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          text += chunk;
+        });
+        res.on("end", () => {
+          let json = null;
+          try {
+            json = JSON.parse(text);
+          } catch {
+            /* 非 JSON 响应 */
+          }
+          resolve({ status: res.statusCode, headers: res.headers, text, json });
+        });
+      },
+    );
+    req.on("error", reject);
+    if (body != null) req.write(body);
+    req.end();
+  });
+}
+
+/** 错误码（从响应体里取，兼容 `{error:{code}}` 与 `{code}` 两种形态）。 */
+function codeOf(res) {
+  if (!res.json) return null;
+  if (res.json.error && res.json.error.code) return res.json.error.code;
+  return res.json.code || null;
+}
+
+/**
+ * 在**内存里**编译一个「变异版」模块。
+ *
+ * 关键点：用**真实绝对路径**编译（`new Module(absPath)` + `_compile`），
+ * 所以 `require('./deeplink.cjs')` 这类相对依赖仍能解析 ——
+ * 这正是 `scripts/gate-defects.cjs` 把副本拷到 `os.tmpdir()` 之后崩掉的原因（见 V6 的 D-V12）。
+ * 变异没命中（源码没变）时返回 `null`：**不许**把「变异没生效」当成「护栏检测到了」。
+ */
+function loadMutatedModule(absPath, mutate) {
+  const Module = require("node:module");
+  const original = fs.readFileSync(absPath, "utf8");
+  const mutated = mutate(original);
+  if (typeof mutated !== "string" || mutated === original) return null;
+  const mod = new Module(absPath, null);
+  mod.filename = absPath;
+  mod.paths = Module._nodeModulePaths(path.dirname(absPath));
+  mod._compile(mutated, absPath);
+  return mod.exports;
+}
+
+/** 用指定模块（可能是变异版）起一座桥。 */
+function bootBridgeWith(mod, options = {}) {
+  const dataDir = options.dataDir || fs.mkdtempSync(path.join(os.tmpdir(), "opennote-bridge-s10-"));
+  let token = options.token || null;
+  const controller = mod.createBridge({
+    dataDir,
+    getWindow: () => ({ isDestroyed: () => false, webContents: { send: () => {} } }),
+    onEnvelope: options.onEnvelope || null,
+    getAdvancedOverwrite: () => false,
+    isEnabled: () => true,
+    // 传 null 时桥会退回读 `bridge.json` 里持久化的 tokenHash —— 「重启后令牌仍有效」就靠这条路径。
+    getTokenHash: options.tokenHash === undefined ? () => (token ? mod.sha256Hex(token) : null) : options.tokenHash,
+    log: () => {},
+  });
+  if (!token && options.generateToken !== false) token = controller.generateToken();
+  return { controller, dataDir, getToken: () => token };
+}
+
+async function scenario10(env) {
+  const EXPECTED_S10 = [
+    "S10.0",
+    "S10.1",
+    "S10.2",
+    "S10.3",
+    "S10.4",
+    "S10.5",
+    "S10.6",
+    "S10.7",
+    "S10.8",
+    "S10.9",
+    "S10.10",
+    "S10.11",
+  ];
+  return withCoverageGuard("S10", EXPECTED_S10, () => scenario10Body(env));
+}
+
+async function scenario10Body(env) {
+  stanza("场景 10 · 0.3.1 语义攻击：去掉配对后「普通网页 Origin 必须被拒」等 6 条");
+  const bridgePath = path.join(ROOT, "electron", "bridge.cjs");
+  let root = await freshWorkspace(env);
+  env.clip.resetImportChannelContext();
+  const bridge = bootBridgeWith(env.bridgeModule, {
+    onEnvelope: (json) => env.clip.receiveEnvelopeOutcome(json),
+  });
+  const started = await bridge.controller.start();
+  const token = bridge.getToken();
+  const port = started && started.port;
+
+  if (!port) {
+    fail("S10.0", "前置：桥在 127.0.0.1 启动", JSON.stringify(started));
+    return;
+  }
+  const mdBefore = listWorkspace(root).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/"));
+  pass("S10.0", "前置：桥已启动、令牌已生成（`generateToken()`）、工作区基线已记录",
+    `port=${port} token=${token.slice(0, 8)}…（${token.length} 字符） 基线 .md=${mdBefore.length} 个 allowedOrigins=${JSON.stringify(bridge.controller.status().allowedOrigins)}`);
+
+  const EVIL = "https://evil.example";
+  const importPath = "/v1/import";
+
+  /* ── S10.1 最重要的一条：普通网页 Origin + **合法令牌** → 403，且一个字节都不写 ── */
+  const evilBody = envelope({ source: { ...envelope({}).source, url: "https://example.com/s10-evil-page" } });
+  const evil = await httpCall(port, { origin: EVIL, token, body: evilBody });
+  const mdAfterEvil = listWorkspace(root).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/") && !mdBefore.includes(f));
+  if (evil.status === 403 && codeOf(evil) === "IMP-3001" && mdAfterEvil.length === 0) {
+    pass("S10.1", "普通网页 Origin（`https://evil.example`）+ **合法令牌** → 403 `IMP-3001`，且不写任何 .md",
+      `http=${evil.status} code=${codeOf(evil)} 新增 .md=${mdAfterEvil.length}（令牌是有效的，被拦的确实是来源这一道）body=${JSON.stringify(evil.json).slice(0, 150)}`);
+  } else {
+    fail("S10.1", "普通网页 Origin 必须被拒（去掉配对后唯一网络面防线）",
+      `http=${evil.status} code=${codeOf(evil)} 新增 .md=${mdAfterEvil.length}（期望 403/IMP-3001/0）body=${JSON.stringify(evil.json).slice(0, 200)}`);
+  }
+
+  /* ── S10.2 来源变体：全部必须 403 ─────────────────────────────────────────── */
+  const VARIANTS = [
+    ["Origin 字面量 `null`（file:// 页面 / 沙箱 iframe / 隐私模式）", "null"],
+    ["空串 Origin", ""],
+    ["`http://localhost:8787`（localhost 不是 127.0.0.1 字面量）", "http://localhost:8787"],
+    ["`https://127.0.0.1:8787`（回环但协议是 https）", "https://127.0.0.1:8787"],
+    ["`http://127.0.0.1.evil.example`（前缀混淆域名）", `http://127.0.0.1.evil.example`],
+    ["`chrome-extension://短`（扩展 id 长度不足 8）", "chrome-extension://abc"],
+    ["`https://opennote.app`（同名正规域名）", "https://opennote.app"],
+  ];
+  const variantBad = [];
+  for (const [label, origin] of VARIANTS) {
+    const res = await httpCall(port, { origin, token, body: envelope({ source: { ...envelope({}).source, url: `https://example.com/s10-variant-${encodeURIComponent(origin)}` } }) });
+    if (!(res.status === 403 && codeOf(res) === "IMP-3001")) {
+      variantBad.push(`${label} → http=${res.status} code=${codeOf(res)}`);
+    }
+  }
+  if (variantBad.length === 0) {
+    pass("S10.2", `${VARIANTS.length} 个「不该被信任」的来源变体全部 403 \`IMP-3001\``,
+      VARIANTS.map(([l, o]) => `${o === "" ? "(空串)" : o}`).join(" / "));
+  } else {
+    fail("S10.2", "来源变体应全部 403 IMP-3001", variantBad.join(" | "));
+  }
+
+  /* ── S10.3 三类合法来源必须放行（无令牌 → 401，证明「来源这关过了」） ─────── */
+  const ACCEPT = [
+    ["chrome-extension://abcdefghijklmnopabcdefghijklmnop", "扩展（32 位 id）"],
+    ["moz-extension://abcdefghijklmnopabcdefghijklmnop", "Firefox 扩展"],
+    [`http://127.0.0.1:${port}`, "本机回环（带端口）"],
+  ];
+  const acceptBad = [];
+  for (const [origin] of ACCEPT) {
+    const noToken = await httpCall(port, { origin, body: envelope({}) });
+    // 来源被放行 → 继续走到令牌那一道 → 401 IMP-2001（**不是** 403 IMP-3001）
+    if (!(noToken.status === 401 && codeOf(noToken) === "IMP-2001")) {
+      acceptBad.push(`${origin} → http=${noToken.status} code=${codeOf(noToken)}（期望 401/IMP-2001）`);
+    }
+  }
+  if (acceptBad.length === 0) {
+    pass("S10.3", `三类合法来源放行（无令牌时是 401 \`IMP-2001\`，不是 403）`,
+      ACCEPT.map(([o, l]) => `${l}=${o}`).join(" | "));
+  } else {
+    fail("S10.3", "合法来源应通过来源这一道（随后因无令牌 401）", acceptBad.join(" | "));
+  }
+
+  /* ── S10.4 扩展来源：无令牌 401 / 错令牌 401 / 合法令牌放行 ───────────────── */
+  const EXT = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+  const noTok = await httpCall(port, { origin: EXT, body: envelope({ source: { ...envelope({}).source, url: "https://example.com/s10-notoken" } }) });
+  const badTok = await httpCall(port, { origin: EXT, token: token.slice(0, -1) + (token.endsWith("A") ? "B" : "A"), body: envelope({ source: { ...envelope({}).source, url: "https://example.com/s10-badtoken" } }) });
+  const goodTok = await httpCall(port, { origin: EXT, token, body: envelope({ source: { ...envelope({}).source, url: "https://example.com/s10-goodtoken" } }) });
+  const goodOk = goodTok.status === 200 || goodTok.status === 201 || goodTok.status === 202;
+  if (noTok.status === 401 && codeOf(noTok) === "IMP-2001" && badTok.status === 401 && codeOf(badTok) === "IMP-2002" && goodOk) {
+    pass("S10.4", "扩展来源 + 无令牌 → 401 `IMP-2001`；错令牌 → 401 `IMP-2002`；合法令牌 → 放行",
+      `无令牌 http=${noTok.status}/${codeOf(noTok)}、错令牌 http=${badTok.status}/${codeOf(badTok)}、合法令牌 http=${goodTok.status} status=${goodTok.json && goodTok.json.data ? goodTok.json.data.status : "?"}`);
+  } else {
+    fail("S10.4", "扩展来源的令牌三道应分别是 401/401/放行",
+      `无令牌 http=${noTok.status}/${codeOf(noTok)}、错令牌 http=${badTok.status}/${codeOf(badTok)}、合法令牌 http=${goodTok.status}/${goodOk}`);
+  }
+
+  /* ── S10.5 `/v1/pair` 已下线，但必须**给出明确说明**（不得静默 404 无文案） ── */
+  const originsBeforePair = JSON.stringify(bridge.controller.status().allowedOrigins);
+  const pair = await httpCall(port, { origin: EXT, token, path: "/v1/pair", body: { code: "123456", client: { name: "chrome-extension", version: "0.1.4" } } });
+  const pairMsg = pair.json && pair.json.error && pair.json.error.userMessage ? pair.json.error.userMessage : "";
+  const pairLeak = Boolean(pair.json && (pair.json.token || (pair.json.data && pair.json.data.token) || /opn_[A-Za-z0-9_-]{10,}/.test(pair.text)));
+  const originsAfterPair = JSON.stringify(bridge.controller.status().allowedOrigins);
+  const pairMentions = pairMsg.includes("配对") && pairMsg.includes("令牌");
+  if (pair.status === 404 && codeOf(pair) === "IMP-3005" && pairMsg.trim() !== "" && pairMentions && !pairLeak && originsBeforePair === originsAfterPair) {
+    pass("S10.5", "`/v1/pair` 已下线：404 `IMP-3005` + 明确文案（含「配对」「令牌」）+ 不返回凭据 + 不改 allowedOrigins",
+      `http=${pair.status} code=${codeOf(pair)} userMessage=「${pairMsg}」 allowedOrigins=${originsBeforePair}（未变）`);
+  } else {
+    fail("S10.5", "`/v1/pair` 下线必须给明确说明且不泄凭据",
+      `http=${pair.status} code=${codeOf(pair)} userMessage=「${pairMsg}」 含配对=${pairMsg.includes("配对")} 含令牌=${pairMsg.includes("令牌")} 凭据泄漏=${pairLeak} allowedOrigins ${originsBeforePair} → ${originsAfterPair}`);
+  }
+
+  /* ── S10.6 令牌长期有效：重启桥（新实例、同一 dataDir、只读 bridge.json）后同一令牌仍可用 ── */
+  await bridge.controller.stop();
+  const persisted = (() => {
+    try {
+      return fs.readFileSync(path.join(bridge.dataDir, "bridge.json"), "utf8");
+    } catch (error) {
+      return `(读取失败：${error.message})`;
+    }
+  })();
+  const persistedJson = (() => {
+    try {
+      return JSON.parse(persisted);
+    } catch {
+      return null;
+    }
+  })();
+  const hashInFile = persistedJson && typeof persistedJson.tokenHash === "string" ? persistedJson.tokenHash : "";
+  const last4InFile = persistedJson ? String(persistedJson.tokenLast4 || "") : "";
+  const plaintextLeak = persisted.includes(token);
+  const restarted = bootBridgeWith(env.bridgeModule, {
+    dataDir: bridge.dataDir,
+    token,
+    tokenHash: undefined, // → 桥退回读 bridge.json 里的 tokenHash（模拟应用重启后主进程没把哈希传进来）
+    generateToken: false,
+    onEnvelope: (json) => env.clip.receiveEnvelopeOutcome(json),
+  });
+  // 注意：这里**不改** `bridge.getToken()` 的取值路径，用的是**重启前生成的那个**令牌。
+  const started2 = await restarted.controller.start();
+  const port2 = started2 && started2.port;
+  const afterRestart = port2
+    ? await httpCall(port2, { origin: EXT, token, body: envelope({ source: { ...envelope({}).source, url: "https://example.com/s10-after-restart" } }) })
+    : { status: 0, json: null };
+  const otherToken = `opn_${"B".repeat(43)}`;
+  const afterRestartOther = port2
+    ? await httpCall(port2, { origin: EXT, token: otherToken, body: envelope({ source: { ...envelope({}).source, url: "https://example.com/s10-other-token" } }) })
+    : { status: 0, json: null };
+  const okAfterRestart = afterRestart.status === 200 || afterRestart.status === 201 || afterRestart.status === 202;
+  const otherRejected = afterRestartOther.status === 401 && codeOf(afterRestartOther) === "IMP-2002";
+  if (okAfterRestart && otherRejected && /^[0-9a-f]{64}$/.test(hashInFile) && last4InFile === token.slice(-4) && !plaintextLeak) {
+    pass("S10.6", "令牌长期有效：重启桥（新实例、同一 dataDir）后**同一令牌仍可用**；另一个令牌 401；bridge.json 只有 sha256 + 后 4 位、无明文",
+      `重启后 http=${afterRestart.status}（同一令牌）／http=${afterRestartOther.status}/${codeOf(afterRestartOther)}（另一个令牌）`
+      + ` bridge.json: tokenHash=${hashInFile.slice(0, 12)}…(64hex=${/^[0-9a-f]{64}$/.test(hashInFile)}) tokenLast4=${last4InFile} 含明文令牌=${plaintextLeak}`);
+  } else {
+    fail("S10.6", "令牌应长期有效且 bridge.json 不得存明文",
+      `重启后同一令牌 http=${afterRestart.status} code=${codeOf(afterRestart)}（期望 2xx）、另一个令牌 http=${afterRestartOther.status}/${codeOf(afterRestartOther)}（期望 401/IMP-2002）`
+      + ` tokenHash 64hex=${/^[0-9a-f]{64}$/.test(hashInFile)} tokenLast4=${last4InFile}（期望 ${token.slice(-4)}）含明文=${plaintextLeak}`);
+  }
+
+  /* ── S10.7 历史遗留白名单**不再**用于放行；且不发放 CORS 头 ───────────────── */
+  const addOk = restarted.controller.addAllowedOrigin(EVIL);
+  // 增量必须**围绕这一次请求**量：S10.4/S10.6 的成功导入本来就写了 .md。
+  const mdBeforeLegacy = listWorkspace(root).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/")).length;
+  const legacy = await httpCall(port2, { origin: EVIL, token, body: envelope({ source: { ...envelope({}).source, url: "https://example.com/s10-legacy-allowlist" } }) });
+  const crosHeader = legacy.headers["access-control-allow-origin"];
+  const mdDeltaLegacy = listWorkspace(root).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/")).length - mdBeforeLegacy;
+  // addAllowedOrigin 之后仍然 403，说明「配对/白名单」这条路真的不再参与放行判定。
+  const preflight = await httpCall(port2, { method: "OPTIONS", origin: EVIL, headers: { "Access-Control-Request-Method": "POST" } });
+  if (legacy.status === 403 && codeOf(legacy) === "IMP-3001" && !crosHeader && mdDeltaLegacy === 0) {
+    pass("S10.7", "历史白名单不再放行（`addAllowedOrigin(https://evil.example)` 后该来源仍 403）且不给 CORS 头",
+      `addAllowedOrigin=${addOk} http=${legacy.status}/${codeOf(legacy)} Access-Control-Allow-Origin=${JSON.stringify(crosHeader)}`
+      + ` 预检 http=${preflight.status} ACAO=${JSON.stringify(preflight.headers["access-control-allow-origin"] || null)} 本次新增 .md=${mdDeltaLegacy}`);
+  } else {
+    fail("S10.7", "白名单不得再参与放行，且普通网页来源不得拿到 CORS 头",
+      `addAllowedOrigin=${addOk} http=${legacy.status}/${codeOf(legacy)} ACAO=${JSON.stringify(crosHeader)} 本次新增 .md=${mdDeltaLegacy}`);
+  }
+
+  /* ── S10.8 变异自检：把防线逐条改成失效，断言必须变红（否则这组检查是恒绿的） ── */
+  const mutations = [
+    {
+      id: "来源这道形同虚设",
+      apply: (src) => src.replace("if (value === '' || value === 'null' || !isAcceptedOrigin(value)) {", "if (false) {"),
+      probe: async (mod) => {
+        const b = bootBridgeWith(mod, { onEnvelope: null });
+        const s = await b.controller.start();
+        try {
+          const r = await httpCall(s.port, { origin: EVIL, token: b.getToken(), body: envelope({}) });
+          return !(r.status === 403 && codeOf(r) === "IMP-3001");
+        } finally {
+          await b.controller.stop();
+        }
+      },
+    },
+    {
+      id: "`/v1/pair` 退回通用 404（说明整段消失）",
+      // 注意：**不能**只把 userMessage 改成空串 —— `sendError` 会回退到 ERROR_TABLE 的文案，
+      // 那样「变异仍绿」是我的变异没打到要害，不是护栏恒绿。这里直接把专属分支摘掉，
+      // 让它落到通用 404（文案变成「接口地址或方法不对。」），这正是「静默 404」的形态。
+      apply: (src) => src.replace("if (route === '/v1/pair') {", "if (false) {"),
+      probe: async (mod) => {
+        const b = bootBridgeWith(mod, { onEnvelope: null });
+        const s = await b.controller.start();
+        try {
+          const r = await httpCall(s.port, { origin: EXT, token: b.getToken(), path: "/v1/pair", body: { code: "123456" } });
+          const msg = r.json && r.json.error && r.json.error.userMessage ? r.json.error.userMessage : "";
+          return !(r.status === 404 && msg.includes("配对") && msg.includes("令牌"));
+        } finally {
+          await b.controller.stop();
+        }
+      },
+    },
+    {
+      id: "令牌校验恒真（不比对哈希）",
+      // 判据：随机令牌**不再被 401/IMP-2002 拒绝**即算变红。
+      // （不要断言「返回 2xx」——这条桥的 onEnvelope 是空的，导入本来就会以别的错误码结束。）
+      apply: (src) => src.replace("const matched = !malformed && typeof expected === 'string' && timingSafeEqualText(sha256Hex(raw), expected)", "const matched = true"),
+      probe: async (mod) => {
+        const b = bootBridgeWith(mod, { onEnvelope: null });
+        const s = await b.controller.start();
+        try {
+          const r = await httpCall(s.port, { origin: EXT, token: `opn_${"C".repeat(43)}`, body: envelope({}) });
+          return !(r.status === 401 && codeOf(r) === "IMP-2002");
+        } finally {
+          await b.controller.stop();
+        }
+      },
+    },
+  ];
+  const mutationBad = [];
+  const mutationOk = [];
+  for (const mutation of mutations) {
+    const mutated = loadMutatedModule(bridgePath, mutation.apply);
+    if (!mutated) {
+      mutationBad.push(`${mutation.id}：**变异没命中源码**（正则/文案已变），本条自检失效`);
+      continue;
+    }
+    let red = false;
+    try {
+      red = await mutation.probe(mutated);
+    } catch (error) {
+      mutationBad.push(`${mutation.id}：变异版桥跑不起来 → ${error && error.message ? error.message : String(error)}`);
+      continue;
+    }
+    if (red) mutationOk.push(`${mutation.id} 如期变红`);
+    else mutationBad.push(`${mutation.id}：**注入后断言仍绿 —— 这条检查是恒绿的，必须修**`);
+  }
+  if (mutationBad.length === 0) {
+    pass("S10.8", `变异自检：${mutations.length} 条防线各自失效后，对应断言全部如期变红`,
+      mutationOk.join("；"));
+  } else {
+    fail("S10.8", "变异自检未全部通过（说明上面某些断言不会红）", mutationBad.join(" | "));
+  }
+
+  /* ── S10.9 元素选择（0.3.1 ㉝）：`selection:false` 的同 URL 不同正文 → 判定链第 4 步 `pending` ── */
+  root = await freshWorkspace(env);
+  env.clip.resetImportChannelContext();
+  // 判定链第 3/4 步只在「落点偏好不是 inbox」且**客户端没显式下发 conflict**
+  // （`envelope.conflictExplicit === false` → `explicit === null`）时才会被走到：
+  //   receive.ts:367  inbox 偏好 + 外部通道 → 直接 pending，跳过第 2–6 步；
+  //   receive.ts:407  `explicit === null && selection === true` → 第 3 步 append；
+  //   receive.ts:423  `existing && explicit === null` → 第 4 步 pending。
+  // 合法偏好只有 new/append/skip/inbox（receive.ts:159），所以这里用 `new`。
+  env.clip.setImportLandingPreference("new");
+  env.clip.setImportChannelContext({ channel: "local-bridge" });
+  const pickUrl = "https://example.com/s10-element-picker";
+  /** 不带 `conflict` 字段 → `conflictExplicit=false` → `explicit=null`（走判定链第 3/4 步）。 */
+  const chainEnvelope = (body, selection) => {
+    const e = envelope({ source: { ...envelope({}).source, url: pickUrl, selection }, body });
+    delete e.conflict;
+    return e;
+  };
+  const pick1 = await env.clip.receiveEnvelopeOutcome(chainEnvelope("元素选择正文第一版。\n", false));
+  const pick2 = await env.clip.receiveEnvelopeOutcome(chainEnvelope("元素选择正文第二版（改了内容）。\n", false));
+  const s1 = pick1.ok ? pick1.result.status : `error:${pick1.error.code}`;
+  const s2 = pick2.ok ? pick2.result.status : `error:${pick2.error.code}`;
+  if (s1 === "created" && s2 === "pending" && pick2.ok && pick2.result.path === null) {
+    pass("S10.9", "元素选择取到的正文（`source.selection === false`）同 URL 不同正文 → `pending`（判定链第 4 步）",
+      `第 1 次=${s1} 第 2 次=${s2} path=${pick2.result.path} inboxId=${pick2.result.inboxId}（偏好=new、信封无 conflict → explicit=null）`);
+  } else {
+    fail("S10.9", "`selection:false` 的同 URL 不同正文应进收件箱 pending",
+      `第 1 次=${s1} 第 2 次=${s2} path=${pick2.ok ? pick2.result.path : "-"}（期望 created → pending）`);
+  }
+
+  /* ── S10.10 阴性对照：同一个 URL、`selection:true` → 走第 3 步 `appended` ── */
+  const pick3 = await env.clip.receiveEnvelopeOutcome(chainEnvelope("真·文本选区二次剪藏。\n", true));
+  const s3 = pick3.ok ? pick3.result.status : `error:${pick3.error.code}`;
+  if (s3 === "appended") {
+    pass("S10.10", "阴性对照：同 URL 但 `selection:true` → `appended`（证明 `selection` 真的被读，不是恒 pending）",
+      `status=${s3} path=${pick3.ok ? pick3.result.path : "-"}`);
+  } else {
+    fail("S10.10", "`selection:true` 应走判定链第 3 步 appended",
+      `status=${s3}（期望 appended；若也是 pending，则说明 selection 没被读）`);
+  }
+  env.clip.setImportChannelContext({ channel: "in-app" });
+  env.clip.resetImportLandingPreference(); // 复原默认偏好，避免污染后续顺序
+
+  /* ── S10.11 受限页面：桥/扩展对受限页面的「如实提示」口径（静态证据，真机交互另行 UNVERIFIED） ── */
+  const restrictedEvidence = [];
+  const extErrors = fs.readFileSync(path.join(ROOT, "extension", "src", "lib", "errors.js"), "utf8");
+  const hasUi = /"IMP-1006"[\s\S]{0,260}?ui:\s*"[^"]+"[\s\S]{0,120}?uiSource:/.test(extErrors);
+  restrictedEvidence.push(`extension/src/lib/errors.js 的 IMP-1006 带 ui 文案与 uiSource 出处=${hasUi}`);
+  const pickerFiles = [];
+  for (const rel of ["content/picker.js", "content/float.js", "lib/picker.js", "content/select-element.js"]) {
+    if (fs.existsSync(path.join(ROOT, "extension", "src", rel))) pickerFiles.push(rel);
+  }
+  restrictedEvidence.push(`元素选择实现文件：${pickerFiles.length ? pickerFiles.join(", ") : "**尚未存在**（0.3.1 ㉝ 未落地）"}`);
+  record("INFO", "S10.11", "受限页面（chrome:// / 扩展商店 / PDF）的**如实提示**：只做了静态取证，真机交互未验证",
+    restrictedEvidence.join(" | "));
+
+  await restarted.controller.stop();
 }
 
 /* ------------------------------------------------------------------ 汇总 */

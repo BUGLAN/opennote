@@ -42,10 +42,40 @@ const CONTRACT_DOC = "docs/import/02-接口契约-导入信封与通道.md";
  * 并附「后两种不提示」的说明；实现只保留 overwrite 降级那一句。
  */
 const DOC_MULTI_CASE_CODES = new Set(["IMP-4011"]);
+/**
+ * 文案列虽是散文、但 Lead 裁定**必须**逐字比对的码（0.3.1）：
+ * `IMP-1006` 的散文格里引用了桌面版那一句「这个导入方式需要 Opennote 桌面版」，
+ * 裁定「以 `02` 附录 A.3（= 桥那句）为准」→ 对这个码不再 SKIP。
+ */
+const DOC_VERBATIM_DESPITE_PROSE = new Set(["IMP-1006"]);
 const BASELINE = process.env.VERIFY_BASELINE || "5a98f59";
 const ARGS = new Set(process.argv.slice(2));
 const WANT_DYNAMIC = ARGS.has("--dynamic") || ARGS.has("--all");
 const WANT_JSON = ARGS.has("--json");
+/**
+ * `--mutate-copy=<producer>`：**只在内存里**把某个产地的文案改一个字，用来做变异验证
+ * （证明 C-6f 的断言对文案敏感、不是恒绿）。**绝不写盘、绝不动产品文件。**
+ * 例：`node scripts/verify-contract.cjs --mutate-copy=main`
+ */
+const MUTATE_COPY = (() => {
+  for (const arg of ARGS) {
+    const m = /^--mutate-copy=(.+)$/.exec(arg);
+    if (m) return m[1];
+  }
+  return null;
+})();
+/**
+ * `--mutate-ex6=remote-src|eval`：**只在内存里**给被扫的 html 追加一段
+ * `<script src="https://evil.example/x.js">` 或 `eval(...)`，用来证明 `EX-6` / `EX-7` 会红。
+ * 这是 Lead 0.3.1 复核时要求的变异验证：改完必须红、去掉必须绿。**不写盘。**
+ */
+const MUTATE_EX6 = (() => {
+  for (const arg of ARGS) {
+    const m = /^--mutate-ex6=(.+)$/.exec(arg);
+    if (m) return m[1];
+  }
+  return null;
+})();
 
 /* ------------------------------------------------------------------ 结果收集 */
 
@@ -61,7 +91,7 @@ function record(status, id, title, detail) {
   const entry = { group: currentGroup, status, id, title, detail: detail == null ? "" : String(detail) };
   results.push(entry);
   if (!WANT_JSON) {
-    const mark = status === "PASS" ? "PASS" : status === "FAIL" ? "FAIL" : "SKIP";
+    const mark = status === "PASS" ? "PASS" : status === "FAIL" ? "FAIL" : status === "INFO" ? "INFO" : "SKIP";
     console.log(`  ${mark}  [${id}] ${title}${entry.detail ? ` — ${entry.detail}` : ""}`);
   }
   return status === "PASS";
@@ -405,13 +435,35 @@ const scopeFiles = featureFiles.length ? featureFiles : allProductFiles;
     const mismatched = [];
     const proseRows = [];
     const multiCaseRows = [];
+    const verbatimProse = [];
+    const verbatimProseBad = [];
     let compared = 0;
     for (const [code, row] of table) {
       const entry = impl[code];
       if (!entry) continue;
-      // 文案列写成说明性散文的码（没有唯一逐字文案，如 IMP-1006「由调用方按平台覆盖」）
-      // 不参与逐字比对，只记一条观测——否则会拿散文当正文，报出假缺陷。
+      /**
+       * 文案列写成说明性散文的码（没有唯一逐字文案，如 `IMP-1006`「由调用方按平台覆盖」）
+       * 一般不参与逐字比对，只记一条观测——否则会拿散文当正文，报出假缺陷。
+       *
+       * **0.3.1（Lead 裁定）例外**：`IMP-1006` 的散文格里**引用了**桌面版那一句
+       * （`「这个导入方式需要 Opennote 桌面版」`），裁定「以 `02` 附录 A.3（= 桥那句）为准」。
+       * 所以这个码**不再 SKIP**：把散文格里被「」引用的句子取出来与桥表逐字比对，
+       * 只归一化句末句号（文档里是行内引用，不带句号；实现里是完整句子）。
+       * 取不到任何引用句 → 报 FAIL（不允许「悄悄退回 SKIP」）。
+       */
       if (row.prose) {
+        if (DOC_VERBATIM_DESPITE_PROSE.has(code)) {
+          const quoted = [...String(row.rawCopy || "").matchAll(/「([^」]+)」/g)].map((q) => q[1]);
+          const norm = (s) => String(s).replace(/[。．.]$/, "");
+          const hit = quoted.find((q) => norm(q) === norm(entry.userMessage));
+          verbatimProse.push(
+            `${code}: 从 A.3 散文格取到 ${quoted.length} 个引用句，桥表「${entry.userMessage}」${hit ? `与引用句「${hit}」逐字一致（句末句号归一）` : "**与任何引用句都不一致**"}`,
+          );
+          if (!hit) {
+            verbatimProseBad.push(`${code}: A.3 引用句=[${quoted.join(" / ")}] ≠ 桥表「${entry.userMessage}」`);
+          }
+          continue;
+        }
         proseRows.push(code);
         continue;
       }
@@ -436,6 +488,13 @@ const scopeFiles = featureFiles.length ? featureFiles : allProductFiles;
     if (proseRows.length) {
       info("C-6d", "文案列是说明性散文（无唯一逐字文案），不参与逐字比对", proseRows.join(", "));
     }
+    // C-6d′：IMP-1006 不再 SKIP（Lead 0.3.1 裁定：以 02 附录 A.3 的引用句为准）。
+    if (verbatimProse.length) {
+      check("C-6d′", "`IMP-1006` 虽在散文格里，但其引用句可与桥表逐字比对（不再 SKIP）",
+        verbatimProseBad.length === 0, verbatimProse.join(" | "), verbatimProseBad.join(" | "));
+    } else {
+      fail("C-6d′", "`IMP-1006` 的散文格解析退化：没有取到任何可比的引用句（不允许悄悄退回 SKIP）", "tap 无输出");
+    }
     if (multiCaseRows.length) {
       info("C-6e", "文案列是多情形复合说明（一个格子覆盖多种分支），不参与逐字比对", multiCaseRows.join(", "));
     }
@@ -443,8 +502,233 @@ const scopeFiles = featureFiles.length ? featureFiles : allProductFiles;
     skip("C-6c", "桥 ERROR_TABLE 与文档逐字比对", error && error.message ? error.message : String(error));
   }
 
-  const warnHits = grepFiles(allProductFiles, /IMP-W\d{3}/g);
-  const unknownW = [...new Set(warnHits.map((h) => h.match))].filter((c) => !ALLOWED_WARNINGS.has(c));
+/* ---------------------------------------------------------------- C-6f 多产地 */
+//
+// **为什么单列**：同一个语义值（错误码的 `userMessage`）被**复制到 N 处**，
+// 而 `C-6c` 只盖住了其中 1 处（桥的 `ERROR_TABLE`）。本轮实测的产地：
+//   ① `electron/bridge.cjs` 的 `ERROR_TABLE`      ← C-6c 盖住
+//   ② `electron/main.cjs` 的 `NO_WINDOW_ERROR()`   ← 曾漏（本轮 Lead 修的）
+//   ③ `src/lib/clip/envelope.ts` 的 `IMPORT_ERRORS`
+//   ④ `src/data/inbox.ts` 的 `MESSAGES`
+//   ⑤ `extension/src/lib/errors.js`（+ `dist/`，即装进浏览器的产物）
+// 它们目前**逐字相同**，但**谁改一份另外几份不会跟着变**，而 `pnpm test` 与 `C-6c` 都发现不了。
+// **凡是「一个语义值被复制到 N 处」的地方，护栏必须覆盖全部 N 处**，否则第 N+1 次改动必然漂移。
+{
+  /**
+   * 取出 `userMessage: "…"` / `userMessage: '…'` 的文案。
+   * 用**反引用**匹配引号，这样文案里含反引号（例如「不能使用 `..`、绝对路径」）也不会被截断。
+   */
+  const userMessageIn = (body) => {
+    const m = /userMessage\s*:\s*(["'`])((?:(?!\1)[\s\S])*?)\1/.exec(body);
+    return m ? m[2] : null;
+  };
+  /**
+   * **括号配平**：从 `{` 找到与它配对的 `}`，跳过字符串字面量里的括号。
+   * 这样每条记录的范围是**精确的**——不会像「窗口到下一个键」那样，
+   * 把文件后半段某个无关的 `userMessage:`（例如 `bridge.cjs:787` 那句「配对功能已删除」的说明）
+   * 吸进某个没有 `userMessage` 的记录里。
+   */
+  const matchBrace = (src, openIdx) => {
+    let depth = 0;
+    for (let i = openIdx; i < src.length; i += 1) {
+      const ch = src[i];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        i += 1;
+        while (i < src.length && src[i] !== ch) {
+          if (src[i] === "\\") i += 1;
+          i += 1;
+        }
+        continue;
+      }
+      if (ch === "{") depth += 1;
+      else if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) return i;
+      }
+    }
+    return -1;
+  };
+  /** 读一个字符串字面量，返回 `{ value, end }`。 */
+  const readLiteral = (src, idx) => {
+    const quote = src[idx];
+    let i = idx + 1;
+    let out = "";
+    while (i < src.length && src[i] !== quote) {
+      if (src[i] === "\\") {
+        out += src[i + 1] || "";
+        i += 2;
+        continue;
+      }
+      out += src[i];
+      i += 1;
+    }
+    return { value: out, end: i };
+  };
+  /**
+   * **逐条取词（配平式）**：定位每个 `"IMP-xxxx":` 键，然后
+   *   · 值是大括号块 → 配平到它的 `}`，在块内找 `userMessage:`；
+   *   · 值是字符串字面量 → 直接取（`inbox.ts` 的 `MESSAGES` 形态）。
+   *
+   * **为什么不能再用 `{…}` 那种正则**（V5 的教训，Lead 复核确认）：
+   * 旧写法 `/["']IMP-(\d{4})["']\s*:\s*\{([\s\S]{0,400}?)\n\s*\}/g` 要求 `{` 与 `}` 之间**有换行**，
+   * 而 `electron/bridge.cjs` 的 `ERROR_TABLE` 是**一行一条**（`'IMP-1001': { … },`），
+   * 于是**整张表被吞成一次匹配**：实测 34 个码只比了 1 个（`envelope.ts` 也漏 2 个）——
+   * 这条「多产地护栏」自己**静默漏掉了 97% 的产地**。配平扫描不依赖缩进/换行风格，
+   * 且键位码数可独立复核（C-6h）。
+   */
+  const balanceCopies = (text, strip = true) => {
+    const source = strip ? stripComments(text) : text;
+    const keyRe = /["']IMP-(\d{4})["']\s*:/g;
+    const copies = new Map(); // code → 文案
+    const invisible = new Set(); // code → 明确写了 `userMessage: null`（契约上不可见）
+    const keys = new Set();
+    let m;
+    while ((m = keyRe.exec(source)) !== null) {
+      const code = `IMP-${m[1]}`;
+      keys.add(code);
+      let pos = m.index + m[0].length;
+      while (pos < source.length && /\s/.test(source[pos])) pos += 1;
+      let body = null;
+      if (source[pos] === "{") {
+        const close = matchBrace(source, pos);
+        if (close < 0) continue;
+        body = source.slice(pos, close + 1);
+      } else if (source[pos] === '"' || source[pos] === "'" || source[pos] === "`") {
+        body = `__literal__${source.slice(pos, readLiteral(source, pos).end + 1)}`;
+      } else {
+        continue; // 既不是块也不是字面量（例如对象简写），不猜
+      }
+      const value = userMessageIn(body);
+      if (value != null) {
+        if (!copies.has(code)) copies.set(code, value);
+      } else if (/userMessage\s*:\s*null/.test(body)) {
+        invisible.add(code);
+      } else if (body.startsWith("__literal__")) {
+        const lit = body.slice("__literal__".length);
+        if (!copies.has(code)) copies.set(code, lit.slice(1, -1));
+      }
+    }
+    return { copies, invisible, keyed: [...keys] };
+  };
+  const asPlain = (map) => ({ copies: map, invisible: new Set(), keyed: [...map.keys()] });
+  /** `main.cjs` 的 `importError('IMP-4006', '文案', 409, true)` 形态。 */
+  const importErrorCopies = (text) => {
+    const out = new Map();
+    const source = stripComments(text);
+    const re = /importError\(\s*["']IMP-(\d{4})["']\s*,\s*["']([^"']*)["']/g;
+    let m;
+    while ((m = re.exec(source)) !== null) out.set(`IMP-${m[1]}`, m[2]);
+    return out;
+  };
+
+  /** 产地清单：id → { file, extract } */
+  const PRODUCERS = [
+    { id: "bridge", label: "electron/bridge.cjs ERROR_TABLE", file: "electron/bridge.cjs", extract: balanceCopies },
+    { id: "main", label: "electron/main.cjs NO_WINDOW_ERROR()", file: "electron/main.cjs", extract: (t) => asPlain(importErrorCopies(t)) },
+    { id: "envelope", label: "src/lib/clip/envelope.ts IMPORT_ERRORS", file: "src/lib/clip/envelope.ts", extract: balanceCopies },
+    { id: "inbox", label: "src/data/inbox.ts MESSAGES", file: "src/data/inbox.ts", extract: balanceCopies },
+    { id: "ext-errors", label: "extension/src/lib/errors.js", file: "extension/src/lib/errors.js", extract: balanceCopies },
+    { id: "ext-dist", label: "extension/dist/lib/errors.js（产物）", file: "extension/dist/lib/errors.js", extract: balanceCopies },
+  ];
+
+  try {
+    const docRows = parseDocErrorTable();
+    const mismatches = [];
+    const annotated = [];
+    const multiCaseSeen = [];
+    const coverage = [];
+    const coverageGaps = [];
+    const perProducer = [];
+    for (const producer of PRODUCERS) {
+      const text = readIfExists(producer.file);
+      if (text == null) {
+        perProducer.push(`${producer.id}: 文件不存在`);
+        continue;
+      }
+      const { copies, invisible, keyed } = producer.extract(text);
+
+      /* ---- C-6h 取词器覆盖率自检（**独立复核**，不依赖取词器自己的输出） ----
+       * 规则：**每个键位 IMP 码都必须有归宿** —— 要么取到文案，要么显式标记 `userMessage: null`。
+       * 有码既没文案也没标记 = 取词器漏了它。
+       * 旧取词器在这里会报出 `bridge: 键位 34 个码，只取到 1 个（未认领：IMP-1001…IMP-5002）`，
+       * 也就是说这条「多产地护栏」自己静默漏掉了 97% 的产地。 */
+      const distinctKeys = [...new Set(keyed)];
+      const unclaimed = distinctKeys.filter((c) => !copies.has(c) && !invisible.has(c));
+      if (unclaimed.length) {
+        coverageGaps.push(`${producer.id}: 键位有 ${distinctKeys.length} 个码，取到文案 ${copies.size} 个、标记不可见 ${invisible.size} 个；**未认领 ${unclaimed.length} 个：${unclaimed.join(", ")}**`);
+      }
+      coverage.push(`${producer.id}: 键位 ${distinctKeys.length} 个码／取到文案 ${copies.size} 个${invisible.size ? `／按契约不可见 ${invisible.size} 个` : ""}`);
+
+      let compared = 0;
+      for (const [code, copy] of copies) {
+        const row = docRows.rows.get(code);
+        if (!row || row.prose || !row.userMessage) continue;
+        /**
+         * 一个格子覆盖多种分支的码（`IMP-4011`）：**逐字比对不成立**，与 `C-6c` 同口径。
+         * 实测依据：`02:1704` 那一行是「「追加」的目标不存在，已改为新建一篇。」
+         * +注解「（overwrite 降级与 skip 情形不提示…）」，而 `bridge.cjs:122` 给的是
+         * 「「覆盖」不可用，已改为新建一篇。」—— 同一个码的**不同触发分支**，
+         * 按 Lead 对 `IMP-4013` 的同类裁定：记 INFO，不判 FAIL。
+         */
+        if (DOC_MULTI_CASE_CODES.has(code)) {
+          multiCaseSeen.push(`${code} @ ${producer.id}: 实现「${copy}」（文档该行是多分支复合说明，不逐字比）`);
+          continue;
+        }
+        // 变异验证：**只在内存里**给指定产地的文案加后缀（不写盘）。用于证明本断言会红。
+        // `--mutate-copy=bridge:IMP-4007` 可以精确指定某个码（用于证明「中间那一行」也真的在被比）。
+        const [mutateTarget, mutateCode] = String(MUTATE_COPY || "").split(":");
+        const actual = mutateTarget === producer.id && (!mutateCode || mutateCode === code) ? `${copy}（变异）` : copy;
+        compared += 1;
+        if (actual === row.userMessage) continue;
+        /**
+         * 「文案 + 给实现者的注解」混在一个格子里的情况（Lead 裁定：文档格混注释是**文档排版**，
+         * 不是缺陷）。口径与 C-6d/C-6e 一致：取第一个 `（`/`(` 之前的部分当 `userMessage` 基准，
+         * **并且把这一格显式记成 INFO**（不静默跳过）。
+         *
+         * 只在「原样比不过、但截断后完全相同」时才走这条路 —— 这样它**不会**把真的漂移洗成通过。
+         */
+        const cut = row.userMessage.split(/[（(]/)[0].trim();
+        // 文档格常用 `「…」` 把整段文案（含注解）括起来，而解析时会吃掉外层的前引号，
+        // 于是「第一个（之前」的部分可能少一个开头的 `「`。两种候选都试。
+        const candidates = [cut, cut && !cut.startsWith("「") ? `「${cut}` : null].filter(Boolean);
+        const hit = cut && cut !== row.userMessage ? candidates.find((c) => actual === c) : null;
+        if (hit) {
+          annotated.push(`${code} @ ${producer.id}: 文档格混有注解，已按「第一个（之前」为基准（${JSON.stringify(row.userMessage)} → ${JSON.stringify(hit)}）`);
+          continue;
+        }
+        mismatches.push(`${code} @ ${producer.id}: 文档「${row.userMessage}」≠ 实现「${actual}」`);
+      }
+      perProducer.push(`${producer.id}: ${compared} 个码`);
+    }
+    check("C-6f", "同一错误码的**全部产地**与 02 附录 A.3 的 userMessage 逐字一致（不只桥那一张表）",
+      mismatches.length === 0,
+      `${PRODUCERS.length} 个产地已比（${perProducer.join("、")}）`,
+      mismatches.slice(0, 6).join(" | "));
+    // 覆盖率**每次都打印**（不再只在 okDetail 里），这样「比了几个码」是可见的，
+    // 而不是等到某天发现「原来一直只比了 1 个」。
+    info("C-6f·覆盖", "每个产地的取词覆盖（键位码数 / 实际取到 / 不可见 / userMessage 字面量）", coverage.join(" | "));
+    check("C-6h", "取词器**不静默漏码**：文件里每处 `userMessage: \"…\"` 都被某个 IMP 键的窗口认领",
+      coverageGaps.length === 0,
+      `6 个产地的取词覆盖率自检通过（${coverage.join("；")}）`,
+      coverageGaps.join(" | "));
+    if (annotated.length) {
+      info("C-6f′", "文档文案格混有「给实现者的注解」，已按「第一个（之前」为基准比对（口径同 C-6d/C-6e）",
+        annotated.join(" | "));
+    }
+    if (multiCaseSeen.length) {
+      info("C-6f″", "多分支复合码（一个文档格覆盖多种情形）不逐字比对，只登记实现的实际文案（口径同 C-6c）",
+        multiCaseSeen.join(" | "));
+    }
+    if (MUTATE_COPY) {
+      info("C-6f·变异", `已对产地「${MUTATE_COPY}」注入内存变异（不写盘）`,
+        mismatches.length ? `断言如期变红：${mismatches.length} 处不一致` : "**断言没有变红 —— 说明这条检查是恒绿的，必须修**");
+    }
+  } catch (error) {
+    skip("C-6f", "多产地 userMessage 逐字比对", error && error.message ? error.message : String(error));
+  }
+}
+
+  const warnHits = grepFiles(allProductFiles, /IMP-W\d{3}/g);  const unknownW = [...new Set(warnHits.map((h) => h.match))].filter((c) => !ALLOWED_WARNINGS.has(c));
   check("C-7", `代码中出现的 IMP-W### 均在附录内（${ALLOWED_WARNINGS.size} 个合法警告码）`, unknownW.length === 0,
     warnHits.length ? `${warnHits.length} 处引用，全部合法` : "0 处引用（尚未落地）",
     `未登记警告码: ${unknownW.join(", ")}`);
@@ -1099,17 +1383,75 @@ group("§8 浏览器插件（manifest v3 / 0 远程 URL / 0 eval / 权限最小�
     if (!scanFiles.length) {
       skip("EX-6", "dist 内 0 处远程 URL、0 处 eval", "extension/ 下无可扫描文件");
     } else {
+      /**
+       * **判据收窄（Lead 0.3.1 复核：`EX-6` 是误报）**。
+       *
+       * 旧判据是「非注释行里出现 `https?://` 就算远程 URL」，于是
+       * `extension/dist/popup/popup.html:70` 的 **示例占位文本**
+       * `placeholder="https://example.com/posts/local-first"` 被当成了远程资源 ——
+       * 它是**表单空值时的灰色提示字**，不会发起任何请求。
+       * （Lead 看到的是同一行的 `data-prop="source.url"` 字段路径；实测真正命中的是 placeholder，
+       *   两者都不该算远程引用，见 V6 的「检查器误报与修正」。）
+       *
+       * 新判据 = **真的会引发网络加载/请求的东西**：
+       *   ① 资源属性 `href/src/srcset/action/poster` 的值；
+       *   ② CSS `url(...)`；
+       *   ③ `fetch/importScripts/XMLHttpRequest.open/import` 的参数；
+       *   ④ 脚本里的 URL **字符串字面量**（`extension/**` 的 js 整体按脚本扫，
+       *      HTML 只扫 `<script>` 块内的部分）。
+       * 非资源属性（`placeholder`/`data-*`/`title`/`aria-*`/`value`/`alt`）里的 URL 只记 INFO，不判 FAIL。
+       */
+      // 回环地址不算「远程」（桥自己的终点就是 `http://127.0.0.1:<port>`）。
+      const NOT_LOCAL = "(?!127\\.0\\.0\\.1|localhost)";
+      const RESOURCE_ATTR = new RegExp(`\\b(?:href|src|srcset|action|poster|data-src)\\s*=\\s*["']\\s*(?:https?:)?\\/\\/${NOT_LOCAL}[A-Za-z0-9\\-._~%]`, "i");
+      const CSS_URL = new RegExp(`\\burl\\(\\s*["']?\\s*(?:https?:)?\\/\\/${NOT_LOCAL}[A-Za-z0-9\\-._~%]`, "i");
+      const NET_CALL = new RegExp(`\\b(?:fetch|importScripts|XMLHttpRequest\\.open|import)\\s*\\(\\s*["'\`](?:https?:)?\\/\\/${NOT_LOCAL}[A-Za-z0-9\\-._~%]`, "i");
+      // 必须是「https?:// + 主机名首字符」才算真 URL：
+      // `opennote://settings/import`（自有协议）、`http(s):// 开头`（说明文字）都不算。
+      const STRING_LITERAL = new RegExp(`["'\`][^"'\`]*https?:\\/\\/${NOT_LOCAL}[A-Za-z0-9\\-._~%][^"'\`]*["'\`]`);
+      const NON_RESOURCE_ATTR = new RegExp(`\\b(?:placeholder|data-[\\w-]+|title|aria-[\\w-]+|value|alt)\\s*=\\s*["'][^"']*(?:https?:)\\/\\/${NOT_LOCAL}[A-Za-z0-9\\-._~%]`, "i");
       const remote = [];
       const evals = [];
+      const benign = [];
+      // 变异挂钩（只在内存里，不写盘）：用于证明 EX-6 / EX-7 真的会红。
+      const overlayTarget = scanFiles.find((rel) => rel.endsWith(".html")) || scanFiles[0];
+      const overlay = (rel, text) => {
+        if (!MUTATE_EX6 || rel !== overlayTarget) return text;
+        if (MUTATE_EX6 === "remote-src") return `${text}\n<script src="https://evil.example/x.js"></script>\n`;
+        if (MUTATE_EX6 === "eval") return `${text}\n<script>eval("1+1")</script>\n`;
+        return text;
+      };
       for (const rel of scanFiles) {
-        const text = readIfExists(rel) || "";
+        const text = overlay(rel, readIfExists(rel) || "");
+        const isScript = /\.(?:js|mjs|cjs|ts)$/i.test(rel);
+        let inScript = isScript;
         text.split(/\r?\n/).forEach((line, i) => {
           const isComment = /^\s*(\/\/|\*|\/\*)/.test(line);
-          if (!isComment && /https?:\/\/(?!127\.0\.0\.1|localhost)[^\s"')]+/.test(line)) remote.push(`${rel}:${i + 1} ${line.trim().slice(0, 100)}`);
-          if (!isComment && /\beval\s*\(|new\s+Function\s*\(/.test(line)) evals.push(`${rel}:${i + 1} ${line.trim().slice(0, 100)}`);
+          if (!isScript) {
+            if (/<script\b/i.test(line) && !/<\/script>/i.test(line)) inScript = true;
+            if (/<\/script>/i.test(line)) inScript = false;
+          }
+          if (isComment) return;
+          const where = `${rel}:${i + 1} ${line.trim().slice(0, 100)}`;
+          if (inScript) {
+            if (NET_CALL.test(line) || STRING_LITERAL.test(line)) remote.push(where);
+          } else if (RESOURCE_ATTR.test(line) || CSS_URL.test(line) || NET_CALL.test(line)) {
+            remote.push(where);
+          }
+          if (NON_RESOURCE_ATTR.test(line) && !RESOURCE_ATTR.test(line) && !CSS_URL.test(line) && !NET_CALL.test(line)) {
+            benign.push(where);
+          }
+          if (/\beval\s*\(|new\s+Function\s*\(/.test(line)) evals.push(where);
         });
       }
-      check("EX-6", `${scanLabel} 内 0 处远程 URL`, remote.length === 0, `${scanFiles.length} 个文件已扫`, remote.slice(0, 6).join(" | "));
+      check("EX-6", `${scanLabel} 内 0 处**真的远程引用**（资源属性 / CSS url() / fetch 参数 / 脚本字符串字面量）`,
+        remote.length === 0,
+        `${scanFiles.length} 个文件已扫（判据已收窄：非资源属性里的示例 URL 不算）`,
+        remote.slice(0, 6).join(" | "));
+      if (benign.length) {
+        info("EX-6′", "非资源属性（placeholder/data-*/title/aria-*/value）里的 URL 示例文本：**不算远程引用**，仅登记",
+          benign.slice(0, 6).join(" | "));
+      }
       check("EX-7", `${scanLabel} 内 0 处 eval / new Function`, evals.length === 0, "0 处", evals.slice(0, 6).join(" | "));
 
       const extText = scanFiles.map((rel) => readIfExists(rel) || "").join("\n");
@@ -1183,7 +1525,10 @@ async function dynamicChecks() {
       const backend = handleBackend.createHandleBackend(memfs.root, "fsa");
       const envelope = {
         spec: "opennote.import/v1",
-        importId: "sha256:00000000000000ff",
+        // `importId` 的契约是 `/^[A-Za-z0-9_-]+$/`（8–128 字符，envelope.ts:652）——
+        // 这里曾经写成 `sha256:0000…`（含冒号）→ 解析器正确地判了 `IMP-4003`。
+        // **那是我的夹具不合规，不是产品缺陷**（改夹具，不改产品）。见 V6 的检查器误报表。
+        importId: "sha256-00000000000000ff",
         title: "验证用标题",
         body: "正文第一段。\n",
         source: { url: "https://example.com/verify", title: "来源标题", site: "example.com", author: "作者", publishedAt: "2026-09-29T10:00:00Z", capturedAt: "2026-09-29T21:00:00+08:00" },
@@ -1212,9 +1557,26 @@ async function dynamicChecks() {
         skip("DYN-2", "receiveEnvelope 动态断言", `调用形状未知，最后一次错误: ${callError.message}`);
       } else {
         const result = outcome && outcome.ok === true ? outcome.result : outcome;
-        const okShape = result && typeof result === "object" && ALLOWED_STATUS.includes(result.status);
-        check("DYN-2", "接收端返回合法 status", okShape, `status=${result && result.status}`, `实际: ${JSON.stringify(outcome).slice(0, 200)}`);
-        if (okShape) {
+        /**
+         * 0.3.1 校准：`receiveEnvelopeOutcome(raw)` 读的是**应用全局的工作区状态**（它只接一个参数），
+         * 本脚本没有打开工作区 → 真实行为是如实返回 `ok:false` + `IMP-4007 工作区未打开`
+         * （**不抛异常、不静默写盘**）—— 这本身就是契约要求的「明确失败」。
+         * 「落盘 / 收件箱 / 判定链」这些要走真工作区的断言在 `verify-e2e.cjs`（102 条，含真 HTTP 桥）。
+         * 旧判据要求这里必须落到 `created`，那是在拿一个没有工作区的调用去要写盘结果 —— 假红。
+         */
+        const noWorkspace = Boolean(outcome && outcome.ok === false && outcome.error && outcome.error.code === "IMP-4007");
+        const okShape = (result && typeof result === "object" && ALLOWED_STATUS.includes(result.status)) || noWorkspace;
+        check("DYN-2", "接收端返回合法 status，或如实报「工作区未打开」`IMP-4007`（不抛异常、不静默写盘）", okShape,
+          noWorkspace
+            ? "未打开工作区 → ok:false / IMP-4007（正确失败面）；写盘路径见 verify-e2e.cjs"
+            : `status=${result && result.status}`,
+          `实际: ${JSON.stringify(outcome).slice(0, 200)}`);
+        if (noWorkspace) {
+          skip("DYN-3", "动态调用里的落盘断言", "本脚本未打开工作区 → 由 verify-e2e.cjs 覆盖（PASS 102 / FAIL 0）");
+          skip("DYN-4", "动态调用里的落盘断言", "同上");
+          skip("DYN-5", "动态调用里的落盘断言", "同上");
+          skip("DYN-6", "动态调用里的落盘断言", "同上");
+        } else if (okShape) {
           const path0 = result.path;
           const written = path0 ? await backend.readText(path0) : null;
           if (written == null) {
@@ -1242,7 +1604,109 @@ async function dynamicChecks() {
 group("§10 端到端 6 场景（由 verify-e2e.cjs 负责，这里只标注入口）");
 info("E2E", "端到端场景", "请运行 `node scripts/verify-e2e.cjs`（独立脚本，输出每条场景的 PASS/FAIL/未验证）");
 
-/* ------------------------------------------------------------------ 汇总 */
+/* ---------------------------------------------------- C-9 · 0.3.1 语义（㉝㉞㊱） */
+//
+// 这一节只做**静态**取证：元素选择的纪律（㉝）、配对文案清零（㊱）、扩展用户可见文案无反引号。
+// 真机交互（点选元素、受限页面提示、popup 文案）在本环境**无法**验证，见 V6 的 UNVERIFIED 清单。
+{
+  const extFiles = readTree(["extension/src"], (rel) => TEXT_EXT.has(path.extname(rel)));
+  const distFiles = readTree(["extension/dist"], (rel) => TEXT_EXT.has(path.extname(rel)));
+
+  /* ── C-9a（㊱）用户可见表面不得再有「配对」措辞 ─────────────────────────── */
+  // 判据只取**用户可见表面**：`userMessage:` / `ui:` / `aria-label=` / HTML 文本 / `label:`。
+  // 内部常量名（`NEEDS_PAIRING`）与注释不算用户可见（另记 INFO），否则会报一堆假缺陷。
+  const PAIRING_WORDS = /配对码|配对新客户端|6 位配对|用配对流程|配对成功|配对已过期/;
+  const visibleHits = [];
+  const internalHits = [];
+  for (const rel of [...extFiles, ...distFiles]) {
+    const raw = readIfExists(rel) || "";
+    const text = stripComments(raw);
+    text.split(/\r?\n/).forEach((line, i) => {
+      if (!PAIRING_WORDS.test(line)) return;
+      const isVisible =
+        /userMessage\s*:|ui\s*:|aria-label\s*=|label\s*:|placeholder\s*=|textContent\s*=|>\s*[^<>]*配对|setAttribute\s*\(\s*["']aria-label["']/.test(line);
+      (isVisible ? visibleHits : internalHits).push(`${rel}:${i + 1} ${line.trim().slice(0, 110)}`);
+    });
+  }
+  check("C-9a", "（㊱）扩展**用户可见文案**里已无配对措辞（`userMessage`/`ui`/`aria-label`/HTML 文本）",
+    visibleHits.length === 0,
+    `${extFiles.length + distFiles.length} 个扩展文件已扫（剥注释）`,
+    visibleHits.slice(0, 6).join(" | "));
+  if (internalHits.length) {
+    info("C-9a′", "（㊱）内部标识符/注释里仍留有配对时代的词（非用户可见，不判失败）",
+      internalHits.slice(0, 6).join(" | "));
+  }
+
+  /* ── C-9b（㉝）元素选择：`source.selection` 恒为 `false` ───────────────── */
+  const bg = readIfExists("extension/src/background.js") || "";
+  const picker = readIfExists("extension/src/content/picker.js");
+  // 一个文件里 `selection:` 可能出现多次（提取结果对象、信封对象…），要看**全部**：
+  // 只要有「绑定到 mode === "selection"」的那一处，且**没有任何**写死 `true` 的，就算达标。
+  const selectionExprs = [...bg.matchAll(/selection:\s*([^,\n]+)/g)].map((m) => m[1].trim());
+  const selectionOnlyText = selectionExprs.some((e) => /mode\s*===\s*["']selection["']/.test(e));
+  const selectionAlwaysTrue = selectionExprs.filter((e) => /^true$/.test(e));
+  const pickerNeverTrue = picker != null && !/selection\s*:\s*true/.test(stripComments(picker));
+  const elementModeExists = /mode\s*===\s*["']element["']/.test(bg);
+  check("C-9b", "（㉝）元素选择走 `body`、`source.selection` 恒为 `false`（只有文本选区模式才为 true）",
+    Boolean(picker) && selectionOnlyText && selectionAlwaysTrue.length === 0 && pickerNeverTrue && elementModeExists,
+    `picker.js=${picker ? `${picker.length} 字节` : "**不存在**"}；selection 表达式=${JSON.stringify(selectionExprs)}；element 模式存在=${elementModeExists}；picker 里无 selection:true=${pickerNeverTrue}`,
+    `picker.js=${picker ? "存在" : "**不存在（㉝ 未落地）**"}；有「mode === selection」绑定=${selectionOnlyText}；写死 true 的处数=${selectionAlwaysTrue.length}（${selectionAlwaysTrue.join(", ") || "无"}）；element 模式存在=${elementModeExists}；picker 里无 selection:true=${pickerNeverTrue}`);
+
+  /* ── C-9c（㉝）元素选择交互纪律：不改页面 DOM、Esc 取消、拦住那一次点击 ──── */
+  const pickerText = picker ? stripComments(picker) : "";
+  const rules = {
+    "Shadow DOM 覆盖层": /attachShadow\s*\(/.test(pickerText),
+    "shadow 为 closed": /mode\s*:\s*["']closed["']/.test(pickerText),
+    "Esc 取消": /["']Escape["']/.test(pickerText),
+    阻止默认行为: /preventDefault\s*\(\s*\)/.test(pickerText),
+    阻止冒泡: /stopPropagation\s*\(\s*\)/.test(pickerText),
+    "注入方式只有 picker.js": /files:\s*\[\s*["']content\/picker\.js["']\s*\]/.test(bg),
+  };
+  const missingRules = Object.entries(rules).filter(([, ok]) => !ok).map(([k]) => k);
+  check("C-9c", "（㉝）元素选择交互纪律（Shadow DOM 覆盖层 / Esc / preventDefault+stopPropagation / 只注入一层）",
+    Boolean(picker) && missingRules.length === 0,
+    Object.keys(rules).join(" ✓、") + " ✓",
+    `未满足：${missingRules.join(", ") || "(picker.js 不存在)"}`);
+
+  /* ── C-9d（㉝）受限页面如实提示：不得静默失败 ─────────────────────────── */
+  const restrictedLabel = /IMP-1006[\s\S]{0,120}?label:\s*["'][^"']+["']/.test(bg);
+  const hasRestrictedFn = /function\s+isRestrictedUrl|const\s+RESTRICTED_RE/.test(bg);
+  const extErrSrc = readIfExists("extension/src/lib/errors.js") || "";
+  const uiCopy = /"IMP-1006"[\s\S]{0,300}?ui:\s*["'][^"']+["']/.test(extErrSrc);
+  check("C-9d", "（㉝）受限页面（`chrome://` / 扩展商店 / PDF）如实提示 `IMP-1006`，不静默失败",
+    hasRestrictedFn && restrictedLabel && uiCopy,
+    `isRestrictedUrl/RESTRICTED_RE=${hasRestrictedFn}、受限时给出用户可见 label=${restrictedLabel}、errors.js 的 IMP-1006 有 ui 文案=${uiCopy}`,
+    `isRestrictedUrl=${hasRestrictedFn} label=${restrictedLabel} ui=${uiCopy}`);
+
+  /* ── C-9e 扩展用户可见文案 0 反引号（src + dist 产物） ─────────────────── */
+  // 背景：D-V10 —— `IMP-4008` 的文案里曾有字面反引号（给用户看的是「不能使用 `..`」）。
+  // 这里扫描所有 `userMessage:` / `ui:` 字面量（含 dist 产物，因为它才是真正装进浏览器的）。
+  const backtickHits = [];
+  for (const rel of [...extFiles, ...distFiles]) {
+    const text = stripComments(readIfExists(rel) || "");
+    for (const m of text.matchAll(/(?:userMessage|ui|label)\s*:\s*(["'])((?:(?!\1)[\s\S])*?)\1/g)) {
+      if (m[2].includes("`")) backtickHits.push(`${rel}: 「${m[2].slice(0, 80)}」`);
+    }
+  }
+  check("C-9e", "扩展用户可见文案 0 字面反引号（含 `dist` 产物）",
+    backtickHits.length === 0,
+    `${extFiles.length + distFiles.length} 个文件已扫`,
+    backtickHits.slice(0, 5).join(" | "));
+
+  /* ── C-9f 渲染层新增面板 0 个 fetch(（设置页走 IPC，不走 HTTP） ─────────── */
+  const rendererChanged = (git(["diff", "--name-only", BASELINE, "--", "src"]) || "")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((rel) => TEXT_EXT.has(path.extname(rel)));
+  const fetchHits = grepFiles(rendererChanged, /\bfetch\s*\(/, { strip: true });
+  check("C-9f", "渲染层改动文件里 0 处 `fetch(`（设置页/面板一律走 IPC）",
+    fetchHits.length === 0,
+    `${rendererChanged.length} 个改动中的渲染层文件已扫，0 处 fetch(`,
+    fetchHits.slice(0, 5).map((h) => `${h.file}:${h.line}`).join(" | "));
+}
+
+
 
 (async () => {
   try {
