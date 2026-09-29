@@ -33,8 +33,32 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,svg,png,woff,woff2}"],
-        maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
+        // Mermaid (~4.9 MB) and KaTeX are only needed once a note actually uses
+        // them, so keep them out of the install-time precache and cache them on
+        // first use instead.
+        globIgnores: ["**/mermaid-*.js", "**/katex-*.js"],
+        maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
         cleanupOutdatedCaches: true,
+        runtimeCaching: [
+          {
+            urlPattern: /\/assets\/(?:mermaid|katex)-[\w-]+\.js$/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "opennote-on-demand",
+              expiration: { maxEntries: 8, maxAgeSeconds: 60 * 60 * 24 * 30 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
+            urlPattern: /\.(?:woff2?|ttf)$/,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "opennote-fonts",
+              expiration: { maxEntries: 80, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+        ],
       },
     }),
   ],
