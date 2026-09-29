@@ -28,6 +28,11 @@ const FALLBACK_PORT = 8788
 const EXT_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
 const MOZ_ORIGIN = 'moz-extension://fedcba9876543210fedcba9876543210'
 const DEV_ORIGIN = 'http://127.0.0.1:5173'
+/** UI 文案的**唯一来源**：设置面板 R1 的四个选项名必须与它逐字一致（㉕ 把「推荐」移到了收件箱）。 */
+const UI_SPEC_PATH = path.join(__dirname, '..', 'docs', 'import', '03-UI设计规范-剪藏与导入.md')
+const PANEL_PATH = path.join(__dirname, '..', 'src', 'components', 'ImportApiPanel.tsx')
+/** 桥源码：用来断言「配对实现真的被删干净了」，而不是只看行为。 */
+const BRIDGE_PATH = path.join(__dirname, '..', 'electron', 'bridge.cjs')
 /** 私有端口：给隔离实例用，避开 8787–8796（那条范围要留给「全占用」断言）。 */
 let privatePortCounter = 19870
 
@@ -235,6 +240,12 @@ function postPair(port, code, origin, client = { name: 'chrome-extension', versi
   return request({ port, path: '/v1/pair', method: 'POST', headers: withHost(port, headers), body: JSON.stringify({ code, client }) })
 }
 
+/** `Origin` 头 + 校验用的最小请求（默认打 /v1/health，无需令牌）。 */
+function withOrigin(port, origin, overrides = {}) {
+  const headers = { Origin: origin, ...(overrides.headers || {}) }
+  return request({ port, path: overrides.path || '/v1/health', method: overrides.method || 'GET', headers: withHost(port, headers), body: overrides.body })
+}
+
 /** 占住一个端口，返回释放函数。 */
 function occupy(port) {
   return new Promise((resolve, reject) => {
@@ -312,6 +323,8 @@ function makeBridge(options = {}) {
     getWorkspaceInfo: options.workspace ? () => ({ open: true, name: options.workspaceName || '我的笔记' }) : undefined,
     getAppVersion: () => '0.2.0',
     getInboxEnabled: () => false,
+    // ㉕ 交付模式挂钩：只有显式传了 `inboxMode` 才接线，用来验证「没接线 = null」。
+    getInboxMode: 'inboxMode' in options ? options.inboxMode : undefined,
     getRecentImports: () => [],
     getImportRecord: (importId) =>
       importId === 'known-id' ? { importId, status: 'created', path: '剪藏/a.md', committedAt: new Date().toISOString(), errors: [] } : null,
@@ -410,6 +423,68 @@ async function main() {
       assert.equal(spec.userMessage.length >= 5, true, `${code} 的 userMessage 太短`)
     }
     return `${Object.keys(ERROR_TABLE).length} 个错误码齐全，1001/5002 文案已区分`
+  })
+
+  await check('㉕ 面板 R1 的四个选项名与 03 号 UI-04 逐字咬合（「（推荐）」必须在收件箱上）', async () => {
+    let raw
+    try {
+      raw = fs.readFileSync(UI_SPEC_PATH, 'utf8')
+    } catch {
+      skip('读不到 03 号规范，无法比对 R1 选项名')
+    }
+    // `| R1 选项（…） | `直接入库` · `先进入收件箱（推荐）` |`
+    // 只认**值那一格**里的反引号——标签格的说明文字里也会出现反引号（例如 `` `（推荐）` 只在 `inbox` 上 ``）。
+    const row = raw.split(/\r?\n/).find((line) => /^\|\s*R1 选项/.test(line))
+    if (!row) skip('03 号里找不到「R1 选项」这一行')
+    const cells = row.split('|')
+    const valueCell = cells.length >= 3 ? cells[2] : row
+    const docLabels = (valueCell.match(/`[^`]+`/g) || []).map((item) => item.slice(1, -1))
+    const stale = '直接入库（推荐）'
+    // ① 03 号必须已经把「（推荐）」移到收件箱（0.3.0 的默认值是 inbox，见 00 §6.14㉕）。
+    assert.equal(
+      docLabels.includes(stale),
+      false,
+      `03 号「R1 选项」还没更新，仍是：${docLabels.join(' / ')}（应改为 直接入库 / 追加到已有笔记 / 跳过重复内容 / 先进入收件箱（推荐））——这是 d-ui 的文件，我这边不改`,
+    )
+    assert.equal(docLabels.includes('先进入收件箱（推荐）'), true, '03 号的「（推荐）」必须在「先进入收件箱」上')
+    // ② 四个选项名必须齐全（追加/跳过这两项 03 号原先没列，㉕ 之后按裁定补齐）。
+    for (const label of ['直接入库', '追加到已有笔记', '跳过重复内容', '先进入收件箱（推荐）']) {
+      assert.equal(docLabels.includes(label), true, `03 号「R1 选项」缺少「${label}」`)
+    }
+    assert.equal(docLabels.length, 4, `03 号 R1 选项应恰好 4 个，实得 ${docLabels.length}：${docLabels.join(' / ')}`)
+    // ③ 面板必须逐字实现 03 号冻死的这四个，且不得残留旧的「（推荐）」标签。
+    const panel = fs.readFileSync(PANEL_PATH, 'utf8')
+    for (const label of docLabels) {
+      assert.equal(panel.includes(`"${label}"`), true, `面板缺少 03 号冻结的选项名「${label}」`)
+    }
+    assert.equal(panel.includes(`"${stale}"`), false, `面板不得再出现旧的「${stale}」`)
+    // ④ 分段控件的取值表里永远不许有 `overwrite`（红线）。
+    const table = panel.slice(panel.indexOf('CONFLICT_LABELS'), panel.indexOf('CONFLICT_NOTES'))
+    assert.equal(/overwrite/.test(table), false, 'R1 取值表里不得出现 overwrite')
+    return `4 个选项名与 03 号逐字一致（收件箱=推荐）`
+  })
+
+  await check('㉗ 逐字：IMP-4006「应用没运行」与 IMP-4007「工作区没打开」必须区分且逐字', async () => {
+    assert.equal(ERROR_TABLE['IMP-4006'].userMessage, 'Opennote 没有在运行。请先打开 Opennote，再试一次。')
+    assert.equal(
+      ERROR_TABLE['IMP-4007'].userMessage,
+      'Opennote 里还没有打开笔记本文件夹。请在 Opennote 左侧选一个文件夹，或新建一个，再试一次。',
+    )
+    // 两条讲的是两件事：一条要用户去启动应用，另一条要用户去选文件夹。
+    assert.notEqual(ERROR_TABLE['IMP-4006'].userMessage, ERROR_TABLE['IMP-4007'].userMessage)
+    // ㉗ 禁令：被否决的旧措辞一个都不许再出现。
+    for (const banned of ['或新建浏览器笔记本', '请先打开一个文件夹。', '的窗口已关闭']) {
+      for (const code of ['IMP-4006', 'IMP-4007']) {
+        assert.equal(
+          ERROR_TABLE[code].userMessage.includes(banned),
+          false,
+          `${code} 不得再出现被 ㉗ 否决的旧措辞「${banned}」`,
+        )
+      }
+    }
+    // 冻结码不得被顺手改掉（D-V08 已冻结的那条）。
+    assert.equal(ERROR_TABLE['IMP-4013'].userMessage, '附件太多或太大，请减少后用重新剪藏。')
+    return '4006/4007 逐字 + 旧措辞 0 处 + 4013 未动'
   })
 
   // -------------------------------------------------------------------------
@@ -607,8 +682,9 @@ async function main() {
     return '201（无 Origin 放行）'
   })
 
-  await check('④ 受信任 Origin 精确回显，绝不用 * / 绝不 credentials', async () => {
-    assert.equal(bridge.addAllowedOrigin(DEV_ORIGIN), true)
+  await check('④ 本机回环来源精确回显，绝不用 * / 绝不 credentials（0.3.1 起按类型放行，不经白名单）', async () => {
+    // ㉞：来源不再需要「入白名单」——`http://127.0.0.1:<port>` 按类型直接放行。
+    assert.equal(bridge.status().origins.includes(DEV_ORIGIN), false, '本用例故意不把来源写进列表')
     const res = await postImport(port, token, validEnvelope(), { Origin: DEV_ORIGIN })
     assert.equal(res.status, 201, `应成功，实际 ${res.status} ${res.text.slice(0, 200)}`)
     assert.equal(res.headers['access-control-allow-origin'], DEV_ORIGIN, '必须精确回显来源')
@@ -732,216 +808,320 @@ async function main() {
   })
 
   // -------------------------------------------------------------------------
-  section('⑦ 配对：6 位码 / 120 s / 一次性 / 扩展来源放宽（Lead 裁定）')
+  section('⑦ 来源按类型校验（0.3.1 ㉞）+ 配对已下线')
   // -------------------------------------------------------------------------
-  await check('⑦ 未受信 Origin: https://evil.com + 正确配对码 → 403 IMP-3001（扩展放宽不适用于网页）', async () => {
-    const code = bridge.newPairCode().code
-    const res = await postPair(port, code, 'https://evil.com', { name: 'attacker', version: '1' })
+  await check('⑦ ①普通网页来源（https://evil.example）被拒 403 IMP-3001，且不回显 CORS', async () => {
+    const res = await postImport(port, token, validEnvelope(), { Origin: 'https://evil.example' })
     expectError(res, 'IMP-3001', 403)
-    assert.equal(bridge.status().origins.includes('https://evil.com'), false, '未受信来源不得进入 allowedOrigins')
-    return '403 IMP-3001'
+    assert.equal(res.headers['access-control-allow-origin'], undefined, '拒绝时不得回显任何 CORS 头')
+    const pre = await request({
+      port,
+      path: '/v1/import',
+      method: 'OPTIONS',
+      headers: withHost(port, { Origin: 'https://evil.example', 'Access-Control-Request-Method': 'POST' }),
+    })
+    expectError(pre, 'IMP-3001', 403)
+    assert.equal(pre.headers['access-control-allow-origin'], undefined, '预检被拒也不得回显 CORS 头')
+    assert.equal(bridge.status().lastRejectedOrigin, 'https://evil.example', 'R8 的拒绝记录行要能看到这个来源')
+    return '403（含预检）+ lastRejectedOrigin 记录'
   })
 
-  await check('⑦ 扩展来源 + 正确配对码 → 200 拿到 token，且 origin 入 allowedOrigins', async () => {
-    const pair = makeBridge({ noWindow: true })
-    const code = pair.bridge.newPairCode()
-    assert.match(code.code, /^\d{6}$/)
-    assert.ok(code.expiresAt > Date.now() && code.expiresAt - Date.now() <= 120000, '配对码有效期 120 s')
-    pair.bridge.regenerateToken()
-    const started = await pair.bridge.startWithPort(privatePortCounter++)
-    try {
-      const res = await postPair(started.port, code.code, EXT_ORIGIN)
-      assert.equal(res.status, 200, `应成功，实际 ${res.status} ${res.text.slice(0, 200)}`)
-      assert.equal(res.json.ok, true)
-      const result = res.json.result
-      assert.equal(result.spec, 'opennote.import/v1')
-      assert.equal(result.endpoint, `http://127.0.0.1:${started.port}`)
-      assert.equal(result.origin, EXT_ORIGIN)
-      assert.match(result.token, /^opn_[A-Za-z0-9_-]{43}$/)
-      assert.equal(pair.bridge.status().origins.includes(EXT_ORIGIN), true, 'origin 必须入 allowedOrigins')
-      assert.equal(res.headers['access-control-allow-origin'], EXT_ORIGIN, '配对响应必须可被扩展读取')
-      return `200 + origin 入白名单（配对码 ${code.code}）`
-    } finally {
-      await pair.bridge.stop()
+  await check('⑦ ②扩展来源放行：chrome-extension:// 与 moz-extension:// 都能导入（精确回显 Origin）', async () => {
+    for (const origin of [EXT_ORIGIN, MOZ_ORIGIN]) {
+      const res = await postImport(port, token, validEnvelope(), { Origin: origin })
+      assert.equal(res.status, 201, `【${origin}】应 201，实际 ${res.status} ${res.text.slice(0, 160)}`)
+      assert.equal(res.headers['access-control-allow-origin'], origin, '必须精确回显该来源')
+      assert.equal(res.headers['access-control-allow-credentials'], undefined, '绝不回 Allow-Credentials')
+      assert.equal(res.headers['access-control-allow-origin'] === '*', false, '绝不用通配符')
     }
+    return 'chrome-extension:// 与 moz-extension:// 都 201'
   })
 
-  await check('⑦ 同上但配对码错误 → 401 IMP-2004 且 allowedOrigins 不含该 origin', async () => {
-    const pair = makeBridge({ noWindow: true })
-    pair.bridge.regenerateToken()
-    pair.bridge.newPairCode()
-    const started = await pair.bridge.startWithPort(privatePortCounter++)
-    try {
-      const res = await postPair(started.port, '000000', EXT_ORIGIN)
-      expectError(res, 'IMP-2004', 401)
-      assert.equal(pair.bridge.status().origins.includes(EXT_ORIGIN), false, '失败路径绝不得写 allowedOrigins')
-      const file = JSON.stringify(pair.bridge.status())
-      assert.equal(file.includes('chrome-extension://'), false)
-      return '401 IMP-2004 且白名单不变'
-    } finally {
-      await pair.bridge.stop()
+  await check('⑦ ②b 本机回环与 file:// 放行；localhost / 伪造扩展 / null 一律 403', async () => {
+    const allowed = [`http://127.0.0.1:${port}`, 'file://']
+    for (const origin of allowed) {
+      // 用 import 而不是 /v1/health：health 按设计不加任何 CORS 头，看不到回显。
+      const res = await postImport(port, token, validEnvelope(), { Origin: origin })
+      assert.equal(res.status, 201, `【${origin}】应放行，实际 ${res.status} ${res.text.slice(0, 160)}`)
+      assert.equal(res.headers['access-control-allow-origin'], origin, '必须精确回显该来源')
     }
-  })
-
-  await check('⑦ moz-extension:// 同样可作配对候选', async () => {
-    const pair = makeBridge({ noWindow: true })
-    pair.bridge.regenerateToken()
-    const code = pair.bridge.newPairCode().code
-    const started = await pair.bridge.startWithPort(privatePortCounter++)
-    try {
-      const res = await postPair(started.port, code, MOZ_ORIGIN, { name: 'firefox-extension', version: '0.1.0' })
-      assert.equal(res.status, 200, res.text.slice(0, 200))
-      assert.equal(pair.bridge.status().origins.includes(MOZ_ORIGIN), true)
-      return '200'
-    } finally {
-      await pair.bridge.stop()
-    }
-  })
-
-  await check('⑦ 配对码一次性：同一码第二次 → 401 IMP-2004，且不新增 origin', async () => {
-    const pair = makeBridge({ noWindow: true })
-    pair.bridge.regenerateToken()
-    const code = pair.bridge.newPairCode().code
-    const started = await pair.bridge.startWithPort(privatePortCounter++)
-    try {
-      const first = await postPair(started.port, code, EXT_ORIGIN)
-      assert.equal(first.status, 200)
-      const other = 'chrome-extension://zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'
-      const second = await postPair(started.port, code, other)
-      expectError(second, 'IMP-2004', 401)
-      assert.equal(pair.bridge.status().origins.includes(other), false, '失败路径绝不得写 allowedOrigins')
-      return '一次性生效'
-    } finally {
-      await pair.bridge.stop()
-    }
-  })
-
-  await check('⑦ 配对码失败 5 次即作废当前码 / 第 6 次触发 429 IMP-2003', async () => {
-    const pair = makeBridge({ noWindow: true })
-    pair.bridge.regenerateToken()
-    const code = pair.bridge.newPairCode().code
-    const started = await pair.bridge.startWithPort(privatePortCounter++)
-    try {
-      for (let i = 0; i < 5; i += 1) {
-        const res = await postPair(started.port, '111111', EXT_ORIGIN)
-        assert.equal(res.status, 401, `第 ${i + 1} 次失败应为 401，实际 ${res.status}`)
-        assert.equal(res.json.error.code, 'IMP-2004')
-      }
-      assert.equal(pair.bridge.status().pairingCode, null, '失败 5 次后当前配对码必须作废')
-      const sixth = await postPair(started.port, code, EXT_ORIGIN)
-      expectError(sixth, 'IMP-2003', 429)
-      assert.ok(sixth.headers['retry-after'], '429 必须带 Retry-After')
-      assert.equal(pair.bridge.status().origins.includes(EXT_ORIGIN), false)
-      return '失败 5 次作废 + 第 6 次 429'
-    } finally {
-      await pair.bridge.stop()
-    }
-  })
-
-  await check('⑦ 配对接口无 Origin 头（CLI）也能换到 token', async () => {
-    const pair = makeBridge({ noWindow: true })
-    pair.bridge.regenerateToken()
-    const code = pair.bridge.newPairCode().code
-    const started = await pair.bridge.startWithPort(privatePortCounter++)
-    try {
-      const res = await postPair(started.port, code, null, { name: 'cli', version: '0.2.0' })
-      assert.equal(res.status, 200, res.text.slice(0, 200))
-      assert.equal(res.json.result.origin, null)
-      return '无 Origin 放行 + 成功'
-    } finally {
-      await pair.bridge.stop()
-    }
-  })
-
-  await check('⑦ 配对交付令牌：未交付的明文直接交付；已交付过则轮换 rotated:true（旧令牌立刻失效）', async () => {
-    const pair = makeBridge({})
-    const first = pair.bridge.regenerateToken()
-    const code1 = pair.bridge.newPairCode().code
-    const started = await pair.bridge.startWithPort(privatePortCounter++)
-    try {
-      const res1 = await postPair(started.port, code1, EXT_ORIGIN)
-      assert.equal(res1.status, 200, res1.text.slice(0, 200))
-      assert.equal(res1.json.result.token, first, '尚未交付过的明文应直接交付（不轮换）')
-      assert.equal(res1.json.result.rotated, false)
-
-      // 明文已交付 → 第二次配对必须轮换，否则客户端会拿到 null 的假成功。
-      const code2 = pair.bridge.newPairCode().code
-      const res2 = await postPair(started.port, code2, MOZ_ORIGIN)
-      assert.equal(res2.status, 200, res2.text.slice(0, 200))
-      const second = res2.json.result.token
-      assert.equal(typeof second, 'string', '配对必须交出可用的明文令牌，绝不返回 null')
-      assert.match(second, /^opn_[A-Za-z0-9_-]{43}$/)
-      assert.notEqual(second, first, '已交付过就必须轮换')
-      assert.equal(res2.json.result.rotated, true)
-
-      const old = await postImport(started.port, first, validEnvelope())
-      expectError(old, 'IMP-2002', 401)
-      const fresh = await postImport(started.port, second, validEnvelope())
-      assert.equal(fresh.status, 201, `新令牌应可用，实际 ${fresh.status}`)
-
-      const statusJson = JSON.stringify(pair.bridge.status())
-      assert.equal(statusJson.includes(second), false, 'status() 不得回显新明文')
-      assert.equal(pair.bridge.status().tokenLast4, second.slice(-4), 'last4 必须跟着换')
-
-      // 面板据此提示「已配对 1 个客户端」与轮换警告（UI-04/R4b）。
-      const last = pair.bridge.status().lastPairing
-      assert.equal(typeof last, 'object', 'status().lastPairing 必须存在（面板无新 IPC 可依赖）')
-      assert.equal(last.origin, MOZ_ORIGIN, 'lastPairing.origin 应为最近配对的来源')
-      assert.equal(last.rotated, true, 'lastPairing.rotated 必须如实反映轮换')
-      assert.equal(Number.isFinite(last.at), true)
-      assert.equal(statusJson.includes(second), false, 'lastPairing 不得含明文')
-      return '未交付直接交付 / 已交付则轮换 / lastPairing 可观测'
-    } finally {
-      await pair.bridge.stop()
-    }
-  })
-
-  await check('⑦ 控制器级 pair(code)：错码 → {ok:false,errorCode}，正确 → {ok:true,token}', async () => {
-    const pair = makeBridge({ noWindow: true })
-    const expected = pair.bridge.regenerateToken()
-    const code = pair.bridge.newPairCode().code
-    const bad = pair.bridge.pair('000000')
-    assert.equal(bad.ok, false)
-    assert.equal(bad.errorCode, 'IMP-2004')
-    const good = pair.bridge.pair(code)
-    assert.equal(good.ok, true)
-    assert.equal(good.token, expected)
-    return '冻结接口 pair() 形态一致'
-  })
-
-  await check('S-11 伪造扩展来源不被信任（长度/大小写/协议不符）', async () => {
-    const bogus = [
+    const rejected = [
+      'https://evil.example',
+      'http://localhost:5173',
+      'http://127.0.0.1.evil.example',
       'chrome-extension://ABC',
-      'chrome-extension://ABCDEFGHIJKLMNOP',
       'CHROME-EXTENSION://abcdefghijklmnopabcdefghijklmnop',
-      'chrome-extension://',
-      'chrome-extension://abcdefghijklmnopabcdefghijklmnop/extra',
-      'moz-extension://short',
       'safari-web-extension://abcdefghijklmnopabcdefghijklmnop',
-      'http://chrome-extension://abcdefghijklmnop',
+      'null',
     ]
-    const code = bridge.newPairCode().code
-    for (const origin of bogus) {
-      const res = await postPair(port, code, origin)
-      assert.equal(res.status, 403, `【${origin}】应 403，实际 ${res.status} ${res.text.slice(0, 120)}`)
-      assert.equal(res.json.error.code, 'IMP-3001')
-      assert.equal(bridge.status().origins.includes(origin), false, `【${origin}】不得进入白名单`)
+    for (const origin of rejected) {
+      const res = await withOrigin(port, origin)
+      expectError(res, 'IMP-3001', 403)
+      assert.equal(res.headers['access-control-allow-origin'], undefined, `【${origin}】不得回显 CORS 头`)
     }
-    return `${bogus.length} 种伪造来源全部 403`
+    // 历史遗留的 allowedOrigins 列表**已经不参与放行判定**：塞进去也不放行。
+    assert.equal(bridge.addAllowedOrigin('https://evil.example'), true)
+    const forced = await withOrigin(port, 'https://evil.example')
+    expectError(forced, 'IMP-3001', 403)
+    assert.equal(bridge.removeAllowedOrigin('https://evil.example'), true, '遗留条目应可清理（removeOrigin 保留的用途）')
+    return `放行 ${allowed.length} 类；拒绝 ${rejected.length} 类；列表已不参与放行`
   })
 
-  await check('扩展放宽只作用于 /v1/pair：未受信扩展来源访问 import / workspace 仍 403', async () => {
-    const fresh = 'chrome-extension://qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq'
-    const imported = await postImport(port, token, validEnvelope(), { Origin: fresh })
-    expectError(imported, 'IMP-3001', 403)
-    assert.equal(imported.headers['access-control-allow-origin'], undefined, '不得回显 CORS 头')
-    const ws = await request({ port, path: '/v1/workspace', headers: withHost(port, { Origin: fresh, Authorization: `Bearer ${token}` }) })
-    expectError(ws, 'IMP-3001', 403)
-    const list = await request({ port, path: '/v1/imports', headers: withHost(port, { Origin: fresh, Authorization: `Bearer ${token}` }) })
-    expectError(list, 'IMP-3001', 403)
-    return 'import / workspace / imports 都 403'
+  await check('⑦ ③ POST /v1/pair 明确「已下线」：404 + 文案说清改用令牌，不得静默 404 无说明', async () => {
+    const retired = await postPair(port, '123456', EXT_ORIGIN)
+    expectError(retired, 'IMP-3005', 404)
+    const error = retired.json.error
+    assert.match(error.userMessage, /配对/, '文案必须说明配对这件事')
+    assert.match(error.userMessage, /删除|下线|取消/, '文案必须说清「已经删除」')
+    assert.match(error.userMessage, /0\.3\.1/, '文案必须点明版本')
+    assert.match(error.userMessage, /令牌/, '文案必须给出替代方式（复制令牌）')
+    assert.equal(error.detail.route, '/v1/pair')
+    assert.equal(error.detail.removedIn, '0.3.1')
+    assert.notEqual(error.userMessage, ERROR_TABLE['IMP-3005'].userMessage, '必须是针对本路由的说明，不能是通用 404 文案')
+    // 已下线的路由不得成为绕过其它校验的口子：普通网页来源仍然被拒。
+    const fromWeb = await request({
+      port,
+      path: '/v1/pair',
+      method: 'POST',
+      headers: withHost(port, { 'Content-Type': 'application/json', Origin: 'https://evil.example' }),
+      body: JSON.stringify({ code: '123456' }),
+    })
+    expectError(fromWeb, 'IMP-3001', 403)
+    assert.equal(bridge.status().origins.includes(EXT_ORIGIN), false, '下线路由绝不得写 allowedOrigins')
+    return `404 + 「${error.userMessage.slice(0, 24)}…」`
   })
 
+  await check('⑦ ④令牌长期有效：桥重启后同一令牌仍可用；只有「重新生成」能让它失效', async () => {
+    const dir = tempDir('opennote-bridge-longtoken-')
+    const first = makeBridge({ dataDir: dir })
+    const shared = first.bridge.regenerateToken()
+    const up = await first.bridge.startWithPort(privatePortCounter++)
+    try {
+      const ok = await postImport(up.port, shared, validEnvelope())
+      assert.equal(ok.status, 201, '重启前应可用')
+    } finally {
+      await first.bridge.stop()
+    }
+    // 「关掉 Opennote 再打开」：同一 dataDir 起一个新实例读回哈希。
+    const second = makeBridge({ dataDir: dir })
+    const status = second.bridge.status()
+    assert.equal(status.tokenSet, true, '重启后应读回令牌哈希')
+    assert.equal('pairingCode' in status, false, 'status() 不得再有配对码字段')
+    assert.equal('lastPairing' in status, false, 'status() 不得再有配对结果字段')
+    const again = await second.bridge.startWithPort(privatePortCounter++)
+    try {
+      const reused = await postImport(again.port, shared, validEnvelope())
+      assert.equal(reused.status, 201, `重启后同一令牌必须仍可用（长期有效），实际 ${reused.status}`)
+      second.bridge.regenerateToken()
+      const stale = await postImport(again.port, shared, validEnvelope())
+      expectError(stale, 'IMP-2002', 401)
+    } finally {
+      await second.bridge.stop()
+    }
+    return '重启后同一令牌 201；重新生成后旧令牌 401'
+  })
+
+  await check('㊲ 本会话内明文可反复复制：tokenVisible=true，且明文不进 status()', async () => {
+    const inst = makeBridge({})
+    const plain = inst.bridge.regenerateToken()
+    const first = inst.bridge.status()
+    assert.equal(first.tokenVisible, true, '刚生成后本会话必须持有明文')
+    const json = JSON.stringify(first)
+    assert.equal(json.includes(plain), false, 'status() 绝不回显明文')
+    assert.equal(/opn_[A-Za-z0-9_-]{20,}/.test(json), false, 'status() 不得出现任何完整令牌')
+    // 关掉接口再开**不是**「应用退出」：明文必须还在，否则面板会在开关一次后突然不能复制。
+    await inst.bridge.startWithPort(privatePortCounter++)
+    await inst.bridge.stop()
+    assert.equal(inst.bridge.status().tokenVisible, true, 'stop() 不得清掉本会话明文')
+    const again = await inst.bridge.startWithPort(privatePortCounter++)
+    try {
+      assert.equal(inst.bridge.status().tokenVisible, true, 'start() 后仍应可复制')
+      const res = await postImport(again.port, plain, validEnvelope())
+      assert.equal(res.status, 201, '本会话内这串明文必须一直可用')
+    } finally {
+      await inst.bridge.stop()
+    }
+    return 'tokenVisible=true 跨 start/stop 保持；明文不出现在 status()'
+  })
+
+  await check('㊲ 重启（新 controller）后 tokenVisible=false，但令牌**没有**失效', async () => {
+    const dir = tempDir('opennote-bridge-tokenvisible-')
+    const first = makeBridge({ dataDir: dir })
+    const plain = first.bridge.regenerateToken()
+    const up = await first.bridge.startWithPort(privatePortCounter++)
+    try {
+      assert.equal((await postImport(up.port, plain, validEnvelope())).status, 201)
+    } finally {
+      await first.bridge.stop()
+    }
+    // 应用重启 = 新的 controller：内存明文没了，磁盘上的哈希还在。
+    const second = makeBridge({ dataDir: dir })
+    const status = second.bridge.status()
+    assert.equal(status.tokenVisible, false, '重启后不得声称还持有明文（否则面板会复制一串拿不到的东西）')
+    assert.equal(status.tokenSet, true, '令牌本身仍然有效')
+    assert.equal(JSON.stringify(status).includes(plain), false)
+    const again = await second.bridge.startWithPort(privatePortCounter++)
+    try {
+      assert.equal((await postImport(again.port, plain, validEnvelope())).status, 201, '令牌长期有效：重启不影响')
+      // 重新生成 → 本会话重新持有明文；旧令牌同时作废。
+      const fresh = second.bridge.regenerateToken()
+      assert.equal(second.bridge.status().tokenVisible, true, '重新生成后本会话重新持有明文')
+      assert.notEqual(fresh, plain)
+      const stale = await postImport(again.port, plain, validEnvelope())
+      expectError(stale, 'IMP-2002', 401)
+    } finally {
+      await second.bridge.stop()
+    }
+    return '重启后不可复制但令牌仍有效；重新生成后恢复可复制'
+  })
+
+  await check('㊲ setTokenHash 读回外部哈希时必须丢弃内存明文（否则会复制一串不对应的令牌）', async () => {
+    const inst = makeBridge({ noWindow: true })
+    inst.bridge.regenerateToken()
+    assert.equal(inst.bridge.status().tokenVisible, true)
+    const other = createBridge({ log: () => {} })
+    const otherPlain = other.regenerateToken()
+    assert.equal(inst.bridge.setTokenHash(sha256Hex(otherPlain), otherPlain.slice(-4)), true)
+    assert.equal(inst.bridge.status().tokenVisible, false, '明文与哈希不再对应 → 必须丢弃')
+    assert.equal(inst.bridge.getSessionPlaintext(), null, '只读频道同理：读回 null，不得交出不对应的明文')
+    assert.equal(inst.bridge.status().tokenLast4, otherPlain.slice(-4))
+    return 'setTokenHash → 明文丢弃 / 只读频道 null'
+  })
+
+  await check('㊲③ getSessionPlaintext() 与「面板可复制的那串」逐字相同，而且真的能用', async () => {
+    const inst = makeBridge({})
+    const plain = inst.bridge.regenerateToken()
+    const read = inst.bridge.getSessionPlaintext()
+    assert.equal(read, plain, '读回来的必须与生成的明文逐字相同（面板就是把这串放进剪贴板）')
+    assert.equal(read.length, 47, '47 字符 = `opn_` + 43 base64url；不是掩码、不是后四位')
+    assert.equal(read.startsWith('opn_'), true)
+    assert.equal(read.includes('•'), false, '不得返回掩码形态')
+    assert.notEqual(read, sha256Hex(plain), '不得返回哈希')
+    const up = await inst.bridge.startWithPort(privatePortCounter++)
+    try {
+      // 用「面板可复制的那串」直接导入：逐字相同还不够，它必须真的是那把钥匙。
+      const res = await postImport(up.port, read, validEnvelope())
+      assert.equal(res.status, 201, '面板复制的那串必须真的能导入')
+    } finally {
+      await inst.bridge.stop()
+    }
+    return `${read.length} 字符、非掩码非哈希；直接用它导入 201`
+  })
+
+  await check('㊲③ 只读频道绝不轮换：连调两次同一串，读取前后旧令牌都能导入', async () => {
+    const inst = makeBridge({})
+    const plain = inst.bridge.regenerateToken()
+    const before = inst.bridge.status()
+    const a = inst.bridge.getSessionPlaintext()
+    const up = await inst.bridge.startWithPort(privatePortCounter++)
+    try {
+      assert.equal((await postImport(up.port, plain, validEnvelope())).status, 201, '读取之前旧令牌可用')
+      const b = inst.bridge.getSessionPlaintext()
+      assert.equal(a, b, '两次读取必须同一串 —— 轮换会让面板复制到一串即将失效的令牌')
+      assert.equal(a, plain)
+      assert.equal((await postImport(up.port, plain, validEnvelope())).status, 201, '读取之后旧令牌**仍然**可用：只读不得有副作用')
+    } finally {
+      await inst.bridge.stop()
+    }
+    assert.equal(inst.bridge.status().tokenLast4, before.tokenLast4, '后四位不得变（= 哈希没被改写）')
+    assert.equal(inst.bridge.status().tokenVisible, true, '读一次不该把「可复制」读没')
+    return '两次同一串；读取前后旧令牌都 201，tokenLast4 不变'
+  })
+
+  await check('㊲③ 重启（新 controller）后只读频道返回 null，但令牌本身仍然有效', async () => {
+    const dir = tempDir('opennote-bridge-sessiontoken-')
+    const first = makeBridge({ dataDir: dir })
+    const plain = first.bridge.regenerateToken()
+    assert.equal(first.bridge.getSessionPlaintext(), plain)
+    // 应用重启 = 新的 controller：内存明文没了，磁盘上的哈希还在 —— 这两件事必须分开断言。
+    const second = makeBridge({ dataDir: dir })
+    assert.equal(second.bridge.getSessionPlaintext(), null, '不可见：内存明文随进程消失')
+    assert.equal(second.bridge.status().tokenVisible, false)
+    assert.equal(second.bridge.status().tokenSet, true, '不可见 ≠ 失效')
+    const up = await second.bridge.startWithPort(privatePortCounter++)
+    try {
+      assert.equal((await postImport(up.port, plain, validEnvelope())).status, 201, '令牌本身仍然有效')
+      assert.equal(second.bridge.getSessionPlaintext(), null, '仍然 null —— 不能因为被用了一次就冒出来')
+    } finally {
+      await second.bridge.stop()
+    }
+    return '读回 null 且 tokenSet=true；令牌仍 201'
+  })
+
+  await check('㊲③ 明文绝不外溢：status() 的 JSON 里不含 `opn_` 前缀子串', async () => {
+    const inst = makeBridge({ noWindow: true })
+    const plain = inst.bridge.regenerateToken()
+    const json = JSON.stringify(inst.bridge.status())
+    assert.equal(json.includes('opn_'), false, 'status() 不得出现任何 `opn_` 前缀子串')
+    assert.equal(json.includes(plain), false)
+    assert.equal(json.includes(plain.slice(-8)), false, '连后 8 位也不额外外溢（只有后 4 位是有意公开的）')
+    assert.equal(json.includes('sessionPlaintext'), false, '连内存字段名都不该出现')
+    return 'status() 无 opn_ 子串、无明文中段、无内存字段名'
+  })
+
+  await check('㊲ tokenVisible 要能穿过 IPC：main.cjs 的 bridgeStatusPayload 必须 `...raw` 展开', async () => {
+    // 第 4 类「假开关」缺陷就是这么来的：桥给了字段，主进程逐字段重建 payload 时静默丢掉。
+    const main = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8')
+    const start = main.indexOf('function bridgeStatusPayload()')
+    assert.notEqual(start, -1, 'main.cjs 里找不到 bridgeStatusPayload()')
+    const body = main.slice(start, start + 4000)
+    assert.equal(body.includes('...raw'), true, '必须展开 `...raw` —— 否则 tokenVisible 这类字段传不到渲染层，面板只会永远显示「不可见」')
+    const spread = body.indexOf('...raw')
+    const explicit = body.indexOf('state: raw.state')
+    if (explicit > -1) assert.equal(spread < explicit, true, '`...raw` 必须在显式字段之前（否则显式字段之外的都会被丢掉）')
+    // IPC 是结构化克隆 / JSON 序列化：字段必须能往返，不能是 undefined 或函数。
+    const inst = makeBridge({ noWindow: true })
+    inst.bridge.regenerateToken()
+    const roundTrip = JSON.parse(JSON.stringify(inst.bridge.status()))
+    assert.equal(roundTrip.tokenVisible, true, 'tokenVisible 必须在序列化后仍然可读')
+    assert.equal(typeof roundTrip.tokenVisible, 'boolean')
+    return 'payload 展开 ...raw；tokenVisible 可序列化往返'
+  })
+
+  await check('⑦ IMP-2004 保留码号但不再产出；IMP-2001 语义为「还没配置令牌」；配对实现零残留', async () => {
+    assert.equal(typeof ERROR_TABLE['IMP-2004'], 'object', '码号必须留在表里（不得复用给别的语义）')
+    assert.equal(
+      ERROR_TABLE['IMP-2001'].userMessage,
+      '这个客户端还没有配置访问令牌。请在 Opennote 的「导入与接口」里复制令牌，粘贴到客户端。',
+      'IMP-2001 文案必须逐字（02 附录 A.3 由 d-contract 同步）',
+    )
+    // 无令牌 → 401 IMP-2001，且 userMessage 不再提「配对」。
+    const noToken = await request({
+      port,
+      path: '/v1/import',
+      method: 'POST',
+      headers: { Host: `127.0.0.1:${port}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(validEnvelope()),
+    })
+    expectError(noToken, 'IMP-2001', 401)
+    assert.equal(/配对/.test(noToken.json.error.userMessage), false, 'IMP-2001 文案里不得再提配对')
+    // 源码级：配对实现必须删干净（行为断言之外再钉一层）。
+    const source = fs.readFileSync(BRIDGE_PATH, 'utf8')
+    for (const name of [
+      'newPairCode',
+      'clearPairCode',
+      'verifyPairCode',
+      'handlePair',
+      'pendingPlaintext',
+      'takeDeliverableToken',
+      'PAIR_CODE_TTL_MS',
+      'PAIR_FAIL_LIMIT',
+      'PAIR_ATTEMPT_LIMIT',
+      'pairBucket',
+      'pairAttemptWindow',
+      'lastPairing',
+      'pairingCode',
+      'pairingCodeExpiresAt',
+    ]) {
+      assert.equal(source.includes(name), false, `桥里不得再残留配对实现：${name}`)
+    }
+    // IMP-2004 的唯一合法出现位置是 ERROR_TABLE 定义那一行（作废注释可以提它）。
+    const productive = source
+      .split('\n')
+      .filter((line) => line.includes('IMP-2004') && !line.includes("'IMP-2004':") && !line.includes('//'))
+    assert.deepEqual(productive.map((line) => line.trim()), [], '不得有任何代码路径产出 IMP-2004')
+    return '码号保留 / 不再产出 / 实现零残留 / IMP-2001 逐字'
+  })
   // -------------------------------------------------------------------------
   section('⑨ 合法信封经 onEnvelope 转交并返回回执（桥不写笔记正文）')
   // -------------------------------------------------------------------------
@@ -1247,6 +1427,8 @@ async function main() {
     assert.equal(result.port, port)
     assert.equal(result.authRequired, true)
     assert.equal(result.inbox, false)
+    // ㉕：主桥没接 getInboxMode → 必须是 null（桥不知道就说不知道，不得假装 direct）。
+    assert.equal(result.inboxMode, null, '没接 getInboxMode 时必须如实返回 null')
     assert.equal(result.workspace.open, true, 'workspace.open 必须如实返回（插件据此区分 IMP-4007）')
     assert.equal(result.workspace.name, '我的笔记')
     assert.equal(typeof result.time, 'string')
@@ -1264,6 +1446,7 @@ async function main() {
     assert.equal(res.status, 200)
     assert.equal(res.json.result.open, true)
     assert.equal(res.json.result.name, '我的笔记')
+    assert.equal(res.json.result.inboxMode, null, '没接 getInboxMode 时 /v1/workspace 也必须给 null')
     assert.equal(res.text.includes(workspace), false, '不得返回绝对路径')
     return 'open=true name=我的笔记'
   })
@@ -1273,6 +1456,74 @@ async function main() {
     assert.equal(res.status, 200)
     assert.deepEqual(res.json.result.imports, [])
     return '200 []'
+  })
+
+  // -------------------------------------------------------------------------
+  section('⑪ 交付模式：只读 inboxMode（㉕，两个端点都给，缺省有确定行为）')
+  // -------------------------------------------------------------------------
+  await check('inboxMode 三态归一：字符串 / 布尔 / 不认识 / 没接线 / 挂钩抛错', async () => {
+    const cases = [
+      { hook: () => 'inbox', expect: 'inbox', label: 'hook=()=>"inbox"' },
+      { hook: () => 'direct', expect: 'direct', label: 'hook=()=>"direct"' },
+      { hook: () => true, expect: 'inbox', label: 'hook=()=>true' },
+      { hook: () => false, expect: 'direct', label: 'hook=()=>false' },
+      { hook: () => 'nonsense', expect: null, label: 'hook 返回不认识的串' },
+      { hook: () => null, expect: null, label: 'hook 返回 null' },
+      { hook: () => { throw new Error('挂钩炸了') }, expect: null, label: 'hook 抛错' },
+      { noHook: true, expect: null, label: '没接线（缺省）' },
+    ]
+    const seen = []
+    for (const item of cases) {
+      const inst = makeBridge({
+        workspace: true,
+        ...(item.noHook ? {} : { inboxMode: item.hook }),
+      })
+      const modeToken = inst.bridge.regenerateToken()
+      const up = await inst.bridge.startWithPort(privatePortCounter++)
+      try {
+        const health = await request({ port: up.port, path: '/v1/health', headers: withHost(up.port) })
+        assert.equal(health.status, 200, `${item.label}: /v1/health 必须仍然 200`)
+        const inHealth = health.json.result.inboxMode
+        const ws = await request({
+          port: up.port,
+          path: '/v1/workspace',
+          headers: withHost(up.port, { Authorization: `Bearer ${modeToken}` }),
+        })
+        assert.equal(ws.status, 200, `${item.label}: /v1/workspace 必须仍然 200`)
+        const inWs = ws.json.result.inboxMode
+        assert.equal(inHealth, item.expect, `${item.label}: /v1/health 的 inboxMode 应为 ${item.expect}`)
+        assert.equal(inWs, item.expect, `${item.label}: /v1/workspace 的 inboxMode 应为 ${item.expect}`)
+        assert.equal(inHealth, inWs, '两个端点必须给同一个答案')
+        // 只读字段只可能是这三态；绝不允许把内部对象/布尔原样漏出去。
+        assert.equal([null, 'inbox', 'direct'].includes(inHealth), true, `${item.label}: 越界取值 ${String(inHealth)}`)
+        seen.push(`${item.label}→${String(inHealth)}`)
+      } finally {
+        await inst.bridge.stop()
+      }
+    }
+    return seen.join(' / ')
+  })
+
+  await check('inboxMode 是只读：请求体里带同名键不影响任何行为，也不能当开关用', async () => {
+    const readonly = makeBridge({ workspace: true, inboxMode: () => 'inbox' })
+    const roToken = readonly.bridge.regenerateToken()
+    const up = await readonly.bridge.startWithPort(privatePortCounter++)
+    try {
+      assert.equal(readonly.bridge.status().inboxMode, undefined, 'status() 不得凭空多出这个字段')
+      // 请求体里塞 inboxMode/direct 是无效的：交付模式由应用侧设置决定，客户端说了不算。
+      const res = await postImport(up.port, roToken, { ...validEnvelope(), inboxMode: 'direct' })
+      assert.equal(res.status, 201, `带 inboxMode 的导入仍应 201 正常落盘，实得 ${res.status}`)
+      const health = await request({ port: up.port, path: '/v1/health', headers: withHost(up.port) })
+      assert.equal(health.json.result.inboxMode, 'inbox', '请求体里的 inboxMode 不得改写服务端答案')
+      // 鉴权面未放宽：/v1/workspace 没令牌仍然 401。
+      const noToken = await request({ port: up.port, path: '/v1/workspace', headers: withHost(up.port) })
+      assert.equal(noToken.status, 401, '/v1/workspace 仍必须要求令牌')
+      // 只读字段不得泄漏路径类信息。
+      assert.equal(health.text.includes(workspace), false, 'inboxMode 落点不得带出工作区绝对路径')
+    } finally {
+      await readonly.bridge.stop()
+    }
+    return '只读 / 鉴权未放宽 / 无路径泄漏'
   })
 
   // -------------------------------------------------------------------------
@@ -1311,17 +1562,13 @@ async function main() {
     return '6 种非法 id + 相对 root 全部拒绝'
   })
 
-  await check('S-08 日志搜不到令牌明文与配对码，status() 不含令牌明文；都不写进工作区', async () => {
-    const code = bridge.newPairCode().code
+  await check('S-08 日志搜不到令牌明文，status() 不含令牌明文；都不写进工作区', async () => {
     const logs = holder.logs
     assert.ok(logs.length > 0, '应有日志产出')
     const logText = logs.join('\n')
     assert.equal(logText.includes(token), false, '日志不得含令牌明文')
-    assert.equal(logText.includes(code), false, '日志不得含配对码')
     const statusJson = JSON.stringify(bridge.status())
     assert.equal(statusJson.includes(token), false, 'status() 不得含令牌明文')
-    // status() 里的 pairingCode 是 UI 显示配对码的正规通道（有效期内），不属于泄漏；
-    // 但令牌明文在任何情况下都不得出现。
     assert.equal(/opn_[A-Za-z0-9_-]{20,}/.test(statusJson), false, 'status() 不得出现任何完整令牌')
     const inWorkspace = listFilesRecursive(workspace).filter((file) => /bridge\.(log|json)$/.test(file))
     assert.deepEqual(inWorkspace, [], '日志不得写进工作区')
@@ -1329,19 +1576,19 @@ async function main() {
     if (fs.existsSync(disk)) {
       const raw = fs.readFileSync(disk, 'utf8')
       assert.equal(raw.includes(token), false, 'bridge.log 不得含令牌明文')
-      assert.equal(raw.includes(code), false, 'bridge.log 不得含配对码')
       for (const line of raw.trim().split('\n')) {
         const parsed = JSON.parse(line)
         assert.equal(typeof parsed.ts, 'string')
         assert.equal(typeof parsed.event, 'string')
+        assert.equal(/^pair\./.test(parsed.event), false, '配对事件名必须已删除（0.3.1 ㉞）')
       }
     }
-    return `${logs.length} 行日志，无令牌/配对码`
+    return `${logs.length} 行日志，无令牌明文、无配对事件`
   })
 
   await check('日志事件名与字段在白名单内（JSONL）', async () => {
     const allowed = new Set([
-      'bridge.start', 'bridge.stop', 'bridge.listen-error', 'pair.ok', 'pair.fail',
+      'bridge.start', 'bridge.stop', 'bridge.listen-error',
       'import.ok', 'import.deduped', 'import.error', 'auth.fail', 'origin.reject',
       'host.reject', 'ratelimit',
     ])
@@ -1481,6 +1728,8 @@ async function main() {
   })
 
   await check('持久化：新实例读回 tokenHash + last4 + allowedOrigins（明文不可恢复）', async () => {
+    // 自己播种遗留列表，不依赖前面用例跑过（红的时候不该连坐）。
+    assert.equal(bridge.addAllowedOrigin(DEV_ORIGIN), true)
     const reloaded = makeBridge({ dataDir, workspace: true })
     const status = reloaded.bridge.status()
     assert.equal(status.tokenSet, true, '应读回令牌哈希')

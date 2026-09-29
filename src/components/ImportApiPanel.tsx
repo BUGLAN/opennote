@@ -26,28 +26,27 @@ import {
   BRIDGE_PORT_MIN,
   bridgeAvailable,
   copyText,
-  createPairCode,
+  fetchSessionToken,
   maskToken,
   openBridgeLog,
-  pairCodeSecondsLeft,
-  pairingStampMs,
   parsePort,
+  peekBridgeToken,
   readBridgeStatus,
   regenerateBridgeToken,
+  rememberBridgeToken,
   removeBridgeOrigin,
   startBridge,
   stateLabelOf,
   stopBridge,
   type BridgeStatusView,
 } from "../lib/importBridge";
-import { notify } from "../lib/toast";
 import { cn, formatRelativeTime } from "../lib/utils";
 import { Icon } from "./Icons";
 
 export interface ImportApiPanelProps {
   /** 桌面版（Electron）环境。false → S9 禁用态。 */
   desktop: boolean;
-  /** R1 导入方式。不给就只读展示默认值 `直接入库（推荐）`。 */
+  /** R1 导入方式。不给就按 ㉕ 的应用侧默认值 `先进入收件箱` 只读展示。 */
   importConflict?: ImportConflictPreference;
   onImportConflict?(value: ImportConflictPreference): void;
   /** R2 入库后提示。 */
@@ -144,12 +143,24 @@ function SettingRow({ label, hint, children }: { label: string; hint?: string; c
 
 /* =============================== 文案 ================================= */
 
+/**
+ * R1 的四个选项名 = `03` 号 UI-04 逐字（`R1 选项` 行）。
+ * ㉕ 之后「（推荐）」在**收件箱**上：0.3.0 的 `DEFAULT_UI.importConflict` 已是 `"inbox"`，
+ * 标签继续把 `new` 叫「推荐」会让面板同时出现两个互相矛盾的推荐。
+ * 改这里必须同步 `03` 号——`scripts/bridge-smoke.cjs` 有一条交叉断言钉住这层咬合。
+ */
 const CONFLICT_LABELS: Record<ImportConflictPreference, string> = {
-  new: "直接入库（推荐）",
+  new: "直接入库",
   append: "追加到已有笔记",
   skip: "跳过重复内容",
-  inbox: "先进入收件箱",
+  inbox: "先进入收件箱（推荐）",
 };
+
+/**
+ * ㉕（00 号 §6.14）：0.3.0 起应用侧默认值 = `"inbox"`（收件箱为主入口）。
+ * 面板缺省时必须按这个值高亮与解释，否则界面会显示一个**与真实行为不符**的选中项。
+ */
+const IMPORT_MODE_DEFAULT: ImportConflictPreference = "inbox";
 
 const CONFLICT_NOTES: Record<ImportConflictPreference, string> = {
   new: "收到就写成 .md 文件，并在应用内提示，可以随时撤销。",
@@ -158,15 +169,45 @@ const CONFLICT_NOTES: Record<ImportConflictPreference, string> = {
   inbox: "外部导入先落到 .opennote/inbox/，由你在收件箱里逐条确认后再入库。",
 };
 
+/**
+ * R1 的推荐说明（㉕）。四个选项名与逐选项说明句沿用 `03` 号 UI-04 的冻结文案，
+ * 「推荐」二字已经由 `inbox` 的标签承担，所以这句**解释「推荐意味着什么」**，
+ * 不再重复喊一次推荐，避免与标签叠字。
+ */
+const R1_RECOMMEND =
+  "推荐：剪藏先暂存到收件箱，你确认之后才写进笔记本，避免外部工具直接改动笔记。";
+
 const R3_HINT =
   "只监听本机 127.0.0.1，只提供导入，不提供读取和删除。任何网页都可能尝试访问本机端口，所以请勿在不可信的网页上暴露令牌。";
 
-const R4_HINT = "令牌只在本机使用，Opennote 不会把它上传到任何地方。重新生成后，旧的令牌立刻失效。";
+/**
+ * R4 令牌区说明（0.3.1 ㉞㊱ + ㊲）：令牌**长期有效**，只在用户重新生成时失效；
+ * 明文在本会话内可以反复复制（㊲），应用重启后明文不再可见、需要时重新生成。
+ */
+const R4_HINT =
+  "令牌长期有效，只在你在 Opennote 里点「重新生成」时才失效。明文在本会话内可以反复复制，应用重启后不再可见，需要时重新生成。令牌只在本机使用，Opennote 不会把它上传到任何地方。";
 
+/**
+ * R4b「复制令牌」区说明（0.3.1 ㉞㊱）。第二句是**必须有的代价披露**：
+ * 去掉配对后令牌是唯一凭据且长期有效，能读到剪贴板/扩展存储的程序就能拿到它 ——
+ * 但同时要说清「拿到它不等于能读笔记」，否则用户会低估或高估风险。
+ */
 const R4B_HINT =
-  "在插件里输入这 6 位配对码即可，不必粘贴令牌。配对码 120 秒有效、一次性、连续失败 5 次即作废；过期后点「配对新客户端」重新生成。";
+  "在新客户端里粘贴一次即可，长期有效、不用再配对；本会话内可以反复复制这串明文。任何能读到剪贴板或扩展存储的程序都能拿到这串令牌并获得导入能力，但桥只提供导入，不提供读取和删除。";
 
-const ROTATED_WARNING = "已为该客户端生成新令牌，其它已配置的客户端需要重新配置。";
+/**
+ * ㊲ 明文不可见时的逐字说明（Lead 裁定）。
+ * 这一步必须**说出来**：应用重启后内存明文没了，令牌却仍然有效 ——
+ * 面板要如实解释「为什么现在复制不了」，而不是留一个点了没反应的按钮。
+ */
+const R4B_INVISIBLE = "令牌已不可见，需要时请重新生成";
+
+/**
+ * ㊲ 第三种状态：桥还说「本会话持有明文」，但这个界面手里没有（界面重载过，明文只在
+ * 主进程内存里、没有回传通道）。如实说明 + 给出可执行的下一步，不假装可用、也不谎称失效。
+ */
+const R4B_RELOADED =
+  "本会话的令牌明文还在（令牌没有失效），但界面重载后拿不到它。需要明文时点上面的「重新生成」拿一串新的。";
 
 const FIREWALL_NOTE = "首次开启时系统可能会弹出防火墙提示，允许本机访问即可。";
 
@@ -194,13 +235,13 @@ export function ImportApiPanel({
 }: ImportApiPanelProps) {
   const [status, setStatus] = useState<BridgeStatusView | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [working, setWorking] = useState<null | "start" | "stop" | "token" | "pair" | "log" | "port">(null);
-  /** S7：本次会话里刚生成的令牌明文，只活在这里，刷新即消失。 */
-  const [freshToken, setFreshToken] = useState<string | null>(null);
-  const [pair, setPair] = useState<{ code: string; expiresAt: number } | null>(null);
-  const [pairExpired, setPairExpired] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
-  const [copied, setCopied] = useState<null | "address" | "token" | "pair">(null);
+  const [working, setWorking] = useState<null | "start" | "stop" | "token" | "log" | "port">(null);
+  /**
+   * ㊲：本次会话的令牌明文。面板重新挂载时用模块缓存恢复（应用重启则两边都空），
+   * 所以「复制」按钮的可点性由 `copyable` 决定，而不是只由「这一帧刚生成过」决定。
+   */
+  const [freshToken, setFreshToken] = useState<string | null>(() => peekBridgeToken());
+  const [copied, setCopied] = useState<null | "address" | "token">(null);
   const [portText, setPortText] = useState(String(BRIDGE_DEFAULT_PORT));
   const [errorText, setErrorText] = useState<string | null>(null);
   const [surface, setSurface] = useState<string | null>(null);
@@ -219,13 +260,33 @@ export function ImportApiPanel({
     return next;
   }, []);
 
-  // 打开面板读一次；不做轮询（桥状态只在用户操作与配对窗口里变）。
+  // 打开面板读一次；不做轮询（桥状态只在用户操作里变）。
   useEffect(() => {
     if (!ipcReady) {
       setLoaded(true);
       return;
     }
-    void refresh();
+    let alive = true;
+    void (async () => {
+      const next = await refresh();
+      // ㊲③ 整窗重载后主进程仍持有明文，而界面手里没有 —— 只读要回来（绝不轮换），
+      // 否则「复制令牌」会变成一个点不动的按钮。
+      // 桥说「还持有」时再试一次（IPC 刚就绪可能空响应一次）；确实取不到就交给
+      // 既有的「不可见」降级 —— 绝不留一个点了没反应的按钮。
+      const attempts = next?.tokenVisible === true ? 2 : 1;
+      for (let i = 0; i < attempts; i += 1) {
+        const plain = await fetchSessionToken();
+        if (!alive) return;
+        if (plain) {
+          rememberBridgeToken(plain);
+          setFreshToken(plain);
+          return;
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
   }, [ipcReady, refresh]);
 
   // 最近导入（P1 的 R6 只有这一行空态；接口还没接好就整块不渲染，不猜）。
@@ -247,36 +308,6 @@ export function ImportApiPanel({
     };
   }, [ipcReady]);
 
-  // 配对码倒计时 + 配对结果观察（120 秒窗口内才有轮询，且只走 IPC）。
-  useEffect(() => {
-    if (!pair || !ipcReady) return;
-    const created = pair.expiresAt - 120_000;
-    const timer = window.setInterval(() => {
-      const stamp = Date.now();
-      setNow(stamp);
-      void readBridgeStatus().then((next) => {
-        if (!next) return;
-        const paired = next.lastPairing;
-        if (paired && pairingStampMs(paired.at) >= created) {
-          setStatus(next);
-          setPair(null);
-          setPairExpired(false);
-          notify("已配对 1 个客户端。");
-          if (paired.rotated) {
-            setSurface(ROTATED_WARNING);
-            notify(ROTATED_WARNING, { kind: "danger", duration: 6000 });
-          }
-          return;
-        }
-        if (pairCodeSecondsLeft(pair.expiresAt, stamp) === null) {
-          setPair(null);
-          setPairExpired(true);
-        }
-      });
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [pair, ipcReady]);
-
   useEffect(() => () => {
     if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
   }, []);
@@ -284,13 +315,20 @@ export function ImportApiPanel({
   const state: BridgeState | null = status ? status.state : null;
   const running = status?.state === "running";
   const busy = working !== null;
+  // R1 当前值：props 优先，缺省按 ㉕ 的应用侧默认值（收件箱），不得退回 `new`。
+  const mode = importConflict ?? IMPORT_MODE_DEFAULT;
+  /**
+   * ㊲ 现在能不能复制明文：界面这一帧生成的（`freshToken`）优先，
+   * 其次是本会话的模块缓存（面板重新挂载后仍拿得到同一串）。
+   * 应用重启后两者都空 → 按钮必须禁用，并显示如实说明。
+   */
+  const copyable = freshToken ?? peekBridgeToken();
   const endpoint = running ? status?.endpoint || `http://127.0.0.1:${status?.port}` : BRIDGE_ADDRESS_PLACEHOLDER;
   // `portRange` 是闭区间元组 `[起, 止]`（与 bridge.cjs 的运行时形状逐字一致）。
   const rangeStart = status?.portRange?.[0] ?? status?.startPort ?? BRIDGE_DEFAULT_PORT;
   const rangeEnd = status?.portRange?.[1] ?? rangeStart + 9;
-  const secondsLeft = pair ? pairCodeSecondsLeft(pair.expiresAt, now) : null;
 
-  const flashCopied = useCallback((which: "address" | "token" | "pair") => {
+  const flashCopied = useCallback((which: "address" | "token") => {
     setCopied(which);
     if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
     copyTimer.current = window.setTimeout(() => setCopied(null), 1600);
@@ -310,7 +348,7 @@ export function ImportApiPanel({
         setStatus(next);
         setPortText(String(next.portRange?.[0] ?? next.startPort ?? port ?? BRIDGE_DEFAULT_PORT));
         if (next.state === "running") {
-          setFreshToken(null);
+          // ㊲：开启接口**不再丢弃明文** —— 本会话内随时可以再复制一次。
           return true;
         }
         setErrorText(next.error || null);
@@ -348,7 +386,7 @@ export function ImportApiPanel({
         return;
       }
       const requested = parsePort(portText) ?? status?.startPort ?? BRIDGE_DEFAULT_PORT;
-      // 首次开启：先确认风险，再生成令牌（明文只展示这一次），最后才监听。
+      // 首次开启：先确认风险，再生成令牌（㊲：明文在本会话内保留、可反复复制），最后才监听。
       if (!status?.tokenSet) {
         if (!(await askEnable(requested))) return;
         setWorking("token");
@@ -359,6 +397,7 @@ export function ImportApiPanel({
             return;
           }
           setFreshToken(created.token);
+          rememberBridgeToken(created.token);
           await refresh();
         } finally {
           setWorking(null);
@@ -388,7 +427,9 @@ export function ImportApiPanel({
         setErrorText("生成访问令牌失败，请重试。");
         return;
       }
+      // ㊲：换新明文（旧令牌同时作废），界面与模块缓存一起更新。
       setFreshToken(created.token);
+      rememberBridgeToken(created.token);
       setSurface(null);
       await refresh();
     } finally {
@@ -397,7 +438,7 @@ export function ImportApiPanel({
   }, [refresh]);
 
   const handleCopy = useCallback(
-    async (which: "address" | "token" | "pair", text: string | null) => {
+    async (which: "address" | "token", text: string | null) => {
       if (!text) return;
       const ok = await copyText(text);
       if (!ok) {
@@ -409,24 +450,6 @@ export function ImportApiPanel({
     },
     [flashCopied],
   );
-
-  const handleNewPairCode = useCallback(async () => {
-    setWorking("pair");
-    setErrorText(null);
-    setSurface(null);
-    try {
-      const created = await createPairCode();
-      if (!created) {
-        setErrorText("生成配对码失败，请重试。");
-        return;
-      }
-      setPair({ code: created.code, expiresAt: created.expiresAt });
-      setPairExpired(false);
-      setNow(Date.now());
-    } finally {
-      setWorking(null);
-    }
-  }, []);
 
   const handleChangePort = useCallback(async () => {
     const parsed = parsePort(portText);
@@ -510,7 +533,7 @@ export function ImportApiPanel({
             <button
               key={value}
               type="button"
-              className={cn((importConflict ?? "new") === value && "is-active")}
+              className={cn(mode === value && "is-active")}
               disabled={!onImportConflict}
               onClick={() => onImportConflict?.(value)}
             >
@@ -518,7 +541,8 @@ export function ImportApiPanel({
             </button>
           ))}
         </div>
-        <p className="setting__meta">{CONFLICT_NOTES[importConflict ?? "new"]}</p>
+        <p className="setting__meta">{CONFLICT_NOTES[mode]}</p>
+        <p className="setting__meta">{R1_RECOMMEND}</p>
       </SettingRow>
 
       <SettingRow label="入库后提示" hint="入库成功时显示可撤销提示">
@@ -604,15 +628,15 @@ export function ImportApiPanel({
 
       <SettingRow label="访问令牌" hint="剪藏工具用它证明身份">
         <div style={ROW}>
-          <span role="group" aria-label="访问令牌" style={{ ...VALUE_BOX, color: freshToken ? "var(--ink)" : "var(--ink-2)" }}>
-            {freshToken ?? maskToken(status?.tokenLast4)}
+          <span role="group" aria-label="访问令牌" style={{ ...VALUE_BOX, color: copyable ? "var(--ink)" : "var(--ink-2)" }}>
+            {maskToken(status?.tokenLast4)}
           </span>
           <button
             type="button"
             className="btn"
-            disabled={!freshToken || busy}
-            title={freshToken ? "复制后请妥善保存；关闭本面板后无法再次显示。" : "令牌只在生成那一刻完整显示一次"}
-            onClick={() => void handleCopy("token", freshToken)}
+            disabled={!copyable || busy}
+            title={copyable ? "复制后粘贴到客户端即可；本会话内可以反复复制。" : "明文在本会话里已不可见，需要时点「重新生成」"}
+            onClick={() => void handleCopy("token", copyable)}
           >
             <Icon name="copy" size={14} />
             {copied === "token" ? "已复制" : "复制"}
@@ -622,36 +646,47 @@ export function ImportApiPanel({
             重新生成
           </button>
         </div>
-        {freshToken ? (
+        {copyable ? (
           <>
-            <p style={{ ...ERROR, color: "var(--ink)" }}>这串令牌只显示这一次，请先复制保存。</p>
-            <div style={{ ...ROW, marginTop: "var(--s2)" }}>
-              <button type="button" className="btn btn--primary" disabled={busy} onClick={() => void doStart(parsePort(portText) ?? undefined)}>
-                <Icon name="check" size={14} />
-                我已保存，开启接口
-              </button>
-            </div>
+            <p style={{ ...ERROR, color: "var(--ink)" }}>
+              这串明文在本会话内一直可以复制；应用重启后明文不再可见，需要时重新生成。
+            </p>
+            {!running ? (
+              <div style={{ ...ROW, marginTop: "var(--s2)" }}>
+                <button type="button" className="btn btn--primary" disabled={busy} onClick={() => void doStart(parsePort(portText) ?? undefined)}>
+                  <Icon name="check" size={14} />
+                  我已保存，开启接口
+                </button>
+              </div>
+            ) : null}
           </>
         ) : null}
         <p style={HINT}>{R4_HINT}</p>
       </SettingRow>
 
-      <SettingRow label="配对新客户端" hint="比手抄 47 字符令牌省事">
+      <SettingRow label="复制令牌" hint="粘贴到新客户端，长期有效">
         <div style={ROW}>
-          <span style={{ ...VALUE_BOX, fontSize: 17, letterSpacing: "0.3em" }}>
-            {pair && secondsLeft !== null ? pair.code : "—"}
+          <span role="group" aria-label="复制令牌" style={{ ...VALUE_BOX, color: copyable ? "var(--ink)" : "var(--ink-2)" }}>
+            {copyable ?? maskToken(status?.tokenLast4)}
           </span>
-          <button type="button" className="btn btn--primary" disabled={busy} onClick={() => void handleNewPairCode()}>
-            <Icon name="link" size={14} />
-            {working === "pair" ? "正在生成…" : "配对新客户端"}
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={!copyable || busy}
+            title={copyable ? "复制后粘贴到客户端即可；本会话内可以反复复制。" : "明文在本会话里已不可见，需要时点「重新生成」"}
+            onClick={() => void handleCopy("token", copyable)}
+          >
+            <Icon name="copy" size={14} />
+            {copied === "token" ? "已复制" : "复制令牌"}
           </button>
-          {pair && secondsLeft !== null ? (
-            <span style={{ fontSize: "var(--fs-xs)", color: "var(--ink-3)" }}>剩余 {secondsLeft} 秒</span>
-          ) : null}
-          {pairExpired ? (
-            <span style={{ fontSize: "var(--fs-xs)", color: "var(--ink-3)" }}>配对码已过期，重新生成。</span>
-          ) : null}
         </div>
+        {/* ㊲ 两态如实降级：没有明文就**不留一个点了没反应的按钮**，而是说清为什么 + 下一步。 */}
+        {!copyable && status?.tokenVisible === true ? (
+          <p style={HINT}>{R4B_RELOADED}</p>
+        ) : null}
+        {!copyable && status?.tokenVisible !== true ? (
+          <p style={HINT}>{R4B_INVISIBLE}</p>
+        ) : null}
         {surface ? (
           <p style={ERROR} role="alert">
             {surface}
@@ -660,7 +695,9 @@ export function ImportApiPanel({
         <p style={HINT}>{R4B_HINT}</p>
         {origins.length > 0 ? (
           <div style={{ marginTop: "var(--s2)" }}>
-            <div style={{ fontSize: "var(--fs-xs)", color: "var(--ink-3)" }}>已信任的来源</div>
+            <div style={{ fontSize: "var(--fs-xs)", color: "var(--ink-3)" }}>
+              0.3.1 之前的来源记录（现在来源按类型判断，这些条目已不生效，可清理）
+            </div>
             {origins.map((origin) => (
               <div key={origin} style={{ ...ROW, marginTop: 4 }}>
                 <span style={{ ...VALUE_BOX, flex: "1 1 auto", fontSize: "var(--fs-xs)" }}>{origin}</span>

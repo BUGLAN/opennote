@@ -4,7 +4,8 @@
  * Opennote 本地桥（桌面版主进程内的极小 HTTP 服务）。
  *
  * 契约来源：docs/import/02-接口契约-导入信封与通道.md §5.2（绑地址/端口/四道校验/
- * 限流/令牌/配对）、§10（IPC 频道）、§11（硬红线）、§12（S-01…S-12 门禁）。
+ * 限流/令牌）、§10（IPC 频道）、§11（硬红线）、§12（S-01…S-12 门禁）；
+ * 0.3.1 起以 00 号 §6.15 的 ㉞/㉟/㊱ 为准：**配对整体删除，改用「URL + 长期令牌」**。
  *
  * 设计边界（逐条对应硬红线）：
  *   - 零新依赖：只用 node:http / node:crypto / node:fs，没有 express/fastify/ws。
@@ -14,6 +15,12 @@
  *   - 唯一可由主进程写的内容是 .opennote/inbox/<entry>/state.json，且原子写（tmp + rename）。
  *   - 只提供导入，不提供读取/删除/移动/任意 mkdir；绝不接受信封里的绝对路径。
  *   - 令牌服务端只存 sha256，明文只在 generateToken() 的那一刻返回一次。
+ *   - **令牌是唯一凭据且长期有效**（0.3.1 ㉞）：任何能读到扩展 storage 或剪贴板的程序
+ *     都能拿到明文并获得**导入**能力（不等于读笔记能力）。这条代价已写进设置面板说明句。
+ *
+ * 来源（第 2 道校验）在 0.3.1 改为**按类型**：扩展 `chrome-extension://` / `moz-extension://`、
+ * 本机回环 `http://127.0.0.1[:port]`、`file://` 放行；`Origin: null`、空串与任何普通网页
+ * 来源一律 403 —— 去掉配对是少一道人工步骤，不是让任意网站都能驱动本机接口。
  *
  * 挂钩接口（与 Lead 冻结的接口逐字一致）：
  *   createBridge({
@@ -21,8 +28,15 @@
  *     getAdvancedOverwrite, log,
  *     // 可选扩展（不传即退化，不影响冻结面）：
  *     dataDir, getWorkspaceInfo, getAppVersion, getInboxEnabled, getRecentImports,
- *     getImportRecord, getTags,
+ *     getImportRecord, getTags, getInboxMode,
  *   }) -> BridgeController
+ *
+ * 只读交付模式（㉕）：`GET /v1/health` 与 `GET /v1/workspace` 的响应都带 `inboxMode` 字段：
+ *   - `"inbox"`：非应用内通道的导入会**先进入收件箱**等待用户确认（0.3.0 起应用侧默认值）；
+ *   - `"direct"`：直接落盘（0.2.0 行为）；
+ *   - `null`：挂载方没有提供 `getInboxMode()`，桥**不知道**应用侧的设置。客户端不得据此
+ *     推断交付方式，一律以导入回执的 `status`（`created` / `pending` / `deduped`）为准。
+ * 该字段是**只读**的：请求体里出现同名键一律忽略，不影响任何写入路径。
  */
 
 const http = require('node:http')
@@ -59,11 +73,11 @@ const RATE_REFILL_PER_MS = 60 / 60000
 /** 鉴权失败 10 次/分钟。 */
 const AUTH_FAIL_LIMIT = 10
 const AUTH_FAIL_WINDOW_MS = 60000
-/** 配对码 5 次/分钟，失败 5 次即作废当前码。 */
-const PAIR_ATTEMPT_LIMIT = 5
-const PAIR_ATTEMPT_WINDOW_MS = 60000
-const PAIR_FAIL_LIMIT = 5
-const PAIR_CODE_TTL_MS = 120000
+/**
+ * 0.3.1（00 号 §6.15㉞）**配对功能整体删除**：`POST /v1/pair`、6 位配对码、120 s 有效期、
+ * 一次性、连续 5 次作废、「配对成功即轮换令牌」全部移除。客户端改用「URL + 长期令牌」：
+ * 在设置面板复制一次令牌，粘贴到客户端，长期有效（只在用户重新生成时失效）。
+ */
 /** 同时进行的 /v1/import 为 1，排队超过 10 s → 409 IMP-4020。 */
 const IMPORT_QUEUE_LIMIT_MS = 10000
 /** 单请求最长处理时间。 */
@@ -92,11 +106,14 @@ const ERROR_TABLE = {
   'IMP-1004': { http: 504, retryable: true, message: '请求超时', userMessage: '本地接口没有及时响应。请确认 Opennote 正在运行。' },
   'IMP-1005': { http: 403, retryable: false, message: 'Host 头缺失或不在白名单', userMessage: '请求被本地接口拒绝。' },
   'IMP-1006': { http: 409, retryable: false, message: '当前平台不支持该导入形态', userMessage: '这个导入方式需要 Opennote 桌面版。' },
-  'IMP-2001': { http: 401, retryable: false, message: '缺少访问令牌', userMessage: '这个客户端还没有配对。请在 Opennote 的「导入与接口」里点「配对新客户端」，输入显示的 6 位配对码。' },
+  // 0.3.1（㉞）：语义从「还没配对」改为「还没配置令牌」——配对已删除，凭据只有令牌。
+  'IMP-2001': { http: 401, retryable: false, message: '缺少访问令牌', userMessage: '这个客户端还没有配置访问令牌。请在 Opennote 的「导入与接口」里复制令牌，粘贴到客户端。' },
   'IMP-2002': { http: 401, retryable: false, message: '令牌格式错误或哈希不匹配', userMessage: '访问令牌不正确或已失效。重新生成令牌后，请在客户端里更新。' },
   'IMP-2003': { http: 429, retryable: true, message: '鉴权失败次数过多', userMessage: '尝试次数过多，请稍后再试。' },
+  // ⚠️ 已作废（0.3.1 ㉞）：配对码整体删除，本码**不再产出**；保留码号以免与历史日志/文档冲突，不得复用给别的语义。
   'IMP-2004': { http: 401, retryable: false, message: '配对码错误、过期或已使用', userMessage: '配对码不正确或已过期，请在 Opennote 里重新生成。' },
-  'IMP-3001': { http: 403, retryable: false, message: 'Origin 不在信任列表', userMessage: '来源未被允许。请在设置里添加来源，或用配对流程重新配对。' },
+  // 0.3.1：Origin 判据改为按类型（扩展 / 本机回环 / file://），不再是「信任列表 + 配对」。
+  'IMP-3001': { http: 403, retryable: false, message: 'Origin 类型不被接受', userMessage: '来源未被允许。本地接口只接受浏览器扩展与本机程序发来的请求。' },
   'IMP-3002': { http: 400, retryable: false, message: 'JSON 解析失败', userMessage: '导入内容不是有效的 JSON，请重试。' },
   'IMP-3003': { http: 400, retryable: false, message: '请求体为空', userMessage: '导入内容为空。' },
   'IMP-3004': { http: 415, retryable: false, message: 'Content-Type 不被接受', userMessage: '请求格式不被接受。' },
@@ -106,8 +123,9 @@ const ERROR_TABLE = {
   'IMP-4003': { http: 422, retryable: false, message: '必填字段缺失或取值非法', userMessage: '导入内容缺少必要信息（标题、来源时间或地址），请重试。' },
   'IMP-4004': { http: 413, retryable: false, message: '正文超过 8 MiB', userMessage: '正文太长了（超过 8 MB），请分次导入。' },
   'IMP-4005': { http: 413, retryable: false, message: '请求体超过 16 MiB', userMessage: '这次剪藏的内容太大（超过 16 MB），请分次导入或去掉图片。' },
-  'IMP-4006': { http: 409, retryable: true, message: '应用窗口不在场', userMessage: 'Opennote 的窗口已关闭。请重新打开 Opennote，再试一次。' },
-  'IMP-4007': { http: 409, retryable: false, message: '工作区未打开', userMessage: 'Opennote 里还没有打开笔记本，请先打开一个文件夹（或新建浏览器笔记本）。' },
+  // ㉗（00 号 §6.14）：区分「应用没运行」（4006）与「工作区没打开」（4007），逐字冻结。
+  'IMP-4006': { http: 409, retryable: true, message: '应用窗口不在场', userMessage: 'Opennote 没有在运行。请先打开 Opennote，再试一次。' },
+  'IMP-4007': { http: 409, retryable: false, message: '工作区未打开', userMessage: 'Opennote 里还没有打开笔记本文件夹。请在 Opennote 左侧选一个文件夹，或新建一个，再试一次。' },
   'IMP-4008': { http: 422, retryable: false, message: 'target.folder 非法', userMessage: '目标目录不合法：不能使用 ..、绝对路径或系统保留字符。' },
   'IMP-4009': { http: 404, retryable: false, message: '目标笔记不存在或目录无法创建', userMessage: '找不到要追加的那篇笔记，或目标目录无法创建（可能没有写入权限）。' },
   'IMP-4010': { http: 409, retryable: false, message: '无法分配文件名', userMessage: '这个目录里同名文件太多了，请换一个目录或改标题。' },
@@ -136,7 +154,7 @@ const WARNING_TEXT = {
 
 /** 日志事件名（契约 §10 逐字）。 */
 const LOG_EVENTS = new Set([
-  'bridge.start', 'bridge.stop', 'bridge.listen-error', 'pair.ok', 'pair.fail',
+  'bridge.start', 'bridge.stop', 'bridge.listen-error',
   'import.ok', 'import.deduped', 'import.error', 'auth.fail', 'origin.reject',
   'host.reject', 'ratelimit',
 ])
@@ -183,19 +201,35 @@ function isJsonContentType(value) {
 }
 
 /**
- * 扩展来源：只认 chrome-extension:// 与 moz-extension://。
- * 仅用于 POST /v1/pair 的「配对候选」放宽（Lead 裁定），不影响其它接口。
+ * 来源类型判据（0.3.1 ㉞）：不再靠「配对成功后加入白名单」，而是**按类型**判断。
+ *   放行：`chrome-extension://<id>`、`moz-extension://<id>`、`http://127.0.0.1:<port>`、`file://`
+ *   拒绝：任何普通网页来源（`https://evil.example`、任何非回环 http(s) 域名）
+ * 普通网页能带令牌发请求 → 等于任意网站都能驱动本机接口，所以**去掉配对不等于放宽这一条**。
  */
 function isExtensionOrigin(value) {
   return /^(?:chrome|moz)-extension:\/\/[a-z0-9]{8,64}$/.test(String(value))
 }
 
-/** 日志脱敏：令牌明文与配对码绝不出现在日志/错误消息里。 */
+/** 本机回环来源（只认 127.0.0.1 字面量，端口可省）。`localhost` 不在白名单内。 */
+function isLoopbackOrigin(value) {
+  return /^http:\/\/127\.0\.0\.1(?::\d{1,5})?$/.test(String(value))
+}
+
+/** 本地文件来源（字面量 `file://`；注意浏览器给 `file://` 页面发的是 `Origin: null`，那条仍然拒绝）。 */
+function isFileOrigin(value) {
+  return /^file:\/\//.test(String(value))
+}
+
+/** 按类型放行来源。 */
+function isAcceptedOrigin(value) {
+  return isExtensionOrigin(value) || isLoopbackOrigin(value) || isFileOrigin(value)
+}
+
+/** 日志脱敏：令牌明文绝不出现在日志/错误消息里。 */
 function redact(text) {
   if (typeof text !== 'string') return text
   return text
     .replace(/opn_[A-Za-z0-9_-]{10,}/g, 'opn_***')
-    .replace(/(配对码|pair(?:ing)?\s*code|code)\D{0,4}\d{6}/gi, '$1******')
     .replace(/\b\d{6}\b/g, '******')
 }
 
@@ -247,7 +281,7 @@ function windowRetryAfter(window, now = Date.now()) {
 
 /**
  * @param {object} options 见文件头注释（冻结接口 + 可选扩展）。
- * @returns {{start: Function, stop: Function, status: Function, regenerateToken: Function, generateToken: Function, pair: Function, writeInboxState: Function, readAllowedOrigins: Function, addAllowedOrigin: Function, removeAllowedOrigin: Function}}
+ * @returns {{start: Function, stop: Function, status: Function, regenerateToken: Function, generateToken: Function, getSessionPlaintext: Function, writeInboxState: Function, readAllowedOrigins: Function, addAllowedOrigin: Function, removeAllowedOrigin: Function}}
  */
 function createBridge(options = {}) {
   const hasGetWindow = typeof options.getWindow === 'function'
@@ -293,23 +327,24 @@ function createBridge(options = {}) {
     importRefillPerMinute: readLimit(overrides.importRefillPerMinute, 60),
     authFailLimit: readLimit(overrides.authFailLimit, AUTH_FAIL_LIMIT),
     authFailWindowMs: readLimit(overrides.authFailWindowMs, AUTH_FAIL_WINDOW_MS),
-    pairAttemptLimit: readLimit(overrides.pairAttemptLimit, PAIR_ATTEMPT_LIMIT),
   }
   const importBucket = newTokenBucket(limits.importCapacity, limits.importRefillPerMinute / 60000)
-  const pairBucket = newTokenBucket(RATE_CAPACITY, RATE_REFILL_PER_MS)
   const authFailWindow = newSlidingWindow(limits.authFailLimit, limits.authFailWindowMs)
-  const pairAttemptWindow = newSlidingWindow(limits.pairAttemptLimit, PAIR_ATTEMPT_WINDOW_MS)
 
-  /** 配对码（只在内存里）。 */
-  let pairCode = null
-  let pairExpiresAt = 0
-  let pairFailures = 0
   /**
-   * 本次会话生成、且**尚未交付给任何客户端**的令牌明文（绝不持久化）。
-   * 用于「设置里生成令牌 → 用配对码把同一把令牌交给插件」这条路径；
-   * 交付一次即清空，之后既不再显示也无法再取回（与契约「只展示一次」一致）。
+   * ㊲（00 号 §6.15）**本会话保留的令牌明文**：`bridge.json` 仍然只存 sha256 + 后 4 位
+   * （明文**绝不落盘**），但明文在本进程内存里留到「应用退出」或「用户重新生成」为止，
+   * 于是面板可以在本次会话内反复复制同一串明文。
+   *
+   * 为什么值得留：令牌是长期有效的**唯一凭据**，而用户拿到它的唯一途径就是这串明文。
+   * 只允许「显示一次」会把「长期有效」变成自相矛盾的承诺 —— 误关一次面板就只能重新生成，
+   * 而每次重新生成都会让此前所有已配置的客户端失效。内存保留是「能用」与「不落盘」之间
+   * 唯一站得住的折中。
+   *
+   * 绝不出现在 `status()` 的返回值里（只通过 `tokenVisible` 报「还在不在」），
+   * 也绝不写进日志、错误体或 `bridge.json`。
    */
-  let pendingPlaintext = null
+  let sessionPlaintext = null
 
   /** 唯一导入队列：全局 1 并发。 */
   let importQueueActive = 0
@@ -427,15 +462,23 @@ function createBridge(options = {}) {
     res.end(req.method === 'HEAD' ? undefined : body)
   }
 
-  function sendError(req, res, code, detail, httpOverride) {
+  /**
+   * 发错误响应。
+   * 第 5 参数兼容两种形态：**数字** = 只覆盖 HTTP 状态（沿用的旧调用），
+   * **对象** = `{ http?, userMessage? }`，其中 `userMessage` 用于只有本接口才知道的特定说明
+   * （例如 `/v1/pair` 已下线）。两者都不改 `ERROR_TABLE` —— 那张表必须与 `02` 附录 A.3
+   * 逐字一致（见 verify-contract 的 C-6c）。
+   */
+  function sendError(req, res, code, detail, overrides) {
     const spec = ERROR_TABLE[code] || ERROR_TABLE['IMP-5001']
-    const http = httpOverride || spec.http
+    const object = overrides && typeof overrides === 'object' ? overrides : null
+    const http = typeof overrides === 'number' ? overrides : object && object.http ? object.http : spec.http
     const payload = {
       ok: false,
       error: {
         code,
         message: spec.message,
-        userMessage: spec.userMessage,
+        userMessage: object && object.userMessage ? object.userMessage : spec.userMessage,
         http,
         retryable: spec.retryable,
       },
@@ -495,30 +538,20 @@ function createBridge(options = {}) {
   }
 
   /**
-   * 第 2 道：Origin。无 Origin（curl/CLI）放行；null → 403；不在信任列表 → 403 且无 CORS 头。
+   * 第 2 道：Origin，**按类型**判断（0.3.1 ㉞，不再查白名单）。
+   *   无 Origin（curl/CLI/agent）→ 放行（非浏览器客户端不发这个头）
+   *   扩展来源 / 本机回环 / `file://` → 放行
+   *   `null`、空串、普通网页来源（任何非回环 http(s) 域名）→ 403 且不加 CORS 头
    * 通过时在 res.__cors 上记下来源，之后所有响应都会精确回显。
    */
-  function checkOrigin(req, res, allowExtensionCandidate = false) {
+  function checkOrigin(req, res) {
     const origin = req.headers.origin
     if (origin === undefined) return true
     const value = String(origin)
-    if (value === '' || value === 'null') {
+    if (value === '' || value === 'null' || !isAcceptedOrigin(value)) {
       lastRejectedOrigin = value || 'null'
       writeLog('origin.reject', { code: 'IMP-3001', origin: value || 'null' })
-      sendError(req, res, 'IMP-3001', { origin: value || 'null' })
-      return false
-    }
-    if (!allowedOrigins.has(value)) {
-      if (allowExtensionCandidate && isExtensionOrigin(value)) {
-        // 配对死锁修补（Lead 裁定）：扩展来源在 /v1/pair 上视为通过第 2 道校验。
-        // 只有配对码正确时才会被写入 allowedOrigins（见 handlePair）。
-        res.__cors = { origin: value, preflight: req.method === 'OPTIONS' }
-        res.__pairCandidateOrigin = value
-        return true
-      }
-      lastRejectedOrigin = value
-      writeLog('origin.reject', { code: 'IMP-3001', origin: value })
-      sendError(req, res, 'IMP-3001', { origin: value })
+      sendError(req, res, 'IMP-3001', { origin: value || 'null', accepted: 'extension | loopback | file' })
       return false
     }
     res.__cors = { origin: value, preflight: req.method === 'OPTIONS' }
@@ -739,13 +772,11 @@ function createBridge(options = {}) {
     }
 
     const method = req.method === 'HEAD' ? 'GET' : req.method
-    /** 配对是唯一在「无令牌」状态下会改变服务端状态的接口。 */
-    const isPairRoute = route === '/v1/pair' && method === 'POST'
 
     // OPTIONS 预检：只走 Host + Origin，不校验令牌（预检不携带 Authorization）。
     if (req.method === 'OPTIONS') {
       if (!checkHost(req, res)) return
-      if (!checkOrigin(req, res, isPairRoute)) return
+      if (!checkOrigin(req, res)) return
       if (!route.startsWith('/v1/')) {
         sendError(req, res, 'IMP-3005', { path: route })
         return
@@ -756,8 +787,7 @@ function createBridge(options = {}) {
     }
 
     if (!checkHost(req, res)) return
-    // 扩展来源的配对候选放宽只作用于 POST /v1/pair。
-    if (!checkOrigin(req, res, isPairRoute)) return
+    if (!checkOrigin(req, res)) return
 
     // GET /v1/health —— 唯一不需要令牌的接口，且不加任何 CORS 头。
     if (route === '/v1/health' && method === 'GET') {
@@ -766,15 +796,30 @@ function createBridge(options = {}) {
       return
     }
 
-    if (!checkContentType(req, res)) return
-
-    // 需要令牌的接口（配对走配对码，不需要令牌）
-    if (!isPairRoute && !checkToken(req, res)) return
-
-    if (isPairRoute) {
-      await handlePair(req, res, startedAt)
+    /*
+     * POST /v1/pair 已于 0.3.1（00 号 §6.15㉞）整体下线。
+     * 这里**明确**告诉客户端「配对已删除、改用什么」，而不是让它撞上通用 404 ——
+     * 老版本扩展/CLI 的唯一补救方式就是这条说明。走四道前置校验（Host/Origin 已过），
+     * 回复不带任何凭据，也不写 allowedOrigins。
+     */
+    if (route === '/v1/pair') {
+      writeLog('import.error', { code: 'IMP-3005', detail: 'pair-retired' })
+      sendError(req, res, 'IMP-3005', {
+        route: '/v1/pair',
+        removedIn: '0.3.1',
+        replacement: 'url + long-lived token',
+      }, {
+        userMessage:
+          '配对功能已经在 0.3.1 删除。请改用「URL + 长期令牌」：在 Opennote 的「设置 · 文件 · 导入与接口」里复制令牌，粘贴到客户端。',
+      })
       return
     }
+
+    if (!checkContentType(req, res)) return
+
+    // 需要令牌的接口（0.3.1 起没有例外：所有写接口都要令牌）。
+    if (!checkToken(req, res)) return
+
     if (route === '/v1/import' && method === 'POST') {
       await handleImport(req, res, startedAt)
       return
@@ -814,9 +859,28 @@ function createBridge(options = {}) {
       port: listeningPort,
       workspace: { open: workspace.open === true, name: workspace.name ?? null },
       inbox: typeof options.getInboxEnabled === 'function' ? Boolean(options.getInboxEnabled()) : false,
+      inboxMode: inboxModeValue(),
       authRequired: true,
       time: new Date().toISOString(),
     }
+  }
+
+  /**
+   * 交付模式（只读，㉕）：交给客户端**判断这次导入会不会先进收件箱**。
+   * 缺省（没传挂钩 / 挂钩抛错 / 返回值不认识）一律 `null`——桥不知道就说不知道，
+   * 绝不用 `"direct"` 假装默认，那会让客户端对用户承诺错误的落点。
+   */
+  function inboxModeValue() {
+    let raw = null
+    try {
+      raw = typeof options.getInboxMode === 'function' ? options.getInboxMode() : null
+    } catch {
+      return null
+    }
+    if (raw === true) return 'inbox'
+    if (raw === false) return 'direct'
+    if (raw === 'inbox' || raw === 'direct') return raw
+    return null
   }
 
   /** 只返回笔记本名与是否打开：绝不返回绝对路径、用户名、笔记标题、目录树。 */
@@ -828,6 +892,7 @@ function createBridge(options = {}) {
       name: open && typeof info.name === 'string' ? info.name : null,
       defaultFolder: typeof options.getDefaultFolder === 'function' ? options.getDefaultFolder() : null,
       inboxEnabled: typeof options.getInboxEnabled === 'function' ? Boolean(options.getInboxEnabled()) : false,
+      inboxMode: inboxModeValue(),
     }
   }
 
@@ -1043,124 +1108,11 @@ function createBridge(options = {}) {
     sendOk(req, res, status, result)
   }
 
-  // -------------------------------------------------------------------------
-  // POST /v1/pair
-  // -------------------------------------------------------------------------
-
-  async function handlePair(req, res) {
-    const wait = takeToken(pairBucket)
-    if (wait > 0) {
-      writeLog('ratelimit', { code: 'IMP-2003', detail: 'pair' })
-      sendJson(req, res, ERROR_TABLE['IMP-2003'].http, errorBody('IMP-2003'), { 'Retry-After': String(wait) })
-      return
-    }
-    if (recordHit(pairAttemptWindow)) {
-      writeLog('ratelimit', { code: 'IMP-2003', detail: 'pair' })
-      sendJson(req, res, ERROR_TABLE['IMP-2003'].http, errorBody('IMP-2003'), { 'Retry-After': String(windowRetryAfter(pairAttemptWindow)) })
-      return
-    }
-
-    const body = await readBody(req, res)
-    if (body.tooLarge || body.aborted) return
-    let payload = null
-    try {
-      payload = JSON.parse(body.buffer ? body.buffer.toString('utf8') : '')
-    } catch {
-      writeLog('pair.fail', { code: 'IMP-3002' })
-      sendError(req, res, 'IMP-3002')
-      return
-    }
-    const code = payload && typeof payload.code === 'string' ? payload.code.trim() : ''
-    const client = payload && payload.client && typeof payload.client === 'object' ? payload.client : {}
-    const clientName = typeof client.name === 'string' ? client.name.slice(0, 80) : 'unknown'
-    const origin = res.__cors ? res.__cors.origin : null
-
-    const result = verifyPairCode(code)
-    if (!result.ok) {
-      writeLog('pair.fail', { code: result.errorCode, origin: origin || undefined, client: clientName })
-      sendError(req, res, result.errorCode)
-      return
-    }
-
-    if (origin) {
-      // 只有配对码正确才会走到这里 —— 扩展来源此刻才真正进入信任列表。
-      allowedOrigins.add(origin)
-      state.pairingCodeOrigin = origin
-    }
-    // 面板据此提示「已配对一个客户端」以及「本次配对顺带轮换了令牌」。
-    // `origin` 为 null 表示无 Origin 的 CLI 配对（与 bridge.ts 的 `string | null` 一致）。
-    state.lastPairing = { at: Date.now(), origin: origin || null, rotated: result.rotated === true }
-    pairCode = null
-    pairExpiresAt = 0
-    pairFailures = 0
-    persist()
-    writeLog('pair.ok', { origin: origin || undefined, client: clientName })
-
-    sendOk(req, res, 200, {
-      token: result.token,
-      /** true = 本次配对顺带轮换了令牌（旧令牌已失效，其它客户端需要重新配置）。 */
-      rotated: result.rotated === true,
-      spec: SPEC_VERSION,
-      endpoint: `http://127.0.0.1:${listeningPort}`,
-      origin,
-    })
-    // 配对码失败的路径绝不写入 allowedOrigins（见下方 verifyPairCode 的失败分支）。
-    res.__pairCandidateOrigin = null
-  }
-
-  /**
-   * 校验配对码：一次性、120 s、失败 5 次作废。
-   *
-   * 配对成功必须交出一把**可用的明文令牌**，但服务端只存 sha256。所以：
-   *   1) 若本次会话生成过令牌且明文还没交付（`pendingPlaintext`），交付它；
-   *   2) 否则轮换出一把新令牌交付（旧令牌立刻失效），并在回执里 `rotated: true`
-   *      —— 绝不返回 null 假装成功。UI 据此提示「正在使用旧令牌的客户端需要重新配置」。
+  /*
+   * 0.3.1（㉞）：POST /v1/pair 与配套的配对码状态机（120 s / 一次性 / 5 次作废 /
+   * 「配对成功即轮换令牌」）已整体删除，客户端改用「URL + 长期令牌」。
+   * 路由层的「已下线」响应见 handleRequest；这里不再保留任何配对实现。
    */
-  function verifyPairCode(code) {
-    if (!pairCode || Date.now() > pairExpiresAt) {
-      pairCode = null
-      return { ok: false, errorCode: 'IMP-2004' }
-    }
-    if (typeof code !== 'string' || !/^\d{6}$/.test(code) || !timingSafeEqualText(sha256Hex(code), sha256Hex(pairCode))) {
-      pairFailures += 1
-      if (pairFailures >= PAIR_FAIL_LIMIT) {
-        pairCode = null
-        pairExpiresAt = 0
-        pairFailures = 0
-      }
-      return { ok: false, errorCode: 'IMP-2004' }
-    }
-    return { ok: true, ...takeDeliverableToken() }
-  }
-
-  /** 交付令牌明文：优先交付本次会话里尚未交付过的那一把，否则轮换。 */
-  function takeDeliverableToken() {
-    if (typeof pendingPlaintext === 'string' && pendingPlaintext !== '') {
-      const token = pendingPlaintext
-      pendingPlaintext = null
-      return { token, rotated: false }
-    }
-    const token = generateToken()
-    state.tokenHash = sha256Hex(token)
-    state.tokenLast4 = token.slice(-4)
-    persist()
-    return { token, rotated: true }
-  }
-
-  /** 没有令牌就先生成一把（明文只在此刻返回一次）。 */
-  function ensureToken() {
-    if (state.tokenHash) {
-      const delivered = takeDeliverableToken()
-      return { token: delivered.token, last4: state.tokenLast4 }
-    }
-    const token = generateToken()
-    state.tokenHash = sha256Hex(token)
-    state.tokenLast4 = token.slice(-4)
-    pendingPlaintext = token
-    persist()
-    return { token, last4: state.tokenLast4 }
-  }
-
   // -------------------------------------------------------------------------
   // 生命周期
   // -------------------------------------------------------------------------
@@ -1268,9 +1220,6 @@ function createBridge(options = {}) {
     server = null
     listeningPort = null
     state.port = null
-    pairCode = null
-    pairExpiresAt = 0
-    pairFailures = 0
 
     if (active) {
       await new Promise((resolve) => {
@@ -1298,43 +1247,46 @@ function createBridge(options = {}) {
   }
 
   // -------------------------------------------------------------------------
-  // 配对码
-  // -------------------------------------------------------------------------
-
-  function newPairCode() {
-    pairCode = String(crypto.randomInt(100000, 999999))
-    pairExpiresAt = Date.now() + PAIR_CODE_TTL_MS
-    pairFailures = 0
-    state.pairingCode = pairCode
-    state.pairingCodeExpiresAt = pairExpiresAt
-    return { code: pairCode, expiresAt: pairExpiresAt }
-  }
-
-  function clearPairCode() {
-    pairCode = null
-    pairExpiresAt = 0
-    state.pairingCode = null
-    state.pairingCodeExpiresAt = 0
-  }
-
-  // -------------------------------------------------------------------------
   // 令牌
   // -------------------------------------------------------------------------
 
-  /** 轮换令牌：返回明文（只此一次），服务端只留 sha256 + last4。 */
+  /**
+   * 生成/轮换令牌：立刻作废旧令牌，返回新明文，并把它**留在本会话内存里**（㊲）。
+   * 服务端只持久化 sha256 + last4 —— 明文进不了 `bridge.json`。
+   *
+   * `status().tokenVisible` 因此为 `true`：面板可以在本次会话内反复复制同一串明文，
+   * 直到应用退出或用户再点一次「重新生成」。
+   */
   function regenerateToken() {
     const token = generateToken()
     state.tokenHash = sha256Hex(token)
     state.tokenLast4 = token.slice(-4)
-    pendingPlaintext = token
+    sessionPlaintext = token
     persist()
     return token
+  }
+
+  /**
+   * ㊲③ **只读**取回本会话的令牌明文：仍持有就返回它，否则返回 `null`。
+   *
+   * **调用它绝不轮换令牌、绝不写盘、绝不改任何状态** —— 这是它与 `newToken()` 的本质区别：
+   * `newToken()` = 「重新生成」（旧令牌立刻作废），这里只是把内存里那串**已经有效**的明文
+   * 再交出来一次。IPC 层（`opennote:bridge:token`）用它解决「整窗重载后界面拿不到明文，
+   * 于是「复制令牌」变成点不动的按钮」—— 那正是本项目一路在打的假开关 / 死按钮缺陷。
+   *
+   * 返回 `null` 只代表「本会话不再持有明文」（应用重启过 / 被 `setTokenHash` 丢弃），
+   * **不代表令牌失效**：令牌仍然长期有效，只是要重新生成一次才能再看到明文。
+   */
+  function getSessionPlaintext() {
+    return typeof sessionPlaintext === 'string' && sessionPlaintext !== '' ? sessionPlaintext : null
   }
 
   function setTokenHash(hash, last4) {
     if (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)) return false
     state.tokenHash = hash
     state.tokenLast4 = typeof last4 === 'string' ? last4.slice(-4) : null
+    // 外部改写了哈希 → 内存里那串明文已经不对应了，必须丢掉（否则面板会复制一串已失效的令牌）。
+    sessionPlaintext = null
     persist()
     return true
   }
@@ -1399,20 +1351,22 @@ function createBridge(options = {}) {
        * 重启会丢令牌 —— UI 必须如实告知，不能让人以为长期有效。
        */
       tokenPersisted: Boolean(state.tokenHash && bridgeFile),
+      /**
+       * ㊲：本会话是否仍持有令牌明文（= 面板能不能反复复制）。
+       * `false` 只代表「明文不在内存里了」（应用重启过 / 刚 `setTokenHash` 读回旧哈希），
+       * **不代表令牌失效** —— 令牌仍然长期有效，只是要重新生成一次才能再看到明文。
+       * 面板必须据此**如实降级**成一句说明，而不是留一个点了没反应的按钮。
+       */
+      tokenVisible: typeof sessionPlaintext === 'string' && sessionPlaintext !== '',
       origins: [...allowedOrigins],
       allowedOrigins: [...allowedOrigins],
       lastRejectedOrigin,
-      /** 最近一次配对结果：`{ at, origin, rotated }`（面板提示配对与轮换用）。 */
-      lastPairing: state.lastPairing ? { ...state.lastPairing } : null,
       logPath: logFile,
       inboxWatch: typeof options.getInboxWatchMode === 'function' ? options.getInboxWatchMode() : false,
       startPort,
       /** 当前生效的起始端口段（元组 `[起, 止]`，与 `src/desktop/bridge.ts` 逐字一致）。 */
       portRange: [effectiveStartPort(), Math.min(effectiveStartPort() + PORT_COUNT - 1, CUSTOM_PORT_MAX)],
       error: state.error,
-      /** 仅 start 之后短暂可读；配对码本身不是长期凭据。 */
-      pairingCode: pairCode && Date.now() <= pairExpiresAt ? pairCode : null,
-      pairingCodeExpiresAt: pairCode ? pairExpiresAt : 0,
       spec: SPEC_VERSION,
     }
   }
@@ -1427,10 +1381,8 @@ function createBridge(options = {}) {
     stop,
     status,
     regenerateToken,
-    pair(code) {
-      const result = verifyPairCode(typeof code === 'string' ? code.trim() : '')
-      return result.ok ? { ok: true, token: result.token, rotated: result.rotated === true } : { ok: false, errorCode: result.errorCode }
-    },
+    /** ㊲③ 只读取回本会话明文（IPC `opennote:bridge:token` 用；绝不轮换、绝不写盘）。 */
+    getSessionPlaintext,
     /** 与 start/stop 同源的别名，供 IPC 层直接调用。 */
     startWithPort(port) {
       if (port == null) return start()
@@ -1443,13 +1395,10 @@ function createBridge(options = {}) {
     },
     /** 生成新令牌（= regenerateToken，语义别名）。 */
     generateToken: regenerateToken,
-    /** 配对码。 */
-    newPairCode,
-    clearPairCode,
-    getPairingCode() {
-      return pairCode && Date.now() <= pairExpiresAt ? { code: pairCode, expiresAt: pairExpiresAt } : null
-    },
-    /** 允许来源管理。 */
+    /**
+     * 允许来源管理（0.3.1 起**不再用于放行判定**：来源按类型判断，见 `checkOrigin`）。
+     * 保留读写接口只为清理 0.3.1 之前写进 `bridge.json` 的历史遗留条目。
+     */
     addAllowedOrigin(origin) {
       if (typeof origin !== 'string' || origin === '' || origin === 'null') return false
       allowedOrigins.add(origin)

@@ -26,6 +26,34 @@ export interface BridgeStatusView extends BridgeStatus {
   addressText?: string;
   /** 是否正在监听（等价于 `state === "running"`）。 */
   running?: boolean;
+  /**
+   * ㊲：本会话桥的内存里是否还持有令牌明文（= 能不能反复复制）。
+   * `undefined` 一律按 `false` 处理 —— 主进程没给这个字段时面板照「不可见」降级，
+   * 绝不假装按钮可用。注意 `false` **不等于令牌失效**：令牌仍长期有效。
+   */
+  tokenVisible?: boolean;
+}
+
+/**
+ * ㊲（00 号 §6.15）本会话的令牌明文缓存。
+ *
+ * 令牌是长期有效的**唯一凭据**，用户拿到它的唯一途径就是明文。只允许「显示一次」会把
+ * 「长期有效」变成自相矛盾的承诺（误关一次面板就只能重新生成，而重新生成会让此前
+ * 所有已配置的客户端失效）。所以明文在**本会话**里留在这个模块变量中：
+ * 渲染进程内存，不写 localStorage、不落盘；面板重新挂载后仍能复制同一串。
+ *
+ * 应用重启后这里与桥的内存同时清空 —— 面板据 `status().tokenVisible` 如实降级。
+ */
+let sessionToken: string | null = null;
+
+/** 记住 / 清除本会话明文（只在 `newToken` 成功后写入，或明确丢弃时传 `null`）。 */
+export function rememberBridgeToken(token: string | null): void {
+  sessionToken = typeof token === "string" && token !== "" ? token : null;
+}
+
+/** 本会话是否还拿得到明文（与 `status().tokenVisible` 一起决定按钮状态）。 */
+export function peekBridgeToken(): string | null {
+  return sessionToken;
 }
 
 /** 6 个状态的中文（逐字，契约 §5.2.2）。 */
@@ -123,14 +151,49 @@ export function regenerateBridgeToken(origin?: string): Promise<{ token: string;
   );
 }
 
-/** 生成 6 位配对码（120 秒、一次性、与端口绑定）。 */
-export function createPairCode(): Promise<{ code: string; expiresAt: number } | null> {
-  return call<{ code: string; expiresAt: number } | null>((api) => api.newPairCode(), null);
-}
-
-/** 移除一个受信任来源。 */
+/**
+ * 移除一个历史遗留来源。
+ *
+ * 0.3.1（㉞）起来源**按类型**判断（扩展 / 本机回环 / `file://`），这份列表不再参与放行，
+ * 只用于清理 0.3.1 之前 `bridge.json` 里剩下的条目 —— 所以入口还在，但没有「授权」语义了。
+ */
 export function removeBridgeOrigin(origin: string): Promise<BridgeStatusView | null> {
   return call<BridgeStatusView | null>((api) => api.removeOrigin({ origin }) as Promise<BridgeStatusView>, null);
+}
+
+/**
+ * ㊲③ 只读明文频道（Lead 冻结）：`bridge.token()`，arity 0，返回 `{ token: string | null }`。
+ *
+ * 用最小声明而不是写死在 `OpennoteBridge` 里，是为了让面板在「preload 还没接上这条频道」
+ * 的构建里也能编译、也能跑 —— 读不到就按「不可见」如实降级，而不是整个文件编译不过。
+ * 频道由 Lead 在 preload/main 侧接线，面板只消费。
+ */
+interface TokenChannelApi {
+  token?(): Promise<{ token: string | null }>;
+}
+
+/**
+ * ㊲③ 向主进程**只读**要回本会话的令牌明文；拿不到返回 `null`。
+ *
+ * **绝不轮换令牌** —— 这是它与 `regenerateBridgeToken()`（重新生成、旧令牌立刻作废）
+ * 的本质区别。用途：整窗重载后主进程还持有明文、而界面手里没有，
+ * 于是「复制令牌」会变成一个点不动的按钮（假开关 / 死按钮）。
+ *
+ * 返回 `null` 的两种情况都按同一套降级处理：本会话确实不再持有明文（应用重启过），
+ * 或 preload 还没接上这条频道。
+ */
+export async function fetchSessionToken(): Promise<string | null> {
+  const api = bridgeApi();
+  if (!api) return null;
+  const read = (api as BridgeApi & TokenChannelApi).token;
+  if (typeof read !== "function") return null;
+  try {
+    const res = await read.call(api);
+    const token = res && typeof res === "object" ? res.token : null;
+    return typeof token === "string" && token !== "" ? token : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 用系统文件管理器打开 bridge.log（未配置日志目录时为 no-op）。 */
@@ -167,24 +230,4 @@ export async function copyText(text: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/** 「剩余 118 秒」；已过期返回 null。 */
-export function pairCodeSecondsLeft(expiresAt: number, now: number): number | null {
-  const left = Math.ceil((expiresAt - now) / 1000);
-  return left > 0 ? left : null;
-}
-
-/**
- * 把 `lastPairing.at` 归一成毫秒数。类型允许 `string | number`（ISO 串或毫秒），
- * 所以面板做时间比较前必须过这一道——直接 `Number('2026-…')` 会得到 `NaN`，
- * 会让「配对成功」永远检测不到。
- */
-export function pairingStampMs(at: string | number | null | undefined): number {
-  if (typeof at === "number" && Number.isFinite(at)) return at;
-  if (typeof at === "string" && at !== "") {
-    const parsed = Date.parse(at);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return 0;
 }
