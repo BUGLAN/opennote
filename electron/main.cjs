@@ -1278,6 +1278,26 @@ function ensureBridge() {
     getAdvancedOverwrite,
     // R8：关掉后桥不再往 bridge.log 落行（既有日志不删）。
     isLogEnabled: () => bridgeLogEnabled,
+    /**
+     * 「工作区是否打开」。**这一条原先漏传**，桥侧
+     * `typeof options.getWorkspaceInfo === 'function'` 判 false → `workspace.open`
+     * 恒为 `false` → 插件对着一本开着的笔记本也显示
+     * `IMP-4007「Opennote 里还没有打开笔记本」`。
+     * 与 `bridgeStatusPayload()` 逐字段重建截断 6 个字段是同一类缺陷：
+     * **桥声明了挂钩，装配处漏接**，而两侧各自单测都是绿的。
+     * 只回笔记本名与开关，绝不回绝对路径（契约 7 安全模型）。
+     */
+    getWorkspaceInfo: () => ({
+      open: Boolean(currentWorkspaceRoot),
+      name: currentWorkspaceRoot ? path.basename(currentWorkspaceRoot) : null,
+    }),
+    // `/v1/health` 的 app 字段：如实回真实版本，不要回桥自己的常量兜底。
+    getAppVersion: () => app.getVersion(),
+    // 收件箱是本版本的内建能力，没有单独的开关。
+    getInboxEnabled: () => true,
+    // 落点默认是工作区根（00 号 §6.13⑤ 裁定：default landing = workspace root），
+    // `null` 即「根目录」。
+    getDefaultFolder: () => null,
     log: (event, fields) => {
       // 契约要求日志不含令牌、配对码、正文与 userData 绝对路径；
       // 桥自己已经脱敏，这里只补一条事件名，避免把整个 fields 打进主进程日志。
