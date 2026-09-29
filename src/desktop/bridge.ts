@@ -156,6 +156,11 @@ export interface BridgeStatus {
   inboxWatch: "watch" | "poll" | "off";
   /** 实现细节：没有 dataDir 时令牌不落盘，重启后需重新生成。 */
   tokenPersisted?: boolean;
+  /**
+   * ㊲：本会话是否仍持有令牌明文（只报「还在不在」，**绝不回显明文**）。
+   * 桥与主进程都可能不提供这个字段；渲染层必须按 false 降级，绝不假装可复制。
+   */
+  tokenVisible?: boolean;
   /** 实际绑定的地址，形如 `127.0.0.1:8787`；未运行时为 `null`。 */
   address?: string | null;
   /** 上一次启动失败的原因（已脱敏）。 */
@@ -166,11 +171,6 @@ export interface BridgeStatus {
   startPort?: number | null;
   /** 端口探测范围 `[起, 止]`（闭区间），与 `bridge.cjs` 的 `status()` 逐字一致。 */
   portRange?: [number, number] | null;
-  /**
-   * 最近一次配对结果。`at` 允许字符串（ISO）或毫秒数——`bridge.cjs` 两种都可能给；
-   * `origin` 为 `null` 表示未记录来源。`rotated` 为真时 UI **必须**提示其它客户端需重新配置。
-   */
-  lastPairing?: { at: string | number; origin: string | null; rotated: boolean } | null;
 }
 
 /** 撤销一次导入的结果。`mode` 如实反映实际用的回退手段。 */
@@ -292,7 +292,11 @@ export interface OpennoteBridge {
     stop(): Promise<BridgeStatus>;
     /** 唯一一次返回令牌明文；服务端只存 sha256。 */
     newToken(options?: { origin?: string }): Promise<{ token: string; last4: string }>;
-    newPairCode(): Promise<{ code: string; expiresAt: number }>;
+    /**
+     * ㊲：取回**当前**令牌明文（用于整窗重载后仍可复制）。**绝不轮换令牌** ——
+     * 那是 `newToken()` 的职责。本会话不再持有时返回 `null`，绝不假装可用。
+     */
+    token(): Promise<{ token: string | null }>;
     removeOrigin(options: { origin: string }): Promise<BridgeStatus>;
     openLog(): Promise<void>;
     /**
@@ -300,6 +304,12 @@ export interface OpennoteBridge {
      * 否则用户上次关掉的开关会在重启后失效。关掉后既有日志不删除，只是不再增长。
      */
     setLogEnabled(options: { enabled: boolean }): Promise<{ enabled: boolean }>;
+    /**
+     * 交付模式（00 号 §6.14㉕）。把 `ui.importConflict` 推给主进程，桥据此在
+     * `/v1/health` 与 `/v1/workspace` 里如实回报 `inboxMode`——客户端由此知道
+     * 「这次导入会不会先进收件箱」，而不是猜。
+     */
+    setInboxMode(options: { mode: "inbox" | "direct" }): Promise<{ mode: "inbox" | "direct" }>;
   };
   /** 导入相关的只读查询与撤销（`opennote:import:*`、`opennote:inbox:*`）。 */
   import: {
@@ -307,7 +317,7 @@ export interface OpennoteBridge {
     undo(options: { importId: string }): Promise<ImportUndoResult>;
     log(options?: { limit?: number }): Promise<unknown[]>;
     inboxList(): Promise<InboxEntry[]>;
-    inboxCommit(options: { id: string }): Promise<ImportResult>;
+    inboxCommit(options: { id: string; folder?: string | null }): Promise<ImportResult>;
     inboxDiscard(options: { id: string }): Promise<void>;
     /**
      * 回执一次主进程转交（信封或收件箱操作）。必须与 `reqId` 一一对应。
@@ -317,6 +327,16 @@ export interface OpennoteBridge {
     replyToImport(reqId: string, outcome: ImportReply): void;
   };
   onMenu(callback: (command: string) => void): () => void;
+  /**
+   * `opennote://` 深链（00 号 §6.14㉛）。**未实现或非法的链接不会走到这里**——
+   * 主进程用系统对话框如实告知「暂不支持」，绝不静默无反应（0.2.0 那个
+   * 「打开 Opennote 设置」死按钮就是协议从未注册导致的）。
+   */
+  onDeepLink(
+    callback: (
+      link: { ok: true; kind: "settings"; section: "import" } | { ok: true; kind: "open"; path: string },
+    ) => void,
+  ): () => void;
   /** 入库完成后主进程的通知；`deduped`/`duplicate`/`skipped` 不发通知。 */
   onImportNotice(callback: (notice: ImportNotice) => void): () => void;
   /** 收件箱目录变化（独立 watcher，去抖 450ms）；浏览器后端下不可用。 */

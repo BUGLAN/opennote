@@ -124,8 +124,8 @@ http://127.0.0.1:8787/*  …  http://127.0.0.1:8796/*   （8787..8796 逐条写�
 | **未开启** | 8787–8796 十个端口全部拒绝连接 | `本地接口未开启` | `IMP-1001`：`本地接口未开启。打开桌面版 Opennote 的「设置 · 文件 · 导入与接口」，开启本地接口后重试。` + `已保留你填的标题与标签。` + 动作「重试 / 打开 Opennote 设置」 | 去设置开启本地接口，或点「先暂存这页」 | 真机 `state-01-interface-off.png` |
 | **已停止** | 与「未开启」**完全一致**（插件无法区分「没开过」与「开过又停了」，也不该猜） | `本地接口未开启` | 同上 | 同上 | 同上（同一复现路径） |
 | **正在启动** | 端口已绑定但 `/v1/health` 在 300 ms 内没答完 → 探测判超时 → 不算命中（**绝不会误报「已连接」**） | `本地接口未开启` | 同上（点「重试」即可） | 等一两秒点「重试」 | mock `--mode starting`；真机同款读数；Node 断言 `tests/bridge.test.mjs`「starting…」 |
-| **运行中 · 未配对** | `/v1/health` 200 且 `spec`/`bridge` 命中，但本地没有令牌 | `需要配对` | `IMP-2001`：`这个客户端还没有配对。请在 Opennote 的「导入与接口」里点「配对新客户端」，输入显示的 6 位配对码。` + 配对输入框 + 「配对 / 打开 Opennote 设置」 | 输入 6 位配对码 | 真机 `state-00-needs-pairing.png` |
-| **运行中 · 已配对** | 命中 + `GET /v1/imports/auth-probe-0000` 校验令牌通过（期望 404 `IMP-4017`）+ `GET /v1/workspace` | `本地接口已开启` | 预览：标题 / `约 N 字 · 预计 1 篇笔记` / 正文摘要 / 落点+标签行 | 直接「剪藏到 Opennote」 | 真机 `state-03-connected.png` |
+| **运行中 · 未配置令牌** | `/v1/health` 200 且 `spec`/`bridge` 命中，但本地没有令牌（0.3.1 起**没有配对**，芯片文案从 `需要配对` 改成 `未配置令牌`） | `未配置令牌` | `IMP-2001`：`这个客户端还没有配置访问令牌。请在 Opennote 的「导入与接口」里复制令牌，粘贴到客户端。` + 令牌输入块（粘贴 47 字符）+ 代价披露句 + 「打开 Opennote 设置」 | 复制令牌 → 粘贴 → 「连接」 | 真机 `state-00-needs-pairing.png`（0.2.0 时代截图） |
+| **运行中 · 已配置令牌** | 命中 + `GET /v1/imports/auth-probe-0000` 校验令牌通过（期望 404 `IMP-4017`）+ `GET /v1/workspace` | `本地接口已开启` | 预览：标题 / `约 N 字 · 预计 1 篇笔记` / 正文摘要 / 落点+标签行 | 直接「剪藏到 Opennote」 | 真机 `state-03-connected.png` |
 | **端口被占用** | 有端口在监听，但 `/v1/health` 不是 Opennote 的桥（返回别的东西），或桥自报 `IMP-1003` | `端口被占用` | `IMP-1003`：`8787 到 8796 端口都被占用了。请关闭占用端口的程序，或在设置里指定其它端口。` + 「重试 / 打开 Opennote 设置」 | 关掉占用端口的程序，或在 Opennote 设置里换端口 | 真机 `state-05-port-busy.png` |
 | **启动失败** | 端口**有**监听但不是我们的桥 → 与「端口被占用」同款；端口**没有**监听 → 与「未开启」同款。插件侧无法区分「别人的程序占着」与「自己没起来」 | `端口被占用` / `本地接口未开启` | `IMP-1003` / `IMP-1001` | 去 Opennote 设置面板看它自己报的失败原因 | `state-05` / `state-01` |
 
@@ -267,6 +267,9 @@ node tools/mock-bridge.mjs --mode folder-denied --port 8787
 
 ## 10. 真机验证（Chrome 154.0.8037.58 / Windows）
 
+> **0.3.1 的状态**：下面这张表是 **0.2.0 时代跑过的真机链路**（当时的配对 + 浮标），保留为历史证据。
+> 0.3.1 的两处新交互（**元素选择**、**粘贴令牌**）**没有跑真机 CDP**（见 §11 未验证项 1/2 的复现步骤），`dist` 里也**没有任何真机运行证据**。
+
 **为什么要绕这一下**：Chrome 137+ 起，命令行的 `--load-extension` 对未打包扩展**不再生效**（启动参数里能看到、扩展却没被加载；`chrome://extensions` 里 `getExtensionsInfo()` 返回空）。真机自动化改走 CDP：
 
 ```powershell
@@ -286,10 +289,10 @@ chrome.exe --remote-debugging-port=9335 --user-data-dir=%TEMP%\opennote-hl2-prof
 | --- | --- | --- | --- |
 | 装载 | CDP `Extensions.loadUnpacked` 指向 `dist` | 返回扩展 id，service worker `…/background.js` 起在浏览器里 | — |
 | 打开 popup | CDP `Extensions.triggerAction` 点图标 | popup 真身弹出（真 popup 气泡，非本地 HTML 预览） | — |
-| 配对 | 在 popup 的 6 位输入框里填入 mock 的 `482913` | 芯片 `需要配对` → `本地接口已开启`；mock 侧收到 `POST /v1/pair` | `state-00` / `state-03` |
+| 配对（**0.3.1 已删除的路径**） | 在 popup 的 6 位输入框里填入 mock 的 `482913` | 芯片 `需要配对` → `本地接口已开启`；mock 侧收到 `POST /v1/pair` | `state-00` / `state-03` |
 | 连接态 | 打开 popup | 芯片 `本地接口已开启`；mock 侧依次收到 `GET /v1/health`、`GET /v1/imports/auth-probe-0000`、`GET /v1/workspace` | `state-03-connected.png` |
 | 真剪藏 | 切「整页正文」→ 点「剪藏到 Opennote」 | 预览 `中文排版指北 / 约 218 字`；`POST /v1/import 970B`；popup 显示 `已剪藏到「根目录」。中文排版指北.md`；**磁盘上真的出现 .md** | — |
-| 浮标 | 在页面里选中一段正文 | 浮标 pill 出现在选区上方（`記 剪藏 │ 整页`，暗底 + 品牌红印章），Shadow DOM 内令牌生效（`--accent: #b23a2e`、`--font-mono`、圆角 99px） | `state-09-float-on-page.png` |
+| 浮标（**0.3.1 已删除的 UI-02**） | 在页面里选中一段正文 | 浮标 pill 出现在选区上方（`記 剪藏 │ 整页`，暗底 + 品牌红印章），Shadow DOM 内令牌生效（`--accent: #b23a2e`、`--font-mono`、圆角 99px） | `state-09-float-on-page.png`（历史截图，0.3.1 起不再有浮标） |
 | 降级 · 暂存 | 桥不在场（`IMP-4006`）→ 点「先暂存这页」 | 芯片 `离线，已暂存 1 条`；`chrome.storage.local` 里真出现暂存项（9 键信封 + 端口/令牌快照 + 同 `importId`） | `state-06-staged-offline.png` |
 | 降级 · 补投 | 重开接口，再开 popup | 队列自动清空（`pendingCount: 0`），芯片回到 `本地接口已开启`，**磁盘上出现同一个 `importId` 的 .md** | — |
 
@@ -297,7 +300,7 @@ chrome.exe --remote-debugging-port=9335 --user-data-dir=%TEMP%\opennote-hl2-prof
 
 | 文件 | 态 | 芯片 |
 | --- | --- | --- |
-| `state-00-needs-pairing.png` | 运行中 · 未配对 | `需要配对` |
+| `state-00-needs-pairing.png` | 运行中 · 未配置令牌（0.2.0 时代截图，当时这条叫「需要配对」） | `未配置令牌`（0.3.1 起的芯片文案） |
 | `state-01-interface-off.png` | 未开启 / 已停止 / 正在启动 | `本地接口未开启` |
 | `state-02-not-running.png` | 桥在跑、窗口不在场（409 `IMP-4006`） | `Opennote 未运行` |
 | `state-03-connected.png` | 运行中 · 已配对 | `本地接口已开启` |
@@ -305,8 +308,8 @@ chrome.exe --remote-debugging-port=9335 --user-data-dir=%TEMP%\opennote-hl2-prof
 | `state-05-port-busy.png` | 端口被占用 | `端口被占用` |
 | `state-06-staged-offline.png` | 已暂存待补投 | `离线，已暂存 1 条` |
 | `state-07-device-offline.png` | 设备离线（`navigator.onLine === false`） | `未连接` |
-| `state-08-origin-denied.png` | 来源未被信任（403 `IMP-3001`，本地已有令牌） | `需要配对`（**不是**「已连接」） |
-| `state-09-float-on-page.png` | UI-02 浮标（真页面选区） | — |
+| `state-08-origin-denied.png` | 来源不是扩展/本机程序（403 `IMP-3001`，本地已有令牌） | `未配置令牌`（**不是**「已连接」） |
+| `state-09-float-on-page.png` | UI-02 浮标（真页面选区；**0.3.1 已删除**） | — |
 
 > 说明：`state-07` 的 `navigator.onLine` 是在真 service worker 里打桩成 `false` 的（真断网会让同一台机器上的 mock 桥也失联，无法同时观察「离线 + 接口在跑」）；`state-08` 的 403 由 mock 桥返回。其余各态都是真实网络栈 + 真实 MV3 service worker + 真实 popup。
 
@@ -316,23 +319,55 @@ chrome.exe --remote-debugging-port=9335 --user-data-dir=%TEMP%\opennote-hl2-prof
 
 **未验证 / 验证不到位的**：
 
-1. **键盘快捷键与右键菜单没有在真机上触发过**：`Alt+Shift+S`、`Ctrl+Shift+S`、右键菜单项都需要 Chrome 浏览器进程层面的输入/UI 交互，CDP 的 `Input.dispatchKeyEvent` 到不了扩展命令注册表，右键菜单项也无法脚本选择。它们的落点与 popup 共用同一个函数（`background.js:406 clipFromChromeEntry`），单测覆盖了 `handle()` 的分支，但**「按快捷键真的会剪」这一步没人眼确认过**，请人工验一次。
+1. **0.3.1 的「元素选择」没有跑真机 CDP（**UNVERIFIED**）**：这一步需要「真 Chrome + 真用户点击 + closed 影子根的覆盖层」，本轮的自动化没有覆盖。人工复现步骤（3 分钟）：
+   ```powershell
+   cd E:\repo\opennote\extension ; node build.mjs
+   chrome.exe --remote-debugging-port=9346 --user-data-dir=%TEMP%\opennote-pick `
+     --enable-unsafe-extension-debugging http://127.0.0.1:8787/demo
+   # chrome://extensions → 开发者模式 → 加载已解压的扩展程序 → E:\repo\opennote\extension\dist
+   ```
+   预期：点图标 →「选择页面元素」→ popup 关闭、页面出现 `元素名 · 宽 × 高` 跟随标签与红线轮廓 → 在正文段落上**点一下** → popup 自动弹回，正文区显示 `已选择 p`，正文预览是这一段的 Markdown；按 `Esc` 则退出且**页面上不留任何节点**（`document.getElementById("opennote-pick-host") === null`）。
+   代码侧可机器验证的部分已进 `verify.mjs` V14 与 `tests/self-contained.test.mjs`（closed 影子根 / 只加一层覆盖层 / 点击三件套 / Esc / 退出即移除 / 标签逐字格式），但**「真点一下的观感」没人眼确认过**。
+2. **粘贴令牌的整条真机链路没跑（**UNVERIFIED**）**：`opennote:set-token` 的本地校验与落盘有单测，但「在真 popup 里粘贴 47 字符 → 芯片变 `本地接口已开启`」需要在真机上对着真/假桥点一次。可行验证：`node tools/mock-bridge.mjs --mode healthy --port 8795 --token opn_<43 位> --inbox` → popup 里粘贴同一个令牌 → 芯片应变 `本地接口已开启`。
+2. **键盘快捷键与右键菜单没有在真机上触发过**：`Alt+Shift+S`（元素选择）、右键「高亮这段文字」/「剪藏整页正文到 Opennote」都需要 Chrome 浏览器进程层面的输入/UI 交互，CDP 的 `Input.dispatchKeyEvent` 到不了扩展命令注册表，右键菜单项也无法脚本选择。它们与 popup 共用同一个函数（`background.js` 的 `clipFromChromeEntry` / `captureHighlight`），单测覆盖了消息分支，但**「按快捷键真的会进入选择模式」这一步没人眼确认过**，请人工验一次。
 2. **剪贴板三级降级没在真机走完**：`navigator.clipboard.writeText` 需要真用户手势，CDP 里读剪贴板还要额外授权，所以只测到「第 1 级会调用、失败会往第 2/3 级落」的逻辑层（单测 + 代码路径），没有在真机粘贴出来看一眼。
-3. **没有对真的桌面版 Opennote 端到端验证**：本机的真桥是 `tools/mock-bridge.mjs`（按 `02` 契约实现）。判定链那一环用了**真接收端 TS 代码**（`tests/judgment-chain.test.mjs`），但「桌面版应用 + 真 8787 端口」这一整条没跑过。
+3. **没有对真的桌面版 Opennote 端到端验证**：本机的真桥是 `tools/mock-bridge.mjs`（按 `02` 契约实现）。判定链那一环用了**真接收端 TS 代码**（`tests/judgment-chain.test.mjs`），但「桌面版应用 + 真 8787 端口」这一整条没跑过。**0.3.1 的令牌链**同样没对着真应用验过（真应用的令牌是从「导入与接口」复制出来的 47 字符串）。
 4. **只验了 Chrome 154（Windows）**：Edge 未验（同为 Chromium，理论上一致）。
 5. **移动端 / Safari 完全没有考虑**（`03` 里属于 P1，`IMP-1006`）。
 6. **队列管理界面没做**（`03` 的 `O-8` 明确「只做芯片计数，不做队列管理界面」）。
-7. **收件箱模式未实现**：popup ⋯ 菜单里的「剪藏到收件箱」是**置灰**的（`03` §UI-01 第 1 项属于 P1），没有下发任何 `conflict`/收件箱指令——所以「判定链第 4 步进收件箱」目前只能由**接收端**在整页二次剪藏时自动触发（已用真接收端验证），插件侧没有手动入口。
+7. **插件不代发「进收件箱」指令（这是设计，不是缺陷）**：0.3.0（00 §6.14 ㉕㉘）起「进不进收件箱」由**应用侧设置**决定，插件只如实显示；`03` 冻结的 6 项 ⋯ 菜单里已经**没有**这个项（0.2.0 那个置灰死按钮已删除）。判定链第 4 步（同 URL、正文变了、`selection: false`）→ `202 + pending` 收件箱仍由**接收端**在元素选择/整页二次剪藏时触发。
 8. **`02` §6.2 的 `IMP-1003` 文案在「只有一个端口被别人占用」时略过度**：原文是「8787 到 8796 端口都被占用了」。芯片 `端口被占用` 是准确的，正文那句在单端口占用时字面上说过头了。文案逐字取自契约，未擅自改写。
 9. **设备离线且队列为空时没有专属错误码**：`02` 的号段里没有「设备离线」这一号（`IMP-1005` 是 Host 校验、`IMP-1006` 是平台能力），`03` 只为「离线已暂存」定义了 S11。所以该态复用了 `02` 认可的「连不上本地桥 → `IMP-1001`」语义；芯片如实显示 `未连接`。
+10. **元素选择的 Markdown 保真度只到 `extract-page.js` 的能力边界**：点中的元素及子树走同一个抽取器（`stripNoise` + `htmlToMarkdown`），所以 `iframe` / `<canvas>` / closed 影子根里的内容读不到（popup 会如实说明「这块是嵌入的内容，只能剪到它的外框，里面的内容读不到。」）；图片保留 `src` 绝对地址。
+11. **高亮不写回页面**：0.3.0 用的是 CSS Custom Highlight API（不改宿主页面 DOM），所以关掉 popup 再打开、高亮还在不在取决于页面是否还在原标签页；**没有**做「按 `selector` 重放高亮」——那需要 `content_scripts` + `<all_urls>`，被明确否决。高亮的**持久**形态是剪藏正文里的 `## 高亮` 小节。
+12. **`IMP-2004` 已从码表删除**：码号在 `02` 附录 A.3 里保留，但扩展**不再收录它的文案**（产不出来的文案就是死数据，且会永远与冻结文案对不上）。若将来有人重新引入配对，必须同时把该条目加回表里。
 
 **受限页面**：`chrome://*`、扩展页、`file://`、Chrome 应用商店等无法注入，`background.js:88 isRestrictedUrl()` 会直接给 `RESTRICTED_PAGE` 提示（不会假装能剪）。
 
-**iframe 与动态页面**：浮标只装在顶层文档；`executeScript` 默认只注入主 frame。
+**iframe 与动态页面**：元素选择的覆盖层只装在顶层文档；`executeScript` 默认只注入主 frame，所以点中 `iframe` 只能拿到外框（popup 会如实说明）。
 
 ---
 
-## 12. 本次修复记录（BLOCK-1）
+## 12. 变更记录
+
+### 12.1 0.3.1（本轮：元素选择 + 去配对）
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/content/picker.js`（新增） | 元素选择覆盖层：`#opennote-pick-host`（`position:fixed;inset:0;z-index:2147483647;pointer-events:none`）+ **closed** Shadow DOM；轮廓 `2px solid var(--accent)` + `box-shadow:0 0 0 1px var(--paper)`、遮罩 `var(--sel)`；跟随标签 `{标签名} · {宽} × {高}`；点击 `preventDefault` + `stopPropagation` + `stopImmediatePropagation`；`Esc` 取消；只加这一层，**不动页面其它 DOM**；popup 打不开时用同一条影子根显示一次性提示条（`已选好这一块。点扩展图标看预览。` / `知道了`） |
+| `src/content/float.js`（删除） | 选区浮标（UI-02）与它依赖的 `selectionchange` 逻辑整体删除（㉝） |
+| `src/content/extract-page.js` | 新增 `opts.rootSelector`：给了就只抽**点中的元素及子树**，跳过「整页挑正文容器」那一步 |
+| `src/background.js` | 新增 `opennote:pick` / `opennote:element-picked` / `opennote:pick-cancelled`；`startPick()`（受限页回 `IMP-1006`，不注入任何东西）；`rememberPicked()` / `currentPicked()`（结果按 URL 存、换页即失效）；`normalizeMode()` = element/page/selection；`resolveBody` / `resolveTitle` / `templateCtxOf` / `composeDelivery` / `buildClipEnvelope` 全部接 `pickedElement`；**`source.selection` 在元素选择时恒为 `false`**；右键菜单只剩「高亮这段文字 / 剪藏整页正文到 Opennote」；`armTab()` 删除；页面内药丸反馈随浮标删除，改用 `chrome.action` 徽标 |
+| `src/background.js`（配对） | `pairWithCode()` 与 `opennote:pair` 删除；`IMP-2004` 保留码号但**不再产出**；令牌走 `opennote:set-token`（`TOKEN_RE = /^opn_[A-Za-z0-9_-]{43}$/`，47 字符，长期有效） |
+| `src/lib/bridge.js` | `postPair()` 删除（留 `PAIRING_REMOVED` 一条显式记录） |
+| `src/lib/errors.js` | `IMP-2001` / `IMP-3001` 按 ㉞ 改文案；**删除** `IMP-2004` 条目（Lead 0.3.1 裁定：码号保留、表里不收录产不出来的文案） |
+| `src/lib/state.js` | 芯片 `需要配对` → `未配置令牌`；`plan.pairingInput` → `plan.tokenInput`（`kind: "token"`），动作只剩「打开 Opennote 设置」 |
+| `src/popup/popup.html` + `popup.js` | L2「选择页面元素」行（`重新选择` / `正在页面上等待你点选…` / C69 提示）；来源三选一（`元素选择` / `整页正文` / `当前选区`，默认项按「已选过元素 → 有选区 → 整页」判）；C65 `已选择 {标签名}`；C67 空态、C71 受限说明；令牌块（粘贴 47 字符 + C70 四句本地校验 + C72 代价披露 + C74 `令牌已保存。` + C77 清除确认）；**删除**配对输入块与全部 6 位码文案 |
+| `src/manifest.json` | `commands`：删 `clip-selection`，新增 `pick-element`（`Alt+Shift+S`）；`_execute_action` 不再占用该键 |
+| `verify.mjs` | V1 期望清单跟着 `03` 改（`pick-element` + `clip-page`，并断言 `clip-selection` **已删除**）；V7 逐字文案清单换成 0.3.1 冻结句；新增 **V14**（元素选择纪律：closed 影子根 / 覆盖层 only / 点击三件套 / Esc / 退出即移除 / 标签格式 / 无 `float.js`）与 **V15**（去配对 + 令牌格式 + 不产出 `IMP-2004`） |
+| `tools/mutation-check.ps1` | 变异从 4 个扩到 **8 个**（新增 V14 影子根、V15 `opennote:pair`、V15 令牌格式、V1 快捷键语义） |
+
+### 12.2 0.2.0 / BLOCK-1（历史）
 
 | 文件 | 改动 |
 | --- | --- |

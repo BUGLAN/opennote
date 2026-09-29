@@ -1078,6 +1078,39 @@ async function main() {
     return 'payload 展开 ...raw；tokenVisible 可序列化往返'
   })
 
+  await check('㊲③ 只读频道三处接线必须一致（preload arity 0 / main 走只读方法 / 不得挂到轮换）', async () => {
+    // 「同一个值的多个产地」：频道名、arity、以及 main 到底调用哪个控制器方法，三处都要咬合。
+    const preload = fs.readFileSync(path.join(__dirname, '..', 'electron', 'preload.cjs'), 'utf8')
+    assert.equal(
+      /const BRIDGE_TOKEN_CHANNEL = 'opennote:bridge:token'/.test(preload),
+      true,
+      'preload 必须有 `opennote:bridge:token` 频道常量',
+    )
+    assert.equal(
+      /token:\s*\(\)\s*=>\s*invoke\(BRIDGE_TOKEN_CHANNEL\)/.test(preload),
+      true,
+      'preload 的 `token` 必须是 arity 0（不传任何参数）',
+    )
+    const main = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8')
+    // main 用的是字面频道名（没有常量），所以按字面量定位到**这一个 handler**，
+    // 窗口切到下一个 `handle(` 为止 —— 否则会把旁边 newToken 的 regenerateToken 算进来。
+    const at = main.indexOf("'opennote:bridge:token'")
+    assert.notEqual(at, -1, 'main.cjs 没有接上这条频道')
+    const next = main.indexOf('\n  handle(', at)
+    const handler = main.slice(at, next === -1 ? at + 800 : next)
+    assert.equal(
+      handler.includes('getSessionPlaintext'),
+      true,
+      'main 必须调用只读的 getSessionPlaintext()',
+    )
+    assert.equal(
+      /regenerateToken/.test(handler),
+      false,
+      '只读频道**绝不能**接到 regenerateToken —— 那会让「复制令牌」变成静默轮换、把已配置的客户端全部踢下线',
+    )
+    return 'preload arity 0 → main → getSessionPlaintext（未接轮换）'
+  })
+
   await check('⑦ IMP-2004 保留码号但不再产出；IMP-2001 语义为「还没配置令牌」；配对实现零残留', async () => {
     assert.equal(typeof ERROR_TABLE['IMP-2004'], 'object', '码号必须留在表里（不得复用给别的语义）')
     assert.equal(

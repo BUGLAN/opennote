@@ -162,33 +162,22 @@ export function removeBridgeOrigin(origin: string): Promise<BridgeStatusView | n
 }
 
 /**
- * ㊲③ 只读明文频道（Lead 冻结）：`bridge.token()`，arity 0，返回 `{ token: string | null }`。
- *
- * 用最小声明而不是写死在 `OpennoteBridge` 里，是为了让面板在「preload 还没接上这条频道」
- * 的构建里也能编译、也能跑 —— 读不到就按「不可见」如实降级，而不是整个文件编译不过。
- * 频道由 Lead 在 preload/main 侧接线，面板只消费。
- */
-interface TokenChannelApi {
-  token?(): Promise<{ token: string | null }>;
-}
-
-/**
  * ㊲③ 向主进程**只读**要回本会话的令牌明文；拿不到返回 `null`。
  *
+ * 频道（Lead 冻结）：`bridge.token()` —— arity 0，返回 `{ token: string | null }`。
  * **绝不轮换令牌** —— 这是它与 `regenerateBridgeToken()`（重新生成、旧令牌立刻作废）
  * 的本质区别。用途：整窗重载后主进程还持有明文、而界面手里没有，
  * 于是「复制令牌」会变成一个点不动的按钮（假开关 / 死按钮）。
  *
  * 返回 `null` 的两种情况都按同一套降级处理：本会话确实不再持有明文（应用重启过），
- * 或 preload 还没接上这条频道。
+ * 或 preload 还没接上这条频道（类型是新的、跑起来的进程可能是旧的）。
  */
 export async function fetchSessionToken(): Promise<string | null> {
   const api = bridgeApi();
   if (!api) return null;
-  const read = (api as BridgeApi & TokenChannelApi).token;
-  if (typeof read !== "function") return null;
+  if (typeof api.token !== "function") return null;
   try {
-    const res = await read.call(api);
+    const res = await api.token();
     const token = res && typeof res === "object" ? res.token : null;
     return typeof token === "string" && token !== "" ? token : null;
   } catch {
