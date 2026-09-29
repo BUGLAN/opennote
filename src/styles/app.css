@@ -203,6 +203,21 @@
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* 收件箱「保存到」落点选择器（UI-03 补充，00 号 §6.14㉜）。
+   用到的都是既有令牌，新增令牌 0。 */
+.inbox__save-to {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+
+.inbox__save-to > span {
+  flex: none;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+
 .choice:disabled {
   opacity: 0.5;
   cursor: not-allowed;

@@ -49,6 +49,8 @@ import {
 import { findImportLogEntry, readImportIndex, readImportLog } from "./data/importLog";
 import {
   receiveEnvelopeOutcome,
+  setImportChannelContext,
+  setImportLandingPreference,
   setImportNotifications,
   undoImport,
   type ImportUndoResult,
@@ -167,6 +169,17 @@ export default function App(): ReactNode {
       void (async () => {
         let outcome: ImportOutcome;
         try {
+          /**
+           * **必须先声明通道**（00 号 §6.13⑧ 原话：「本地桥转交前设 `local-bridge`」）。
+           * 这里是全仓**唯一**消费 `onImportReceipt` 的地方；不声明的话通道会停在模块
+           * 默认的 `"in-app"`，于是两件事同时静默失效：
+           *   1. 0.3.0 默认的「外部导入先进收件箱」（㉕）—— `isExternalDeliveryChannel("in-app")`
+           *      为 false，强制 `pending` 分支被跳过，外部剪藏会**直接写进笔记本**；
+           *   2. `overwrite` 的通道闸门（`receive.ts` 要求 `channel === "local-bridge"`）
+           *      永不成立 —— 设置里那个开关变成假开关。
+           * 同一个根因、两个假开关，而两侧单测都是绿的（测试自己会声明通道）。
+           */
+          setImportChannelContext({ channel: "local-bridge" });
           outcome = await receiveEnvelopeOutcome(envelope);
         } catch (error) {
           // receiveEnvelopeOutcome 理论上不抛；真抛了也只能如实报 500，不能假装成功。
@@ -218,7 +231,14 @@ export default function App(): ReactNode {
             result = await listInbox();
           } else if (op === "inboxCommit") {
             // 契约要求回 `ImportResult`；Entry 已入库时 `null`（幂等），不算失败。
-            result = await commitInboxResult(String(args?.id ?? ""));
+            // 落点覆盖（00 §6.14㉜）：**「缺 folder 键」与「folder: null」必须区分** ——
+            // 前者沿用信封的 target.folder（0.2.0 行为），后者明确要求存到工作区根。
+            const id = String(args?.id ?? "");
+            const hasFolder = Boolean(args) && Object.prototype.hasOwnProperty.call(args, "folder");
+            result = await commitInboxResult(
+              id,
+              hasFolder ? { folder: (args as { folder?: string | null } | undefined)?.folder ?? null } : undefined,
+            );
           } else if (op === "inboxDiscard") {
             await discardInbox(String(args?.id ?? ""));
             result = null;
@@ -261,6 +281,20 @@ export default function App(): ReactNode {
     void api.bridge.setLogEnabled({ enabled: ui.bridgeLog }).catch(() => undefined);
   }, [bridge, ui.bridgeLog]);
 
+  // 交付模式（00 号 §6.14㉕）：`ui.importConflict` 是**应用侧用户的显式意愿**，
+  // 必须同时到达两个地方——接收端（决定这次导入进不进收件箱）与本地桥
+  // （`/v1/health` 的 `inboxMode`，让客户端知道会发生什么，而不是猜）。
+  useEffect(() => {
+    setImportLandingPreference(ui.importConflict);
+  }, [ui.importConflict]);
+
+  useEffect(() => {
+    const api = bridge;
+    if (!api || typeof api.bridge?.setInboxMode !== "function") return;
+    const mode = ui.importConflict === "inbox" ? "inbox" : "direct";
+    void api.bridge.setInboxMode({ mode }).catch(() => undefined);
+  }, [bridge, ui.importConflict]);
+
   // UI-06 冲突对话框：L2 接收端遇到第 5 步 pending 冲突时回调这里。
   // 卸载时立刻 settle，避免接收端永远等一个已经不在的对话框。
   useEffect(() => {
@@ -278,6 +312,27 @@ export default function App(): ReactNode {
     startInboxWatch();
     return () => stopInboxWatch();
   }, [library.workspace]);
+
+  // `opennote://` 深链（00 号 §6.14㉛）：未实现/非法的链接由主进程弹系统对话框
+  // 如实告知，**不会走到这里**，所以这里只处理两条已实现的路由。
+  useEffect(() => {
+    const api = bridge;
+    if (!api || typeof api.onDeepLink !== "function") return;
+    return api.onDeepLink((link) => {
+      if (!link || link.ok !== true) return;
+      if (link.kind === "settings") {
+        // API-11：打开「设置 · 文件 · 导入与接口」（02 号定为 P0）。
+        setSettingsSection("文件");
+        setSettingsOpen(true);
+        return;
+      }
+      if (link.kind === "open") {
+        // API-12：打开一篇笔记。路径的合法性已在主进程判过（含越权拒绝），
+        // 这里仍走正常打开路径，路径不存在时由 openNote 自己如实失败。
+        openNote(link.path);
+      }
+    });
+  }, [bridge, openNote]);
 
   // 主进程广播的入库通知：无 dirty 直接重载，有 dirty 绝不静默覆盖。
   useEffect(() => {

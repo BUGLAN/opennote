@@ -25,10 +25,14 @@ const BRIDGE_STATUS_CHANNEL = 'opennote:bridge:status'
 const BRIDGE_START_CHANNEL = 'opennote:bridge:start'
 const BRIDGE_STOP_CHANNEL = 'opennote:bridge:stop'
 const BRIDGE_NEW_TOKEN_CHANNEL = 'opennote:bridge:newToken'
-const BRIDGE_NEW_PAIR_CODE_CHANNEL = 'opennote:bridge:newPairCode'
 const BRIDGE_REMOVE_ORIGIN_CHANNEL = 'opennote:bridge:removeOrigin'
 const BRIDGE_OPEN_LOG_CHANNEL = 'opennote:bridge:openLog'
 const BRIDGE_SET_LOG_ENABLED_CHANNEL = 'opennote:bridge:setLogEnabled'
+const BRIDGE_SET_INBOX_MODE_CHANNEL = 'opennote:bridge:setInboxMode'
+/** ㊲ 只读取回当前令牌明文（绝不轮换）。 */
+const BRIDGE_TOKEN_CHANNEL = 'opennote:bridge:token'
+/** `opennote://` 深链（main 侧由 electron/deeplink.cjs 定义同一个字符串）。 */
+const DEEPLINK_CHANNEL = 'opennote:app:deeplink'
 const IMPORT_RECENT_CHANNEL = 'opennote:import:recent'
 const IMPORT_UNDO_CHANNEL = 'opennote:import:undo'
 const IMPORT_LOG_CHANNEL = 'opennote:import:log'
@@ -142,11 +146,20 @@ const bridge = {
     stop: () => invoke(BRIDGE_STOP_CHANNEL),
     /** 唯一一次返回令牌明文；主进程只存 sha256 与后四位。 */
     newToken: (options) => invoke(BRIDGE_NEW_TOKEN_CHANNEL, options),
-    newPairCode: () => invoke(BRIDGE_NEW_PAIR_CODE_CHANNEL),
     removeOrigin: (options) => invoke(BRIDGE_REMOVE_ORIGIN_CHANNEL, options),
     openLog: () => invoke(BRIDGE_OPEN_LOG_CHANNEL),
     // R8「记录本地接口日志」：开关的真实行为在主进程（决定是否往 bridge.log 落行）。
     setLogEnabled: (options) => invoke(BRIDGE_SET_LOG_ENABLED_CHANNEL, options),
+    /**
+     * 交付模式（00 号 §6.14㉕）：把 `ui.importConflict` 推给主进程，桥据此在
+     * `/v1/health` 与 `/v1/workspace` 里如实回报 `inboxMode`。arity 1。
+     */
+    setInboxMode: (options) => invoke(BRIDGE_SET_INBOX_MODE_CHANNEL, options),
+    /**
+     * ㊲：取回**当前**令牌明文，用于「整窗重载后仍可复制」。**绝不轮换令牌**
+     * （那是 newToken 的职责）。本会话不再持有时返回 null，绝不假装可用。arity 0。
+     */
+    token: () => invoke(BRIDGE_TOKEN_CHANNEL),
   },
 
   /** 导入查询、撤销与收件箱操作。 */
@@ -181,6 +194,14 @@ const bridge = {
 
   /** 入库完成后主进程的通知（`deduped`/`duplicate`/`skipped` 不发）。 */
   onImportNotice: (callback) => subscribe(IMPORT_NOTICE_CHANNEL, callback),
+
+  /**
+   * `opennote://` 深链（00 号 §6.14㉛ / 02 号 §5.6）。
+   * payload 形如 `{ ok:true, kind:"settings", section:"import" }` 或
+   * `{ ok:true, kind:"open", path:"剪藏/a.md" }`；**未实现/非法的链接不会走到这里**，
+   * 由主进程用系统对话框如实告知（绝不静默）。arity 1。
+   */
+  onDeepLink: (callback) => subscribe(DEEPLINK_CHANNEL, callback),
 
   /** 收件箱目录变化（独立 watcher，去抖 450ms）；浏览器后端下不可用。 */
   onInboxChanged: (callback) => subscribe(INBOX_CHANGED_CHANNEL, callback),

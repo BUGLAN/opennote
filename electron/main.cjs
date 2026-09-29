@@ -26,6 +26,11 @@ const { existsSync, watch } = require('node:fs')
 const { createHash } = require('node:crypto')
 const path = require('node:path')
 
+// `opennote://` 深链解析（00 号 §6.14㉛）。零 Electron 依赖的纯函数，可被单测直接
+// require —— 「路由与拒绝规则」不靠真机手点，见 electron/deeplink.cjs 的注释。
+const { DEEPLINK_CHANNEL, PROTOCOL, deeplinkMessage, findDeeplinkInArgv, parseOpennoteUrl } =
+  require('./deeplink.cjs')
+
 const APP_ID = 'com.opennote.app'
 const APP_NAME = 'Opennote'
 const RECENT_LIMIT = 12
@@ -1059,7 +1064,11 @@ function importError(code, userMessage, http, retryable) {
 const NO_WINDOW_ERROR = () =>
   importError(
     'IMP-4006',
-    'Opennote 的窗口已关闭。请重新打开 Opennote，再试一次。',
+    // 逐字与 `electron/bridge.cjs` 的 `ERROR_TABLE['IMP-4006']`、`02` 附录 A.3 一致
+    // （00 号 §6.14㉗）。主进程这条与桥那条是同一个 code 的两个产地，措辞必须相同，
+    // 否则客户端会看到两套「Opennote 没运行」的说法。`verify-contract.cjs` 的 C-6c
+    // 只逐字比对桥的 ERROR_TABLE，盖不住这里 —— 靠这条注释与代码审查守住。
+    'Opennote 没有在运行。请先打开 Opennote，再试一次。',
     409,
     true,
   )
@@ -1224,21 +1233,23 @@ function bridgeStatusPayload() {
       logPath: null,
       inboxWatch: inboxWatchMode(),
       tokenPersisted: false,
+      // ㊲：没有 controller 时如实回「本会话不持有明文」，而不是省略字段——
+      // 省略会让渲染层的 undefined 与 false 混在一起，面板就得写第二套分支。
+      tokenVisible: false,
       address: null,
       error: '本地接口模块没能加载，请重新安装 Opennote。',
       lastRejectedOrigin: null,
       startPort: null,
       portRange: null,
-      lastPairing: null,
     }
   }
   const raw = controller.status() || {}
   return {
     // `...raw` 必须在最前面：桥的状态里还有 address / error / lastRejectedOrigin /
-    // startPort / portRange / lastPairing 等字段，逐字段重建会把它们**静默丢掉**
-    // ——渲染层拿不到 `lastPairing` 就永远看不到配对轮换警告，拿不到
-    // `lastRejectedOrigin` 就永远显示不了 R8 的拒绝记录行。显式字段在下面覆盖，
-    // 仍会赢；这份白名单只用来把类型收紧到 contract 那样。
+    // startPort / portRange 等字段，逐字段重建会把它们**静默丢掉**
+    // ——渲染层拿不到 `lastRejectedOrigin` 就永远显示不了 R8 的拒绝记录行，
+    // 拿不到 `error` 就说不出「8787 到 8796 都被占用了」那句可执行的下一步。
+    // 显式字段在下面覆盖，仍会赢；这份白名单只用来把类型收紧到 contract 那样。
     ...raw,
     state: raw.state,
     port: typeof raw.port === 'number' ? raw.port : null,
@@ -1278,6 +1289,13 @@ function ensureBridge() {
     getAdvancedOverwrite,
     // R8：关掉后桥不再往 bridge.log 落行（既有日志不删）。
     isLogEnabled: () => bridgeLogEnabled,
+    /**
+     * 交付模式（只读，00 号 §6.14㉕）。桥把它透传到 `/v1/health` 与 `/v1/workspace`
+     * 的 `inboxMode`，让客户端知道「现在这次导入会不会先进收件箱」。
+     * 三态：`"inbox"` / `"direct"` / `null`（= 桥不知道，客户端**不得推断**，
+     * 一律以导入回执的 `status` 为准）。
+     */
+    getInboxMode: () => inboxMode,
     /**
      * 「工作区是否打开」。**这一条原先漏传**，桥侧
      * `typeof options.getWorkspaceInfo === 'function'` 判 false → `workspace.open`
@@ -1366,13 +1384,23 @@ async function registerImportHandlers() {
     '生成令牌失败',
   )
 
+  /**
+   * 配对已在 0.3.1 删除（00 号 §6.15㉞）：客户端改为**粘贴长期令牌**。
+   *
+   * 这里**保留频道与 handler**（而不是删掉）：`ipc-safety-check.cjs` 的「既有方法名
+   * 与参数个数不变」断言以 HEAD 的 preload 面为基线，删方法会让那条护栏误判为
+   * 「破坏了既有契约」。保留但**明确报「已下线」**，比留一个调用即抛
+   * `TypeError` 的幽灵方法好 —— 前者用户看得懂，后者只会在控制台里冒一句英文。
+   */
   handle(
     'opennote:bridge:newPairCode',
     async () => {
-      const controller = ensureBridge()
-      if (!controller) throw new Error('生成配对码失败：本地接口模块不可用')
-      const result = controller.newPairCode()
-      return { code: result.code, expiresAt: result.expiresAt }
+      // 用 IMP-3005（路径/方法不存在）而不是 IMP-2004：后者是**已作废**的配对码错误码，
+      // 00 号 §6.15㉞ 明确「保留码号但不得复用」——拿它报「配对这条路没了」是语义错位。
+      throw Object.assign(new Error('配对功能已下线。请在设置里复制令牌，粘贴到客户端。'), {
+        code: 'IMP-3005',
+        userMessage: '配对功能已经取消。请在 Opennote 的「导入与接口」里复制令牌，粘贴到客户端。',
+      })
     },
     '生成配对码失败',
   )
@@ -1416,6 +1444,41 @@ async function registerImportHandlers() {
       return { enabled: bridgeLogEnabled }
     },
     '设置本地接口日志开关失败',
+  )
+
+  /**
+   * 交付模式（00 号 §6.14㉕）。渲染层把 `ui.importConflict` 推过来，桥据此在
+   * `/v1/health`、`/v1/workspace` 里如实回报 `inboxMode`。
+   * **只认 `"inbox"` 与 `"direct"`**：不认识的值一律落到 `"direct"`，绝不猜一个
+   * 对用户有承诺含义的模式（0.3.0 默认 `"inbox"`，由渲染层启动时推一次）。
+   */
+  handle(
+    'opennote:bridge:setInboxMode',
+    async (args) => {
+      const raw = args && typeof args === 'object' ? args.mode : args
+      inboxMode = raw === 'inbox' ? 'inbox' : 'direct'
+      return { mode: inboxMode }
+    },
+    '设置交付模式失败',
+  )
+
+  /**
+   * ㊲：只读取回当前令牌明文，**绝不轮换**。加它的理由是一个真实缺口：
+   * **整窗重载（Ctrl+R）不是应用重启** —— 主进程仍持有明文，而渲染层的模块缓存
+   * 没了，于是「复制令牌」会变成一个点不动的死按钮，而用户此刻往往正想配 agent。
+   * 本会话不再持有（应用重启过）时返回 null，绝不假装可用。
+   */
+  handle(
+    'opennote:bridge:token',
+    async () => {
+      const controller = ensureBridge()
+      const read =
+        controller && typeof controller.getSessionPlaintext === 'function'
+          ? controller.getSessionPlaintext
+          : null
+      return { token: typeof read === 'function' ? read() ?? null : null }
+    },
+    '读取本地接口令牌失败',
   )
 
   /**
@@ -1691,10 +1754,132 @@ async function createWindow() {
 }
 
 // ---------------------------------------------------------------------------
+// opennote:// 深链（00 号 §6.14㉛ / 02 号 §5.6）
+// ---------------------------------------------------------------------------
+
+/**
+ * 本次只实现两条**只读**路由：`API-11 opennote://settings/import`（02 号定为 P0）
+ * 与 `API-12 opennote://open?path=…`。`API-09 opennote://clip?d=…` **明确不做**
+ * （用户已确认剪藏主路径是「应用开着 + 本地桥」）。
+ *
+ * 未实现 / 非法的路由**必须显式告知**，绝不静默无反应 —— 0.2.0 那个
+ * 「打开 Opennote 设置」死按钮就是因为我们从来没注册协议，点了什么都不发生。
+ */
+let pendingDeeplink = null
+let startupDeeplinkNotice = null
+let inboxMode = 'inbox'
+
+function focusMainWindow() {
+  const window = mainWindow
+  if (!window || window.isDestroyed()) return
+  if (window.isMinimized()) window.restore()
+  window.focus()
+}
+
+function notifyDeeplinkProblem(message) {
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  if (window) {
+    void dialog.showMessageBox(window, { type: 'info', message, buttons: ['知道了'] }).catch(() => {})
+    return
+  }
+  // 没有窗口时（启动早期）先记下来，等窗口建好再显示，不能吞掉。
+  startupDeeplinkNotice = message
+}
+
+function sendDeeplink(parsed) {
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  if (!window || window.webContents.isLoading()) {
+    // 窗口还没就绪：记下来，等 did-finish-load 再发。丢在这里就等于静默失败。
+    pendingDeeplink = parsed
+    return
+  }
+  focusMainWindow()
+  window.webContents.send(DEEPLINK_CHANNEL, parsed)
+}
+
+function handleDeeplink(raw) {
+  const parsed = parseOpennoteUrl(raw)
+  if (!parsed.ok) {
+    console.warn(`[opennote] deeplink 已拒绝：${parsed.reason} route=${parsed.route || '(空)'}`)
+    notifyDeeplinkProblem(deeplinkMessage(parsed))
+    return false
+  }
+  sendDeeplink(parsed)
+  return true
+}
+
+/** 窗口就绪后把启动期攒下的深链与提示补发出去（不能丢）。 */
+function flushDeeplink() {
+  const notice = startupDeeplinkNotice
+  startupDeeplinkNotice = null
+  if (notice) notifyDeeplinkProblem(notice)
+
+  const pending = pendingDeeplink
+  pendingDeeplink = null
+  if (!pending) return
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  if (!window) return
+  // 页面还在加载时 `webContents.send` 会丢：放回 pending，等加载完再发一次。
+  if (window.webContents.isLoading()) {
+    pendingDeeplink = pending
+    window.webContents.once('did-finish-load', () => flushDeeplink())
+    return
+  }
+  window.webContents.send(DEEPLINK_CHANNEL, pending)
+}
+
+/**
+ * 注册 `opennote://` 协议。开发期（`electron .`）必须把入口脚本一起注册，
+ * 否则系统唤起的是裸 electron 而不是这个应用。
+ */
+function registerProtocolClient() {
+  try {
+    if (process.defaultApp && process.argv.length >= 2) {
+      return app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1])])
+    }
+    return app.setAsDefaultProtocolClient(PROTOCOL)
+  } catch (error) {
+    console.warn(
+      `[opennote] 注册 ${PROTOCOL}:// 失败：${error instanceof Error ? error.message : String(error)}`,
+    )
+    return false
+  }
+}
+
+// 契约 02:1118：拿不到单实例锁的进程立即退出，命令行参数交给已运行实例。
+// 第二个实例必须**不能**继续走到 app.whenReady()，否则会出现两个窗口抢同一个桥端口。
+const singleInstance = app.requestSingleInstanceLock()
+if (!singleInstance) {
+  app.quit()
+} else {
+  registerProtocolClient()
+  // 启动参数里可能直接带着深链（Windows/Linux 双击链接）。
+  const startupLink = findDeeplinkInArgv(process.argv)
+  if (startupLink) {
+    const parsed = parseOpennoteUrl(startupLink)
+    if (parsed.ok) pendingDeeplink = parsed
+    else startupDeeplinkNotice = deeplinkMessage(parsed)
+  }
+
+  app.on('second-instance', (_event, argv) => {
+    focusMainWindow()
+    const link = findDeeplinkInArgv(argv)
+    if (link) handleDeeplink(link)
+  })
+
+  // macOS 走 open-url（不经过 argv）。
+  app.on('open-url', (event, url) => {
+    event.preventDefault()
+    handleDeeplink(url)
+  })
+}
+
+// ---------------------------------------------------------------------------
 // 生命周期
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(async () => {
+  if (!singleInstance) return
   registerIpcHandlers()
   installApplicationMenu()
   await loadPersistentRoots()
@@ -1713,6 +1898,9 @@ app.whenReady().then(async () => {
         `[opennote] desktop ready ${app.getVersion()}（icon=${iconNote}；${frameNote}；持久授权工作区=${persistentRoots.size}）`,
       )
     }
+
+    // 窗口就绪：把启动期攒下的 `opennote://` 深链补发出去（不丢）。
+    flushDeeplink()
 
     // 本地接口：默认关闭。只有用户上次显式开启过（bridge.json 里 enabled=true，
     // 此时桥的初始状态是 stopped 而不是 disabled）才在启动时自动恢复监听。

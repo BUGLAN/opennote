@@ -165,8 +165,10 @@ export const DEFAULT_UI: UiSettings = {
   expanded: [],
   collapsed: [],
   lastNoteId: null,
-  // R1 默认「新建一篇」：不猜用户意图、不覆盖任何既有笔记。
-  importConflict: "new",
+  // 0.3.0（00 号 §6.14㉕）默认「先进入收件箱」：外部导入先落 `.opennote/inbox/`，
+  // 由用户在收件箱里确认落点后再入库。这样任何外部客户端都不可能静默写进笔记库。
+  // 改成直接入库仍可（设置 · 文件 · 导入与接口 → R1）。
+  importConflict: "inbox",
   importNotify: true,
   bridgeLog: true,
 };
