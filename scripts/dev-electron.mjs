@@ -123,10 +123,14 @@ async function main() {
   }
 
   log('启动 Electron…')
+  // ELECTRON_RUN_AS_NODE 会让 Electron 退化成普通 Node（app/BrowserWindow 全无），
+  // 某些终端/CI 环境会带着它，这里显式清掉再启动。
+  const electronEnv = { ...process.env, OPENNOTE_DEV_URL: DEV_URL }
+  delete electronEnv.ELECTRON_RUN_AS_NODE
   electronChild = spawn(electronPath, [projectRoot], {
     cwd: projectRoot,
     stdio: 'inherit',
-    env: { ...process.env, OPENNOTE_DEV_URL: DEV_URL },
+    env: electronEnv,
   })
   electronChild.on('error', (error) => {
     log(`Electron 启动失败：${error.message}`)
