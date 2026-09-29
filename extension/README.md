@@ -319,15 +319,12 @@ chrome.exe --remote-debugging-port=9335 --user-data-dir=%TEMP%\opennote-hl2-prof
 
 **未验证 / 验证不到位的**：
 
-1. **0.3.1 的「元素选择」没有跑真机 CDP（**UNVERIFIED**）**：这一步需要「真 Chrome + 真用户点击 + closed 影子根的覆盖层」，本轮的自动化没有覆盖。人工复现步骤（3 分钟）：
+1. ~~元素选择没跑真机~~ → **已真机验证（2026-XX，Chrome 154.0.8037.58 / Windows）**：`node tools/cdp-pick-check.mjs` 全 12 项 PASS（退出码 0）。它做的事：起本地 demo 页 + 专用 Chrome（CDP 9346）→ `Extensions.loadUnpacked` → `Extensions.triggerAction` 弹真 popup → 在 popup 真 DOM 里点 `#pick` → 观察页面上的 `#opennote-pick-host`（`position:fixed` / `z-index:2147483647` / `pointer-events:none` / `closed` 影子根）→ `Input.dispatchMouseEvent` 在正文段落上真点一下 → 从 service worker 的 `chrome.storage.local` 读回 `picked`（`tagName=p`、`selector=main > article > p:nth-of-type(1)`、Markdown 含被点段落且**不含**侧栏/页脚）→ 覆盖层已移除。
    ```powershell
-   cd E:\repo\opennote\extension ; node build.mjs
-   chrome.exe --remote-debugging-port=9346 --user-data-dir=%TEMP%\opennote-pick `
-     --enable-unsafe-extension-debugging http://127.0.0.1:8787/demo
-   # chrome://extensions → 开发者模式 → 加载已解压的扩展程序 → E:\repo\opennote\extension\dist
+   cd E:\repo\opennote\extension ; node build.mjs ; node tools\cdp-pick-check.mjs
+   # 退出码：0 = 全 PASS；1 = 有 FAIL；2 = 环境缺失（没装 Chrome / 没 build / 9346 被上一轮遗留的 Chrome 占用）
    ```
-   预期：点图标 →「选择页面元素」→ popup 关闭、页面出现 `元素名 · 宽 × 高` 跟随标签与红线轮廓 → 在正文段落上**点一下** → popup 自动弹回，正文区显示 `已选择 p`，正文预览是这一段的 Markdown；按 `Esc` 则退出且**页面上不留任何节点**（`document.getElementById("opennote-pick-host") === null`）。
-   代码侧可机器验证的部分已进 `verify.mjs` V14 与 `tests/self-contained.test.mjs`（closed 影子根 / 只加一层覆盖层 / 点击三件套 / Esc / 退出即移除 / 标签逐字格式），但**「真点一下的观感」没人眼确认过**。
+   **仍未验证**：`Esc` 取消与「popup 打不开时的页面内提示条」这两条**没有真机点到过**（前者要发键盘事件给页面、后者要 `chrome.action.openPopup()` 失败，headless 下不稳），只有静态断言（V14）+ 单测覆盖（`tests/self-contained.test.mjs`）。
 2. **粘贴令牌的整条真机链路没跑（**UNVERIFIED**）**：`opennote:set-token` 的本地校验与落盘有单测，但「在真 popup 里粘贴 47 字符 → 芯片变 `本地接口已开启`」需要在真机上对着真/假桥点一次。可行验证：`node tools/mock-bridge.mjs --mode healthy --port 8795 --token opn_<43 位> --inbox` → popup 里粘贴同一个令牌 → 芯片应变 `本地接口已开启`。
 2. **键盘快捷键与右键菜单没有在真机上触发过**：`Alt+Shift+S`（元素选择）、右键「高亮这段文字」/「剪藏整页正文到 Opennote」都需要 Chrome 浏览器进程层面的输入/UI 交互，CDP 的 `Input.dispatchKeyEvent` 到不了扩展命令注册表，右键菜单项也无法脚本选择。它们与 popup 共用同一个函数（`background.js` 的 `clipFromChromeEntry` / `captureHighlight`），单测覆盖了消息分支，但**「按快捷键真的会进入选择模式」这一步没人眼确认过**，请人工验一次。
 2. **剪贴板三级降级没在真机走完**：`navigator.clipboard.writeText` 需要真用户手势，CDP 里读剪贴板还要额外授权，所以只测到「第 1 级会调用、失败会往第 2/3 级落」的逻辑层（单测 + 代码路径），没有在真机粘贴出来看一眼。

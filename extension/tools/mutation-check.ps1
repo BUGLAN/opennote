@@ -1,8 +1,18 @@
 # 反向验证（变异 → 红；恢复 → 绿）。每个变异都先备份、跑断言、再恢复，最后核对 git 干净。
+#
+# ⚠ 协调警告：本脚本在运行期间会把 `src/` 与 `dist/` 短暂改成「故意坏的」状态（含 `node build.mjs` 重建），
+#   别人此时跑 `node verify.mjs` 会看到**假红**（例如 V1 报「缺少 commands：pick-element / clip-page」）。
+#   跑之前先在群里说一声，或等其他人验完再跑；跑完一轮约 2–3 分钟（8 个变异）。
 param([string]$Which = "all")
 $ErrorActionPreference = "Stop"
 Set-Location E:\repo\opennote\extension
+
+# 机器可见的信号（Lead 0.3.1 追加规则）：「有变异在跑 → 此刻的 verify 结果不可信」必须与
+# 「结果可信但失败」区分开。verify.mjs 发现这个标记会**以退出码 2 中止**，不打印任何红绿。
+$marker = Join-Path (Get-Location) ".mutation-running"
+New-Item -ItemType File -Path $marker -Force | Out-Null
 $report = @()
+try {
 
 function Run-Verify {
   $out = & node verify.mjs 2>&1
@@ -108,6 +118,8 @@ $results += Mutate "src/manifest.json" `
 $results | ForEach-Object { $report += $_; $report += "" }
 
 "================= 恢复后复跑 ================="
+# 复跑前必须先摘掉标记（否则 verify 会以退出码 2 中止，这是**设计**）
+Remove-Item $marker -Force -ErrorAction SilentlyContinue
 $v = Run-Verify
 $t = Run-Tests
 $report += "verify exit=$($v.code) → $(($v.text -split "`n" | Select-Object -Last 1))"
@@ -116,3 +128,7 @@ $report += "git status src/（应为空）:"
 $report += ((& git status --short -- src) -join "`n")
 
 $report -join "`n"
+} finally {
+  # 无论中途怎么退出（包括 Ctrl+C / 抛错），标记都必须被摘掉
+  Remove-Item $marker -Force -ErrorAction SilentlyContinue
+}

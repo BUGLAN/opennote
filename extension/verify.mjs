@@ -28,6 +28,16 @@ const DIST = join(HERE, "dist");
 const SRC = join(HERE, "src");
 const ROOT_TOKENS = join(HERE, "..", "src", "styles", "tokens.css");
 
+// 「结果不可信」必须与「结果可信且失败」分开（Lead 0.3.1 裁定）：
+// `tools/mutation-check.ps1` 运行期间会把 src/dist 改成故意坏的状态，此刻跑 verify 得到的红是**假红**。
+// 发现标记就**以退出码 2 中止**，不打印任何红绿 —— 这种中止不是 PASS，也不是 FAIL。
+const MUTATION_MARKER = join(HERE, ".mutation-running");
+if (existsSync(MUTATION_MARKER)) {
+  console.error("有变异正在运行（extension/.mutation-running 存在）：本次 verify 结果不可信，已中止（退出码 2）。");
+  console.error("等 tools/mutation-check.ps1 跑完（它会自己摘掉标记）再跑 verify。");
+  process.exit(2);
+}
+
 const failures = [];
 const notes = [];
 const fail = (group, message) => failures.push(`[${group}] ${message}`);
