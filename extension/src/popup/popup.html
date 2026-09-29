@@ -41,15 +41,18 @@
       <span class="clip__pick-note" id="pickNote"></span>
     </div>
 
-    <!-- 令牌块（㉞：配对整体删除；S30/S31/S32 + C70/C72/C73/C74）。已保存时只显示后 4 位。 -->
+    <!-- 令牌块（㉞：配对整体删除；S6/S10/S30–S32 + C56/C57/C58/C70/C72/C73/C74） -->
     <div class="clip__token" id="tokenRow" hidden>
+      <p class="clip__token-main" id="tokenMain">这个客户端还没有配置访问令牌。请在 Opennote 的「导入与接口」里复制令牌，粘贴到客户端。</p>
+      <p class="clip__hint" id="tokenHint">令牌在 Opennote 的「设置 · 文件 → 导入与接口」里点「复制令牌」拿到，粘贴到这里。</p>
       <div class="clip__token-saved" id="tokenSaved" hidden>
         <code class="clip__token-code" id="tokenCode"></code>
+        <button type="button" class="btn btn--ghost" id="tokenRepaste">重新粘贴令牌</button>
         <span class="clip__token-next" id="tokenNext">换一个令牌：在 Opennote 里重新生成，然后回来粘贴。</span>
       </div>
       <div class="clip__token-input" id="tokenInputRow" hidden>
         <label for="tokenInput">访问令牌</label>
-        <input id="tokenInput" class="field" type="password" placeholder="opn_…（47 个字符）" autocomplete="off" spellcheck="false">
+        <input id="tokenInput" class="field" type="text" placeholder="粘贴访问令牌" autocomplete="off" spellcheck="false">
         <button type="button" class="btn btn--primary" id="tokenSave">连接</button>
       </div>
       <p class="clip__hint" id="tokenError" hidden></p>

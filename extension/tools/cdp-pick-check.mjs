@@ -107,7 +107,7 @@ async function evaluate(session, expression) {
 const observations = [];
 function observe(ok, label, extra) {
   observations.push({ ok, label, extra });
-  console.log(`${ok ? "✓" : "✗"} ${label}${extra ? ` —— ${extra}` : ""}`);
+  console.log(`${ok ? "PASS" : "FAIL"} ${label}${extra ? ` —— ${extra}` : ""}`);
 }
 
 async function main() {

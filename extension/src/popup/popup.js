@@ -64,6 +64,9 @@ const tokenInputRow = $("tokenInputRow");
 const tokenInput = $("tokenInput");
 const tokenSave = $("tokenSave");
 const tokenError = $("tokenError");
+const tokenHint = $("tokenHint");
+const tokenMain = $("tokenMain");
+const tokenRepaste = $("tokenRepaste");
 const hlScopeNote = $("hlScopeNote");
 const tokenConfirm = $("tokenConfirm");
 const tokenConfirmYes = $("tokenConfirmYes");
@@ -268,10 +271,12 @@ function tokenInputBlock() {
   const hasToken = Boolean(state.hasToken);
   tokenSaved.hidden = !hasToken;
   tokenInputRow.hidden = hasToken;
+  tokenHint.hidden = hasToken;
+  tokenMain.hidden = hasToken;
   tokenError.hidden = true;
   if (hasToken) {
-    // C58 的只读块写法：只显示后 4 位（令牌明文只在生成时出现一次，插件不存明文以外的东西）
-    tokenCode.textContent = `opn_…${String(state.tokenTail || "????")}`;
+    // C58 / UI-04 S6 的只读写法：`opn_••••••••••••1234`（明文不留在界面上）
+    tokenCode.textContent = `opn_${"•".repeat(12)}${String(state.tokenTail || "????")}`;
     tokenNext.textContent = "换一个令牌：在 Opennote 里重新生成，然后回来粘贴。";
     return el("div");
   }
@@ -1373,6 +1378,12 @@ function bindEvents() {
   pickButton.addEventListener("click", () => void startPick());
   // 令牌块（㉞）：粘贴 → 本地校验 → 保存；清除前先确认（C77）
   tokenSave.addEventListener("click", () => void connectToken(tokenInput.value, false));
+  // C58：已保存状态下给「重新粘贴令牌」，点了就把输入框放回来（旧令牌在新令牌写入前保持有效）
+  tokenRepaste.addEventListener("click", () => {
+    if (snapshot && snapshot.settings) snapshot.settings.hasToken = false;
+    tokenInputBlock();
+    tokenInput.focus();
+  });
   tokenInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
