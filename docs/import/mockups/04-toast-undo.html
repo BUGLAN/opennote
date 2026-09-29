@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="paper" data-accent="seal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设计稿 · 04 入库提示、冲突与失败（UI-05 / UI-06 / UI-07）</title>
+<style>
+/* ── 令牌：逐字复制自 src/styles/tokens.css（截至撰写时） ─────────────── */
+:root{
+  --radius-sm:5px;--radius:8px;--radius-lg:14px;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --ease:cubic-bezier(0.22,0.61,0.36,1);--ease-out:cubic-bezier(0.16,1,0.3,1);
+  --dur-fast:120ms;--dur:220ms;--dur-slow:460ms;
+  --font-ui:"Figtree Variable","Figtree",system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --font-serif:"Newsreader Variable","Newsreader","Iowan Old Style",Georgia,"Songti SC","Noto Serif SC","Source Han Serif SC","SimSun",serif;
+  --font-display:"Fraunces Variable","Fraunces","Newsreader Variable",Georgia,"Songti SC",serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono",ui-monospace,"Cascadia Code",Consolas,"Liberation Mono",monospace;
+  --fs-xs:11.5px;--fs-sm:12.5px;--fs-md:13.5px;--fs-lg:15px;--tracking-wide:0.08em;
+}
+:root,[data-theme="paper"]{--paper:#fbf8f3;--paper-2:#fffdf9;--paper-3:#f2ece1;--paper-4:#e9e1d3;--ink:#221d17;--ink-2:#5c5347;--ink-3:#97897a;--rule:#e8dfd1;--rule-strong:#d7cbb8;--code-bg:#f4eee4;--sel:rgba(178,58,46,.16);--shadow-c:52 39 22;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.28);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.36),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.035;color-scheme:light}
+[data-theme="celadon"]{--paper:#f4f7f5;--paper-2:#fbfdfc;--paper-3:#e8efec;--paper-4:#dde7e2;--ink:#17221f;--ink-2:#4c5c57;--ink-3:#86968f;--rule:#dce5e1;--rule-strong:#c6d3cd;--code-bg:#eaf0ed;--sel:rgba(47,111,94,.16);--shadow-c:22 44 38;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.26);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.34),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.03;color-scheme:light}
+[data-theme="sepia"]{--paper:#faf3e6;--paper-2:#fffbf3;--paper-3:#f1e6d2;--paper-4:#e6d8bf;--ink:#2a2118;--ink-2:#6a5a45;--ink-3:#9d8a70;--rule:#e7d9c0;--rule-strong:#d3c1a2;--code-bg:#f3e9d8;--sel:rgba(168,100,42,.18);--shadow-c:60 44 20;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.07);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.12),0 12px 28px -18px rgb(var(--shadow-c)/.3);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.38),0 2px 8px -4px rgb(var(--shadow-c)/.14);--grain:.045;color-scheme:light}
+[data-theme="night"]{--paper:#14120f;--paper-2:#1c1915;--paper-3:#262119;--paper-4:#322b21;--ink:#eae3d7;--ink-2:#b0a796;--ink-3:#7d7466;--rule:#2e2820;--rule-strong:#413930;--code-bg:#1f1b15;--sel:rgba(224,102,79,.24);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.05;color-scheme:dark}
+[data-theme="ink"]{--paper:#0e1113;--paper-2:#151a1d;--paper-3:#1d2428;--paper-4:#273034;--ink:#dfe6e6;--ink-2:#9faeae;--ink-3:#6e7d7e;--rule:#232b2f;--rule-strong:#333d42;--code-bg:#161c20;--sel:rgba(79,181,154,.22);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.04;color-scheme:dark}
+:root,[data-accent="seal"]{--accent:#b23a2e;--accent-ink:#ffffff;--accent-soft:rgba(178,58,46,.12);--accent-line:rgba(178,58,46,.34)}
+[data-theme="night"][data-accent="seal"],[data-theme="ink"][data-accent="seal"]{--accent:#e0664f;--accent-ink:#1a0f0c;--accent-soft:rgba(224,102,79,.16);--accent-line:rgba(224,102,79,.4)}
+[data-accent="indigo"]{--accent:#34558b;--accent-ink:#ffffff;--accent-soft:rgba(52,85,139,.12);--accent-line:rgba(52,85,139,.34)}
+[data-theme="night"][data-accent="indigo"],[data-theme="ink"][data-accent="indigo"]{--accent:#7ea6e0;--accent-ink:#0b1420;--accent-soft:rgba(126,166,224,.16);--accent-line:rgba(126,166,224,.4)}
+[data-accent="pine"]{--accent:#2f6f5e;--accent-ink:#ffffff;--accent-soft:rgba(47,111,94,.12);--accent-line:rgba(47,111,94,.34)}
+[data-theme="night"][data-accent="pine"],[data-theme="ink"][data-accent="pine"]{--accent:#4fb59a;--accent-ink:#08130f;--accent-soft:rgba(79,181,154,.16);--accent-line:rgba(79,181,154,.4)}
+[data-accent="gamboge"]{--accent:#9a6b12;--accent-ink:#ffffff;--accent-soft:rgba(154,107,18,.14);--accent-line:rgba(154,107,18,.36)}
+[data-theme="night"][data-accent="gamboge"],[data-theme="ink"][data-accent="gamboge"]{--accent:#d9a537;--accent-ink:#171004;--accent-soft:rgba(217,165,55,.16);--accent-line:rgba(217,165,55,.4)}
+
+/* ── base.css 公共层（逐字复制） ─────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-ui);font-size:var(--fs-md);line-height:1.6;-webkit-font-smoothing:antialiased;font-synthesis-weight:none}
+body::before{content:"";position:fixed;inset:0;z-index:9999;pointer-events:none;opacity:var(--grain);mix-blend-mode:multiply;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+[data-theme="night"] body::before,[data-theme="ink"] body::before{mix-blend-mode:overlay}
+h1,h2,h3,h4,p{margin:0}
+button,input{font:inherit;color:inherit;background:none;border:none;margin:0}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+a{color:var(--accent)}
+::selection{background:var(--sel)}
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px;border-radius:3px}
+*{scrollbar-width:thin;scrollbar-color:var(--rule-strong) transparent}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);height:28px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--rule-strong);color:var(--ink);background:var(--paper-2);font-size:var(--fs-md);transition:background var(--dur-fast) var(--ease)}
+.btn:hover{background:var(--paper-3)}
+.btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn--primary:hover{filter:brightness(1.06);background:var(--accent)}
+.btn--ghost{border-color:transparent;background:transparent}
+.btn--ghost:hover{background:var(--paper-3)}
+.btn--danger{color:var(--accent)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.choice{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;align-items:center;padding:12px 14px;border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--paper-2);color:var(--ink);transition:border-color var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease);text-align:left;width:100%;cursor:pointer}
+.choice:hover{border-color:var(--accent-line);background:var(--accent-soft)}
+.choice.is-active{border-color:var(--accent-line);background:var(--accent-soft)}
+.choice:disabled{opacity:.5;cursor:not-allowed;border-color:var(--rule-strong);background:var(--paper-2)}
+.choice__icon{grid-row:span 2;width:16px;height:16px;color:var(--accent);display:inline-flex;align-items:center;justify-content:center;font-size:13px}
+.choice strong{font-weight:600}
+.choice small{grid-column:2;color:var(--ink-3);font-size:var(--fs-sm);line-height:1.5}
+.spinner{width:12px;height:12px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes pop{from{opacity:0;translate:0 -6px;scale:.985}to{opacity:1;translate:0 0;scale:1}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
+
+/* ── 设计稿外壳 ─────────────────────────────────────────────────────── */
+.mk-bar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;padding:8px var(--s4);border-bottom:1px solid var(--rule);background:color-mix(in srgb,var(--paper-2) 86%,var(--paper))}
+.mk-bar__title{font-family:var(--font-display);font-size:14px;font-weight:600;margin-right:auto}
+.mk-bar__title small{display:block;font-family:var(--font-ui);font-size:var(--fs-xs);font-weight:400;color:var(--ink-3);letter-spacing:var(--tracking-wide)}
+.mk-nav{display:flex;gap:2px;flex-wrap:wrap}
+.mk-nav a{padding:4px 8px;border-radius:var(--radius-sm);color:var(--ink-2);text-decoration:none;font-size:var(--fs-sm)}
+.mk-nav a:hover{background:var(--paper-3);color:var(--ink)}
+.mk-nav a.is-here{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-group{display:flex;align-items:center;gap:var(--s1);padding:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper)}
+.mk-group>span{padding:0 6px;font-size:var(--fs-xs);color:var(--ink-3)}
+.mk-chip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 8px;border-radius:4px;color:var(--ink-2);font-size:var(--fs-sm)}
+.mk-chip:hover{background:var(--paper-3)}
+.mk-chip.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-chip__dot{width:11px;height:11px;border-radius:3px;box-shadow:inset 0 0 0 1px rgb(0 0 0/.14);flex:none}
+.mk-wrap{max-width:1080px;margin:0 auto;padding:var(--s5) var(--s4) var(--s7)}
+.mk-h1{font-family:var(--font-display);font-size:22px;font-weight:600;letter-spacing:-.015em}
+.mk-lede{margin-top:4px;max-width:84ch;color:var(--ink-2);font-size:var(--fs-sm);line-height:1.75}
+.mk-spec{margin-top:var(--s5)}
+.mk-spec__id{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--accent);letter-spacing:var(--tracking-wide)}
+.mk-spec__t{font-weight:600;font-size:var(--fs-md);margin-top:2px}
+.mk-spec__n{margin-top:2px;max-width:88ch;color:var(--ink-3);font-size:var(--fs-xs);line-height:1.7}
+.mk-sec{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--rule)}
+.mk-sec>h2{font-family:var(--font-display);font-size:16px;font-weight:600}
+.mk-sec>p{margin-top:3px;max-width:84ch;color:var(--ink-3);font-size:var(--fs-sm);line-height:1.7}
+.mk-note{margin-top:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2);font-size:var(--fs-sm);color:var(--ink-2);line-height:1.75}
+.mk-kv{display:flex;gap:var(--s2);padding:4px 0;border-bottom:1px dashed var(--rule);font-size:var(--fs-sm)}
+.mk-kv:last-child{border-bottom:none}
+.mk-kv b{font-weight:600;min-width:92px}
+.mk-stage{position:relative;height:150px;margin-top:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper);overflow:hidden}
+.mk-stage--tall{height:210px}
+.mk-stage__hint{position:absolute;right:10px;bottom:8px;font-size:var(--fs-xs);color:var(--ink-3);font-family:var(--font-mono)}
+.mk-toastroot{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:var(--s2);width:max-content;max-width:94%}
+.mk-table{width:100%;border-collapse:collapse;margin-top:var(--s3);font-size:var(--fs-sm)}
+.mk-table th,.mk-table td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--rule);vertical-align:top}
+.mk-table th{font-weight:600;color:var(--ink-3);font-size:var(--fs-xs);letter-spacing:var(--tracking-wide);text-transform:uppercase}
+.mk-table td:first-child{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--ink-3);white-space:nowrap}
+
+/* ── UI-05 toast / UI-07 错误块 ─────────────────────────────────────── */
+.toast{display:inline-flex;align-items:center;gap:var(--s2);max-width:420px;padding:8px 14px;border-radius:99px;background:var(--ink);color:var(--paper);font-size:var(--fs-md);box-shadow:var(--shadow-2);animation:rise var(--dur) var(--ease-out) both}
+.toast--danger{background:var(--accent);color:var(--accent-ink)}
+.toast__action{color:inherit;text-decoration:underline;text-underline-offset:2px;flex:none}
+.toast__action:hover{opacity:.78}
+.clip__alert{padding:var(--s3) var(--s3) var(--s3) 11px;border:1px solid var(--rule-strong);border-left:2px solid var(--accent);border-radius:var(--radius-sm);background:var(--paper-2);max-width:560px}
+.clip__alert p{font-size:var(--fs-sm);line-height:1.7;color:var(--ink)}
+.clip__alert .next{margin-top:6px;color:var(--ink-2)}
+.clip__alert .acts{display:flex;gap:var(--s2);margin-top:10px}
+.inbox__item{display:flex;gap:8px;width:100%;padding:7px 9px;border-radius:var(--radius-sm);border-left:2px solid var(--accent);text-align:left;color:var(--ink-2);font-size:var(--fs-sm);cursor:pointer;background:var(--paper-2)}
+.inbox__title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-md);color:var(--ink)}
+.inbox__sub{display:block;font-size:var(--fs-xs);color:var(--accent);line-height:1.5}
+
+/* ── UI-06 冲突决策对话框 ───────────────────────────────────────────── */
+.dialog{width:min(560px,100%);display:flex;flex-direction:column;background:var(--paper-2);border:1px solid var(--rule-strong);border-radius:var(--radius-lg);box-shadow:var(--shadow-3);overflow:hidden;animation:pop var(--dur) var(--ease-out) both}
+.dialog__head{display:flex;align-items:center;gap:var(--s2);padding:var(--s4) var(--s4) var(--s3);border-bottom:1px solid var(--rule)}
+.dialog__title{flex:1;font-family:var(--font-display);font-size:17px;font-weight:600;letter-spacing:-.01em}
+.dialog__body{flex:1;min-height:0;overflow-y:auto;padding:var(--s4)}
+.dialog__foot{display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s4);border-top:1px solid var(--rule);background:color-mix(in srgb,var(--paper-3) 40%,var(--paper-2))}
+.dialog__foot .spacer{flex:1}
+.dialog__message{color:var(--ink-2);line-height:1.75}
+.dialog__note{margin-top:var(--s2);font-size:var(--fs-sm);color:var(--ink-3)}
+.choices{display:grid;gap:10px;margin-top:var(--s4)}
+.dialog__sub{margin-top:4px;font-size:var(--fs-sm);color:var(--ink-3)}
+</style>
+</head>
+<body>
+
+<div class="mk-bar">
+  <span class="mk-bar__title">04 · 入库提示、冲突与失败<small>UI-05（5 状态）· UI-06（6 状态）· UI-07（6 状态）</small></span>
+  <nav class="mk-nav" aria-label="设计稿导航">
+    <a href="00-index.html">索引</a><a href="01-extension-popup.html">插件弹窗</a><a href="02-import-inbox.html">导入收件箱</a><a href="03-settings-import-api.html">设置 · 导入与接口</a><a href="04-toast-undo.html" class="is-here">提示与冲突</a><a href="05-first-run.html">首次引导</a>
+  </nav>
+  <div class="mk-group" role="group" aria-label="配色主题">
+    <span>主题</span>
+    <button class="mk-chip" data-set-theme="paper">素笺</button>
+    <button class="mk-chip" data-set-theme="night">夜读</button>
+  </div>
+  <div class="mk-group" role="group" aria-label="强调色">
+    <span>强调色</span>
+    <button class="mk-chip" data-set-accent="seal"><i class="mk-chip__dot" style="background:#b23a2e"></i>朱砂</button>
+    <button class="mk-chip" data-set-accent="indigo"><i class="mk-chip__dot" style="background:#34558b"></i>靛青</button>
+    <button class="mk-chip" data-set-accent="pine"><i class="mk-chip__dot" style="background:#2f6f5e"></i>松绿</button>
+    <button class="mk-chip" data-set-accent="gamboge"><i class="mk-chip__dot" style="background:#9a6b12"></i>藤黄</button>
+  </div>
+  <button class="btn" data-toggle-light>切换亮 / 暗</button>
+</div>
+
+<main class="mk-wrap">
+  <h1 class="mk-h1">入库提示、冲突与失败</h1>
+  <p class="mk-lede">
+    导入的失败方式是打断写作，所以这一页是最需要设计的一块。三条原则：成功用中性墨色药丸，失败用强调色药丸并配一句能读懂的中文，错误不抖动、不变红、不闪烁。所有 toast 文案逐字取自 PRD 冻结清单。
+  </p>
+
+  <!-- ═══ UI-05 ═══ -->
+  <section class="mk-spec">
+    <div class="mk-spec__id">UI-05 / S1 · S4 · 默认与危险态</div>
+    <div class="mk-spec__t">入库成功 + 撤销（10 秒）</div>
+    <div class="mk-spec__n">沿用现有 .toast 药丸：--ink 底 / --paper 字 / 99px 圆角 / rise 220ms。动作是下划线文字，不加背景块，保持药丸的单一形状。</div>
+    <div class="mk-stage">
+      <div class="mk-toastroot">
+        <div class="toast" role="status"><span>已从网页剪藏：《中文排版指北》。</span><button class="toast__action">撤销</button></div>
+        <div class="toast" role="status"><span>已导入：《Rust 异步运行时的调度策略》。</span><button class="toast__action">撤销</button></div>
+        <div class="toast" role="status"><span>已保存为《中文排版指北 2》（同名文件已存在，另存为新笔记）。</span><button class="toast__action">撤销</button></div>
+      </div>
+      <span class="mk-stage__hint">toast-root · bottom 44px · 最多同时 4 条</span>
+    </div>
+    <div class="mk-note">
+      <div class="mk-kv"><b>S2 hover</b>动作文字透明度 1 → .78，120ms；不加背景块。</div>
+      <div class="mk-kv"><b>S3 聚焦</b>:focus-visible 焦点环 2px --accent-line，offset 2px；暗色主题下 --accent-line 用提亮后的强调色（#e0664f 系）。</div>
+      <div class="mk-kv"><b>S5 多条堆叠</b>最多 4 条（现有 toast.ts 的 slice(-4)）；同一标题的重复导入提示合并为一条，否则连剪三篇会堆三行。</div>
+      <div class="mk-kv"><b>焦点</b>不移动到 toast——用户正在打字时抢焦点是严重打断（原则 P1）。动作按钮需要 pointer-events: auto 才可点（.toast-root 本身是 pointer-events: none）。</div>
+      <div class="mk-kv"><b>Ctrl/⌘ + Z</b>不绑定为撤销导入：编辑器撤销有自己的语义，混淆两者会造成误删。</div>
+      <div class="mk-kv"><b>两档撤销</b>改变既有笔记内容的操作（append / overwrite）若回执 canRollback=false，toast 多一行小字「内容已合并进已有笔记，撤销会把整篇移入回收站。」——小字出现即代表撤销力度变弱，属必须告知的语义差别。新建（new）永远是完整回退，不加小字。</div>
+      <div class="mk-kv"><b>不提示的两种情况</b>① deduped: true（同一幂等键重复投递）一律静默——第二次本来就什么都没发生；② conflict: skip 返回 200 + skipped，按成功处理，最多一行「已存在同名笔记，按设置跳过」。</div>
+      <div class="mk-kv"><b>时长</b>带动作的提示 10 秒（FR-25 冻结值，实现必须显式传 duration；现有 toast.ts 的 action 分支默认是 6000ms，不满足要求），不带动作的 2600ms。</div>
+    </div>
+  </section>
+  <section class="mk-spec">
+    <div class="mk-spec__id">UI-05 · 收件箱模式 / 撤销过期 / 两档撤销</div>
+    <div class="mk-spec__t">另外三条成功的分支</div>
+    <div class="mk-stage mk-stage--tall">
+      <div class="mk-toastroot">
+        <div class="toast" role="status"><span>已进入收件箱等待确认：《给中文写作者的排版速查》。</span><button class="toast__action">去确认</button></div>
+        <div class="toast" role="status"><span>已把《中文排版指北》移入回收站，可以再找回来。</span></div>
+        <div class="toast" role="status"><span>撤销时间已过，可到回收站恢复《中文排版指北》。</span></div>
+        <div class="toast" role="status"><span>已把新片段追加到《中文排版指北》。</span><button class="toast__action">撤销</button></div>
+      </div>
+    </div>
+    <div class="mk-note">
+      <div class="mk-kv"><b>停留时长</b>带动作的 10 秒（沿用现有 notify 的 action 分支默认值），不带动作的 2600ms。</div>
+      <div class="mk-kv"><b>撤销语义</b>撤销 = 撤销本次入库（新建则移到回收站；追加则回滚到追加前的内容）。6 秒后仍可到回收站恢复——「按钮消失」不等于「内容不可恢复」，这条必须写进接口契约的语义里。</div>
+      <div class="mk-kv"><b>写盘即提示</b>桥返回成功 → 立即写盘 → 立即弹 toast；界面重扫在后台进行，提示不等重扫完成。</div>
+    </div>
+  </section>
+
+  <!-- ═══ UI-06 ═══ -->
+  <section class="mk-sec">
+    <h2>UI-06 · 冲突与去重决策</h2>
+    <p>只有当默认策略会让人看不懂结果时才出现。默认情况下不弹窗——同名走「加序号新建」，同 URL 走「追加」。三选一用现有的 .choice 卡片（与「打开笔记本」的选择卡片完全同款）。</p>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-06 / S1 · 默认（同名冲突）</div>
+      <div class="mk-spec__t">推荐项随着场景变化</div>
+      <div class="mk-spec__n">打开时焦点落在推荐项上，回车即得最常见结果。</div>
+      <div style="display:flex;gap:var(--s4);flex-wrap:wrap;margin-top:var(--s3)">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="这个落点已经有同名笔记">
+          <header class="dialog__head"><h2 class="dialog__title">这个落点已经有同名笔记</h2><button class="btn btn--ghost" style="width:26px;padding:0" aria-label="关闭">×</button></header>
+          <div class="dialog__body">
+            <p class="dialog__message">《中文排版指北》已经存在。选一种处理方式：</p>
+            <div class="choices" role="radiogroup" aria-label="冲突处理方式">
+              <button class="choice is-active" role="radio" aria-checked="true">
+                <span class="choice__icon">＋</span><strong>新建一篇</strong>
+                <small>自动改名为《中文排版指北 2》，原文件不动。</small>
+              </button>
+              <button class="choice" role="radio" aria-checked="false">
+                <span class="choice__icon">↧</span><strong>追加到已有笔记（推荐）</strong>
+                <small>在《中文排版指北》末尾加一个分割线再写入。</small>
+              </button>
+              <button class="choice" role="radio" aria-checked="false">
+                <span class="choice__icon">⊘</span><strong>跳过这次</strong>
+                <small>不写入任何文件。</small>
+              </button>
+            </div>
+          </div>
+          <footer class="dialog__foot"><div class="spacer"></div><button class="btn">取消</button><button class="btn btn--primary">继续</button></footer>
+        </div>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>取消的语义</b>「取消」不是「什么都不做」，而是回到 00 号简报 §6.3 的默认策略。这一点在界面上不解释，但接口契约里必须写清楚。</div>
+        <div class="mk-kv"><b>S4 聚焦</b>焦点环画在 .choice 上；↑/↓ 在三个选项间移动并即时更新选中（role="radiogroup" + role="radio"）。</div>
+        <div class="mk-kv"><b>S6 加载</b>点「继续」后按钮变「正在写入…」+ 旋转环；选项整体 pointer-events: none 且 opacity .6。</div>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-06 / S2 · 同 URL 重复剪藏</div>
+      <div class="mk-spec__t">默认追加，带上次剪藏时间</div>
+      <div style="display:flex;gap:var(--s4);flex-wrap:wrap;margin-top:var(--s3)">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="这个网址之前剪藏过">
+          <header class="dialog__head">
+            <div style="flex:1">
+              <h2 class="dialog__title">这个网址之前剪藏过</h2>
+              <p class="dialog__sub">example.com/typography-cn</p>
+            </div>
+            <button class="btn btn--ghost" style="width:26px;padding:0" aria-label="关闭">×</button>
+          </header>
+          <div class="dialog__body">
+            <p class="dialog__message">上次剪藏是 2026-09-21 15:04。默认追加到那篇笔记的末尾，也可以新建一篇。</p>
+            <div class="choices" role="radiogroup" aria-label="冲突处理方式">
+              <button class="choice is-active" role="radio" aria-checked="true">
+                <span class="choice__icon">↧</span><strong>追加到已有笔记（推荐）</strong>
+                <small>在《中文排版指北》末尾加一个分割线再写入。</small>
+              </button>
+              <button class="choice" role="radio" aria-checked="false">
+                <span class="choice__icon">＋</span><strong>新建一篇</strong>
+                <small>自动改名为《中文排版指北 2》，原文件不动。</small>
+              </button>
+              <button class="choice" role="radio" aria-checked="false">
+                <span class="choice__icon">⊘</span><strong>跳过这次</strong>
+                <small>不写入任何文件。</small>
+              </button>
+            </div>
+          </div>
+          <footer class="dialog__foot"><div class="spacer"></div><button class="btn">取消</button><button class="btn btn--primary">继续</button></footer>
+        </div>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-06 / S3 · 正在编辑同一篇</div>
+      <div class="mk-spec__t">不出现「覆盖」选项</div>
+      <div class="mk-spec__n">FR-18 明确不自动覆盖。正文已经在内存里排好队，只是落盘位置待定。</div>
+      <div style="display:flex;gap:var(--s4);flex-wrap:wrap;margin-top:var(--s3)">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="这篇笔记正在编辑">
+          <header class="dialog__head"><h2 class="dialog__title">这篇笔记正在编辑</h2><button class="btn btn--ghost" style="width:26px;padding:0" aria-label="关闭">×</button></header>
+          <div class="dialog__body">
+            <p class="dialog__message">《中文排版指北》有未写入的改动。追加会在你保存后又写入一段，建议先保存。</p>
+            <div class="choices" role="radiogroup" aria-label="冲突处理方式">
+              <button class="choice is-active" role="radio" aria-checked="true">
+                <span class="choice__icon">↧</span><strong>追加到已有笔记（推荐）</strong>
+                <small>在《中文排版指北》末尾加一个分割线再写入。</small>
+              </button>
+              <button class="choice" role="radio" aria-checked="false">
+                <span class="choice__icon">＋</span><strong>新建一篇</strong>
+                <small>自动改名为《中文排版指北 2》，原文件不动。</small>
+              </button>
+              <button class="choice" role="radio" aria-checked="false">
+                <span class="choice__icon">⊘</span><strong>跳过这次</strong>
+                <small>不写入任何文件。</small>
+              </button>
+            </div>
+          </div>
+          <footer class="dialog__foot"><div class="spacer"></div><button class="btn">取消</button><button class="btn btn--primary">继续</button></footer>
+        </div>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-06 / S5 · 追加目标不可写</div>
+      <div class="mk-spec__t">禁用项必须说明原因</div>
+      <div style="display:flex;gap:var(--s4);flex-wrap:wrap;margin-top:var(--s3)">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="这个落点已经有同名笔记">
+          <header class="dialog__head"><h2 class="dialog__title">这个落点已经有同名笔记</h2><button class="btn btn--ghost" style="width:26px;padding:0" aria-label="关闭">×</button></header>
+          <div class="dialog__body">
+            <p class="dialog__message">《如何读一本厚书》已经存在。选一种处理方式：</p>
+            <div class="choices" role="radiogroup" aria-label="冲突处理方式">
+              <button class="choice is-active" role="radio" aria-checked="true">
+                <span class="choice__icon">＋</span><strong>新建一篇</strong>
+                <small>自动改名为《如何读一本厚书 2》，原文件不动。</small>
+              </button>
+              <button class="choice" role="radio" aria-checked="false" disabled>
+                <span class="choice__icon" style="color:var(--ink-3)">↧</span><strong>追加到已有笔记</strong>
+                <small>这篇笔记在回收站里，不能追加。</small>
+              </button>
+              <button class="choice" role="radio" aria-checked="false">
+                <span class="choice__icon">⊘</span><strong>跳过这次</strong>
+                <small>不写入任何文件。</small>
+              </button>
+            </div>
+          </div>
+          <footer class="dialog__foot"><div class="spacer"></div><button class="btn">取消</button><button class="btn btn--primary">继续</button></footer>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ═══ UI-07 ═══ -->
+  <section class="mk-sec">
+    <h2>UI-07 · 失败与离线</h2>
+    <p>同一份文案在三个位置复用：应用内 toast、插件 popup 的内嵌错误块、收件箱条目。每种失败都给一句「发生了什么」+ 一句「怎么办」+ 一个能直接点的下一步。</p>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-07 / S1 · S2</div>
+      <div class="mk-spec__t">应用内 toast（危险态）</div>
+      <div class="mk-stage mk-stage--tall">
+        <div class="mk-toastroot">
+          <div class="toast toast--danger" role="status"><span>本地接口未开启。打开桌面版 Opennote 的「设置 · 文件 · 导入与接口」，开启本地接口后重试。</span><button class="toast__action">重试</button></div>
+          <div class="toast toast--danger" role="status"><span>导入失败 3 次：本地接口未开启…</span></div>
+          <div class="toast toast--danger" role="status"><span>没有可导入的内容：标题和正文都是空的。</span></div>
+          <div class="toast toast--danger" role="status"><span>附件「shot.png」超过 8 MB，已跳过；正文其余部分已保存。</span><button class="toast__action">查看</button></div>
+        </div>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>S2 合并</b>同原因码 6 秒内合并为一条并追加计数，否则一次批量导入会刷满屏幕。</div>
+        <div class="mk-kv"><b>不变红</b>没有红色令牌；危险与失败一律用 --accent（与 .btn--danger、.menu__item.is-danger、.toast--danger 一致）。</div>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-07 / S3 · S6</div>
+      <div class="mk-spec__t">插件内的错误块与网页版说明</div>
+      <div class="mk-note" style="padding:var(--s4)">
+        <div class="clip__alert">
+          <p>本地接口未开启。打开桌面版 Opennote 的「设置 · 文件 · 导入与接口」，开启本地接口后重试。</p>
+          <p class="next">已保留你填的标题与标签。</p>
+          <div class="acts"><button class="btn btn--primary">重试</button><button class="btn">打开 Opennote 设置</button></div>
+        </div>
+        <div class="clip__alert" style="margin-top:var(--s4);border-left-color:var(--rule-strong)">
+          <p>本地接口令牌不正确或已被撤销。请在 Opennote 设置里重新复制令牌，并更新剪藏工具的配置。</p>
+          <input class="btn" style="margin-top:10px;width:100%;height:30px;justify-content:flex-start;font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--ink-3)" value="粘贴访问令牌" readonly>
+          <div class="acts"><button class="btn btn--primary">连接</button><button class="btn">打开 Opennote 设置</button></div>
+        </div>
+        <div class="clip__alert" style="margin-top:var(--s4);border-left-color:var(--rule-strong)">
+          <p style="color:var(--ink-2)">本地接口只在桌面版提供。网页版的笔记存在浏览器里，外部程序无法直接写入。</p>
+        </div>
+        <div class="clip__alert" style="margin-top:var(--s4);border-left-color:var(--rule-strong)">
+          <p style="color:var(--ink-2)">没有找到已打开的 Opennote 窗口，请先打开 Opennote 网页版再重试。</p>
+          <div class="acts"><button class="btn btn--primary">打开 Opennote</button></div>
+        </div>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>S4 离线暂存</b>芯片「离线，已暂存 3 条」；主按钮保持可用（继续暂存）；底部一行 --fs-xs --ink-3「打开 Opennote 后会自动补投。」</div>
+        <div class="mk-kv"><b>S5 收件箱条目</b>条目左侧 2px --accent 边 + --fs-xs --accent 的原因文字，见下方。</div>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-07 / S5</div>
+      <div class="mk-spec__t">收件箱里的失败条目</div>
+      <div style="display:grid;gap:var(--s2);max-width:460px;margin-top:var(--s3)">
+        <button class="inbox__item"><div style="flex:1;min-width:0"><span class="inbox__title">（没有标题）</span><span class="inbox__sub">正文为空，无法入库</span></div><span style="font-size:var(--fs-xs);color:var(--ink-3)">命令行</span></button>
+        <button class="inbox__item"><div style="flex:1;min-width:0"><span class="inbox__title">中文排版指北</span><span class="inbox__sub">附件「shot.png」超过 8 MB，已跳过</span></div><span style="font-size:var(--fs-xs);color:var(--ink-3)">插件</span></button>
+        <button class="inbox__item"><div style="flex:1;min-width:0"><span class="inbox__title">写给中文写作者的排版速查</span><span class="inbox__sub">目标目录「读书笔记」不存在</span></div><span style="font-size:var(--fs-xs);color:var(--ink-3)">插件</span></button>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-07 · 错误文案与原因码对照</div>
+      <div class="mk-spec__t">逐字取自 PRD 冻结清单</div>
+      <div class="mk-spec__n">「原因码」一列最终以 02 号接口契约为准：带 IMP- 前缀的逐字沿用其 userMessage，占位名仅用于 02 未覆盖的通道级本地状态（如 queued_offline，它不是错误码）。</div>
+      <table class="mk-table">
+        <thead><tr><th>原因码</th><th>逐字文案</th><th>出现在</th><th>下一步</th></tr></thead>
+        <tbody>
+          <tr><td>bridge_off</td><td>本地接口未开启。打开桌面版 Opennote 的「设置 · 文件 · 导入与接口」，开启本地接口后重试。</td><td>插件 / CLI / toast</td><td>打开 Opennote 设置</td></tr>
+          <tr><td>bridge_token</td><td>本地接口令牌不正确或已被撤销。请在 Opennote 设置里重新复制令牌，并更新剪藏工具的配置。</td><td>插件 / CLI / 设置</td><td>切到令牌输入块</td></tr>
+          <tr><td>bridge_port</td><td>本地接口无法启动：端口 8787 已被占用。可在设置里改用其它端口。</td><td>设置面板 / toast</td><td>换一个端口</td></tr>
+          <tr><td>no_workspace</td><td>Opennote 还没有打开笔记本文件夹，这次剪藏没有入库。</td><td>toast / 收件箱</td><td>打开笔记本</td></tr>
+          <tr><td>empty_body</td><td>没有可导入的内容：标题和正文都是空的。</td><td>toast / 收件箱条目</td><td>无（用户重剪）</td></tr>
+          <tr><td>asset_too_large</td><td>附件「{文件名}」超过 {上限}，已跳过；正文其余部分已保存。</td><td>toast / 收件箱条目</td><td>无</td></tr>
+          <tr><td>deduped</td><td>（不提示）同一幂等键重复投递一律静默；只在客户端内联显示「已在笔记中（未重复入库）。」</td><td>不出现</td><td>无</td></tr>
+          <tr><td>IMP-3001</td><td>来源未被允许。请在设置里添加来源，或用配对流程重新配对。</td><td>设置面板「被拒绝的来源」日志（用户可见）</td><td>添加来源</td></tr>
+          <tr><td>IMP-3002</td><td>导入内容不是有效的 JSON，请重试。</td><td>CLI stderr / MCP 返回值（手写 JSON 的场景）</td><td>修正 JSON</td></tr>
+          <tr><td>IMP-4001</td><td>导入内容格式不正确。</td><td>CLI stderr / MCP 返回值</td><td>修客户端序列化</td></tr>
+          <tr><td>IMP-4010</td><td>这个目录里同名文件太多了，请换一个目录或改标题。</td><td>收件箱条目次级行 / 「最近导入」详情</td><td>换个落点…</td></tr>
+          <tr><td>IMP-4017</td><td>没有找到这条导入记录。</td><td>「最近导入」详情（查询失败态）</td><td>检查 importId</td></tr>
+          <tr><td>queued_offline</td><td>Opennote 未打开笔记本，内容已暂存在插件里，打开笔记本后会自动补投。</td><td>插件弹窗</td><td>无</td></tr>
+          <tr><td>IMP-4006（no_window）</td><td>没有找到已打开的 Opennote 窗口，请先打开 Opennote 网页版再重试。</td><td>插件</td><td>打开 Opennote</td></tr>
+          <tr><td>IMP-1006（unsupported_platform）</td><td>这个浏览器里的笔记本暂时还不能接收剪藏，正在做最后的适配。（表达「尚未开放」，不是「不支持」；P1 且绑定 D12 门禁）</td><td>插件 / 设置面板</td><td>无（如实告知）</td></tr>
+          <tr><td>IMP-1006（移动端）</td><td>手机上暂时不能直接剪藏到 Opennote。可以复制正文，在 Opennote 里新建笔记粘贴。</td><td>分享面板（P1）</td><td>无</td></tr>
+          <tr><td>IMP-5001（write_failed）</td><td>写入笔记失败，磁盘可能已满或没有权限。原内容没有丢失。</td><td>toast</td><td>重试一次</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mk-sec">
+      <h2>动效约定：哪里动、哪里不动</h2>
+      <div class="mk-note">
+        <div class="mk-kv"><b>动</b>toast 出现 rise 220ms；错误块出现 rise 220ms；状态芯片「启动中」圆点 pulse 1.8s（成功后立刻停）；收件箱条目被消耗后 fade 120ms。</div>
+        <div class="mk-kv"><b>不动</b>错误不抖动（no shake）、不闪红、不扫光；列表不逐条入场；数字徽标不弹跳；按钮 hover 不做位移或缩放；加载不用整屏遮罩。</div>
+        <div class="mk-kv"><b>降级</b>prefers-reduced-motion 下动画与过渡降为 0.01ms（本文件已内联）；「启动中」不能只靠脉冲，必须同时有文字。</div>
+        <div class="mk-kv"><b>屏幕阅读器</b>toast 用 role="status" 而非 alert，避免打断屏幕阅读器正在朗读的内容；多条时为 aria-live="polite"。</div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ═══ UI-13 ═══ -->
+  <section class="mk-sec">
+    <h2>UI-13 · <span style="font-family:var(--font-mono);font-size:15px">opennote://</span> 唤起确认（FR-64 / P1）</h2>
+    <p>URL scheme 可以被任意网页、任意本地程序触发，所以必须弹一次确认再入库——静默入库等于给了一个免鉴权的写入入口（00 §6.8④：只做短载荷 ≤4 KiB 与收件箱领取）。默认焦点落在次要按钮上，回车不应该直接写入。</p>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-13 / S1 · 默认（短载荷）</div>
+      <div class="mk-spec__t">要从外部链接导入吗？</div>
+      <div class="mk-spec__n">复用 UI-06 的决策对话框；只列来源与规模，不预览全文（长正文会把对话框撑爆）。</div>
+      <div style="display:flex;gap:var(--s4);flex-wrap:wrap;margin-top:var(--s3)">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="要从外部链接导入吗">
+          <header class="dialog__head">
+            <div style="flex:1">
+              <h2 class="dialog__title">要从外部链接导入吗？</h2>
+              <p class="dialog__sub">opennote://import/…（载荷 1.8 KiB）</p>
+            </div>
+            <button class="btn btn--ghost" style="width:26px;padding:0" aria-label="关闭">×</button>
+          </header>
+          <div class="dialog__body">
+            <p class="dialog__message">这个链接要求把一条内容导入当前笔记本。</p>
+            <div style="margin-top:var(--s3)">
+              <div style="display:flex;gap:8px;padding:7px 0;border-bottom:1px dashed var(--rule);font-size:var(--fs-sm)"><b style="min-width:64px;font-weight:600">来源</b><span style="color:var(--ink-2)">example.com · 中文排版指北</span></div>
+              <div style="display:flex;gap:8px;padding:7px 0;border-bottom:1px dashed var(--rule);font-size:var(--fs-sm)"><b style="min-width:64px;font-weight:600">落点</b><span style="color:var(--ink-2)">剪藏</span></div>
+              <div style="display:flex;gap:8px;padding:7px 0;font-size:var(--fs-sm)"><b style="min-width:64px;font-weight:600">正文</b><span style="color:var(--ink-2)">约 62 行</span></div>
+            </div>
+            <p class="dialog__note">本机链接只支持短载荷（最多 8192 个字符）。更长内容请用浏览器插件或命令行导入。</p>
+          </div>
+          <footer class="dialog__foot"><div class="spacer"></div><button class="btn">取消</button><button class="btn btn--primary">导入</button></footer>
+        </div>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>S2 超限</b>标题「这个链接的内容太大了」；正文「本机链接最多支持 8192 个字符。请改用浏览器插件或命令行导入。」；只有「知道了」。</div>
+        <div class="mk-kv"><b>S3 未打开笔记本</b>标题「Opennote 还没有打开笔记本」；正文「Opennote 里还没有打开笔记本，请先打开一个文件夹（或新建浏览器笔记本）。」（IMP-4007）；按钮「打开笔记本」。</div>
+        <div class="mk-kv"><b>S4 收件箱领取（opennote://inbox/claim）</b>标题「有 3 条内容在收件箱等着确认」；按钮「去确认」+「稍后」；确认后打开 UI-03。</div>
+        <div class="mk-kv"><b>S5 已导入过</b>标题「已在笔记中（未重复入库）。」· 正文「打开那条笔记看看。」；按钮「打开那条笔记」+「知道了」，不显示「导入」——再点也不会产生第二条。</div>
+        <div class="mk-kv"><b>S6 不可信来源</b>标题「要允许这个来源吗？」· 正文「{origin} 想通过本机链接导入内容。」；按钮「允许一次」+「拒绝」；拒绝后 2600ms 提示「已拒绝一个来源不明的请求：{origin}。」</div>
+        <div class="mk-kv"><b>键盘</b>默认焦点在「取消 / 稍后 / 知道了」，不在主按钮；Esc = 取消；焦点陷阱与焦点归还见规范 §10.3。</div>
+        <div class="mk-kv"><b>动效</b>进场 pop 220ms；不做从屏幕外滑入（那会让人误以为是操作系统弹窗）。</div>
+      </div>
+    </section>
+  </section>
+</main>
+
+<script>
+(function(){
+  var root=document.documentElement, light="paper";
+  function store(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+  function read(k){try{return localStorage.getItem(k)}catch(e){return null}}
+  function apply(theme,accent,persist){
+    root.setAttribute("data-theme",theme); root.setAttribute("data-accent",accent);
+    if(theme!=="night"&&theme!=="ink") light=theme;
+    document.querySelectorAll("[data-set-theme]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-theme")===theme)});
+    document.querySelectorAll("[data-set-accent]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-accent")===accent)});
+    if(persist){store("opennote-mock-theme",theme);store("opennote-mock-accent",accent)}
+  }
+  document.querySelectorAll("[data-set-theme]").forEach(function(b){b.addEventListener("click",function(){apply(b.getAttribute("data-set-theme"),root.getAttribute("data-accent"),true)})});
+  document.querySelectorAll("[data-set-accent]").forEach(function(b){b.addEventListener("click",function(){apply(root.getAttribute("data-theme"),b.getAttribute("data-set-accent"),true)})});
+  var tl=document.querySelector("[data-toggle-light]");
+  if(tl) tl.addEventListener("click",function(){
+    var dark=root.getAttribute("data-theme")==="night"||root.getAttribute("data-theme")==="ink";
+    apply(dark?light:"night",root.getAttribute("data-accent"),true);
+  });
+  var q=new URLSearchParams(location.search);
+  apply(q.get("theme")||read("opennote-mock-theme")||"paper",q.get("accent")||read("opennote-mock-accent")||"seal",false);
+})();
+</script>
+</body>
+</html>

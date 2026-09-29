@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="paper" data-accent="seal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设计稿 · 02 导入收件箱（UI-03 / UI-08 / UI-10）</title>
+<style>
+/* ── 令牌：逐字复制自 src/styles/tokens.css（截至撰写时） ─────────────── */
+:root{
+  --sidebar-w:268px;--tabbar-h:40px;--statusbar-h:30px;
+  --radius-sm:5px;--radius:8px;--radius-lg:14px;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --ease:cubic-bezier(0.22,0.61,0.36,1);--ease-out:cubic-bezier(0.16,1,0.3,1);
+  --dur-fast:120ms;--dur:220ms;--dur-slow:460ms;
+  --font-ui:"Figtree Variable","Figtree",system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --font-serif:"Newsreader Variable","Newsreader","Iowan Old Style",Georgia,"Songti SC","Noto Serif SC","Source Han Serif SC","SimSun",serif;
+  --font-display:"Fraunces Variable","Fraunces","Newsreader Variable",Georgia,"Songti SC",serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono",ui-monospace,"Cascadia Code",Consolas,"Liberation Mono",monospace;
+  --fs-xs:11.5px;--fs-sm:12.5px;--fs-md:13.5px;--fs-lg:15px;--tracking-wide:0.08em;
+}
+:root,[data-theme="paper"]{--paper:#fbf8f3;--paper-2:#fffdf9;--paper-3:#f2ece1;--paper-4:#e9e1d3;--ink:#221d17;--ink-2:#5c5347;--ink-3:#97897a;--rule:#e8dfd1;--rule-strong:#d7cbb8;--code-bg:#f4eee4;--sel:rgba(178,58,46,.16);--shadow-c:52 39 22;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.28);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.36),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.035;color-scheme:light}
+[data-theme="celadon"]{--paper:#f4f7f5;--paper-2:#fbfdfc;--paper-3:#e8efec;--paper-4:#dde7e2;--ink:#17221f;--ink-2:#4c5c57;--ink-3:#86968f;--rule:#dce5e1;--rule-strong:#c6d3cd;--code-bg:#eaf0ed;--sel:rgba(47,111,94,.16);--shadow-c:22 44 38;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.26);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.34),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.03;color-scheme:light}
+[data-theme="sepia"]{--paper:#faf3e6;--paper-2:#fffbf3;--paper-3:#f1e6d2;--paper-4:#e6d8bf;--ink:#2a2118;--ink-2:#6a5a45;--ink-3:#9d8a70;--rule:#e7d9c0;--rule-strong:#d3c1a2;--code-bg:#f3e9d8;--sel:rgba(168,100,42,.18);--shadow-c:60 44 20;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.07);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.12),0 12px 28px -18px rgb(var(--shadow-c)/.3);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.38),0 2px 8px -4px rgb(var(--shadow-c)/.14);--grain:.045;color-scheme:light}
+[data-theme="night"]{--paper:#14120f;--paper-2:#1c1915;--paper-3:#262119;--paper-4:#322b21;--ink:#eae3d7;--ink-2:#b0a796;--ink-3:#7d7466;--rule:#2e2820;--rule-strong:#413930;--code-bg:#1f1b15;--sel:rgba(224,102,79,.24);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.05;color-scheme:dark}
+[data-theme="ink"]{--paper:#0e1113;--paper-2:#151a1d;--paper-3:#1d2428;--paper-4:#273034;--ink:#dfe6e6;--ink-2:#9faeae;--ink-3:#6e7d7e;--rule:#232b2f;--rule-strong:#333d42;--code-bg:#161c20;--sel:rgba(79,181,154,.22);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.04;color-scheme:dark}
+:root,[data-accent="seal"]{--accent:#b23a2e;--accent-ink:#ffffff;--accent-soft:rgba(178,58,46,.12);--accent-line:rgba(178,58,46,.34)}
+[data-theme="night"][data-accent="seal"],[data-theme="ink"][data-accent="seal"]{--accent:#e0664f;--accent-ink:#1a0f0c;--accent-soft:rgba(224,102,79,.16);--accent-line:rgba(224,102,79,.4)}
+[data-accent="indigo"]{--accent:#34558b;--accent-ink:#ffffff;--accent-soft:rgba(52,85,139,.12);--accent-line:rgba(52,85,139,.34)}
+[data-theme="night"][data-accent="indigo"],[data-theme="ink"][data-accent="indigo"]{--accent:#7ea6e0;--accent-ink:#0b1420;--accent-soft:rgba(126,166,224,.16);--accent-line:rgba(126,166,224,.4)}
+[data-accent="pine"]{--accent:#2f6f5e;--accent-ink:#ffffff;--accent-soft:rgba(47,111,94,.12);--accent-line:rgba(47,111,94,.34)}
+[data-theme="night"][data-accent="pine"],[data-theme="ink"][data-accent="pine"]{--accent:#4fb59a;--accent-ink:#08130f;--accent-soft:rgba(79,181,154,.16);--accent-line:rgba(79,181,154,.4)}
+[data-accent="gamboge"]{--accent:#9a6b12;--accent-ink:#ffffff;--accent-soft:rgba(154,107,18,.14);--accent-line:rgba(154,107,18,.36)}
+[data-theme="night"][data-accent="gamboge"],[data-theme="ink"][data-accent="gamboge"]{--accent:#d9a537;--accent-ink:#171004;--accent-soft:rgba(217,165,55,.16);--accent-line:rgba(217,165,55,.4)}
+
+/* ── base.css 公共层（逐字复制） ─────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-ui);font-size:var(--fs-md);line-height:1.6;-webkit-font-smoothing:antialiased;font-synthesis-weight:none}
+body::before{content:"";position:fixed;inset:0;z-index:9999;pointer-events:none;opacity:var(--grain);mix-blend-mode:multiply;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+[data-theme="night"] body::before,[data-theme="ink"] body::before{mix-blend-mode:overlay}
+h1,h2,h3,h4,p{margin:0}
+button,input{font:inherit;color:inherit;background:none;border:none;margin:0}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+a{color:var(--accent)}
+::selection{background:var(--sel)}
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px;border-radius:3px}
+*{scrollbar-width:thin;scrollbar-color:var(--rule-strong) transparent}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);height:28px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--rule-strong);color:var(--ink);background:var(--paper-2);font-size:var(--fs-md);transition:background var(--dur-fast) var(--ease)}
+.btn:hover{background:var(--paper-3)}
+.btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn--primary:hover{filter:brightness(1.06);background:var(--accent)}
+.btn--ghost{border-color:transparent;background:transparent}
+.btn--ghost:hover{background:var(--paper-3)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:var(--radius-sm);color:var(--ink-2)}
+.icon-btn:hover{background:var(--paper-3);color:var(--ink)}
+.seal{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:5px;background:var(--accent);color:var(--accent-ink);font-family:var(--font-serif);font-size:13px;line-height:1;box-shadow:inset 0 0 0 1px rgb(255 255 255/.32)}
+.segmented{display:inline-flex;padding:2px;gap:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper)}
+.segmented button{height:24px;padding:0 10px;border-radius:4px;color:var(--ink-2);font-size:var(--fs-sm)}
+.segmented button.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.switch{display:inline-flex;align-items:center;gap:var(--s2);color:var(--ink-2);font-size:var(--fs-sm)}
+.switch input{appearance:none;width:34px;height:19px;border-radius:99px;background:var(--paper-4);border:1px solid var(--rule-strong);position:relative;cursor:pointer;flex:none;transition:background var(--dur-fast) var(--ease)}
+.switch input::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--paper-2);box-shadow:var(--shadow-1);transition:transform var(--dur-fast) var(--ease)}
+.switch input:checked{background:var(--accent);border-color:var(--accent)}
+.switch input:checked::after{transform:translateX(15px)}
+.tree__row{display:flex;align-items:center;gap:6px;width:100%;min-height:27px;padding:3px 8px 3px 6px;border-radius:var(--radius-sm);color:var(--ink-2);text-align:left;font-size:var(--fs-md);line-height:1.35;cursor:pointer;transition:background var(--dur-fast) var(--ease)}
+.tree__row:hover{background:var(--paper-3);color:var(--ink)}
+.tree__row.is-active{background:var(--accent-soft);color:var(--ink);font-weight:550}
+.tree__icon{display:inline-flex;color:var(--ink-3);flex:none;font-size:12px}
+.tree__row.is-active .tree__icon,.tree__row:hover .tree__icon{color:var(--accent)}
+.tree__label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tree__meta{flex:none;font-size:var(--fs-xs);color:var(--ink-3);font-variant-numeric:tabular-nums}
+.tree__group{display:flex;align-items:center;gap:6px;margin:var(--s3) 0 3px;padding:0 8px;font-size:var(--fs-xs);letter-spacing:var(--tracking-wide);text-transform:uppercase;color:var(--ink-3)}
+.tree__group::after{content:"";flex:1;height:1px;background:var(--rule)}
+.tree__empty{padding:var(--s4) var(--s3);color:var(--ink-3);font-size:var(--fs-sm);text-align:center;line-height:1.7}
+.dialog__note{margin-top:var(--s2);font-size:var(--fs-sm);color:var(--ink-3)}
+.spinner{width:12px;height:12px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pop{from{opacity:0;translate:0 -6px;scale:.985}to{opacity:1;translate:0 0;scale:1}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
+
+/* ── 设计稿外壳 ─────────────────────────────────────────────────────── */
+.mk-bar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;padding:8px var(--s4);border-bottom:1px solid var(--rule);background:color-mix(in srgb,var(--paper-2) 86%,var(--paper))}
+.mk-bar__title{font-family:var(--font-display);font-size:14px;font-weight:600;margin-right:auto}
+.mk-bar__title small{display:block;font-family:var(--font-ui);font-size:var(--fs-xs);font-weight:400;color:var(--ink-3);letter-spacing:var(--tracking-wide)}
+.mk-nav{display:flex;gap:2px;flex-wrap:wrap}
+.mk-nav a{padding:4px 8px;border-radius:var(--radius-sm);color:var(--ink-2);text-decoration:none;font-size:var(--fs-sm)}
+.mk-nav a:hover{background:var(--paper-3);color:var(--ink)}
+.mk-nav a.is-here{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-group{display:flex;align-items:center;gap:var(--s1);padding:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper)}
+.mk-group>span{padding:0 6px;font-size:var(--fs-xs);color:var(--ink-3)}
+.mk-chip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 8px;border-radius:4px;color:var(--ink-2);font-size:var(--fs-sm)}
+.mk-chip:hover{background:var(--paper-3)}
+.mk-chip.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-chip__dot{width:11px;height:11px;border-radius:3px;box-shadow:inset 0 0 0 1px rgb(0 0 0/.14);flex:none}
+.mk-wrap{max-width:1180px;margin:0 auto;padding:var(--s5) var(--s4) var(--s7)}
+.mk-h1{font-family:var(--font-display);font-size:22px;font-weight:600;letter-spacing:-.015em}
+.mk-lede{margin-top:4px;max-width:80ch;color:var(--ink-2);font-size:var(--fs-sm);line-height:1.75}
+.mk-spec{margin-top:var(--s5)}
+.mk-spec__id{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--accent);letter-spacing:var(--tracking-wide)}
+.mk-spec__t{font-weight:600;font-size:var(--fs-md);margin-top:2px}
+.mk-spec__n{margin-top:2px;max-width:88ch;color:var(--ink-3);font-size:var(--fs-xs);line-height:1.7}
+.mk-sec{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--rule)}
+.mk-sec>h2{font-family:var(--font-display);font-size:16px;font-weight:600}
+.mk-sec>p{margin-top:3px;max-width:84ch;color:var(--ink-3);font-size:var(--fs-sm);line-height:1.7}
+.mk-note{margin-top:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2);font-size:var(--fs-sm);color:var(--ink-2);line-height:1.75}
+.mk-kv{display:flex;gap:var(--s2);padding:4px 0;border-bottom:1px dashed var(--rule);font-size:var(--fs-sm)}
+.mk-kv:last-child{border-bottom:none}
+.mk-kv b{font-weight:600;min-width:80px}
+.mk-app{display:grid;grid-template-columns:236px minmax(0,1fr);height:520px;border:1px solid var(--rule-strong);border-radius:var(--radius);overflow:hidden;background:var(--paper)}
+
+/* ── UI-10 入口：侧栏 + 状态栏 ──────────────────────────────────────── */
+.sidebar{display:flex;flex-direction:column;min-height:0;overflow:hidden;border-right:1px solid var(--rule);background:color-mix(in srgb,var(--paper-2) 62%,var(--paper))}
+.sidebar__head{display:flex;align-items:center;gap:var(--s2);height:40px;padding:0 var(--s3);border-bottom:1px solid var(--rule)}
+.sidebar__name{font-family:var(--font-display);font-size:14px;font-weight:600}
+.sidebar__name small{display:block;font-family:var(--font-ui);font-size:10.5px;font-weight:400;letter-spacing:var(--tracking-wide);color:var(--ink-3);margin-top:-2px}
+.sidebar__tabs{display:flex;gap:2px;padding:var(--s2) var(--s3) 6px}
+.sidebar__tab{flex:1;height:26px;border-radius:var(--radius-sm);color:var(--ink-2);font-size:var(--fs-sm)}
+.sidebar__tab.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.sidebar__body{flex:1;min-height:0;overflow-y:auto;padding:var(--s2) var(--s2) var(--s4)}
+.sidebar__foot{display:flex;align-items:center;gap:var(--s2);padding:6px var(--s3);border-top:1px solid var(--rule);font-size:var(--fs-xs);color:var(--ink-3)}
+.main{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:var(--paper)}
+.tabbar{display:flex;align-items:stretch;height:var(--tabbar-h);border-bottom:1px solid var(--rule);background:color-mix(in srgb,var(--paper-2) 40%,var(--paper))}
+.tab{display:flex;align-items:center;gap:6px;padding:0 12px;border-right:1px solid var(--rule);color:var(--ink-3);font-size:var(--fs-md);position:relative}
+.tab.is-active{background:var(--paper);color:var(--ink);font-weight:550}
+.tab.is-active::after{content:"";position:absolute;inset:auto 0 -1px 0;height:2px;background:var(--accent)}
+.editor{flex:1;min-height:0;padding:var(--s4) var(--s5);overflow:hidden}
+.editor h3{font-family:var(--font-serif);font-size:19px;font-weight:600}
+.editor p{margin-top:var(--s3);font-family:var(--font-serif);font-size:var(--fs-lg);line-height:1.85;color:var(--ink-2);max-width:34rem}
+.statusbar{display:flex;align-items:center;gap:var(--s3);height:var(--statusbar-h);padding:0 var(--s3);border-top:1px solid var(--rule);background:color-mix(in srgb,var(--paper-2) 45%,var(--paper));font-size:var(--fs-xs);color:var(--ink-3);flex-wrap:nowrap;overflow:hidden}
+.statusbar__spacer{flex:1}
+.statusbar__item{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 6px;border-radius:4px;font-variant-numeric:tabular-nums;flex:none;white-space:nowrap}
+.statusbar__item--button:hover{background:var(--paper-3);color:var(--ink)}
+.statusbar__item.is-on{color:var(--accent);background:var(--accent-soft)}
+.statusbar__dot{width:6px;height:6px;border-radius:50%;background:var(--ink-3)}
+
+/* ── UI-03 导入收件箱：.inbox ────────────────────────────────────────── */
+.overlay{display:flex;align-items:flex-start;justify-content:center;padding:var(--s4);margin-top:var(--s3)}
+.dialog{width:min(760px,100%);max-height:640px;display:flex;flex-direction:column;background:var(--paper-2);border:1px solid var(--rule-strong);border-radius:var(--radius-lg);box-shadow:var(--shadow-3);overflow:hidden;animation:pop var(--dur) var(--ease-out) both}
+.dialog--narrow{width:min(520px,100%)}
+.dialog__head{display:flex;align-items:center;gap:var(--s2);padding:var(--s4) var(--s4) var(--s3);border-bottom:1px solid var(--rule)}
+.dialog__title{flex:1;font-family:var(--font-display);font-size:17px;font-weight:600;letter-spacing:-.01em}
+.dialog__body{flex:1;min-height:0;overflow-y:auto;padding:var(--s4)}
+.dialog__foot{display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s4);border-top:1px solid var(--rule);background:color-mix(in srgb,var(--paper-3) 40%,var(--paper-2))}
+.dialog__foot .spacer{flex:1}
+.inbox__bar{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;padding:var(--s2) var(--s4);border-bottom:1px solid var(--rule);background:color-mix(in srgb,var(--paper-3) 40%,var(--paper-2))}
+.inbox{display:grid;grid-template-columns:200px minmax(0,1fr);gap:var(--s4);min-height:340px}
+.inbox__list{border-right:1px solid var(--rule);padding-right:var(--s3);max-height:400px;overflow-y:auto}
+.inbox__item{display:flex;gap:8px;width:100%;padding:7px 9px;border-radius:var(--radius-sm);border-left:2px solid transparent;text-align:left;color:var(--ink-2);font-size:var(--fs-sm);cursor:pointer;transition:background var(--dur-fast) var(--ease)}
+.inbox__item:hover{background:var(--paper-3)}
+.inbox__item.is-active{background:var(--accent-soft);color:var(--ink)}
+.inbox__item.is-error{border-left-color:var(--accent)}
+.inbox__item.is-error .inbox__sub{color:var(--accent)}
+.inbox__row{display:flex;align-items:baseline;gap:6px}
+.inbox__title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-md)}
+.inbox__sub{display:block;font-size:var(--fs-xs);color:var(--ink-3);line-height:1.5}
+.inbox__kind{flex:none;font-size:var(--fs-xs);color:var(--ink-3)}
+.inbox__check{width:14px;height:14px;flex:none;margin-top:3px}
+.inbox__detail{min-width:0}
+.inbox__group{margin-top:var(--s3);font-size:var(--fs-xs);letter-spacing:var(--tracking-wide);text-transform:uppercase;color:var(--ink-3);display:flex;align-items:center;gap:6px}
+.inbox__group::after{content:"";flex:1;height:1px;background:var(--rule)}
+.inbox__dl{margin-top:6px;display:grid;gap:2px}
+.inbox__dl div{display:flex;gap:var(--s2);font-size:var(--fs-sm);line-height:1.6}
+.inbox__dl dt{width:60px;flex:none;color:var(--ink-3);font-size:var(--fs-xs);padding-top:2px}
+.inbox__dl dd{margin:0;color:var(--ink-2);min-width:0;word-break:break-all}
+.inbox__mono{font-family:var(--font-mono);font-size:var(--fs-xs)}
+.inbox__preview{margin-top:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper);font-family:var(--font-serif);font-size:var(--fs-sm);line-height:1.8;color:var(--ink-2);max-height:150px;overflow:auto}
+.inbox__hint{margin-top:6px;font-size:var(--fs-sm);color:var(--ink)}
+.inbox__tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.tag{display:inline-flex;align-items:center;height:20px;padding:0 8px;border:1px solid var(--rule-strong);border-radius:99px;font-size:var(--fs-xs);color:var(--ink-2);background:var(--paper)}
+.inbox__empty{padding:var(--s6) var(--s3);text-align:center}
+.inbox__empty .empty__seal{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:var(--radius);background:var(--accent);color:var(--accent-ink);font-family:var(--font-serif);font-size:23px;box-shadow:inset 0 0 0 1.5px rgb(255 255 255/.32);margin-bottom:var(--s3)}
+.inbox__empty h3{font-size:var(--fs-md);font-weight:600}
+.inbox__empty p{margin-top:4px;font-size:var(--fs-sm);color:var(--ink-3);line-height:1.7}
+.inbox__field-err{margin-top:6px;padding:7px 9px;border-left:2px solid var(--accent);font-size:var(--fs-sm);color:var(--ink);background:var(--paper)}
+</style>
+</head>
+<body>
+
+<div class="mk-bar">
+  <span class="mk-bar__title">02 · 导入收件箱<small>UI-03（10 状态）· UI-08 空态 · UI-10 入口 · min(760px, 100vw−32px)</small></span>
+  <nav class="mk-nav" aria-label="设计稿导航">
+    <a href="00-index.html">索引</a><a href="01-extension-popup.html">插件弹窗</a><a href="02-import-inbox.html" class="is-here">导入收件箱</a><a href="03-settings-import-api.html">设置 · 导入与接口</a><a href="04-toast-undo.html">提示与冲突</a><a href="05-first-run.html">首次引导</a>
+  </nav>
+  <div class="mk-group" role="group" aria-label="配色主题">
+    <span>主题</span>
+    <button class="mk-chip" data-set-theme="paper">素笺</button>
+    <button class="mk-chip" data-set-theme="night">夜读</button>
+  </div>
+  <div class="mk-group" role="group" aria-label="强调色">
+    <span>强调色</span>
+    <button class="mk-chip" data-set-accent="seal"><i class="mk-chip__dot" style="background:#b23a2e"></i>朱砂</button>
+    <button class="mk-chip" data-set-accent="indigo"><i class="mk-chip__dot" style="background:#34558b"></i>靛青</button>
+    <button class="mk-chip" data-set-accent="pine"><i class="mk-chip__dot" style="background:#2f6f5e"></i>松绿</button>
+    <button class="mk-chip" data-set-accent="gamboge"><i class="mk-chip__dot" style="background:#9a6b12"></i>藤黄</button>
+  </div>
+  <button class="btn" data-toggle-light>切换亮 / 暗</button>
+</div>
+
+<main class="mk-wrap">
+  <h1 class="mk-h1">导入收件箱</h1>
+  <p class="mk-lede">
+    只有开启「先进入收件箱」模式、或某次导入需要人工判断时，用户才会来到这里。骨架沿用「历史版本」对话框的两栏（<code style="font-family:var(--font-mono)">.history</code>），条目沿用文件树的树行手感。示例数据含一条 example.com 网页剪藏、一条来自 Claude Code 的导入、一条正文为空的失败项、一条同 URL 重复剪藏。
+  </p>
+
+  <!-- ═══ UI-10 入口：侧栏行 + 状态栏 ═══ -->
+  <section class="mk-spec">
+    <div class="mk-spec__id">UI-10 · 入口整合</div>
+    <div class="mk-spec__t">侧栏文件树一行（紧挨回收站）+ 状态栏一项</div>
+    <div class="mk-spec__n">不新增第五个侧栏页签：四页签是锁定的信息架构，加第五个会改动 SidebarTab 类型与持久化。收件箱语义上就是文件树里的一个特殊位置，与回收站同构。计数用现有 .tree__meta（等宽数字），不加红点、不加角标色（原则 P3）。</div>
+    <div class="mk-app" style="margin-top:10px">
+      <aside class="sidebar">
+        <div class="sidebar__head"><span class="seal" aria-hidden="true">記</span><span class="sidebar__name">Opennote<small>开源笔记</small></span><span style="margin-left:auto;color:var(--ink-3)">＋</span></div>
+        <nav class="sidebar__tabs"><button class="sidebar__tab is-active">文件</button><button class="sidebar__tab">搜索</button><button class="sidebar__tab">标签</button><button class="sidebar__tab">星标</button></nav>
+        <div class="sidebar__body">
+          <div class="tree__row"><span class="tree__icon">▤</span><span class="tree__label">全部笔记</span><span class="tree__meta">37</span></div>
+          <div class="tree__group">文件夹</div>
+          <div class="tree__row"><span class="tree__icon">▾</span><span class="tree__icon">▤</span><span class="tree__label">读书笔记</span></div>
+          <div class="tree__row" style="padding-left:19px"><span class="tree__icon">◇</span><span class="tree__label">中文排版指北</span></div>
+          <div class="tree__row" style="padding-left:19px"><span class="tree__icon">◇</span><span class="tree__label">写给中文写作者的排版速查</span></div>
+          <div class="tree__row" style="padding-left:19px"><span class="tree__icon">◇</span><span class="tree__label">Rust 异步运行时笔记</span></div>
+          <div class="tree__row"><span class="tree__icon">▸</span><span class="tree__icon">▤</span><span class="tree__label">工作</span><span class="tree__meta">6</span></div>
+          <div class="tree__group">其他</div>
+          <div class="tree__row"><span class="tree__icon">◇</span><span class="tree__label">星标笔记</span><span class="tree__meta">4</span></div>
+          <div class="tree__row"><span class="tree__icon">×</span><span class="tree__label">回收站</span><span class="tree__meta">2</span></div>
+          <!-- ↓ 新入口：与回收站同一分组、同一行的写法，计数 = 待确认条目数 -->
+          <div class="tree__row"><span class="tree__icon">↓</span><span class="tree__label">导入收件箱</span><span class="tree__meta">3</span></div>
+        </div>
+        <footer class="sidebar__foot"><span>37 篇笔记</span></footer>
+      </aside>
+      <div class="main">
+        <div class="tabbar"><div class="tab is-active"><span>中文排版指北</span></div><div class="tab"><span>Rust 异步运行时笔记</span></div></div>
+        <div class="editor">
+          <h3>中文排版指北</h3>
+          <p>正文的行高比字号更影响阅读的舒适度。一段 16px 的中文，行高落在 1.7 到 1.8 之间时，眼睛在换行处最不容易丢掉行。</p>
+          <p>字距则相反：中文字距几乎不需要调整，加了反而松散。</p>
+        </div>
+        <footer class="statusbar">
+          <span class="statusbar__item">▤ 本机磁盘 · D:\Notes</span>
+          <span class="statusbar__item">37 个文件</span>
+          <span class="statusbar__item"><span class="statusbar__dot"></span>已保存</span>
+          <span class="statusbar__spacer"></span>
+          <span class="statusbar__item">行 12 · 列 8</span>
+          <span class="statusbar__item">历史 6</span>
+          <!-- ↓ 新入口：常规态，不是 .is-on —— .is-on 留给「面板已开启」这类开关状态 -->
+          <span class="statusbar__item statusbar__item--button">↓ 收件箱 3</span>
+          <span class="statusbar__item statusbar__item--button">◐ 素笺</span>
+          <span class="statusbar__item statusbar__item--button">设置</span>
+        </footer>
+      </div>
+    </div>
+    <div class="mk-note">
+      <div class="mk-kv"><b>窄窗口</b>≤1180px 时状态栏这一项随 .statusbar__item--compact 隐藏；侧栏行与命令面板仍然可达，能力不丢失。</div>
+      <div class="mk-kv"><b>命令面板</b>新增分组「导入」：导入收件箱 · 开启/关闭本地导入接口 · 复制本地接口地址 · 复制访问令牌 · 导入与接口设置 · 查看最近导入。沿用现有命令注册表结构，快捷键与设置面板共用同一份定义。</div>
+      <div class="mk-kv"><b>图标</b>侧栏行用现有 Icon 的 download（与设置里「导入文件或 zip」一致），状态栏用 layers，不新增图标资源。</div>
+    </div>
+  </section>
+
+  <!-- ═══ UI-03/S1 默认 · 有待确认条目 ═══ -->
+  <section class="mk-spec">
+    <div class="mk-spec__id">UI-03 / S1 · 默认</div>
+    <div class="mk-spec__t">有哪些待确认、每条从哪来、会落到哪</div>
+    <div class="mk-spec__n">左列表 ↑/↓ 移动时右详情即时更新（不等 Enter）。失败条目左侧 2px 强调色竖边 + 原因文字，不用红底。</div>
+    <div class="overlay">
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="导入收件箱">
+        <header class="dialog__head">
+          <h2 class="dialog__title">导入收件箱</h2>
+          <button class="icon-btn" aria-label="关闭">×</button>
+        </header>
+        <div class="inbox__bar">
+          <div class="segmented"><button class="is-active">全部 4</button><button>待确认 3</button><button>失败 1</button></div>
+          <div class="spacer" style="flex:1"></div>
+          <span class="dialog__note" style="margin:0">收件箱在 .opennote/inbox/</span>
+        </div>
+        <div class="dialog__body">
+          <div class="inbox">
+            <div class="inbox__list" role="list" aria-label="收件箱条目，共 4 条">
+              <button class="inbox__item is-active" role="listitem" aria-current="true">
+                <div style="flex:1;min-width:0">
+                  <div class="inbox__row"><span class="inbox__title">中文排版指北</span><span class="inbox__kind">插件</span></div>
+                  <span class="inbox__sub">example.com · 12 分钟前</span>
+                </div>
+              </button>
+              <button class="inbox__item" role="listitem">
+                <div style="flex:1;min-width:0">
+                  <div class="inbox__row"><span class="inbox__title">Rust 异步运行时的调度策略</span><span class="inbox__kind">Claude Code</span></div>
+                  <span class="inbox__sub">without.boats · 1 小时前</span>
+                </div>
+              </button>
+              <button class="inbox__item" role="listitem">
+                <div style="flex:1;min-width:0">
+                  <div class="inbox__row"><span class="inbox__title">中文排版指北</span><span class="inbox__kind">插件</span></div>
+                  <span class="inbox__sub">example.com · 3 小时前 · 同网址</span>
+                </div>
+              </button>
+              <button class="inbox__item is-error" role="listitem">
+                <div style="flex:1;min-width:0">
+                  <div class="inbox__row"><span class="inbox__title">（没有标题）</span><span class="inbox__kind">命令行</span></div>
+                  <span class="inbox__sub">正文为空，无法入库</span>
+                </div>
+              </button>
+            </div>
+            <div class="inbox__detail">
+              <div style="display:flex;gap:8px;align-items:baseline">
+                <h3 style="font-size:var(--fs-lg);font-weight:600;font-family:var(--font-serif);flex:1">中文排版指北</h3>
+                <span class="tag">网页剪藏</span>
+              </div>
+
+              <div class="inbox__group">落点</div>
+              <dl class="inbox__dl">
+                <div><dt>目录</dt><dd>读书笔记</dd></div>
+                <div><dt>文件名</dt><dd class="inbox__mono">中文排版指北.md</dd></div>
+              </dl>
+              <p class="inbox__hint">同名文件已存在，入库时会另存为《中文排版指北 2》。</p>
+
+              <div class="inbox__group">来源信息</div>
+              <dl class="inbox__dl">
+                <div><dt>来源</dt><dd class="inbox__mono">https://example.com/typography-cn</dd></div>
+                <div><dt>网页标题</dt><dd>中文排版指北 · example.com</dd></div>
+                <div><dt>作者</dt><dd>小林</dd></div>
+                <div><dt>发布时间</dt><dd>2026-09-20</dd></div>
+                <div><dt>剪藏时间</dt><dd>2026-09-29 14:26</dd></div>
+                <div><dt>客户端</dt><dd>chrome-extension 0.3.0</dd></div>
+              </dl>
+
+              <div class="inbox__group">标签</div>
+              <div class="inbox__tags"><span class="tag">排版</span><span class="tag">网页剪藏</span></div>
+
+              <div class="inbox__group">正文预览</div>
+              <div class="inbox__preview">一份写给中文写作者的排版速查。它不讨论字体设计，只回答一个具体问题：在屏幕和纸上，中文怎样才能读得下去。全文分为行高与字距、段落间距、标点挤压、中西文混排四节，每节都给出可以直接照抄的数值。</div>
+
+              <div class="inbox__group">附件 · 2</div>
+              <dl class="inbox__dl">
+                <div><dt></dt><dd>line-height.png · 42 KB</dd></div>
+                <div><dt></dt><dd>punctuation.png · 18 KB</dd></div>
+              </dl>
+
+              <div class="inbox__group">详情</div>
+              <dl class="inbox__dl">
+                <div><dt>幂等键</dt><dd class="inbox__mono">8f2c1d40-9a3e-4c77-b1d5-2e6a90f4c318</dd></div>
+                <div><dt>信封</dt><dd class="inbox__mono">opennote.import/v1</dd></div>
+              </dl>
+            </div>
+          </div>
+        </div>
+        <footer class="dialog__foot">
+          <button class="btn btn--ghost">在浏览器中打开来源</button>
+          <div class="spacer"></div>
+          <button class="btn">跳过这次</button>
+          <button class="btn btn--primary">入库</button>
+        </footer>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ UI-03/S5 错误条目被选中 ═══ -->
+  <section class="mk-spec">
+    <div class="mk-spec__id">UI-03 / S5 · 错误条目</div>
+    <div class="mk-spec__t">单条入库失败：不关闭对话框，就地换策略重试</div>
+    <div class="mk-spec__n">错误文案逐字取自 PRD 冻结清单第 5 条。主按钮在失败条目上禁用，并给出唯一可执行的下一步。</div>
+    <div class="overlay">
+      <div class="dialog dialog--narrow" role="dialog" aria-modal="true" aria-label="导入收件箱">
+        <header class="dialog__head">
+          <h2 class="dialog__title">导入收件箱</h2>
+          <button class="icon-btn" aria-label="关闭">×</button>
+        </header>
+        <div class="inbox__bar">
+          <div class="segmented"><button>全部 4</button><button class="is-active">失败 1</button><button>待确认 3</button></div>
+        </div>
+        <div class="dialog__body">
+          <div class="inbox" style="grid-template-columns:180px minmax(0,1fr);min-height:220px">
+            <div class="inbox__list" style="max-height:220px">
+              <button class="inbox__item is-error is-active" aria-current="true">
+                <div style="flex:1;min-width:0">
+                  <div class="inbox__row"><span class="inbox__title">（没有标题）</span></div>
+                  <span class="inbox__sub">正文为空，无法入库</span>
+                </div>
+              </button>
+            </div>
+            <div class="inbox__detail">
+              <div class="inbox__field-err">没有可导入的内容：标题和正文都是空的。</div>
+              <div class="inbox__group">来源信息</div>
+              <dl class="inbox__dl">
+                <div><dt>客户端</dt><dd>cli 0.3.0</dd></div>
+                <div><dt>剪藏时间</dt><dd>2026-09-29 13:02</dd></div>
+                <div><dt>来源</dt><dd class="inbox__mono">（没有网址）</dd></div>
+              </dl>
+              <div class="inbox__group">修复方式</div>
+              <p style="font-size:var(--fs-sm);color:var(--ink-2);line-height:1.7;margin-top:4px">在来源工具里补上正文后重新投递；也可以直接丢弃这一条。</p>
+            </div>
+          </div>
+        </div>
+        <footer class="dialog__foot">
+          <button class="btn btn--ghost">丢弃</button>
+          <div class="spacer"></div>
+          <button class="btn">稍后处理</button>
+          <button class="btn btn--primary" disabled title="正文为空，无法入库">入库</button>
+        </footer>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ UI-03/S7 空态 ═══ -->
+  <section class="mk-spec">
+    <div class="mk-spec__id">UI-03 / S7 · S8 · 空状态</div>
+    <div class="mk-spec__t">收件箱是空的 / 筛选后没有结果</div>
+    <div class="mk-spec__n">口吻参照现有实现「回收站是空的。」——陈述事实 + 一句「怎么办」，不写「暂无数据」。印章方块在对话框内缩到 40px、圆角降到 --radius。</div>
+    <div class="overlay" style="gap:var(--s4)">
+      <div class="dialog dialog--narrow" role="dialog" aria-modal="true" aria-label="导入收件箱">
+        <header class="dialog__head">
+          <h2 class="dialog__title">导入收件箱</h2>
+          <button class="icon-btn" aria-label="关闭">×</button>
+        </header>
+        <div class="dialog__body">
+          <div class="inbox__empty">
+            <span class="empty__seal" aria-hidden="true">記</span>
+            <h3>收件箱是空的。</h3>
+            <p>外部导入若选择「先进入收件箱」，会先出现在这里。</p>
+            <button class="btn" style="margin-top:var(--s4)">知道了</button>
+          </div>
+        </div>
+      </div>
+      <div class="dialog dialog--narrow" role="dialog" aria-modal="true" aria-label="导入收件箱">
+        <header class="dialog__head">
+          <h2 class="dialog__title">导入收件箱</h2>
+          <button class="icon-btn" aria-label="关闭">×</button>
+        </header>
+        <div class="inbox__bar">
+          <div class="segmented"><button>全部 4</button><button class="is-active">失败 0</button><button>待确认 4</button></div>
+        </div>
+        <div class="dialog__body">
+          <p class="tree__empty">没有「失败」的条目。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ UI-03/S10 批量模式（P1） ═══ -->
+  <section class="mk-spec">
+    <div class="mk-spec__id">UI-03 / S10 · 批量模式（P1）</div>
+    <div class="mk-spec__t">批量确认与批量丢弃</div>
+    <div class="mk-spec__n">每条左侧出现 .switch 复选框；未选任何条目时两个按钮禁用。P1 范围（FR-12），P0 只做逐条确认。</div>
+    <div class="overlay">
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="导入收件箱">
+        <header class="dialog__head">
+          <h2 class="dialog__title">导入收件箱</h2>
+          <button class="icon-btn" aria-label="关闭">×</button>
+        </header>
+        <div class="inbox__bar">
+          <div class="segmented"><button class="is-active">全部 4</button><button>待确认 3</button><button>失败 1</button></div>
+          <div class="spacer" style="flex:1"></div>
+          <label class="switch"><input type="checkbox" checked>批量选择</label>
+        </div>
+        <div class="dialog__body">
+          <div class="inbox" style="grid-template-columns:minmax(0,1fr);min-height:180px">
+            <div class="inbox__list" style="border-right:none;padding-right:0;max-height:220px">
+              <button class="inbox__item is-active" style="align-items:flex-start">
+                <input class="inbox__check" type="checkbox" checked aria-label="选择中文排版指北">
+                <div style="flex:1;min-width:0">
+                  <div class="inbox__row"><span class="inbox__title">中文排版指北</span><span class="inbox__kind">插件</span></div>
+                  <span class="inbox__sub">example.com · 12 分钟前</span>
+                </div>
+              </button>
+              <button class="inbox__item" style="align-items:flex-start">
+                <input class="inbox__check" type="checkbox" checked aria-label="选择 Rust 异步运行时的调度策略">
+                <div style="flex:1;min-width:0">
+                  <div class="inbox__row"><span class="inbox__title">Rust 异步运行时的调度策略</span><span class="inbox__kind">Claude Code</span></div>
+                  <span class="inbox__sub">without.boats · 1 小时前</span>
+                </div>
+              </button>
+              <button class="inbox__item" style="align-items:flex-start">
+                <input class="inbox__check" type="checkbox" aria-label="选择 中文排版指北（重复）">
+                <div style="flex:1;min-width:0">
+                  <div class="inbox__row"><span class="inbox__title">中文排版指北</span><span class="inbox__kind">插件</span></div>
+                  <span class="inbox__sub">example.com · 3 小时前 · 同网址</span>
+                </div>
+              </button>
+              <button class="inbox__item is-error" style="align-items:flex-start" disabled>
+                <input class="inbox__check" type="checkbox" disabled aria-label="该条目无法入库">
+                <div style="flex:1;min-width:0">
+                  <div class="inbox__row"><span class="inbox__title">（没有标题）</span><span class="inbox__kind">命令行</span></div>
+                  <span class="inbox__sub">正文为空，无法入库</span>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+        <footer class="dialog__foot">
+          <span class="dialog__note" style="margin:0">已选 2 条</span>
+          <div class="spacer"></div>
+          <button class="btn">全部跳过</button>
+          <button class="btn btn--primary">全部入库</button>
+        </footer>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ UI-03/S3 · S4 · S6 · S9 其余状态 ═══ -->
+  <section class="mk-sec">
+    <h2>其余状态（说明性，不重复画）</h2>
+    <div class="mk-note">
+      <div class="mk-kv"><b>S2 聚焦</b>条目获得 :focus-visible 焦点环；↑/↓ 移动选中，右详情同步更新（不等 Enter）。</div>
+      <div class="mk-kv"><b>S3 加载</b>.dialog__body 显示「正在读取收件箱…」，与现有「正在读取历史…」同构。</div>
+      <div class="mk-kv"><b>S4 入库中</b>主按钮变「正在入库…」+ 12px 旋转环；条目右侧「写入中…」；Esc 仍可关闭，入库在后台继续。</div>
+      <div class="mk-kv"><b>S6 落点目录不存在</b>落点行变 --accent-line 边框 + 「目标目录「{目录}」不存在，入库时会存到根目录。」主按钮文案改为「入库到根目录」。</div>
+      <div class="mk-kv"><b>S9 目标笔记正在编辑</b>主按钮变「追加到正在编辑的笔记」并保持可用；若会导致覆盖则禁用 + 「这篇笔记正在编辑，不能覆盖；可以追加或另存为新笔记。」</div>
+      <div class="mk-kv"><b>丢弃确认</b>标题「丢弃这条导入？」正文「「{标题}」还没入库，丢弃后不会进入回收站。」确认「丢弃」（btn--danger），取消「留下」。按 FR-29 冻结语义：丢弃只删待确认条目，回收站条目数不变——所以确认框必须如实说明不可恢复，不能写「可以再找回来」。</div>
+      <div class="mk-kv"><b>条目的 5 个状态</b>pending（左侧 2px 强调色竖条）/ committing（「正在写入…」+ 旋转环，两个按钮都禁用）/ committed（「已入库 · {相对时间}」，保留 24 小时，这期间撤销仍有意义）/ failed（code 的中文文案 + 「还有 {n} 天」，保留 7 天）/ discarded（「已丢弃」，无「恢复」）。</div>
+      <div class="mk-kv"><b>条目的字段</b>客户端（插件 / 命令行 / AI 助手 / 分享 / 手动放入，取 entry.client.name + version）、落点（entry.target.folder 为空时显示「笔记本根目录」）、附件数与合计大小、冲突建议（只渲染 new / append / skip，不渲染 overwrite）、attempts 与 updatedAt。</div>
+      <div class="mk-kv"><b>外部投递标记</b>投递方不是应用时，标题右侧加一个 --fs-xs --ink-3 的「外部」小字（不加重色边框），让用户知道这条不是自己在应用里点的。</div>
+      <div class="mk-kv"><b>列表上限</b>500 条；达到上限时列表顶部一行「收件箱已满（500 条），请先处理一些条目。」不做自动淘汰，避免静默丢内容。</div>
+      <div class="mk-kv"><b>剪藏时间</b>用 entry.source.capturedAt（本地时区），不要用目录名里的 UTC 时间戳。</div>
+    </div>
+  </section>
+
+  <section class="mk-sec">
+    <h2>键盘可达性与无障碍</h2>
+    <div class="mk-note">
+      <div class="mk-kv"><b>打开时</b>焦点落在左列表第一个条目（不是对话框本身）；aria-label="导入收件箱"。</div>
+      <div class="mk-kv"><b>列表</b>↑/↓ 移动，Home/End 到首尾，Enter = 入库当前条目，Esc 关闭（Modal 已实现）。</div>
+      <div class="mk-kv"><b>筛选</b>role="radiogroup" + role="radio"，←/→ 切换；切换后焦点回到当前条目，被筛掉则落到第一条。</div>
+      <div class="mk-kv"><b>屏幕阅读器</b>列表容器 aria-label="收件箱条目，共 {n} 条"；当前条目 aria-current="true"；每条可访问名 = 「{标题}，来自 {站点}，{剪藏时间}，{客户端}」。</div>
+      <div class="mk-kv"><b>Destructive 键</b>Backspace / Delete 不绑定任何破坏性操作，避免误删。</div>
+      <div class="mk-kv"><b>窄屏 ≤720px</b>切单栏：左列表变成横向可滚动的条目条（每条 min-width 180px），详情在下方，底部动作区 sticky。再窄则改为「条目 → 点开详情」两级。</div>
+      <div class="mk-kv"><b>焦点陷阱</b>现有 Modal 实现了 Esc 关闭但未见焦点陷阱；三个新模态层需补齐「打开移入焦点、Tab 循环在层内、关闭归还触发元素」（规范 10.3）。</div>
+    </div>
+  </section>
+
+  <!-- ═══ UI-11 ═══ -->
+  <section class="mk-sec">
+    <h2>UI-11 · 剪藏笔记的「来源信息」行（FR-21 / P1）</h2>
+    <p>这是剪藏笔记与手写笔记在编辑区顶部唯一的差别：标题下方一行 --fs-sm --ink-3 的元信息，不加图标、不加底色块、不加左竖线（否则会和正文引用块混淆）。手写笔记里这一行完全不出现，不留空隙。</p>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-11 / S1 · S4 · 默认与 hover</div>
+      <div class="mk-spec__t">来源：example.com · 2026-09-21 15:04</div>
+      <div class="mk-note" style="padding:var(--s4)">
+        <div style="max-width:640px;margin:0 auto;padding:var(--s4) var(--s3) 0;background:var(--paper);border:1px solid var(--rule);border-radius:var(--radius)">
+          <h3 style="font-family:var(--font-serif);font-size:21px;font-weight:600;letter-spacing:-.01em">中文排版指北</h3>
+          <p style="margin-top:6px;font-size:var(--fs-sm);color:var(--ink-3)">来源：<a href="#" style="color:var(--accent);text-decoration:underline;text-underline-offset:2px">example.com</a> · 2026-09-21 15:04</p>
+          <div style="height:1px;background:var(--rule);margin:var(--s3) 0"></div>
+          <p style="font-family:var(--font-serif);font-size:15px;line-height:1.9;color:var(--ink-2)">先说结论：中文排版里最容易被忽略的不是字体，而是行内标点与外文之间的空隙。<br>许多编辑器把「中英混排」当成字体问题处理，实际上是间距与断行的问题。</p>
+        </div>
+        <div class="mk-kv" style="margin-top:var(--s3)"><b>S1 默认</b>站点名是可点击链接（--accent），点击用系统浏览器打开原 URL（shell.openExternal），不在应用内开网页；站点名与时间之间用「 · 」分隔。</div>
+        <div class="mk-kv"><b>S2 站点名缺失</b>用 URL 的 host 兜底；仍拿不到则整行退化为「来源：无来源」，并且不渲染链接。</div>
+        <div class="mk-kv"><b>S3 只有 URL 没有时间</b>「来源：example.com」——省掉分隔符，不显示「· null」。</div>
+        <div class="mk-kv"><b>S4 hover / 聚焦</b>链接下划线出现；--accent-line 焦点环；整行不做背景高亮，避免行高跳动。</div>
+        <div class="mk-kv"><b>S5 长站点名</b>站点名 max-width 18ch + 省略号，title 属性给完整值；时间不换行。</div>
+        <div class="mk-kv"><b>S6 窄屏 ≤720px</b>时间另起一行，站点名单独一行（--fs-xs），不横向滚动。</div>
+        <div class="mk-kv"><b>S7 从未剪藏</b>这一行完全不存在（不占位、不留空隙）——手写笔记不该看到「来源：无」。</div>
+        <div class="mk-kv"><b>S8 来源链接已失效</b>不影响渲染；点击后由系统浏览器自己报错，应用不拦截、不预检。</div>
+        <div class="mk-kv"><b>可访问性</b>整行是 &lt;p&gt; 而不是按钮；链接是真正的 &lt;a&gt;（去掉默认跳转、改为 openExternal），Enter 可打开；屏幕阅读器读成「来源：example.com，2026-09-21 15:04」，所以时间不能写成纯图标。</div>
+      </div>
+      <div class="mk-spec__n">三处都显示「来源」但目的不同：UI-11 是阅读时的溯源、UI-03 是入库前的确认、UI-04/R6 是事后的审计。因此尺寸与位置各不相同，只共用同一份数据。</div>
+    </section>
+  </section>
+</main>
+
+<script>
+(function(){
+  var root=document.documentElement, light="paper";
+  function store(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+  function read(k){try{return localStorage.getItem(k)}catch(e){return null}}
+  function apply(theme,accent,persist){
+    root.setAttribute("data-theme",theme); root.setAttribute("data-accent",accent);
+    if(theme!=="night"&&theme!=="ink") light=theme;
+    document.querySelectorAll("[data-set-theme]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-theme")===theme)});
+    document.querySelectorAll("[data-set-accent]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-accent")===accent)});
+    if(persist){store("opennote-mock-theme",theme);store("opennote-mock-accent",accent)}
+  }
+  document.querySelectorAll("[data-set-theme]").forEach(function(b){b.addEventListener("click",function(){apply(b.getAttribute("data-set-theme"),root.getAttribute("data-accent"),true)})});
+  document.querySelectorAll("[data-set-accent]").forEach(function(b){b.addEventListener("click",function(){apply(root.getAttribute("data-theme"),b.getAttribute("data-set-accent"),true)})});
+  var tl=document.querySelector("[data-toggle-light]");
+  if(tl) tl.addEventListener("click",function(){
+    var dark=root.getAttribute("data-theme")==="night"||root.getAttribute("data-theme")==="ink";
+    apply(dark?light:"night",root.getAttribute("data-accent"),true);
+  });
+  var q=new URLSearchParams(location.search);
+  apply(q.get("theme")||read("opennote-mock-theme")||"paper",q.get("accent")||read("opennote-mock-accent")||"seal",false);
+})();
+</script>
+</body>
+</html>

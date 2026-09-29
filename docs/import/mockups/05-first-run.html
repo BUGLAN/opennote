@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="paper" data-accent="seal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设计稿 · 05 首次引导（UI-09 / UI-08）</title>
+<style>
+/* ── 令牌：逐字复制自 src/styles/tokens.css（截至撰写时） ─────────────── */
+:root{
+  --radius-sm:5px;--radius:8px;--radius-lg:14px;--measure:46rem;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --ease:cubic-bezier(0.22,0.61,0.36,1);--ease-out:cubic-bezier(0.16,1,0.3,1);
+  --dur-fast:120ms;--dur:220ms;--dur-slow:460ms;
+  --font-ui:"Figtree Variable","Figtree",system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --font-serif:"Newsreader Variable","Newsreader","Iowan Old Style",Georgia,"Songti SC","Noto Serif SC","Source Han Serif SC","SimSun",serif;
+  --font-display:"Fraunces Variable","Fraunces","Newsreader Variable",Georgia,"Songti SC",serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono",ui-monospace,"Cascadia Code",Consolas,"Liberation Mono",monospace;
+  --fs-xs:11.5px;--fs-sm:12.5px;--fs-md:13.5px;--fs-lg:15px;--tracking-wide:0.08em;
+}
+:root,[data-theme="paper"]{--paper:#fbf8f3;--paper-2:#fffdf9;--paper-3:#f2ece1;--paper-4:#e9e1d3;--ink:#221d17;--ink-2:#5c5347;--ink-3:#97897a;--rule:#e8dfd1;--rule-strong:#d7cbb8;--code-bg:#f4eee4;--sel:rgba(178,58,46,.16);--shadow-c:52 39 22;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.28);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.36),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.035;color-scheme:light}
+[data-theme="celadon"]{--paper:#f4f7f5;--paper-2:#fbfdfc;--paper-3:#e8efec;--paper-4:#dde7e2;--ink:#17221f;--ink-2:#4c5c57;--ink-3:#86968f;--rule:#dce5e1;--rule-strong:#c6d3cd;--code-bg:#eaf0ed;--sel:rgba(47,111,94,.16);--shadow-c:22 44 38;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.26);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.34),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.03;color-scheme:light}
+[data-theme="sepia"]{--paper:#faf3e6;--paper-2:#fffbf3;--paper-3:#f1e6d2;--paper-4:#e6d8bf;--ink:#2a2118;--ink-2:#6a5a45;--ink-3:#9d8a70;--rule:#e7d9c0;--rule-strong:#d3c1a2;--code-bg:#f3e9d8;--sel:rgba(168,100,42,.18);--shadow-c:60 44 20;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.07);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.12),0 12px 28px -18px rgb(var(--shadow-c)/.3);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.38),0 2px 8px -4px rgb(var(--shadow-c)/.14);--grain:.045;color-scheme:light}
+[data-theme="night"]{--paper:#14120f;--paper-2:#1c1915;--paper-3:#262119;--paper-4:#322b21;--ink:#eae3d7;--ink-2:#b0a796;--ink-3:#7d7466;--rule:#2e2820;--rule-strong:#413930;--code-bg:#1f1b15;--sel:rgba(224,102,79,.24);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.05;color-scheme:dark}
+[data-theme="ink"]{--paper:#0e1113;--paper-2:#151a1d;--paper-3:#1d2428;--paper-4:#273034;--ink:#dfe6e6;--ink-2:#9faeae;--ink-3:#6e7d7e;--rule:#232b2f;--rule-strong:#333d42;--code-bg:#161c20;--sel:rgba(79,181,154,.22);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.04;color-scheme:dark}
+:root,[data-accent="seal"]{--accent:#b23a2e;--accent-ink:#ffffff;--accent-soft:rgba(178,58,46,.12);--accent-line:rgba(178,58,46,.34)}
+[data-theme="night"][data-accent="seal"],[data-theme="ink"][data-accent="seal"]{--accent:#e0664f;--accent-ink:#1a0f0c;--accent-soft:rgba(224,102,79,.16);--accent-line:rgba(224,102,79,.4)}
+[data-accent="indigo"]{--accent:#34558b;--accent-ink:#ffffff;--accent-soft:rgba(52,85,139,.12);--accent-line:rgba(52,85,139,.34)}
+[data-theme="night"][data-accent="indigo"],[data-theme="ink"][data-accent="indigo"]{--accent:#7ea6e0;--accent-ink:#0b1420;--accent-soft:rgba(126,166,224,.16);--accent-line:rgba(126,166,224,.4)}
+[data-accent="pine"]{--accent:#2f6f5e;--accent-ink:#ffffff;--accent-soft:rgba(47,111,94,.12);--accent-line:rgba(47,111,94,.34)}
+[data-theme="night"][data-accent="pine"],[data-theme="ink"][data-accent="pine"]{--accent:#4fb59a;--accent-ink:#08130f;--accent-soft:rgba(79,181,154,.16);--accent-line:rgba(79,181,154,.4)}
+[data-accent="gamboge"]{--accent:#9a6b12;--accent-ink:#ffffff;--accent-soft:rgba(154,107,18,.14);--accent-line:rgba(154,107,18,.36)}
+[data-theme="night"][data-accent="gamboge"],[data-theme="ink"][data-accent="gamboge"]{--accent:#d9a537;--accent-ink:#171004;--accent-soft:rgba(217,165,55,.16);--accent-line:rgba(217,165,55,.4)}
+
+/* ── base.css 公共层（逐字复制） ─────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-ui);font-size:var(--fs-md);line-height:1.6;-webkit-font-smoothing:antialiased;font-synthesis-weight:none}
+body::before{content:"";position:fixed;inset:0;z-index:9999;pointer-events:none;opacity:var(--grain);mix-blend-mode:multiply;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+[data-theme="night"] body::before,[data-theme="ink"] body::before{mix-blend-mode:overlay}
+h1,h2,h3,h4,p,ol,li{margin:0}
+button,input{font:inherit;color:inherit;background:none;border:none;margin:0}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+a{color:var(--accent)}
+::selection{background:var(--sel)}
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px;border-radius:3px}
+*{scrollbar-width:thin;scrollbar-color:var(--rule-strong) transparent}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);height:28px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--rule-strong);color:var(--ink);background:var(--paper-2);font-size:var(--fs-md);transition:background var(--dur-fast) var(--ease)}
+.btn:hover{background:var(--paper-3)}
+.btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn--primary:hover{filter:brightness(1.06);background:var(--accent)}
+.btn--ghost{border-color:transparent;background:transparent}
+.btn--ghost:hover{background:var(--paper-3)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.choice{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;align-items:center;padding:12px 14px;border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--paper-2);color:var(--ink);transition:border-color var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease);text-align:left;width:100%;cursor:pointer}
+.choice:hover{border-color:var(--accent-line);background:var(--accent-soft)}
+.choice:disabled{opacity:.5;cursor:not-allowed}
+.choice__icon{grid-row:span 2;width:16px;height:16px;color:var(--accent);display:inline-flex;align-items:center;justify-content:center;font-size:13px}
+.choice strong{font-weight:600}
+.choice small{grid-column:2;color:var(--ink-3);font-size:var(--fs-sm);line-height:1.5}
+.choice__act{grid-column:2;margin-top:8px;display:flex;gap:var(--s2);align-items:center}
+.switch{display:inline-flex;align-items:flex-start;gap:var(--s2);color:var(--ink-2);font-size:var(--fs-sm);line-height:1.7;cursor:pointer}
+.switch input{appearance:none;width:34px;height:19px;border-radius:99px;background:var(--paper-4);border:1px solid var(--rule-strong);position:relative;cursor:pointer;flex:none;transition:background var(--dur-fast) var(--ease);margin-top:1px}
+.switch input::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--paper-2);box-shadow:var(--shadow-1);transition:transform var(--dur-fast) var(--ease)}
+.switch input:checked{background:var(--accent);border-color:var(--accent)}
+.switch input:checked::after{transform:translateX(15px)}
+.seal{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:5px;background:var(--accent);color:var(--accent-ink);font-family:var(--font-serif);font-size:13px;line-height:1;box-shadow:inset 0 0 0 1px rgb(255 255 255/.32)}
+.spinner{width:12px;height:12px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes pop{from{opacity:0;translate:0 -6px;scale:.985}to{opacity:1;translate:0 0;scale:1}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
+
+/* ── 设计稿外壳 ─────────────────────────────────────────────────────── */
+.mk-bar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;padding:8px var(--s4);border-bottom:1px solid var(--rule);background:color-mix(in srgb,var(--paper-2) 86%,var(--paper))}
+.mk-bar__title{font-family:var(--font-display);font-size:14px;font-weight:600;margin-right:auto}
+.mk-bar__title small{display:block;font-family:var(--font-ui);font-size:var(--fs-xs);font-weight:400;color:var(--ink-3);letter-spacing:var(--tracking-wide)}
+.mk-nav{display:flex;gap:2px;flex-wrap:wrap}
+.mk-nav a{padding:4px 8px;border-radius:var(--radius-sm);color:var(--ink-2);text-decoration:none;font-size:var(--fs-sm)}
+.mk-nav a:hover{background:var(--paper-3);color:var(--ink)}
+.mk-nav a.is-here{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-group{display:flex;align-items:center;gap:var(--s1);padding:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper)}
+.mk-group>span{padding:0 6px;font-size:var(--fs-xs);color:var(--ink-3)}
+.mk-chip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 8px;border-radius:4px;color:var(--ink-2);font-size:var(--fs-sm)}
+.mk-chip:hover{background:var(--paper-3)}
+.mk-chip.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-chip__dot{width:11px;height:11px;border-radius:3px;box-shadow:inset 0 0 0 1px rgb(0 0 0/.14);flex:none}
+.mk-wrap{max-width:1080px;margin:0 auto;padding:var(--s5) var(--s4) var(--s7)}
+.mk-h1{font-family:var(--font-display);font-size:22px;font-weight:600;letter-spacing:-.015em}
+.mk-lede{margin-top:4px;max-width:84ch;color:var(--ink-2);font-size:var(--fs-sm);line-height:1.75}
+.mk-spec{margin-top:var(--s5)}
+.mk-spec__id{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--accent);letter-spacing:var(--tracking-wide)}
+.mk-spec__t{font-weight:600;font-size:var(--fs-md);margin-top:2px}
+.mk-spec__n{margin-top:2px;max-width:88ch;color:var(--ink-3);font-size:var(--fs-xs);line-height:1.7}
+.mk-sec{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--rule)}
+.mk-sec>h2{font-family:var(--font-display);font-size:16px;font-weight:600}
+.mk-sec>p{margin-top:3px;max-width:84ch;color:var(--ink-3);font-size:var(--fs-sm);line-height:1.7}
+.mk-note{margin-top:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2);font-size:var(--fs-sm);color:var(--ink-2);line-height:1.75}
+.mk-kv{display:flex;gap:var(--s2);padding:4px 0;border-bottom:1px dashed var(--rule);font-size:var(--fs-sm)}
+.mk-kv:last-child{border-bottom:none}
+.mk-kv b{font-weight:600;min-width:92px}
+.mk-row{display:flex;gap:var(--s5);flex-wrap:wrap;align-items:flex-start}
+
+/* ── UI-08 整屏空状态（.empty 的既有写法） ──────────────────────────── */
+.empty{width:min(560px,100%);display:grid;place-items:center;padding:var(--s6);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper)}
+.empty__inner{max-width:420px;text-align:center;animation:rise var(--dur-slow) var(--ease-out) both}
+.empty__seal{display:inline-flex;align-items:center;justify-content:center;width:52px;height:52px;margin-bottom:var(--s4);border-radius:12px;background:var(--accent);color:var(--accent-ink);font-family:var(--font-serif);font-size:30px;box-shadow:inset 0 0 0 1.5px rgb(255 255 255/.32),var(--shadow-2)}
+.empty__title{font-family:var(--font-display);font-size:26px;font-weight:600;letter-spacing:-.015em}
+.empty__lede{margin-top:6px;color:var(--ink-2);line-height:1.75}
+.empty__actions{display:flex;flex-wrap:wrap;gap:var(--s2);justify-content:center;margin-top:var(--s5)}
+
+/* ── UI-09 首次引导对话框 ───────────────────────────────────────────── */
+.dialog{width:min(560px,100%);display:flex;flex-direction:column;background:var(--paper-2);border:1px solid var(--rule-strong);border-radius:var(--radius-lg);box-shadow:var(--shadow-3);overflow:hidden;animation:pop var(--dur) var(--ease-out) both}
+.dialog__head{display:flex;align-items:center;gap:var(--s2);padding:var(--s4) var(--s4) var(--s3);border-bottom:1px solid var(--rule)}
+.dialog__title{flex:1;font-family:var(--font-display);font-size:17px;font-weight:600;letter-spacing:-.01em}
+.dialog__body{flex:1;min-height:0;overflow-y:auto;padding:var(--s4)}
+.dialog__foot{display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s4);border-top:1px solid var(--rule);background:color-mix(in srgb,var(--paper-3) 40%,var(--paper-2))}
+.dialog__foot .spacer{flex:1}
+.dialog__message{color:var(--ink-2);line-height:1.75}
+.choices{display:grid;gap:10px;margin-top:var(--s4)}
+.lead__note{margin-top:var(--s2);font-size:var(--fs-sm);color:var(--ink-3);line-height:1.75}
+.steps{margin:10px 0 0;padding:0;list-style:none;counter-reset:step;border-top:1px dashed var(--rule)}
+.steps li{counter-increment:step;display:flex;gap:9px;padding:6px 0;border-bottom:1px dashed var(--rule);font-size:var(--fs-sm);color:var(--ink-2);line-height:1.7}
+.steps li::before{content:counter(step);flex:none;width:16px;height:16px;margin-top:3px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-family:var(--font-mono);font-size:10px;display:inline-flex;align-items:center;justify-content:center}
+.hook{margin-top:var(--s4);padding-top:var(--s3);border-top:1px solid var(--rule)}
+.hook__err{margin-top:8px;padding-left:10px;border-left:2px solid var(--accent);font-size:var(--fs-sm);color:var(--ink)}
+.cmd-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:6px;margin-top:10px}
+.cmd{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--rule);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink-2);font-size:var(--fs-sm);text-align:left}
+.cmd:hover:not(:disabled){border-color:var(--accent-line);background:var(--accent-soft);color:var(--ink)}
+.cmd:disabled{opacity:.45;cursor:not-allowed}
+.recent{margin-top:10px;padding-top:var(--s3);border-top:1px solid var(--rule)}
+.recent__row{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:var(--radius-sm);font-size:var(--fs-md);color:var(--ink-2)}
+.recent__row:hover{background:var(--paper-3);color:var(--ink)}
+.recent__ch{flex:none;font-size:var(--fs-xs);color:var(--ink-3);min-width:56px}
+.mk-settings-frag{width:min(560px,100%);border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--paper-2);padding:var(--s3) var(--s4)}
+</style>
+</head>
+<body>
+
+<div class="mk-bar">
+  <span class="mk-bar__title">05 · 首次引导<small>UI-09（6 状态，含安装步骤展开态）· UI-08 空状态</small></span>
+  <nav class="mk-nav" aria-label="设计稿导航">
+    <a href="00-index.html">索引</a><a href="01-extension-popup.html">插件弹窗</a><a href="02-import-inbox.html">导入收件箱</a><a href="03-settings-import-api.html">设置 · 导入与接口</a><a href="04-toast-undo.html">提示与冲突</a><a href="05-first-run.html" class="is-here">首次引导</a>
+  </nav>
+  <div class="mk-group" role="group" aria-label="配色主题">
+    <span>主题</span>
+    <button class="mk-chip" data-set-theme="paper">素笺</button>
+    <button class="mk-chip" data-set-theme="night">夜读</button>
+  </div>
+  <div class="mk-group" role="group" aria-label="强调色">
+    <span>强调色</span>
+    <button class="mk-chip" data-set-accent="seal"><i class="mk-chip__dot" style="background:#b23a2e"></i>朱砂</button>
+    <button class="mk-chip" data-set-accent="indigo"><i class="mk-chip__dot" style="background:#34558b"></i>靛青</button>
+    <button class="mk-chip" data-set-accent="pine"><i class="mk-chip__dot" style="background:#2f6f5e"></i>松绿</button>
+    <button class="mk-chip" data-set-accent="gamboge"><i class="mk-chip__dot" style="background:#9a6b12"></i>藤黄</button>
+  </div>
+  <button class="btn" data-toggle-light>切换亮 / 暗</button>
+</div>
+
+<main class="mk-wrap">
+  <h1 class="mk-h1">首次引导与空状态</h1>
+  <p class="mk-lede">
+    这是唯一需要用户认真读一遍的界面，所以它做得安静、可读、不吓人：三张 <code style="font-family:var(--font-mono)">.choice</code> 卡片说明三种通道，一句开头说明讲清楚「不联网、没有账号、写出来的是普通 Markdown」，最后一处勾选明确告知本机端口的风险。空状态的口吻参考现有实现「回收站是空的。」——陈述事实 + 一句怎么办，不写「暂无数据」。
+  </p>
+
+  <!-- ═══ UI-08/S1 整屏空状态 ═══ -->
+  <section class="mk-spec">
+    <div class="mk-spec__id">UI-08 / S1 · 空状态</div>
+    <div class="mk-spec__t">收件箱是空的</div>
+    <div class="mk-spec__n">沿用现有 .empty 的写法：印章方块 + 显示字标题 + 一行说明 + 一个按钮。印章在对话框内会缩到 40px、圆角降到 --radius，这里是整屏空状态所以用 52px。</div>
+    <div class="mk-row" style="margin-top:var(--s3)">
+      <div class="empty">
+        <div class="empty__inner">
+          <div class="empty__seal" aria-hidden="true">記</div>
+          <h1 class="empty__title">收件箱是空的。</h1>
+          <p class="empty__lede">外部导入若选择「先进入收件箱」，会先出现在这里。</p>
+          <div class="empty__actions">
+            <button class="btn">知道了</button>
+            <button class="btn btn--ghost">怎么装插件？</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ UI-08/S2 最近导入空态 ═══ -->
+  <section class="mk-spec">
+    <div class="mk-spec__id">UI-08 / S2 · S3</div>
+    <div class="mk-spec__t">最近导入没有记录 / 筛选后无结果</div>
+    <div class="mk-spec__n">S2 占位高度固定 44px，避免面板高度跳动。S3 保留工具行，只在列表区给一行文字。</div>
+    <div class="mk-row" style="margin-top:var(--s3)">
+      <div class="mk-settings-frag">
+        <div style="font-size:var(--fs-md);font-weight:550">最近导入 <small style="display:block;font-weight:400;font-size:var(--fs-xs);color:var(--ink-3);margin-top:2px">最近 5 次外部导入</small></div>
+        <div style="min-height:44px;padding-top:var(--s2)">
+          <p style="font-size:var(--fs-sm);color:var(--ink-3)">还没有从外部导入过内容。</p>
+          <p style="font-size:var(--fs-sm);color:var(--ink-3)">开启本地接口后，网页剪藏和命令行导入都会记在这里。</p>
+        </div>
+      </div>
+      <div class="mk-settings-frag" style="width:360px">
+        <div style="display:flex;gap:2px;padding:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper);width:max-content">
+          <button class="btn btn--ghost" style="height:24px;font-size:var(--fs-sm);background:var(--accent-soft);color:var(--accent);font-weight:600;border-radius:4px">全部 3</button>
+          <button class="btn btn--ghost" style="height:24px;font-size:var(--fs-sm);border-radius:4px">待确认 3</button>
+          <button class="btn btn--ghost" style="height:24px;font-size:var(--fs-sm);border-radius:4px">失败 0</button>
+        </div>
+        <p style="padding:var(--s5) var(--s3);text-align:center;font-size:var(--fs-sm);color:var(--ink-3)">没有「失败」的条目。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ UI-09/S1 默认（Hook 未勾选） ═══ -->
+  <section class="mk-sec">
+    <h2>UI-09 · 首次引导</h2>
+    <p>从设置面板第一次打开本地接口时出现（FR-71）。再次开启时跳过（S5），但「怎么装插件？」入口保留在设置面板的说明行里。</p>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-09 / S1 · 默认（风险未确认，主按钮禁用）</div>
+      <div class="mk-spec__t">把外面的内容收进来</div>
+      <div class="mk-spec__n">三张卡片按 P0 可用性排序：插件 → 命令行 → AI 助手。卡片本身不可聚焦，只有卡内按钮可聚焦。</div>
+      <div class="mk-row" style="margin-top:var(--s3)">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="把外面的内容收进来">
+          <header class="dialog__head">
+            <h2 class="dialog__title">把外面的内容收进来</h2>
+            <button class="btn btn--ghost" style="width:26px;padding:0" aria-label="关闭">×</button>
+          </header>
+          <div class="dialog__body">
+            <p class="dialog__message">Opennote 不联网、没有账号。外部内容通过三种通道进来，都会写成你文件夹里普通的 Markdown 文件。</p>
+            <p class="lead__note">本地接口跑在桌面版里，<strong style="color:var(--ink-2)">生命周期跟随窗口</strong>：Opennote 没运行时它不存在。所以三种通道都有一个共同前提——Opennote 正在运行且已打开笔记本；这一点对 AI 助手尤其重要。</p>
+            <div class="choices">
+              <div class="choice">
+                <span class="choice__icon">◍</span><strong>浏览器插件</strong>
+                <small>在网页上选中一段就能剪藏；整页正文也可以。</small>
+                <small style="color:var(--ink-2)">当前状态：未安装</small>
+                <div class="choice__act"><button class="btn">怎么安装</button></div>
+              </div>
+              <div class="choice">
+                <span class="choice__icon">&gt;_</span><strong>命令行 opennote clip</strong>
+                <small>在终端里把一篇文章导进来，也可以给脚本调用。</small>
+                <small style="color:var(--ink-2)">当前状态：已可用</small>
+                <div class="choice__act"><button class="btn">复制示例</button></div>
+              </div>
+              <div class="choice">
+                <span class="choice__icon">◇</span><strong>AI 助手（P1）</strong>
+                <small>让 Codex / Claude Code 执行导入，把文章写进笔记本。</small>
+                <small style="color:var(--ink-3)">当前状态：P1 提供</small>
+                <small style="color:var(--ink-2)">前提：Opennote 正在运行且已打开笔记本</small>
+                <div class="choice__act">
+                  <button class="btn" disabled>复制 Skill 安装命令</button>
+                  <button class="btn" disabled>复制 MCP 配置</button>
+                </div>
+              </div>
+            </div>
+            <div class="hook">
+              <label class="switch"><input type="checkbox">我知道了：本地接口只监听本机，不要在不信任的网页上暴露令牌。</label>
+            </div>
+          </div>
+          <footer class="dialog__foot">
+            <div class="spacer"></div>
+            <button class="btn">稍后再说</button>
+            <button class="btn btn--primary" disabled title="请先勾选上面的说明">开启本地接口</button>
+          </footer>
+        </div>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>S2 hover</b>.choice:hover 的既有表现：--accent-line 描边 + --accent-soft 底，120ms。</div>
+        <div class="mk-kv"><b>S4 聚焦</b>Tab 顺序：三张卡片的按钮 → Hook 复选框 → 主按钮；打开时焦点落在第一张卡片的「怎么安装」按钮，不是弹窗本身。</div>
+        <div class="mk-kv"><b>禁用原因</b>主按钮在 Hook 未勾选时 disabled，并且 aria-describedby 指向 Hook 文本，屏幕阅读器能知道「为什么不能点」。</div>
+      </div>
+    </section>
+
+    <!-- ═══ UI-09/S3 安装步骤展开 ═══ -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-09 / S3 · 展开安装步骤</div>
+      <div class="mk-spec__t">就地展开，不新开对话框</div>
+      <div class="mk-spec__n">高度不做过渡动画，直接出现——高度过渡会引起文字重排抖动，得不偿失。按钮文案变「收起步骤」。</div>
+      <div class="mk-row" style="margin-top:var(--s3)">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="把外面的内容收进来">
+          <header class="dialog__head">
+            <h2 class="dialog__title">把外面的内容收进来</h2>
+            <button class="btn btn--ghost" style="width:26px;padding:0" aria-label="关闭">×</button>
+          </header>
+          <div class="dialog__body">
+            <p class="dialog__message">Opennote 不联网、没有账号。外部内容通过三种通道进来，都会写成你文件夹里普通的 Markdown 文件。</p>
+            <p class="lead__note">本地接口跑在桌面版里，<strong style="color:var(--ink-2)">生命周期跟随窗口</strong>：Opennote 没运行时它不存在。所以三种通道都有一个共同前提——Opennote 正在运行且已打开笔记本；这一点对 AI 助手尤其重要。</p>
+            <div class="choices">
+              <div class="choice" style="border-color:var(--accent-line);background:var(--accent-soft)">
+                <span class="choice__icon">◍</span><strong>浏览器插件</strong>
+                <small>在网页上选中一段就能剪藏；整页正文也可以。</small>
+                <small style="color:var(--ink-2)">当前状态：未安装</small>
+                <div class="choice__act"><button class="btn">收起步骤</button></div>
+                <ol class="steps" style="grid-column:1 / -1">
+                  <li>在 Opennote 里打开「设置 · 文件 → 导入与接口」，开启本地接口。</li>
+                  <li>点「复制」拿到访问令牌。</li>
+                  <li>在 Chrome 地址栏打开 chrome://extensions，打开右上角的「开发者模式」。</li>
+                  <li>点「加载已解压的扩展程序」，选择 Opennote 提供的浏览器插件目录。</li>
+                  <li>点工具栏上的插件图标，把令牌粘贴进去。连接状态显示「本地接口已开启」就完成了。</li>
+                </ol>
+              </div>
+              <div class="choice">
+                <span class="choice__icon">&gt;_</span><strong>命令行 opennote clip</strong>
+                <small>在终端里把一篇文章导进来，也可以给脚本调用。</small>
+                <small style="color:var(--ink-2)">当前状态：已可用</small>
+                <div class="choice__act"><button class="btn">复制示例</button><span style="font-size:var(--fs-xs);color:var(--accent);display:inline-flex;align-items:center;gap:5px"><i style="width:6px;height:6px;border-radius:50%;background:var(--accent)"></i>已复制</span></div>
+                <span style="grid-column:1 / -1;margin-top:8px;font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--ink-2);background:var(--code-bg);border:1px solid var(--rule);border-radius:var(--radius-sm);padding:7px 9px;display:block;word-break:break-all">opennote clip --url https://example.com/typography-cn --title "中文排版指北" --tag 排版</span>
+              </div>
+              <div class="choice">
+                <span class="choice__icon">◇</span><strong>AI 助手（P1）</strong>
+                <small>让 Codex / Claude Code 执行导入，把文章写进笔记本。</small>
+                <small style="color:var(--ink-3)">当前状态：P1 提供</small>
+                <small style="color:var(--ink-2)">前提：Opennote 正在运行且已打开笔记本</small>
+                <div class="choice__act">
+                  <button class="btn" disabled>复制 Skill 安装命令</button>
+                  <button class="btn" disabled>复制 MCP 配置</button>
+                </div>
+              </div>
+            </div>
+            <div class="hook">
+              <label class="switch"><input type="checkbox" checked>我知道了：本地接口只监听本机，不要在不信任的网页上暴露令牌。</label>
+            </div>
+          </div>
+          <footer class="dialog__foot">
+            <div class="spacer"></div>
+            <button class="btn">稍后再说</button>
+            <button class="btn btn--primary">开启本地接口</button>
+          </footer>
+        </div>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>步骤列表</b>&lt;ol class="steps"&gt;，序号由 CSS counter 渲染，但 DOM 中保留文本序号，不抹掉语义。</div>
+        <div class="mk-kv"><b>复制反馈</b>就地换文案（复制示例 → 已复制）并在右侧显示强调色小圆点，1.6 秒后复原；不弹 toast。</div>
+        <div class="mk-kv"><b>返回入口</b>S5：再次进入设置面板时跳过引导直接开启，但设置面板的说明行保留「怎么装插件？」这个入口。</div>
+      </div>
+    </section>
+
+    <!-- ═══ UI-09/S6 加载 ═══ -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-09 / S6 · 加载</div>
+      <div class="mk-spec__t">正在开启本地接口</div>
+      <div class="mk-spec__n">卡片区降到 60% 不透明度并停止响应；失败时按钮回到「开启本地接口」，并在 Hook 下方插入失败原因（复用设置面板的端口被占用文案）。</div>
+      <div class="mk-row" style="margin-top:var(--s3)">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="把外面的内容收进来">
+          <header class="dialog__head">
+            <h2 class="dialog__title">把外面的内容收进来</h2>
+            <button class="btn btn--ghost" style="width:26px;padding:0" aria-label="关闭">×</button>
+          </header>
+          <div class="dialog__body">
+            <p class="dialog__message">Opennote 不联网、没有账号。外部内容通过三种通道进来，都会写成你文件夹里普通的 Markdown 文件。</p>
+            <p class="lead__note">本地接口跑在桌面版里，<strong style="color:var(--ink-2)">生命周期跟随窗口</strong>：Opennote 没运行时它不存在。所以三种通道都有一个共同前提——Opennote 正在运行且已打开笔记本；这一点对 AI 助手尤其重要。</p>
+            <div class="choices" style="opacity:.6;pointer-events:none">
+              <div class="choice"><span class="choice__icon">◍</span><strong>浏览器插件</strong><small>在网页上选中一段就能剪藏；整页正文也可以。</small><small style="color:var(--ink-2)">当前状态：已连接</small></div>
+              <div class="choice"><span class="choice__icon">&gt;_</span><strong>命令行 opennote clip</strong><small>在终端里把一篇文章导进来，也可以给脚本调用。</small><small style="color:var(--ink-2)">当前状态：已可用</small></div>
+            </div>
+            <div class="hook">
+              <label class="switch"><input type="checkbox" checked disabled>我知道了：本地接口只监听本机，不要在不信任的网页上暴露令牌。</label>
+              <div class="mk-note" style="margin-top:10px">
+                <div class="mk-kv"><b>S6 失败态</b>按钮回到「开启本地接口」，下方插入：</div>
+              </div>
+              <p class="hook__err">本地接口无法启动：端口 8787 已被占用。可在设置里改用其它端口。</p>
+            </div>
+          </div>
+          <footer class="dialog__foot">
+            <div class="spacer"></div>
+            <button class="btn">稍后再说</button>
+            <button class="btn btn--primary" aria-busy="true"><span class="spinner"></span>正在开启…</button>
+          </footer>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ═══ 关于移动端与网页版：如实告知 ═══ -->
+  <section class="mk-sec">
+    <h2>如实描述平台差异（原则 P5 / FR-56 / FR-66）</h2>
+    <p>三种文件系统后端能力不对等：只有 Electron 桌面版能「外部进程直接落盘」。所以界面必须说清每个平台各自能做到什么，不含「都支持」这种含糊说法。</p>
+    <div class="mk-note">
+      <div class="mk-kv"><b>桌面版</b>三种通道全可用：本地接口 + 命令行 + 收件箱；插件可以投递。</div>
+      <div class="mk-kv"><b>Chrome / Edge 网页版（FSA）</b>没有本地接口；Opennote 窗口在场时可通过页面内桥投递（「已把这段内容发送给已打开的 Opennote 窗口。」），属 P0；窗口不在场时明确告知不可用（IMP-4006）。</div>
+      <div class="mk-kv"><b>其它浏览器（OPFS）</b>页面内桥为 P1 且绑定 D12 门禁；门禁未过时文案表达「<b>尚未开放</b>」而不是「不支持」——能力存在，只是还没放行。</div>
+      <div class="mk-kv"><b>移动端</b>P0 不出现任何入口（不做假入口）；给出降级路径「手机上暂时不能直接剪藏到 Opennote。可以复制正文，在 Opennote 里新建笔记粘贴。」P1 由分享面板承接。</div>
+    </div>
+  </section>
+
+  <!-- ═══ 命令面板入口 ═══ -->
+  <section class="mk-sec">
+    <h2>命令面板：新增分组「导入」（FR-74）</h2>
+    <p>沿用现有命令注册表结构，快捷键与设置面板共用同一份定义，不会出现「菜单里有、面板里没有」的漂移。</p>
+    <div class="cmd-grid">
+      <button class="cmd"><span>↓</span><span style="flex:1">导入收件箱</span></button>
+      <button class="cmd"><span>◍</span><span style="flex:1">开启 / 关闭本地导入接口</span></button>
+      <button class="cmd"><span>⧉</span><span style="flex:1">复制本地接口地址</span></button>
+      <button class="cmd"><span>⧉</span><span style="flex:1">复制访问令牌</span></button>
+      <button class="cmd"><span>◇</span><span style="flex:1">导入与接口设置</span></button>
+      <button class="cmd"><span>≡</span><span style="flex:1">查看最近导入</span></button>
+    </div>
+  </section>
+
+  <section class="mk-sec">
+    <h2>键盘可达性与无障碍</h2>
+    <div class="mk-note">
+      <div class="mk-kv"><b>打开时</b>焦点落在第一张卡片内的「怎么安装」按钮（不是弹窗本身）；Esc 可关闭，等于「稍后再说」。</div>
+      <div class="mk-kv"><b>通知类</b>引导标题不是 role="alert"；开启成功的反馈由状态芯片（role="status" aria-live="polite"）承担。</div>
+      <div class="mk-kv"><b>危险操作</b>「重新生成访问令牌」沿用现有 askConfirm 的 danger 样式与焦点管理。</div>
+      <div class="mk-kv"><b>动效降级</b>prefers-reduced-motion 下动画与过渡降为 0.01ms（本文件已内联）；引导首屏的 rise 460ms 也随之失效，静态呈现仍完整可读。</div>
+      <div class="mk-kv"><b>对比度</b>卡片说明文字用 --ink-3（约 3.2:1，低于 AA），因此卡片标题与状态值一律用 --ink / --ink-2；错误句用 --ink + 左侧强调色竖条。</div>
+      <div class="mk-kv"><b>语言</b>本页 lang="zh-CN"，与产品界面语言一致。</div>
+    </div>
+  </section>
+</main>
+
+<script>
+(function(){
+  var root=document.documentElement, light="paper";
+  function store(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+  function read(k){try{return localStorage.getItem(k)}catch(e){return null}}
+  function apply(theme,accent,persist){
+    root.setAttribute("data-theme",theme); root.setAttribute("data-accent",accent);
+    if(theme!=="night"&&theme!=="ink") light=theme;
+    document.querySelectorAll("[data-set-theme]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-theme")===theme)});
+    document.querySelectorAll("[data-set-accent]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-accent")===accent)});
+    if(persist){store("opennote-mock-theme",theme);store("opennote-mock-accent",accent)}
+  }
+  document.querySelectorAll("[data-set-theme]").forEach(function(b){b.addEventListener("click",function(){apply(b.getAttribute("data-set-theme"),root.getAttribute("data-accent"),true)})});
+  document.querySelectorAll("[data-set-accent]").forEach(function(b){b.addEventListener("click",function(){apply(root.getAttribute("data-theme"),b.getAttribute("data-set-accent"),true)})});
+  var tl=document.querySelector("[data-toggle-light]");
+  if(tl) tl.addEventListener("click",function(){
+    var dark=root.getAttribute("data-theme")==="night"||root.getAttribute("data-theme")==="ink";
+    apply(dark?light:"night",root.getAttribute("data-accent"),true);
+  });
+  var q=new URLSearchParams(location.search);
+  apply(q.get("theme")||read("opennote-mock-theme")||"paper",q.get("accent")||read("opennote-mock-accent")||"seal",false);
+})();
+</script>
+</body>
+</html>

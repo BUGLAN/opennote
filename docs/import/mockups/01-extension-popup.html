@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="paper" data-accent="seal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设计稿 · 01 浏览器插件弹窗（UI-01 / UI-02）</title>
+<style>
+/* ── 令牌：逐字复制自 src/styles/tokens.css（截至撰写时） ─────────────── */
+:root{
+  --radius-sm:5px;--radius:8px;--radius-lg:14px;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --ease:cubic-bezier(0.22,0.61,0.36,1);--ease-out:cubic-bezier(0.16,1,0.3,1);
+  --dur-fast:120ms;--dur:220ms;--dur-slow:460ms;
+  --font-ui:"Figtree Variable","Figtree",system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --font-serif:"Newsreader Variable","Newsreader","Iowan Old Style",Georgia,"Songti SC","Noto Serif SC","Source Han Serif SC","SimSun",serif;
+  --font-display:"Fraunces Variable","Fraunces","Newsreader Variable",Georgia,"Songti SC",serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono",ui-monospace,"Cascadia Code",Consolas,"Liberation Mono",monospace;
+  --fs-xs:11.5px;--fs-sm:12.5px;--fs-md:13.5px;--fs-lg:15px;--tracking-wide:0.08em;
+}
+:root,[data-theme="paper"]{--paper:#fbf8f3;--paper-2:#fffdf9;--paper-3:#f2ece1;--paper-4:#e9e1d3;--ink:#221d17;--ink-2:#5c5347;--ink-3:#97897a;--rule:#e8dfd1;--rule-strong:#d7cbb8;--code-bg:#f4eee4;--sel:rgba(178,58,46,.16);--shadow-c:52 39 22;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.28);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.36),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.035;color-scheme:light}
+[data-theme="celadon"]{--paper:#f4f7f5;--paper-2:#fbfdfc;--paper-3:#e8efec;--paper-4:#dde7e2;--ink:#17221f;--ink-2:#4c5c57;--ink-3:#86968f;--rule:#dce5e1;--rule-strong:#c6d3cd;--code-bg:#eaf0ed;--sel:rgba(47,111,94,.16);--shadow-c:22 44 38;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.26);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.34),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.03;color-scheme:light}
+[data-theme="sepia"]{--paper:#faf3e6;--paper-2:#fffbf3;--paper-3:#f1e6d2;--paper-4:#e6d8bf;--ink:#2a2118;--ink-2:#6a5a45;--ink-3:#9d8a70;--rule:#e7d9c0;--rule-strong:#d3c1a2;--code-bg:#f3e9d8;--sel:rgba(168,100,42,.18);--shadow-c:60 44 20;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.07);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.12),0 12px 28px -18px rgb(var(--shadow-c)/.3);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.38),0 2px 8px -4px rgb(var(--shadow-c)/.14);--grain:.045;color-scheme:light}
+[data-theme="night"]{--paper:#14120f;--paper-2:#1c1915;--paper-3:#262119;--paper-4:#322b21;--ink:#eae3d7;--ink-2:#b0a796;--ink-3:#7d7466;--rule:#2e2820;--rule-strong:#413930;--code-bg:#1f1b15;--sel:rgba(224,102,79,.24);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.05;color-scheme:dark}
+[data-theme="ink"]{--paper:#0e1113;--paper-2:#151a1d;--paper-3:#1d2428;--paper-4:#273034;--ink:#dfe6e6;--ink-2:#9faeae;--ink-3:#6e7d7e;--rule:#232b2f;--rule-strong:#333d42;--code-bg:#161c20;--sel:rgba(79,181,154,.22);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.04;color-scheme:dark}
+:root,[data-accent="seal"]{--accent:#b23a2e;--accent-ink:#ffffff;--accent-soft:rgba(178,58,46,.12);--accent-line:rgba(178,58,46,.34)}
+[data-theme="night"][data-accent="seal"],[data-theme="ink"][data-accent="seal"]{--accent:#e0664f;--accent-ink:#1a0f0c;--accent-soft:rgba(224,102,79,.16);--accent-line:rgba(224,102,79,.4)}
+[data-accent="indigo"]{--accent:#34558b;--accent-ink:#ffffff;--accent-soft:rgba(52,85,139,.12);--accent-line:rgba(52,85,139,.34)}
+[data-theme="night"][data-accent="indigo"],[data-theme="ink"][data-accent="indigo"]{--accent:#7ea6e0;--accent-ink:#0b1420;--accent-soft:rgba(126,166,224,.16);--accent-line:rgba(126,166,224,.4)}
+[data-accent="pine"]{--accent:#2f6f5e;--accent-ink:#ffffff;--accent-soft:rgba(47,111,94,.12);--accent-line:rgba(47,111,94,.34)}
+[data-theme="night"][data-accent="pine"],[data-theme="ink"][data-accent="pine"]{--accent:#4fb59a;--accent-ink:#08130f;--accent-soft:rgba(79,181,154,.16);--accent-line:rgba(79,181,154,.4)}
+[data-accent="gamboge"]{--accent:#9a6b12;--accent-ink:#ffffff;--accent-soft:rgba(154,107,18,.14);--accent-line:rgba(154,107,18,.36)}
+[data-theme="night"][data-accent="gamboge"],[data-theme="ink"][data-accent="gamboge"]{--accent:#d9a537;--accent-ink:#171004;--accent-soft:rgba(217,165,55,.16);--accent-line:rgba(217,165,55,.4)}
+
+/* ── base.css 公共层（逐字复制） ─────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-ui);font-size:var(--fs-md);line-height:1.6;-webkit-font-smoothing:antialiased;font-synthesis-weight:none}
+body::before{content:"";position:fixed;inset:0;z-index:9999;pointer-events:none;opacity:var(--grain);mix-blend-mode:multiply;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+[data-theme="night"] body::before,[data-theme="ink"] body::before{mix-blend-mode:overlay}
+h1,h2,h3,h4,p{margin:0}
+button,input,select{font:inherit;color:inherit;background:none;border:none;margin:0}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+a{color:var(--accent)}
+::selection{background:var(--sel)}
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px;border-radius:3px}
+*{scrollbar-width:thin;scrollbar-color:var(--rule-strong) transparent}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);height:28px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--rule-strong);color:var(--ink);background:var(--paper-2);font-size:var(--fs-md);transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease)}
+.btn:hover{background:var(--paper-3)}
+.btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn--primary:hover{filter:brightness(1.06);background:var(--accent)}
+.btn--ghost{border-color:transparent;background:transparent}
+.btn--ghost:hover{background:var(--paper-3)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.field{width:100%;height:30px;padding:0 9px;border-radius:var(--radius-sm);border:1px solid var(--rule-strong);background:var(--paper-2);color:var(--ink);font-size:var(--fs-md)}
+.field:focus-visible{outline:none;border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-soft)}
+.seal{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:5px;background:var(--accent);color:var(--accent-ink);font-family:var(--font-serif);font-size:13px;line-height:1;box-shadow:inset 0 0 0 1px rgb(255 255 255/.32)}
+.segmented{display:inline-flex;padding:2px;gap:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper)}
+.segmented button{height:24px;padding:0 10px;border-radius:4px;color:var(--ink-2);font-size:var(--fs-sm)}
+.segmented button.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.spinner{width:12px;height:12px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
+
+/* ── 设计稿外壳 ─────────────────────────────────────────────────────── */
+.mk-bar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;padding:8px var(--s4);border-bottom:1px solid var(--rule);background:color-mix(in srgb,var(--paper-2) 86%,var(--paper))}
+.mk-bar__title{font-family:var(--font-display);font-size:14px;font-weight:600;margin-right:auto}
+.mk-bar__title small{display:block;font-family:var(--font-ui);font-size:var(--fs-xs);font-weight:400;color:var(--ink-3);letter-spacing:var(--tracking-wide)}
+.mk-nav{display:flex;gap:2px;flex-wrap:wrap}
+.mk-nav a{padding:4px 8px;border-radius:var(--radius-sm);color:var(--ink-2);text-decoration:none;font-size:var(--fs-sm)}
+.mk-nav a:hover{background:var(--paper-3);color:var(--ink)}
+.mk-nav a.is-here{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-group{display:flex;align-items:center;gap:var(--s1);padding:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper)}
+.mk-group>span{padding:0 6px;font-size:var(--fs-xs);color:var(--ink-3)}
+.mk-chip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 8px;border-radius:4px;color:var(--ink-2);font-size:var(--fs-sm)}
+.mk-chip:hover{background:var(--paper-3)}
+.mk-chip.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-chip__dot{width:11px;height:11px;border-radius:3px;box-shadow:inset 0 0 0 1px rgb(0 0 0/.14);flex:none}
+.mk-wrap{max-width:1180px;margin:0 auto;padding:var(--s5) var(--s4) var(--s7)}
+.mk-h1{font-family:var(--font-display);font-size:22px;font-weight:600;letter-spacing:-.015em}
+.mk-lede{margin-top:4px;max-width:76ch;color:var(--ink-2);font-size:var(--fs-sm);line-height:1.75}
+.mk-shelf{display:flex;gap:var(--s5);flex-wrap:wrap;align-items:flex-start;margin-top:var(--s5)}
+.mk-spec{width:360px;flex:none}
+.mk-spec__id{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--accent);letter-spacing:var(--tracking-wide)}
+.mk-spec__t{font-weight:600;font-size:var(--fs-md);margin-top:2px}
+.mk-spec__n{margin-top:2px;color:var(--ink-3);font-size:var(--fs-xs);line-height:1.65}
+.mk-sec{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--rule)}
+.mk-sec>h2{font-family:var(--font-display);font-size:16px;font-weight:600}
+.mk-sec>p{margin-top:3px;max-width:80ch;color:var(--ink-3);font-size:var(--fs-sm);line-height:1.7}
+.mk-note{margin-top:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2);font-size:var(--fs-sm);color:var(--ink-2);line-height:1.75}
+.mk-kv{display:flex;gap:var(--s2);padding:4px 0;border-bottom:1px dashed var(--rule);font-size:var(--fs-sm)}
+.mk-kv:last-child{border-bottom:none}
+.mk-kv b{font-weight:600;min-width:76px}
+
+/* ── UI-01 插件弹窗：.clip（新组件类名，取值全部来自现有令牌） ────────── */
+.clip{width:360px;display:flex;flex-direction:column;background:var(--paper);border:1px solid var(--rule-strong);border-radius:var(--radius-lg);box-shadow:var(--shadow-3);overflow:hidden}
+.clip__head{display:flex;align-items:center;gap:var(--s2);height:40px;padding:0 var(--s3);border-bottom:1px solid var(--rule);background:var(--paper-2);flex:none}
+.clip__name{font-family:var(--font-display);font-size:var(--fs-lg);font-weight:600;letter-spacing:-.01em}
+.clip__name small{display:block;font-family:var(--font-ui);font-size:10.5px;font-weight:400;letter-spacing:var(--tracking-wide);color:var(--ink-3);margin-top:-2px}
+.status-chip{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border-radius:99px;border:1px solid var(--rule);background:var(--paper-2);color:var(--ink-2);font-size:var(--fs-xs);white-space:nowrap;flex:none}
+.status-chip__dot{width:6px;height:6px;border-radius:50%;background:var(--ink-3);flex:none}
+.status-chip.is-on{background:var(--accent-soft);border-color:var(--accent-soft);color:var(--ink)}
+.status-chip.is-on .status-chip__dot{background:var(--accent)}
+.status-chip.is-busy .status-chip__dot{background:var(--ink-3);animation:pulse 1.8s var(--ease) infinite}
+.status-chip.is-error{border-color:var(--accent-line);color:var(--ink)}
+.status-chip.is-error .status-chip__dot{background:var(--accent)}
+.clip__seg{padding:var(--s3) var(--s3) 0}
+.clip__preview{margin:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2)}
+.clip__title-in{font-family:var(--font-ui);font-size:var(--fs-md);font-weight:600;color:var(--ink);border-bottom:1px dashed var(--rule);padding-bottom:6px;width:100%}
+.clip__excerpt{margin-top:8px;font-family:var(--font-serif);font-size:var(--fs-sm);line-height:1.75;color:var(--ink-2);display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.clip__src{margin-top:8px;padding-top:7px;border-top:1px solid var(--rule);font-size:var(--fs-xs);color:var(--ink-3);display:flex;gap:6px;align-items:baseline}
+.clip__src em{font-style:normal;color:var(--ink-2)}
+.clip__rows{padding:0 var(--s3)}
+.clip__row{display:flex;align-items:center;gap:var(--s2);padding:7px 0;border-bottom:1px solid var(--rule)}
+.clip__row:last-child{border-bottom:none}
+.clip__row>label{width:44px;flex:none;font-size:var(--fs-sm);color:var(--ink-3)}
+.clip__row .field{height:26px;font-size:var(--fs-sm)}
+.clip__sel{display:flex;align-items:center;gap:6px;height:26px;padding:0 8px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper-2);font-size:var(--fs-sm);color:var(--ink)}
+.clip__sel i{margin-left:auto;color:var(--ink-3);font-style:normal;font-size:9px}
+.clip__foot{display:flex;align-items:center;gap:var(--s2);margin-top:var(--s3);padding:var(--s3);border-top:1px solid var(--rule);background:var(--paper-2);flex:none}
+.clip__foot .btn{flex:1;height:30px}
+.clip__more{width:30px;height:30px;flex:none;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);color:var(--ink-2);background:var(--paper)}
+.clip__more:hover{background:var(--paper-3);color:var(--ink)}
+.clip__block{margin:var(--s3);padding:var(--s3);border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--paper-2)}
+.clip__block p{font-size:var(--fs-sm);color:var(--ink);line-height:1.7}
+.clip__alert{margin:var(--s3);padding:var(--s3) var(--s3) var(--s3) 11px;border:1px solid var(--rule-strong);border-left:2px solid var(--accent);border-radius:var(--radius-sm);background:var(--paper-2);animation:rise var(--dur) var(--ease-out) both}
+.clip__alert p{font-size:var(--fs-sm);line-height:1.7;color:var(--ink)}
+.clip__alert .next{margin-top:6px;color:var(--ink-2)}
+.clip__alert .acts{display:flex;gap:var(--s2);margin-top:10px}
+.clip__skeleton{margin:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2)}
+.clip__bar{height:9px;border-radius:99px;background:var(--paper-3)}
+.clip__bar+.clip__bar{margin-top:8px}
+.clip__ok{margin:var(--s3);display:flex;gap:var(--s2);align-items:flex-start;padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2)}
+.clip__ok .dot{width:14px;height:14px;border-radius:50%;background:var(--accent);flex:none;margin-top:2px}
+.clip__empty{margin:var(--s3);padding:var(--s5) var(--s3);text-align:center}
+.clip__empty .empty__seal{width:40px;height:40px;font-size:23px;border-radius:var(--radius);margin-bottom:10px}
+.clip__empty h3{font-size:var(--fs-md);font-weight:600}
+.clip__empty p{margin-top:4px;font-size:var(--fs-sm);color:var(--ink-3);line-height:1.7}
+
+/* ── UI-02 页面内选区浮标 .clip-float ──────────────────────────────── */
+.page{position:relative;width:100%;max-width:640px;border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2);padding:var(--s5) var(--s5) var(--s6);overflow:hidden}
+.page__bar{display:flex;align-items:center;gap:6px;padding-bottom:var(--s3);border-bottom:1px solid var(--rule);font-size:var(--fs-xs);color:var(--ink-3)}
+.page__dot{width:9px;height:9px;border-radius:50%;background:var(--paper-4);border:1px solid var(--rule-strong)}
+.page__h1{margin-top:var(--s4);font-family:var(--font-serif);font-size:21px;font-weight:600;line-height:1.45}
+.page__by{margin-top:6px;font-size:var(--fs-xs);color:var(--ink-3)}
+.page__p{margin-top:var(--s3);font-family:var(--font-serif);font-size:var(--fs-lg);line-height:1.85;color:var(--ink-2)}
+.page__p mark{background:var(--sel);color:var(--ink);border-radius:2px}
+.clip-float{position:absolute;left:212px;top:118px;display:inline-flex;align-items:center;gap:0;height:26px;padding:0 4px 0 5px;border-radius:99px;background:var(--ink);color:var(--paper);box-shadow:var(--shadow-3);animation:rise var(--dur-fast) var(--ease-out) both}
+.clip-float__seal{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:3px;background:var(--accent);color:var(--accent-ink);font-family:var(--font-serif);font-size:9px;line-height:1}
+.clip-float__btn{padding:0 7px;color:inherit;font-size:var(--fs-sm)}
+.clip-float__sep{width:1px;height:12px;background:var(--rule-strong);opacity:.5}
+.clip-float__icon{padding:0 5px;color:inherit;font-size:var(--fs-xs)}
+.clip-float--danger{background:var(--accent);color:var(--accent-ink)}
+.clip-float--danger .clip-float__seal{background:var(--accent-ink);color:var(--accent)}
+</style>
+</head>
+<body>
+
+<div class="mk-bar">
+  <span class="mk-bar__title">01 · 浏览器插件弹窗<small>UI-01（11 状态）· UI-02 页面内选区浮标（5 状态）· 宽 360px</small></span>
+  <nav class="mk-nav" aria-label="设计稿导航">
+    <a href="00-index.html">索引</a><a href="01-extension-popup.html" class="is-here">插件弹窗</a><a href="02-import-inbox.html">导入收件箱</a><a href="03-settings-import-api.html">设置 · 导入与接口</a><a href="04-toast-undo.html">提示与冲突</a><a href="05-first-run.html">首次引导</a>
+  </nav>
+  <div class="mk-group" role="group" aria-label="配色主题">
+    <span>主题</span>
+    <button class="mk-chip" data-set-theme="paper">素笺</button>
+    <button class="mk-chip" data-set-theme="night">夜读</button>
+  </div>
+  <div class="mk-group" role="group" aria-label="强调色">
+    <span>强调色</span>
+    <button class="mk-chip" data-set-accent="seal"><i class="mk-chip__dot" style="background:#b23a2e"></i>朱砂</button>
+    <button class="mk-chip" data-set-accent="indigo"><i class="mk-chip__dot" style="background:#34558b"></i>靛青</button>
+    <button class="mk-chip" data-set-accent="pine"><i class="mk-chip__dot" style="background:#2f6f5e"></i>松绿</button>
+    <button class="mk-chip" data-set-accent="gamboge"><i class="mk-chip__dot" style="background:#9a6b12"></i>藤黄</button>
+  </div>
+  <button class="btn" data-toggle-light>切换亮 / 暗</button>
+</div>
+
+<main class="mk-wrap">
+  <h1 class="mk-h1">浏览器插件弹窗</h1>
+  <p class="mk-lede">
+    插件是唯一一个不在 Opennote 窗口里的新界面，所以它最需要证明「像同一个应用」：外壳用应用的对话框材质（<code style="font-family:var(--font-mono)">--paper</code> 底 + 1px <code style="font-family:var(--font-mono)">--rule-strong</code> 描边 + <code style="font-family:var(--font-mono)">--radius-lg</code>），条目行沿用树行手感，主按钮用应用的强调色主按钮。示例数据取自 example.com 的一篇整页剪藏。
+  </p>
+
+  <div class="mk-shelf">
+
+    <!-- UI-01/S1 加载 · 读取正文 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S1 · 加载</div>
+      <div class="mk-spec__t">正在读取页面正文</div>
+      <div class="mk-spec__n">骨架条用 --paper-3 静态色块，不用 spinner，避免打开瞬间闪烁。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-busy"><i class="status-chip__dot"></i>正在连接本地接口…</span></span>
+        </div>
+        <div class="clip__seg"><div class="segmented"><button class="is-active">选中片段</button><button>整页正文</button></div></div>
+        <div class="clip__skeleton">
+          <div class="clip__bar" style="width:72%"></div>
+          <div class="clip__bar"></div><div class="clip__bar" style="width:88%"></div><div class="clip__bar" style="width:54%"></div>
+        </div>
+        <div class="clip__foot"><button class="btn btn--primary" disabled>正在读取页面…</button><button class="clip__more" title="更多" aria-label="更多">⋯</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S2 默认 · 选中片段 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S2 · 默认</div>
+      <div class="mk-spec__t">选中片段剪藏</div>
+      <div class="mk-spec__n">分段选中「选中片段」，预览卡显示选区与字数。落点与标签在提交前就可见（原则 P4）。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-on"><i class="status-chip__dot"></i>本地接口已开启</span></span>
+        </div>
+        <div class="clip__seg"><div class="segmented"><button class="is-active">选中片段</button><button>整页正文</button></div></div>
+        <div class="clip__preview">
+          <input class="clip__title-in" value="中文排版指北">
+          <p class="clip__excerpt">正文的行高比字号更影响阅读的舒适度。一段 16px 的中文，行高落在 1.7 到 1.8 之间时，眼睛在换行处最不容易丢掉行。字距则相反：中文字距几乎不需要调整，加了反而松散。</p>
+          <p class="clip__src">已选中 214 字 · <em>example.com</em> · 2026-09-24</p>
+        </div>
+        <div class="clip__rows">
+          <div class="clip__row"><label>存到</label><span class="clip__sel" style="flex:1">读书笔记<i>▾</i></span></div>
+          <div class="clip__row"><label>标签</label><input class="field" value="排版, 网页剪藏" placeholder="用逗号分隔，可留空"></div>
+        </div>
+        <div class="clip__foot"><button class="btn btn--primary">剪藏到 Opennote</button><button class="clip__more" title="更多" aria-label="更多">⋯</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S3 默认 · 整页正文 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S3 · 默认</div>
+      <div class="mk-spec__t">整页正文剪藏</div>
+      <div class="mk-spec__n">切到「整页正文」后，标题右侧出现篇幅预估；预览仍是衬线材质，与编辑器的正文观感一致。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-on"><i class="status-chip__dot"></i>本地接口已开启</span></span>
+        </div>
+        <div class="clip__seg"><div class="segmented"><button>选中片段</button><button class="is-active">整页正文</button></div></div>
+        <div class="clip__preview">
+          <div style="display:flex;gap:8px;align-items:baseline">
+            <input class="clip__title-in" style="flex:1" value="中文排版指北">
+            <span style="font-size:var(--fs-xs);color:var(--ink-3);white-space:nowrap">约 3,800 字 · 预计 1 篇笔记</span>
+          </div>
+          <p class="clip__excerpt">一份写给中文写作者的排版速查。它不讨论字体设计，只回答一个具体问题：在屏幕和纸上，中文怎样才能读得下去。全文分为行高与字距、段落间距、标点挤压、中西文混排四节，每节都给出可以直接照抄的数值。</p>
+          <p class="clip__src"><em>example.com</em> · 小林 · 发布于 2026-09-20 · 剪藏于 2026-09-29</p>
+        </div>
+        <div class="clip__rows">
+          <div class="clip__row"><label>存到</label><span class="clip__sel" style="flex:1">读书笔记<i>▾</i></span></div>
+          <div class="clip__row"><label>标签</label><input class="field" value="排版" placeholder="用逗号分隔，可留空"></div>
+        </div>
+        <div class="clip__foot"><button class="btn btn--primary">剪藏到 Opennote</button><button class="clip__more" title="更多" aria-label="更多">⋯</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S4 空 · 没有选中任何文字 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S4 · 空</div>
+      <div class="mk-spec__t">没有选中任何文字</div>
+      <div class="mk-spec__n">停在「选中片段」但页面无选区。空态口吻参照现有「回收站是空的。」：陈述事实 + 一句怎么办。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-on"><i class="status-chip__dot"></i>本地接口已开启</span></span>
+        </div>
+        <div class="clip__seg"><div class="segmented"><button class="is-active">选中片段</button><button>整页正文</button></div></div>
+        <div class="clip__empty">
+          <span class="empty__seal" aria-hidden="true">記</span>
+          <h3>没有选中任何文字。</h3>
+          <p>在页面上选一段，或者切到「整页正文」。</p>
+        </div>
+        <div class="clip__foot"><button class="btn btn--primary" disabled>剪藏到 Opennote</button><button class="clip__more" title="更多" aria-label="更多">⋯</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S5 空 · 页面不可读取 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S5 · 空（受限页面）</div>
+      <div class="mk-spec__t">这个页面不允许插件读取内容</div>
+      <div class="mk-spec__n">插件只申请 activeTab + scripting（FR-54），因此 chrome://、扩展商店、PDF 阅读器都读不到。如实告知，不转圈。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-on"><i class="status-chip__dot"></i>本地接口已开启</span></span>
+        </div>
+        <div class="clip__empty">
+          <span class="empty__seal" aria-hidden="true">記</span>
+          <h3>这个页面不允许插件读取内容。</h3>
+          <p>换个普通网页再试。</p>
+        </div>
+        <div class="clip__foot"><button class="btn" style="flex:1">插件设置</button><button class="btn" style="flex:1">打开 Opennote</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S6 未连接 · 需要配对 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S6 · 未连接</div>
+      <div class="mk-spec__t">需要配对（输入 6 位配对码）</div>
+      <div class="mk-spec__n">桥在运行但插件还没拿到令牌。主路径是配对码：47 字符令牌不必手抄。配对码 120 秒有效、一次性、连续失败 5 次作废（IMP-2004）。错误恢复时（S10）也回到这里，不让用户自己找入口。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip"><i class="status-chip__dot"></i>需要配对</span></span>
+        </div>
+        <div class="clip__block">
+          <p>这个客户端还没有配对。请在 Opennote 的「导入与接口」里点「配对新客户端」，输入显示的 6 位配对码。</p>
+          <input class="field" style="margin-top:10px;font-family:var(--font-mono);font-size:18px;letter-spacing:.34em;text-align:center" inputmode="numeric" maxlength="6" placeholder="••••••" value="482971" aria-label="6 位配对码">
+          <div style="display:flex;gap:8px;margin-top:10px"><button class="btn btn--primary" style="flex:1">配对</button><button class="btn">打开 Opennote 设置</button></div>
+        </div>
+        <div class="clip__foot"><button class="btn btn--primary" disabled>剪藏到 Opennote</button><button class="clip__more" title="更多" aria-label="更多">⋯</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S12 错误 · Opennote 未运行 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S12 · 错误</div>
+      <div class="mk-spec__t">Opennote 未运行（桥跟随窗口生命周期）</div>
+      <div class="mk-spec__n">这一态必须与 S9 分开：S12 用户要做的是启动应用，S9 用户要做的是改设置。合成一句「未连接」等于让用户自己猜。依据 00 §6.8①、IMP-4006。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-error"><i class="status-chip__dot"></i>Opennote 未运行</span></span>
+        </div>
+        <div class="clip__alert">
+          <p>Opennote 的窗口已关闭。请重新打开 Opennote，再试一次。</p>
+          <p class="next">连接被拒说明本机没有在监听，不是令牌问题。</p>
+          <div class="acts"><button class="btn btn--primary">重试</button><button class="btn">先暂存这页</button></div>
+        </div>
+        <div class="clip__foot"><button class="btn btn--primary" disabled>剪藏到 Opennote</button><button class="clip__more" title="更多" aria-label="更多">⋯</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S7 加载 · 正在剪藏 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S7 · 加载</div>
+      <div class="mk-spec__t">正在剪藏</div>
+      <div class="mk-spec__n">按钮宽度不跳变（加载态与默认态同 padding）；预览与落点区降到 60% 不透明度并停止响应。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-on"><i class="status-chip__dot"></i>本地接口已开启</span></span>
+        </div>
+        <div class="clip__seg"><div class="segmented"><button>选中片段</button><button class="is-active">整页正文</button></div></div>
+        <div style="opacity:.6">
+          <div class="clip__preview">
+            <input class="clip__title-in" value="中文排版指北">
+            <p class="clip__excerpt">一份写给中文写作者的排版速查。它不讨论字体设计，只回答一个具体问题：在屏幕和纸上，中文怎样才能读得下去。</p>
+            <p class="clip__src"><em>example.com</em> · 小林 · 剪藏于 2026-09-29</p>
+          </div>
+        </div>
+        <div class="clip__foot"><button class="btn btn--primary" aria-busy="true"><span class="spinner"></span>正在剪藏…</button><button class="clip__more" title="更多" aria-label="更多">⋯</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S8 成功 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S8 · 成功</div>
+      <div class="mk-spec__t">已剪藏</div>
+      <div class="mk-spec__n">2 秒后自动关闭弹窗；次行显示最终笔记标题，让用户知道落到哪里了。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-on"><i class="status-chip__dot"></i>本地接口已开启</span></span>
+        </div>
+        <div class="clip__ok">
+          <span class="dot" aria-hidden="true"></span>
+          <div>
+            <p style="font-size:var(--fs-md);color:var(--ink)">已剪藏到「读书笔记」。</p>
+            <p style="font-size:var(--fs-xs);color:var(--ink-3);margin-top:2px">中文排版指北.md</p>
+          </div>
+        </div>
+        <div class="clip__foot"><button class="btn" style="flex:1">打开这篇笔记</button><button class="btn" style="flex:1">再剪一段</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S9 错误 · 本地接口未开启 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S9 · 错误</div>
+      <div class="mk-spec__t">本地接口未开启</div>
+      <div class="mk-spec__n">文案逐字取自 PRD 冻结清单第 1 条。左侧 2px 强调色竖条是错误块的识别方式，不用红色（原则 P3）。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-error"><i class="status-chip__dot"></i>本地接口未开启</span></span>
+        </div>
+        <div class="clip__alert">
+          <p>本地接口未开启。打开桌面版 Opennote 的「设置 · 文件 · 导入与接口」，开启本地接口后重试。</p>
+          <p class="next">已保留你填的标题与标签。</p>
+          <div class="acts"><button class="btn btn--primary">重试</button><button class="btn">打开 Opennote 设置</button></div>
+        </div>
+        <div class="clip__foot"><button class="btn btn--primary" disabled>剪藏到 Opennote</button><button class="clip__more" title="更多" aria-label="更多">⋯</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S10 错误 · 令牌无效 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S10 · 错误</div>
+      <div class="mk-spec__t">令牌不正确或已被撤销</div>
+      <div class="mk-spec__n">文案逐字取自 02 号 IMP-2002；错误块下方直接接配对码输入框，一次点击解决。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-error"><i class="status-chip__dot"></i>未连接</span></span>
+        </div>
+        <div class="clip__alert">
+          <p>访问令牌不正确或已失效。重新生成令牌后，请在客户端里更新。</p>
+          <input class="field" style="margin-top:10px;font-family:var(--font-mono);font-size:18px;letter-spacing:.34em;text-align:center" inputmode="numeric" maxlength="6" placeholder="••••••" aria-label="6 位配对码">
+          <div class="acts"><button class="btn btn--primary">配对</button><button class="btn">打开 Opennote 设置</button></div>
+        </div>
+        <div class="clip__foot"><button class="btn btn--primary" disabled>剪藏到 Opennote</button><button class="clip__more" title="更多" aria-label="更多">⋯</button></div>
+      </div>
+    </section>
+
+    <!-- UI-01/S11 离线 · 已暂存待补投 -->
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-01 / S11 · 离线（P1）</div>
+      <div class="mk-spec__t">离线暂存，桥恢复后补投</div>
+      <div class="mk-spec__n">文案逐字取自 PRD 冻结清单第 14 条。主按钮保持可用（继续暂存），不把用户堵在错误里。</div>
+      <div class="clip" style="margin-top:10px">
+        <div class="clip__head">
+          <span class="seal" aria-hidden="true">記</span>
+          <span class="clip__name">Opennote<small>剪藏</small></span>
+          <span style="margin-left:auto"><span class="status-chip is-busy"><i class="status-chip__dot"></i>离线，已暂存 3 条</span></span>
+        </div>
+        <div class="clip__alert" style="border-left-color:var(--rule-strong)">
+          <p>Opennote 未打开笔记本，内容已暂存在插件里，打开笔记本后会自动补投。</p>
+          <p class="next">打开 Opennote 后会自动补投。</p>
+        </div>
+        <div class="clip__rows">
+          <div class="clip__row"><label>存到</label><span class="clip__sel" style="flex:1">读书笔记<i>▾</i></span></div>
+          <div class="clip__row"><label>标签</label><input class="field" value="稍后读" placeholder="用逗号分隔，可留空"></div>
+        </div>
+        <div class="clip__foot"><button class="btn btn--primary">暂存在插件里</button><button class="clip__more" title="更多" aria-label="更多">⋯</button></div>
+      </div>
+    </section>
+
+  </div>
+
+  <section class="mk-sec">
+    <h2>UI-02 · 页面内选区浮标</h2>
+    <p>选中文字后浮出的极简动作条，与应用的 toast 完全同构（--ink 底 / --paper 字 / 99px 药丸 / --shadow-3）。它不进入 Tab 顺序，键盘用户走弹窗与快捷键。</p>
+    <div class="mk-shelf">
+      <section class="mk-spec" style="width:660px">
+        <div class="mk-spec__id">UI-02 / S1 · S4 · S5</div>
+        <div class="mk-spec__t">默认 → 加载 → 错误</div>
+        <div class="page">
+          <div class="page__bar"><span class="page__dot"></span><span class="page__dot"></span><span class="page__dot"></span><span style="margin-left:auto;font-family:var(--font-mono)">example.com/typography-cn</span></div>
+          <h2 class="page__h1">中文排版指北</h2>
+          <p class="page__by">小林 · 2026-09-20 · 约 12 分钟读完</p>
+          <p class="page__p">正文的行高比字号更影响阅读的舒适度。<mark>一段 16px 的中文，行高落在 1.7 到 1.8 之间时，眼睛在换行处最不容易丢掉行。</mark>字距则相反：中文字距几乎不需要调整，加了反而松散。</p>
+          <span class="clip-float" role="toolbar" aria-label="剪藏动作">
+            <i class="clip-float__seal" aria-hidden="true">記</i>
+            <button class="clip-float__btn">剪藏</button>
+            <i class="clip-float__sep"></i>
+            <button class="clip-float__icon" title="剪藏整页正文" aria-label="剪藏整页正文">整页</button>
+          </span>
+        </div>
+        <div style="display:flex;gap:var(--s4);flex-wrap:wrap;margin-top:var(--s3)">
+          <div>
+            <div class="mk-spec__id">S4 · 加载</div>
+            <span class="clip-float" style="position:static;display:inline-flex;animation:none"><i class="clip-float__seal" aria-hidden="true">記</i><span style="padding:0 9px"><span class="spinner" style="border-color:var(--paper);border-top-color:transparent"></span></span><i class="clip-float__sep"></i><button class="clip-float__icon">整页</button></span>
+          </div>
+          <div>
+            <div class="mk-spec__id">S5 · 错误</div>
+            <span class="clip-float clip-float--danger" style="position:static;display:inline-flex;animation:none"><i class="clip-float__seal" aria-hidden="true">記</i><span style="padding:0 9px;font-size:var(--fs-sm)">本地接口未开启</span></span>
+          </div>
+        </div>
+        <div class="mk-note">
+          <div class="mk-kv"><b>S2 hover</b>药丸底从 --ink 提到 color-mix(in srgb, var(--ink) 88%, var(--paper))，120ms。</div>
+          <div class="mk-kv"><b>S3 聚焦</b>焦点环画在药丸内侧（outline-offset: -2px），因为外环会盖住页面文字。</div>
+          <div class="mk-kv"><b>位置</b>选区包围盒上方 --s2，水平居中；上方空间不足时翻转到下方。</div>
+          <div class="mk-kv"><b>裁掉它</b>UI-02 是可裁剪项：UI-01 已覆盖同一能力，裁掉不损失功能完整性（规范 O-5）。</div>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <section class="mk-sec">
+    <h2>键盘可达性与无障碍</h2>
+    <div class="mk-note">
+      <div class="mk-kv"><b>Tab 顺序</b>状态芯片（只读，tabindex="-1"）→ 分段控件 → 标题输入 → 落点 → 标签 → 主按钮 → 「⋯」菜单</div>
+      <div class="mk-kv"><b>Enter</b>在标题或标签输入框内直接提交，等价于点主按钮</div>
+      <div class="mk-kv"><b>Esc</b>关闭弹窗（浏览器原生行为，不拦截）</div>
+      <div class="mk-kv"><b>分段控件</b>role="radiogroup" + role="radio"，←/→ 切换，不必按 Tab 穿过两个按钮</div>
+      <div class="mk-kv"><b>加载态</b>主按钮 aria-busy="true"；状态芯片 role="status" aria-live="polite"</div>
+      <div class="mk-kv"><b>对比度</b>错误句与状态文字一律用 --ink 或 --accent；--ink-3 只用于时间戳这类补充信息（约 3.2:1，低于 AA）</div>
+      <div class="mk-kv"><b>动效</b>只用 rise / fade / pop / pulse 与 120·220·460ms；prefers-reduced-motion 全局降级（本文件已内联）</div>
+    </div>
+  </section>
+</main>
+
+<script>
+(function(){
+  var root=document.documentElement, light="paper";
+  function store(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+  function read(k){try{return localStorage.getItem(k)}catch(e){return null}}
+  function apply(theme,accent,persist){
+    root.setAttribute("data-theme",theme); root.setAttribute("data-accent",accent);
+    if(theme!=="night"&&theme!=="ink") light=theme;
+    document.querySelectorAll("[data-set-theme]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-theme")===theme)});
+    document.querySelectorAll("[data-set-accent]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-accent")===accent)});
+    if(persist){store("opennote-mock-theme",theme);store("opennote-mock-accent",accent)}
+  }
+  document.querySelectorAll("[data-set-theme]").forEach(function(b){b.addEventListener("click",function(){apply(b.getAttribute("data-set-theme"),root.getAttribute("data-accent"),true)})});
+  document.querySelectorAll("[data-set-accent]").forEach(function(b){b.addEventListener("click",function(){apply(root.getAttribute("data-theme"),b.getAttribute("data-set-accent"),true)})});
+  var tl=document.querySelector("[data-toggle-light]");
+  if(tl) tl.addEventListener("click",function(){
+    var dark=root.getAttribute("data-theme")==="night"||root.getAttribute("data-theme")==="ink";
+    apply(dark?light:"night",root.getAttribute("data-accent"),true);
+  });
+  var q=new URLSearchParams(location.search);
+  apply(q.get("theme")||read("opennote-mock-theme")||"paper",q.get("accent")||read("opennote-mock-accent")||"seal",false);
+})();
+</script>
+</body>
+</html>

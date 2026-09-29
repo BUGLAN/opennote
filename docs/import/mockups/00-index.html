@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="paper" data-accent="seal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opennote · 剪藏与导入 · 设计稿索引</title>
+<style>
+/* ═══════════════════════════════════════════════════════════════════════════
+   设计稿令牌层：逐字复制自 src/styles/tokens.css（截至撰写时）
+   本文件自包含：无外链、无字体请求，file:// 直接打开即可。
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root{
+  --sidebar-w:268px;--outline-w:232px;--tabbar-h:40px;--statusbar-h:30px;
+  --radius-sm:5px;--radius:8px;--radius-lg:14px;--measure:46rem;--doc-fs:16.5px;--doc-lh:1.78;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --ease:cubic-bezier(0.22,0.61,0.36,1);--ease-out:cubic-bezier(0.16,1,0.3,1);
+  --dur-fast:120ms;--dur:220ms;--dur-slow:460ms;
+  --font-ui:"Figtree Variable","Figtree",system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --font-serif:"Newsreader Variable","Newsreader","Iowan Old Style",Georgia,"Songti SC","Noto Serif SC","Source Han Serif SC","SimSun",serif;
+  --font-display:"Fraunces Variable","Fraunces","Newsreader Variable",Georgia,"Songti SC",serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono",ui-monospace,"Cascadia Code",Consolas,"Liberation Mono",monospace;
+  --font-cjk-serif:"Songti SC","Noto Serif SC","Source Han Serif SC","SimSun",serif;
+  --font-cjk-sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --font-doc:var(--font-serif);
+  --fs-xs:11.5px;--fs-sm:12.5px;--fs-md:13.5px;--fs-lg:15px;--tracking-wide:0.08em;
+}
+/* 素笺 — 暖色亮色，默认 */
+:root,[data-theme="paper"]{--paper:#fbf8f3;--paper-2:#fffdf9;--paper-3:#f2ece1;--paper-4:#e9e1d3;--ink:#221d17;--ink-2:#5c5347;--ink-3:#97897a;--rule:#e8dfd1;--rule-strong:#d7cbb8;--code-bg:#f4eee4;--mark:#f6e3a8;--sel:rgba(178,58,46,.16);--shadow-c:52 39 22;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.28);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.36),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.035;color-scheme:light}
+/* 青瓷 — 冷色亮色 */
+[data-theme="celadon"]{--paper:#f4f7f5;--paper-2:#fbfdfc;--paper-3:#e8efec;--paper-4:#dde7e2;--ink:#17221f;--ink-2:#4c5c57;--ink-3:#86968f;--rule:#dce5e1;--rule-strong:#c6d3cd;--code-bg:#eaf0ed;--mark:#d7ecd6;--sel:rgba(47,111,94,.16);--shadow-c:22 44 38;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.26);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.34),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.03;color-scheme:light}
+/* 琥珀 — 琥珀色亮色 */
+[data-theme="sepia"]{--paper:#faf3e6;--paper-2:#fffbf3;--paper-3:#f1e6d2;--paper-4:#e6d8bf;--ink:#2a2118;--ink-2:#6a5a45;--ink-3:#9d8a70;--rule:#e7d9c0;--rule-strong:#d3c1a2;--code-bg:#f3e9d8;--mark:#f3dfa6;--sel:rgba(168,100,42,.18);--shadow-c:60 44 20;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.07);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.12),0 12px 28px -18px rgb(var(--shadow-c)/.3);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.38),0 2px 8px -4px rgb(var(--shadow-c)/.14);--grain:.045;color-scheme:light}
+/* 夜读 — 暖色暗色 */
+[data-theme="night"]{--paper:#14120f;--paper-2:#1c1915;--paper-3:#262119;--paper-4:#322b21;--ink:#eae3d7;--ink-2:#b0a796;--ink-3:#7d7466;--rule:#2e2820;--rule-strong:#413930;--code-bg:#1f1b15;--mark:#4a3b1e;--sel:rgba(224,102,79,.24);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.05;color-scheme:dark}
+/* 砚池 — 冷色暗色 */
+[data-theme="ink"]{--paper:#0e1113;--paper-2:#151a1d;--paper-3:#1d2428;--paper-4:#273034;--ink:#dfe6e6;--ink-2:#9faeae;--ink-3:#6e7d7e;--rule:#232b2f;--rule-strong:#333d42;--code-bg:#161c20;--mark:#2c3b33;--sel:rgba(79,181,154,.22);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.04;color-scheme:dark}
+/* 朱砂（默认） */
+:root,[data-accent="seal"]{--accent:#b23a2e;--accent-ink:#ffffff;--accent-soft:rgba(178,58,46,.12);--accent-line:rgba(178,58,46,.34)}
+[data-theme="night"][data-accent="seal"],[data-theme="ink"][data-accent="seal"]{--accent:#e0664f;--accent-ink:#1a0f0c;--accent-soft:rgba(224,102,79,.16);--accent-line:rgba(224,102,79,.4)}
+/* 靛青 */
+[data-accent="indigo"]{--accent:#34558b;--accent-ink:#ffffff;--accent-soft:rgba(52,85,139,.12);--accent-line:rgba(52,85,139,.34)}
+[data-theme="night"][data-accent="indigo"],[data-theme="ink"][data-accent="indigo"]{--accent:#7ea6e0;--accent-ink:#0b1420;--accent-soft:rgba(126,166,224,.16);--accent-line:rgba(126,166,224,.4)}
+/* 松绿 */
+[data-accent="pine"]{--accent:#2f6f5e;--accent-ink:#ffffff;--accent-soft:rgba(47,111,94,.12);--accent-line:rgba(47,111,94,.34)}
+[data-theme="night"][data-accent="pine"],[data-theme="ink"][data-accent="pine"]{--accent:#4fb59a;--accent-ink:#08130f;--accent-soft:rgba(79,181,154,.16);--accent-line:rgba(79,181,154,.4)}
+/* 藤黄 */
+[data-accent="gamboge"]{--accent:#9a6b12;--accent-ink:#ffffff;--accent-soft:rgba(154,107,18,.14);--accent-line:rgba(154,107,18,.36)}
+[data-theme="night"][data-accent="gamboge"],[data-theme="ink"][data-accent="gamboge"]{--accent:#d9a537;--accent-ink:#171004;--accent-soft:rgba(217,165,55,.16);--accent-line:rgba(217,165,55,.4)}
+
+/* ═══════════ base.css 的公共层（逐字复制） ═══════════ */
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-ui);font-size:var(--fs-md);line-height:1.6;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;font-synthesis-weight:none;text-rendering:optimizeLegibility}
+body::before{content:"";position:fixed;inset:0;z-index:9999;pointer-events:none;opacity:var(--grain);mix-blend-mode:multiply;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+[data-theme="night"] body::before,[data-theme="ink"] body::before{mix-blend-mode:overlay}
+h1,h2,h3,h4,h5,h6,p,figure,blockquote,dl,dd{margin:0}
+button,input,select,textarea{font:inherit;color:inherit;background:none;border:none;margin:0}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+a{color:var(--accent)}
+::selection{background:var(--sel)}
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px;border-radius:3px}
+*{scrollbar-width:thin;scrollbar-color:var(--rule-strong) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--rule-strong);border:3px solid transparent;background-clip:padding-box;border-radius:99px}
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:var(--radius-sm);color:var(--ink-2);transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.icon-btn:hover{background:var(--paper-3);color:var(--ink)}
+.btn{display:inline-flex;align-items:center;gap:var(--s2);height:28px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--rule-strong);color:var(--ink);background:var(--paper-2);font-size:var(--fs-md);transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease)}
+.btn:hover{background:var(--paper-3)}
+.btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn--primary:hover{filter:brightness(1.06);background:var(--accent)}
+.btn--ghost{border-color:transparent;background:transparent}
+.btn--ghost:hover{background:var(--paper-3)}
+.btn--danger{color:var(--accent)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.field{width:100%;height:30px;padding:0 9px;border-radius:var(--radius-sm);border:1px solid var(--rule-strong);background:var(--paper-2);color:var(--ink);font-size:var(--fs-md)}
+.field:focus-visible{outline:none;border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-soft)}
+kbd{display:inline-flex;align-items:center;min-width:18px;height:19px;padding:0 5px;border:1px solid var(--rule-strong);border-bottom-width:2px;border-radius:4px;background:var(--paper-2);color:var(--ink-2);font-family:var(--font-ui);font-size:var(--fs-xs);line-height:1;white-space:nowrap}
+.seal{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:5px;background:var(--accent);color:var(--accent-ink);font-family:var(--font-serif);font-size:13px;line-height:1;box-shadow:inset 0 0 0 1px rgb(255 255 255/.32)}
+.muted{color:var(--ink-3)}
+.truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.switch{display:inline-flex;align-items:center;gap:var(--s2);color:var(--ink-2);font-size:var(--fs-md)}
+.switch input{appearance:none;width:34px;height:19px;border-radius:99px;background:var(--paper-4);border:1px solid var(--rule-strong);position:relative;cursor:pointer;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease);flex:none}
+.switch input::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--paper-2);box-shadow:var(--shadow-1);transition:transform var(--dur-fast) var(--ease)}
+.switch input:checked{background:var(--accent);border-color:var(--accent)}
+.switch input:checked::after{transform:translateX(15px)}
+.segmented{display:inline-flex;padding:2px;gap:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper)}
+.segmented button{height:24px;padding:0 10px;border-radius:4px;color:var(--ink-2);font-size:var(--fs-sm)}
+.segmented button:hover{background:var(--paper-3)}
+.segmented button.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.choice{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;align-items:center;padding:12px 14px;border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--paper-2);color:var(--ink);transition:border-color var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease);text-align:left;width:100%}
+.choice:hover:not(:disabled){border-color:var(--accent-line);background:var(--accent-soft)}
+.choice.is-active{border-color:var(--accent-line);background:var(--accent-soft)}
+.choice:disabled{opacity:.5;cursor:not-allowed}
+.choice svg{grid-row:span 2;color:var(--accent)}
+.choice strong{font-weight:600}
+.choice small{grid-column:2;color:var(--ink-3);font-size:var(--fs-sm);line-height:1.5}
+.tree__row{display:flex;align-items:center;gap:6px;width:100%;min-height:27px;padding:3px 8px 3px 6px;border-radius:var(--radius-sm);color:var(--ink-2);text-align:left;font-size:var(--fs-md);line-height:1.35;cursor:pointer;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.tree__row:hover{background:var(--paper-3);color:var(--ink)}
+.tree__row.is-active{background:var(--accent-soft);color:var(--ink);font-weight:550}
+.tree__icon{display:inline-flex;color:var(--ink-3);flex:none}
+.tree__row.is-active .tree__icon,.tree__row:hover .tree__icon{color:var(--accent)}
+.tree__label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tree__meta{flex:none;font-size:var(--fs-xs);color:var(--ink-3);font-variant-numeric:tabular-nums}
+.tree__group{display:flex;align-items:center;gap:6px;margin:var(--s3) 0 3px;padding:0 8px;font-size:var(--fs-xs);letter-spacing:var(--tracking-wide);text-transform:uppercase;color:var(--ink-3)}
+.tree__group::after{content:"";flex:1;height:1px;background:var(--rule)}
+.tree__empty{padding:var(--s4) var(--s3);color:var(--ink-3);font-size:var(--fs-sm);text-align:center;line-height:1.7}
+.toast{display:flex;align-items:center;gap:var(--s2);max-width:420px;padding:8px 14px;border-radius:99px;background:var(--ink);color:var(--paper);font-size:var(--fs-md);box-shadow:var(--shadow-2);animation:rise var(--dur) var(--ease-out) both}
+.toast--danger{background:var(--accent);color:var(--accent-ink)}
+.toast__action{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.statusbar__item{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 6px;border-radius:4px;color:inherit;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease);font-variant-numeric:tabular-nums;flex:none;white-space:nowrap}
+.statusbar__item--button:hover{background:var(--paper-3);color:var(--ink)}
+.statusbar__item.is-on{color:var(--accent);background:var(--accent-soft)}
+.empty__seal{display:inline-flex;align-items:center;justify-content:center;width:52px;height:52px;margin-bottom:var(--s4);border-radius:12px;background:var(--accent);color:var(--accent-ink);font-family:var(--font-serif);font-size:30px;box-shadow:inset 0 0 0 1.5px rgb(255 255 255/.32),var(--shadow-2)}
+.empty__title{font-family:var(--font-display);font-size:26px;font-weight:600;letter-spacing:-.015em}
+.empty__lede{margin-top:6px;color:var(--ink-2);line-height:1.75}
+.busy__spinner{width:12px;height:12px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@keyframes pop{from{opacity:0;translate:0 -6px;scale:.985}to{opacity:1;translate:0 0;scale:1}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
+
+/* ═══════════ 设计稿外壳（不属于产品，仅供审阅） ═══════════ */
+.mk-bar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;padding:8px var(--s4);border-bottom:1px solid var(--rule);background:color-mix(in srgb,var(--paper-2) 86%,var(--paper));backdrop-filter:blur(6px)}
+.mk-bar__title{font-family:var(--font-display);font-size:14px;font-weight:600;letter-spacing:-.01em;margin-right:auto}
+.mk-bar__title small{display:block;font-family:var(--font-ui);font-size:var(--fs-xs);font-weight:400;letter-spacing:var(--tracking-wide);color:var(--ink-3)}
+.mk-nav{display:flex;gap:2px;flex-wrap:wrap}
+.mk-nav a{padding:4px 8px;border-radius:var(--radius-sm);color:var(--ink-2);text-decoration:none;font-size:var(--fs-sm);transition:background var(--dur-fast) var(--ease)}
+.mk-nav a:hover{background:var(--paper-3);color:var(--ink)}
+.mk-nav a.is-here{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-group{display:flex;align-items:center;gap:var(--s1);padding:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper)}
+.mk-group>span{padding:0 6px;font-size:var(--fs-xs);color:var(--ink-3);letter-spacing:var(--tracking-wide)}
+.mk-chip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 8px;border-radius:4px;color:var(--ink-2);font-size:var(--fs-sm);transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.mk-chip:hover{background:var(--paper-3)}
+.mk-chip.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-chip__dot{width:11px;height:11px;border-radius:3px;box-shadow:inset 0 0 0 1px rgb(0 0 0/.14);flex:none}
+.mk-wrap{max-width:1080px;margin:0 auto;padding:var(--s6) var(--s4) var(--s7)}
+.mk-h1{font-family:var(--font-display);font-size:26px;font-weight:600;letter-spacing:-.015em}
+.mk-lede{margin-top:6px;max-width:62ch;color:var(--ink-2);line-height:1.8}
+.mk-sec{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--rule)}
+.mk-sec>h2{font-family:var(--font-display);font-size:17px;font-weight:600;letter-spacing:-.01em}
+.mk-sec>h2+p{margin-top:4px;max-width:70ch;color:var(--ink-3);font-size:var(--fs-sm);line-height:1.7}
+.mk-grid{display:grid;gap:var(--s3);margin-top:var(--s4)}
+.mk-grid--2{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+.mk-grid--3{grid-template-columns:repeat(auto-fill,minmax(232px,1fr))}
+.mk-card{border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--paper-2);padding:var(--s3)}
+.mk-card>h3{font-size:var(--fs-md);font-weight:600}
+.mk-card>h3+p{margin-top:2px;font-size:var(--fs-xs);color:var(--ink-3);line-height:1.6}
+.mk-swatches{display:flex;gap:6px;margin-top:var(--s3)}
+.mk-swatch{flex:1;height:44px;border-radius:var(--radius-sm);box-shadow:inset 0 0 0 1px rgb(0 0 0/.1);position:relative}
+.mk-swatch span{position:absolute;left:0;right:0;bottom:-16px;text-align:center;font-size:10px;color:var(--ink-3)}
+.mk-rowline{display:flex;align-items:baseline;gap:var(--s2);padding:5px 0;border-bottom:1px dashed var(--rule);font-size:var(--fs-sm)}
+.mk-rowline:last-child{border-bottom:none}
+.mk-rowline b{font-weight:600;min-width:96px}
+.mk-rowline span{margin-left:auto;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.mk-code{display:block;margin-top:var(--s2);padding:7px 9px;border-radius:var(--radius-sm);background:var(--code-bg);border:1px solid var(--rule);font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--ink-2);word-break:break-all}
+.mk-no{display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:18px;padding:0 6px;border-radius:99px;background:var(--accent-soft);color:var(--accent);font-size:10px;letter-spacing:var(--tracking-wide);flex:none}
+.mk-yes{display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:18px;padding:0 6px;border-radius:99px;border:1px solid var(--rule-strong);color:var(--ink-3);font-size:10px;letter-spacing:var(--tracking-wide);flex:none}
+.mk-bans{display:grid;gap:var(--s2);margin-top:var(--s4)}
+.mk-ban{display:flex;align-items:center;gap:var(--s3);padding:7px 10px;border:1px solid var(--rule);border-radius:var(--radius-sm);background:var(--paper-2);font-size:var(--fs-md)}
+.mk-ban em{font-style:normal;color:var(--ink-3);font-size:var(--fs-sm);margin-left:auto;text-align:right}
+.mk-foot{margin-top:var(--s7);padding-top:var(--s4);border-top:1px solid var(--rule);font-size:var(--fs-xs);color:var(--ink-3);line-height:1.9}
+</style>
+</head>
+<body>
+
+<div class="mk-bar">
+  <span class="mk-bar__title">Opennote · 剪藏与导入 · 设计稿<small>静态设计稿 · 双击 file:// 打开 · 无外链</small></span>
+  <nav class="mk-nav" aria-label="设计稿导航">
+    <a href="00-index.html" class="is-here">索引</a>
+    <a href="01-extension-popup.html">插件弹窗</a>
+    <a href="02-import-inbox.html">导入收件箱</a>
+    <a href="03-settings-import-api.html">设置 · 导入与接口</a>
+    <a href="04-toast-undo.html">提示与冲突</a>
+    <a href="05-first-run.html">首次引导</a>
+  </nav>
+  <div class="mk-group" role="group" aria-label="配色主题">
+    <span>主题</span>
+    <button class="mk-chip" data-set-theme="paper">素笺</button>
+    <button class="mk-chip" data-set-theme="celadon">青瓷</button>
+    <button class="mk-chip" data-set-theme="sepia">琥珀</button>
+    <button class="mk-chip" data-set-theme="night">夜读</button>
+    <button class="mk-chip" data-set-theme="ink">砚池</button>
+  </div>
+  <div class="mk-group" role="group" aria-label="强调色">
+    <span>强调色</span>
+    <button class="mk-chip" data-set-accent="seal"><i class="mk-chip__dot" style="background:#b23a2e"></i>朱砂</button>
+    <button class="mk-chip" data-set-accent="indigo"><i class="mk-chip__dot" style="background:#34558b"></i>靛青</button>
+    <button class="mk-chip" data-set-accent="pine"><i class="mk-chip__dot" style="background:#2f6f5e"></i>松绿</button>
+    <button class="mk-chip" data-set-accent="gamboge"><i class="mk-chip__dot" style="background:#9a6b12"></i>藤黄</button>
+  </div>
+  <button class="btn" data-toggle-light>切换亮 / 暗</button>
+</div>
+
+<main class="mk-wrap">
+  <h1 class="mk-h1">剪藏与导入 · 静态设计稿</h1>
+  <p class="mk-lede">
+    这是 <strong>设计交付物</strong>，不是产品代码。每个页面都是自包含的单文件 HTML：内联 CSS、零外网依赖、无构建步骤。
+    页面顶部的主题与强调色切换器用于核验多主题适配；它属于设计稿交互，不会出现在产品里。
+    所有值逐字复制自 <code style="font-family:var(--font-mono);font-size:var(--fs-sm)">src/styles/tokens.css</code>（截至撰写时），新增令牌数为 0。
+  </p>
+
+  <section class="mk-sec">
+    <h2>界面索引</h2>
+    <p>规范正文见 <code style="font-family:var(--font-mono);font-size:var(--fs-sm)">docs/import/03-UI设计规范-剪藏与导入.md</code>。</p>
+    <div class="mk-grid mk-grid--2">
+      <a class="mk-card" href="01-extension-popup.html" style="text-decoration:none;display:block">
+        <h3>01 · 浏览器插件弹窗</h3>
+        <p>UI-01（12 个状态，含 Opennote 未运行 + 6 位配对码）· UI-02 页面内选区浮标（5 个状态）</p>
+        <div class="mk-rowline"><b>宽度</b><span>360 × 380–600 px</span></div>
+      </a>
+      <a class="mk-card" href="02-import-inbox.html" style="text-decoration:none;display:block">
+        <h3>02 · 导入收件箱</h3>
+        <p>UI-03（10 个状态 + 5 个 status）· UI-08 空态 · UI-10 侧栏与状态栏入口 · UI-11 来源信息行</p>
+        <div class="mk-rowline"><b>宽度</b><span>min(760px, 100vw − 32px)</span></div>
+      </a>
+      <a class="mk-card" href="03-settings-import-api.html" style="text-decoration:none;display:block">
+        <h3>03 · 设置 · 导入与接口</h3>
+        <p>UI-04（11 个状态 + 开关状态机 6 枚举 + 配对码倒计时）· UI-12 页面内桥（FSA = P0 / OPFS = P1 + D12 门禁）</p>
+        <div class="mk-rowline"><b>宽度</b><span>min(900px, 100vw − 32px)</span></div>
+      </a>
+      <a class="mk-card" href="04-toast-undo.html" style="text-decoration:none;display:block">
+        <h3>04 · 提示、冲突与失败</h3>
+        <p>UI-05（5，含两档撤销）· UI-06（6）· UI-07（6 + IMP 错误码表）· UI-13 opennote:// 唤起确认</p>
+        <div class="mk-rowline"><b>位置</b><span>底部居中 bottom 44px</span></div>
+      </a>
+      <a class="mk-card" href="05-first-run.html" style="text-decoration:none;display:block">
+        <h3>05 · 首次引导</h3>
+        <p>UI-09（6 个状态，含安装步骤展开态）· UI-08/S2 最近导入空态</p>
+        <div class="mk-rowline"><b>宽度</b><span>min(560px, 100vw − 32px)</span></div>
+      </a>
+      <div class="mk-card">
+        <h3>示例数据</h3>
+        <p>一条来自 example.com 的网页剪藏 · 一条来自 Claude Code 的导入 · 一条正文为空的失败导入 · 一条同 URL 重复剪藏。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="mk-sec">
+    <h2>配色令牌（5 套）</h2>
+    <p>每张卡片自带 <code style="font-family:var(--font-mono);font-size:var(--fs-sm)">data-theme</code>，因此五套配色可以同屏对比。左四格是纸面层级，右三格是墨色层级与描边。</p>
+    <div class="mk-grid mk-grid--3" id="theme-board"></div>
+  </section>
+
+  <section class="mk-sec">
+    <h2>强调色令牌（4 种 × 亮暗各一）</h2>
+    <p>强调色只出现在主按钮、激活行、焦点环、印章与危险提示上。注意暗色主题下每一种强调色都被提亮过（tokens.css 的暗色覆盖规则）。</p>
+    <div class="mk-grid mk-grid--3" id="accent-board"></div>
+  </section>
+
+  <section class="mk-sec">
+    <h2>间距 · 圆角 · 阴影 · 动效</h2>
+    <div class="mk-grid mk-grid--2">
+      <div class="mk-card">
+        <h3>间距 --s1…--s7</h3>
+        <div class="mk-rowline"><b>--s1</b><span>4px</span></div>
+        <div class="mk-rowline"><b>--s2</b><span>8px</span></div>
+        <div class="mk-rowline"><b>--s3</b><span>12px</span></div>
+        <div class="mk-rowline"><b>--s4</b><span>16px</span></div>
+        <div class="mk-rowline"><b>--s5</b><span>24px</span></div>
+        <div class="mk-rowline"><b>--s6</b><span>32px</span></div>
+        <div class="mk-rowline"><b>--s7</b><span>48px</span></div>
+      </div>
+      <div class="mk-card">
+        <h3>圆角</h3>
+        <div class="mk-rowline"><b>--radius-sm</b><span>5px · 按钮 / 树行 / 输入框</span></div>
+        <div class="mk-rowline"><b>--radius</b><span>8px · 卡片 / 菜单 / 选项</span></div>
+        <div class="mk-rowline"><b>--radius-lg</b><span>14px · 对话框 / 插件弹窗</span></div>
+      </div>
+      <div class="mk-card">
+        <h3>阴影（三级）</h3>
+        <div style="display:flex;gap:var(--s4);margin-top:var(--s3)">
+          <div style="flex:1;height:52px;border-radius:var(--radius);background:var(--paper-2);box-shadow:var(--shadow-1)"></div>
+          <div style="flex:1;height:52px;border-radius:var(--radius);background:var(--paper-2);box-shadow:var(--shadow-2)"></div>
+          <div style="flex:1;height:52px;border-radius:var(--radius);background:var(--paper-2);box-shadow:var(--shadow-3)"></div>
+        </div>
+        <div class="mk-rowline" style="margin-top:var(--s3)"><b>1 / 2 / 3</b><span>芯片 / 菜单 / 对话框</span></div>
+      </div>
+      <div class="mk-card">
+        <h3>动效</h3>
+        <div class="mk-rowline"><b>--dur-fast</b><span>120ms · hover 与状态切换</span></div>
+        <div class="mk-rowline"><b>--dur</b><span>220ms · 弹层进场</span></div>
+        <div class="mk-rowline"><b>--dur-slow</b><span>460ms · 整屏空态</span></div>
+        <div class="mk-rowline"><b>关键帧</b><span>rise / fade / pop / pulse</span></div>
+        <span class="mk-code">@media (prefers-reduced-motion: reduce) → 动画与过渡降为 0.01ms</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="mk-sec">
+    <h2>字体栈（系统回退，无外链字体）</h2>
+    <div class="mk-grid mk-grid--2">
+      <div class="mk-card">
+        <h3>界面 --font-ui</h3>
+        <p>Figtree → system-ui → PingFang SC / Microsoft YaHei</p>
+        <div class="mk-rowline"><b>字号</b><span>11.5 / 12.5 / 13.5 / 15 px</span></div>
+      </div>
+      <div class="mk-card">
+        <h3>正文 --font-serif</h3>
+        <p>Newsreader → Georgia → Songti SC / Noto Serif SC</p>
+        <div class="mk-rowline"><b>用途</b><span>预览摘录、印章汉字</span></div>
+      </div>
+      <div class="mk-card">
+        <h3>显示字 --font-display</h3>
+        <p>Fraunces → Newsreader → Georgia → Songti SC</p>
+        <div class="mk-rowline"><b>用途</b><span>对话框标题、品牌名</span></div>
+      </div>
+      <div class="mk-card">
+        <h3>等宽 --font-mono</h3>
+        <p>JetBrains Mono → ui-monospace → Consolas</p>
+        <div class="mk-rowline"><b>用途</b><span>访问令牌、端口、落点路径</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mk-sec">
+    <h2>视觉禁区（验收硬指标）</h2>
+    <p>用户的验收原话是「希望这个 UI 能够简洁美观，能够符合现在的应用」。下面是这套设计稿明确排除的做法。</p>
+    <div class="mk-bans">
+      <div class="mk-ban"><span class="mk-no">不要</span> 大色块渐变、彩色英雄区、玻璃拟态卡片 <em>全站唯一渐变是主题色板上的小圆点</em></div>
+      <div class="mk-ban"><span class="mk-no">不要</span> emoji 装饰 <em>图标只用项目现有 Icon 名称</em></div>
+      <div class="mk-ban"><span class="mk-no">不要</span> 彩色圆角卡片堆叠 <em>卡片只有一种形态：1px 描边 + 8px 圆角，一次最多 3 张</em></div>
+      <div class="mk-ban"><span class="mk-no">不要</span> SaaS 仪表盘风：统计卡片、环形进度、彩色图标块 <em>导入是安静的后台行为</em></div>
+      <div class="mk-ban"><span class="mk-no">不要</span> 成功绿 / 警告黄 / 失败红语义色 <em>危险与失败一律用 --accent，成功用 --ink 反色药丸</em></div>
+      <div class="mk-ban"><span class="mk-no">不要</span> 错误抖动、闪红、扫光 <em>错误靠一句完整的中文和位置区分</em></div>
+      <div class="mk-ban"><span class="mk-no">不要</span> 列表逐条入场动画、数字徽标弹跳 <em>会打断写作</em></div>
+      <div class="mk-ban"><span class="mk-no">不要</span> 搬运式加载遮罩 <em>加载只发生在被操作的那个控件上</em></div>
+    </div>
+  </section>
+
+  <section class="mk-sec">
+    <h2>批准与复用</h2>
+    <div class="mk-grid mk-grid--2">
+      <div class="mk-card">
+        <h3><span class="mk-yes">复用</span> 现有组件类名</h3>
+        <p>.dialog · .dialog--wide · .settings · .settings__rail · .setting · .setting--stack · .cmd-grid · .cmd · .segmented · .switch · .swatch · .tree__row · .choice · .toast · .toast--danger · .statusbar__item · .empty · .menu · .field · .icon-btn · .btn · kbd</p>
+      </div>
+      <div class="mk-card">
+        <h3><span class="mk-no">新增</span> 设计令牌</h3>
+        <p style="font-size:var(--fs-md);color:var(--ink)">0 个。</p>
+        <p>新写的只是组件类名（.clip / .status-chip / .inbox / .token / .recent / .steps 等），它们的取值全部来自上表的现有变量。</p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="mk-foot">
+    Opennote 0.2.0 · 剪藏与导入 · 设计交付物 · 本文件不进入 src/，不被产品引用。<br>
+    主题与强调色选择会被记在 localStorage（file:// 下若被浏览器拒绝则自动忽略，不影响查看）。
+  </footer>
+</main>
+
+<script>
+(function(){
+  var THEMES=[["paper","素笺"],["celadon","青瓷"],["sepia","琥珀"],["night","夜读"],["ink","砚池"]];
+  var ACCENTS=[["seal","朱砂","#b23a2e","#e0664f"],["indigo","靛青","#34558b","#7ea6e0"],["pine","松绿","#2f6f5e","#4fb59a"],["gamboge","藤黄","#9a6b12","#d9a537"]];
+  var root=document.documentElement, light="paper";
+  function store(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+  function read(k){try{return localStorage.getItem(k)}catch(e){return null}}
+
+  /* 令牌看板：每张卡片自带 data-theme / data-accent，用于同屏对比 */
+  var tb=document.getElementById("theme-board");
+  THEMES.forEach(function(t){
+    var d=document.createElement("div");
+    d.className="mk-card"; d.setAttribute("data-theme",t[0]);
+    d.innerHTML='<h3>'+t[1]+' <span style="font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--ink-3)">'+t[0]+'</span></h3>'+
+      '<p>'+(t[0]==="paper"?"默认亮色":t[0]==="night"?"暖色暗色":t[0]==="ink"?"冷色暗色":t[0]==="celadon"?"冷色亮色":"琥珀色亮色")+'</p>'+
+      '<div class="mk-swatches">'+
+      '<div class="mk-swatch" style="background:var(--paper)"><span>paper</span></div>'+
+      '<div class="mk-swatch" style="background:var(--paper-2)"><span>paper-2</span></div>'+
+      '<div class="mk-swatch" style="background:var(--paper-3)"><span>paper-3</span></div>'+
+      '<div class="mk-swatch" style="background:var(--paper-4)"><span>paper-4</span></div></div>'+
+      '<div class="mk-swatches" style="margin-top:var(--s6)">'+
+      '<div class="mk-swatch" style="background:var(--ink)"><span>ink</span></div>'+
+      '<div class="mk-swatch" style="background:var(--ink-2)"><span>ink-2</span></div>'+
+      '<div class="mk-swatch" style="background:var(--ink-3)"><span>ink-3</span></div>'+
+      '<div class="mk-swatch" style="background:var(--rule)"><span>rule</span></div>'+
+      '<div class="mk-swatch" style="background:var(--rule-strong)"><span>rule-strong</span></div></div>';
+    tb.appendChild(d);
+  });
+  var ab=document.getElementById("accent-board");
+  ACCENTS.forEach(function(a){
+    [["paper","素笺",false],["night","夜读",true]].forEach(function(th){
+      var d=document.createElement("div");
+      d.className="mk-card"; d.setAttribute("data-theme",th[0]); d.setAttribute("data-accent",a[0]);
+      d.innerHTML='<h3>'+a[1]+' <span style="font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--ink-3)">'+a[0]+' · '+th[0]+'</span></h3>'+
+        '<p>--accent / --accent-soft / --accent-line</p>'+
+        '<div style="display:flex;gap:var(--s3);align-items:center;margin-top:var(--s3)">'+
+        '<button class="btn btn--primary">剪藏到 Opennote</button>'+
+        '<span style="width:13px;height:13px;border-radius:4px;background:var(--accent)"></span>'+
+        '<span style="width:13px;height:13px;border-radius:4px;background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent-line)"></span>'+
+        '</div>'+
+        '<div class="mk-rowline" style="margin-top:var(--s3)"><b>取值</b><span style="font-family:var(--font-mono);font-size:var(--fs-xs)">'+a[th[2]?3:2]+'</span></div>';
+      ab.appendChild(d);
+    });
+  });
+
+  function apply(theme,accent,persist){
+    root.setAttribute("data-theme",theme);
+    root.setAttribute("data-accent",accent);
+    if(theme==="paper"||theme==="celadon"||theme==="sepia") light=theme;
+    document.querySelectorAll("[data-set-theme]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-theme")===theme)});
+    document.querySelectorAll("[data-set-accent]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-accent")===accent)});
+    if(persist){store("opennote-mock-theme",theme);store("opennote-mock-accent",accent)}
+  }
+  document.querySelectorAll("[data-set-theme]").forEach(function(b){
+    b.addEventListener("click",function(){apply(b.getAttribute("data-set-theme"),root.getAttribute("data-accent"),true)});
+  });
+  document.querySelectorAll("[data-set-accent]").forEach(function(b){
+    b.addEventListener("click",function(){apply(root.getAttribute("data-theme"),b.getAttribute("data-set-accent"),true)});
+  });
+  var tl=document.querySelector("[data-toggle-light]");
+  if(tl) tl.addEventListener("click",function(){
+    var dark=root.getAttribute("data-theme")==="night"||root.getAttribute("data-theme")==="ink";
+    apply(dark?light:(root.getAttribute("data-accent")==="pine"?"ink":"night"),root.getAttribute("data-accent"),true);
+  });
+
+  var q=new URLSearchParams(location.search);
+  apply(q.get("theme")||read("opennote-mock-theme")||"paper",q.get("accent")||read("opennote-mock-accent")||"seal",false);
+})();
+</script>
+</body>
+</html>
