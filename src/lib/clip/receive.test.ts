@@ -13,7 +13,11 @@ vi.mock("../../data/workspaces", () => ({
 
 const inboxCalls = vi.hoisted(() => [] as { json: string; meta: Record<string, unknown> }[]);
 /** 让某个用例注入 `enqueueInbox` 的失败（域错误对象 / 普通 Error）。 */
-const inboxState = vi.hoisted(() => ({ failWith: null as unknown }));
+const inboxState = vi.hoisted(() => ({
+  failWith: null as unknown,
+  /** 收件箱里的条目（id = 完整 importId）。复刻 C2 的 `enqueueInbox` 幂等语义。 */
+  entries: [] as { id: string; status: string; tags: string[] }[],
+}));
 
 /** 复刻 `src/data/inbox.ts` 的目录名规则（§5.8.2）：`<UTC YYYYMMDDTHHMMSS>-<importId 前 8 位>`。 */
 const inboxDirName = (importId: string): string =>
@@ -28,20 +32,31 @@ function inboxError(code: string, userMessage: string, message = userMessage): E
 
 vi.mock("../../data/inbox", () => ({
   // `InboxEntry.id` = 条目身份（完整 importId）；`dirName` 只在磁盘侧的视图里（InboxDetail）。
+  // `enqueueInbox` 的两条真实语义必须复刻：① 同 importId 已有条目 → **返回既有条目**（幂等，
+  // 不产生第二条）；② 查不到时 `readInboxDetail` 抛 `IMP-4017`（§6.13㉔，不能靠 dirName 兜底）。
   enqueueInbox: async (json: string, meta: Record<string, unknown>) => {
     if (inboxState.failWith) throw inboxState.failWith;
     inboxCalls.push({ json, meta });
-    return { id: (JSON.parse(json) as { importId: string }).importId, status: "pending" };
+    const parsed = JSON.parse(json) as { importId: string; tags?: string[] };
+    const existing = inboxState.entries.find((entry) => entry.id === parsed.importId);
+    if (existing) return { ...existing };
+    const created = { id: parsed.importId, status: "pending", tags: Array.isArray(parsed.tags) ? parsed.tags : [] };
+    inboxState.entries.push(created);
+    return { ...created };
   },
-  readInboxDetail: async (id: string) => ({ entry: { id, status: "pending" }, dirName: inboxDirName(id) }),
+  readInboxDetail: async (id: string) => {
+    const entry = inboxState.entries.find((item) => item.id === id);
+    if (!entry) throw inboxError("IMP-4017", "没有找到这条导入记录。");
+    return { entry: { ...entry }, dirName: inboxDirName(entry.id) };
+  },
 }));
 
 import { closeWorkspace, openWorkspace, updateNoteContent } from "../../data/library";
 import { resetImportIndexCache } from "../../data/importLog";
 import { toastStore } from "../toast";
 import type { ImportResult } from "../../desktop/bridge";
-import { encodeBase64, ImportRejection, importProblem } from "./envelope";
-import { DUPLICATE_MESSAGE, receiveEnvelope, receiveEnvelopeOutcome, resetImportChannelContext, setImportChannelContext, setImportConflictResolver, setImportNotifications, undoImport, type ImportReceipt } from "./receive";
+import { encodeBase64, IMPORT_ERRORS, ImportRejection, importProblem } from "./envelope";
+import { DUPLICATE_MESSAGE, getImportLandingPreference, receiveEnvelope, receiveEnvelopeOutcome, resetImportChannelContext, resetImportLandingPreference, setImportChannelContext, setImportConflictResolver, setImportLandingPreference, setImportNotifications, undoImport, type ImportLandingPreference, type ImportReceipt } from "./receive";
 
 const RECORD: WorkspaceRecord = {
   id: "test",
@@ -94,10 +109,12 @@ beforeEach(async () => {
   testBackend = new MemoryBackend();
   resetImportIndexCache();
   resetImportChannelContext();
+  resetImportLandingPreference();
   setImportConflictResolver(null);
   setImportNotifications(false);
   inboxCalls.length = 0;
   inboxState.failWith = null;
+  inboxState.entries.length = 0;
   await openWorkspace(RECORD, { silent: true });
 });
 
@@ -362,6 +379,12 @@ describe("L2 接收端 · 幂等与去重判定链（契约 §4.1）", () => {
 });
 
 describe("L2 接收端 · overwrite 的四道闸门（00 号 §6.7①）", () => {
+  // 这组用例验的是 **0.2.0 的 overwrite 语义**：闸门代码与 0.2.0 一字不差。
+  // 0.3.0 的默认偏好是 `"inbox"`（00 §6.14㉕），而 `pref === "inbox"` 时第 1 步之后直接进收件箱、
+  // **根本走不到 overwrite 分支**（㉕.2 已裁定「设置优先于客户端下发的 conflict」）。
+  // 所以这里把偏好显式设成 `"new"`（= 用户没选「先进入收件箱」），才是这四个闸门的有效场景。
+  beforeEach(() => setImportLandingPreference("new"));
+
   it("默认通道（in-app）+ 未开启开关 → 降级为 new + IMP-4011，原文件不动", async () => {
     const a = await receiveEnvelope(raw({ importId: ID1, body: "第一段" }));
     const before = testBackend.bytes(a.path!)!;
@@ -869,5 +892,163 @@ describe("L2 接收端 · 冲突对话框挂钩（UI-06/S3）", () => {
     const receipt = await receiveEnvelope(raw({ importId: ID2, body: "第二段", source: { selection: true, capturedAt: CAPTURED } }));
     expect(receipt.status).toBe("pending");
     expect(inboxCalls).toHaveLength(1);
+  });
+});
+
+/* =====================================================================================
+ * 0.3.0：落点偏好 = `UiSettings.importConflict` 的**行为层输入**（00 §6.14㉕㉖㉗）
+ *
+ * 0.2.0 的病：`importConflict` 只被设置面板改 UI 值，`receive.ts` 从不读它 —— 假开关（第 4 例）。
+ * 这组用例就是「它现在是真输入」的证据，且每一条都能独立红（回退实现即失败）。
+ * ===================================================================================== */
+
+describe("L2 接收端 · 落点偏好（00 §6.14㉕㉖）", () => {
+  it("默认值就是 inbox：外部通道（local-bridge）投递 → pending，磁盘上不出现新 .md", async () => {
+    expect(getImportLandingPreference()).toBe("inbox");
+    setImportChannelContext({ channel: "local-bridge" });
+
+    const receipt = await receiveEnvelope(raw({ target: { folder: "剪藏/技术", notePath: null } }));
+
+    expect(receipt.status).toBe("pending");
+    expect(receipt.path).toBeNull();
+    expect(receipt.inboxId).toMatch(/^\d{8}T\d{6}-.{8}$/);
+    expect(receipt.deduped).toBe(false);
+    expect(receipt.dedupedBy).toBeNull();
+    expect(receipt.revertible).toBe(true);
+    expect(receipt.preimage).toBeNull();
+    expect(receipt.assets).toEqual([]);
+    // 关键：「不写盘」= 一个笔记文件都没有（收件箱条目在 `.opennote/inbox/` 下，不是笔记）。
+    expect(notePaths()).toEqual([]);
+    expect(testBackend.paths().filter((path) => path.endsWith(".md"))).toEqual([]);
+    expect(inboxCalls).toHaveLength(1);
+    // 附件/目标目录没被解析成落点，也就不会创建空目录。
+    expect(testBackend.paths().some((path) => path.startsWith("剪藏/"))).toBe(false);
+  });
+
+  it("同 importId 重投两次 → 第二次 deduped，收件箱里只有 1 条（㉕「第 1 步依然优先」）", async () => {
+    setImportChannelContext({ channel: "local-bridge" });
+
+    const first = await receiveEnvelope(raw());
+    expect(first.status).toBe("pending");
+    const second = await receiveEnvelope(raw());
+
+    expect(second.status).toBe("deduped");
+    expect(second.deduped).toBe(true);
+    expect(second.dedupedBy).toBe("importId");
+    expect(second.inboxId).toBe(first.inboxId);
+    expect(second.path).toBeNull();
+    expect(second.message).toBe("");
+    expect(inboxState.entries).toHaveLength(1);
+    expect(inboxCalls).toHaveLength(1);
+    expect(notePaths()).toEqual([]);
+  });
+
+  it("channel=in-app 不受影响：仍然直接落盘 + 可撤销", async () => {
+    expect(getImportLandingPreference()).toBe("inbox");
+    setImportChannelContext({ channel: "in-app" });
+
+    const receipt = await receiveEnvelope(raw());
+    expect(receipt.status).toBe("created");
+    expect(receipt.path).toBe("测试标题.md");
+    expect(receipt.revertible).toBe(true);
+    expect(notePaths()).toEqual(["测试标题.md"]);
+    expect(inboxCalls).toEqual([]);
+  });
+
+  it("channel=inbox（用户在收件箱里点「确认入库」）不被强制回收件箱（㉕.1，反死循环）", async () => {
+    const first = await receiveEnvelope(raw({ importId: ID1, body: "第一段" }));
+    // C2 的确认入库：`setImportChannelContext({ channel: "inbox" })` + 复投同一封信封。
+    setImportChannelContext({ channel: "inbox" });
+    const committed = await receiveEnvelope(raw({ importId: ID2, body: "第二段", source: { selection: true, capturedAt: CAPTURED } }));
+
+    expect(committed.status).toBe("appended");
+    expect(committed.path).toBe(first.path);
+    expect(inboxCalls).toEqual([]);
+  });
+
+  it("pref === 'new' 时与 0.2.0 完全一致（同一封信封 → 回执逐字段相同）", async () => {
+    const baseline = await receiveEnvelope(raw({ target: { folder: "剪藏", notePath: null } }));
+
+    // 换一个干净工作区、清空收件箱，用同一封信封、改成外部通道 + pref="new" 再跑一次。
+    testBackend = new MemoryBackend();
+    resetImportIndexCache();
+    inboxState.entries.length = 0;
+    inboxCalls.length = 0;
+    await openWorkspace(RECORD, { silent: true });
+    setImportLandingPreference("new");
+    setImportChannelContext({ channel: "local-bridge" });
+
+    const withNew = await receiveEnvelope(raw({ target: { folder: "剪藏", notePath: null } }));
+    expect(withNew).toEqual(baseline);
+    expect(withNew.status).toBe("created");
+
+    // 判定链第 4 步（整页二次剪藏 → pending）在 pref="new" 下照旧。
+    const second = await receiveEnvelope(raw({ importId: ID2, body: "整页改版后" }));
+    expect(second.status).toBe("pending");
+  });
+
+  it("pref === 'inbox' 优先于客户端的 conflict:'overwrite'（㉕.2）；四闸门齐备也不覆盖", async () => {
+    const a = await receiveEnvelope(raw({ importId: ID1, body: "第一段" }));
+    const before = testBackend.bytes(a.path!)!;
+    setImportLandingPreference("inbox");
+    setImportChannelContext({ channel: "local-bridge", overwriteEnabled: true });
+
+    const b = await receiveEnvelope(raw({ importId: ID2, body: "第二段", conflict: "overwrite" }));
+
+    expect(b.status).toBe("pending");
+    expect(b.path).toBeNull();
+    expect(b.warnings).toEqual([]);
+    expect(testBackend.bytes(a.path!)).toEqual(before);
+    expect(notePaths()).toEqual([a.path]);
+  });
+
+  it("页面内桥（channel=inpage）同样强制进收件箱", async () => {
+    setImportChannelContext({ channel: "inpage" });
+    const receipt = await receiveEnvelope(raw());
+    expect(receipt.status).toBe("pending");
+    expect(notePaths()).toEqual([]);
+  });
+
+  it("脏值不采信：非法偏好被忽略并告警，当前值不变", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      setImportLandingPreference("inbox");
+      setImportLandingPreference("bogus" as ImportLandingPreference);
+      setImportLandingPreference(undefined as unknown as ImportLandingPreference);
+      expect(getImportLandingPreference()).toBe("inbox");
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("resetImportLandingPreference() 复位成 'inbox'（不是 'new'）", async () => {
+    setImportLandingPreference("new");
+    resetImportLandingPreference();
+    expect(getImportLandingPreference()).toBe("inbox");
+    // 复位后行为也真的跟着回来（不是只改了个变量）。
+    setImportChannelContext({ channel: "local-bridge" });
+    const receipt = await receiveEnvelope(raw());
+    expect(receipt.status).toBe("pending");
+  });
+
+  it("三个入口都从 barrel 导出（task-14 只 import 这一个入口）", async () => {
+    const barrel = await import("./index");
+    expect(typeof barrel.setImportLandingPreference).toBe("function");
+    expect(typeof barrel.getImportLandingPreference).toBe("function");
+    expect(typeof barrel.resetImportLandingPreference).toBe("function");
+    expect(barrel.setImportLandingPreference).toBe(setImportLandingPreference);
+  });
+
+  it("㉗ 逐字：IMP-4007 的新文案（并禁止旧措辞）+ IMP-4006 三态区分", () => {
+    expect(IMPORT_ERRORS["IMP-4007"].userMessage).toBe(
+      "Opennote 里还没有打开笔记本文件夹。请在 Opennote 左侧选一个文件夹，或新建一个，再试一次。",
+    );
+    expect(IMPORT_ERRORS["IMP-4006"].userMessage).toBe("Opennote 没有在运行。请先打开 Opennote，再试一次。");
+    // ㉗「禁止再用」的两句旧措辞：一个字都不许留。
+    const all = Object.values(IMPORT_ERRORS).map((item) => item.userMessage).join("\n");
+    expect(all).not.toContain("还没有打开笔记本，");
+    expect(all).not.toContain("请先打开一个文件夹");
+    expect(all).not.toContain("新建浏览器笔记本");
   });
 });

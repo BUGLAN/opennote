@@ -6,7 +6,23 @@
 
 ---
 
-## 0. 准备（30 秒）
+## ⚠️ 0.3.0 起的前置条件（先看这一条）
+
+0.3.0 的默认设置是 **「先进入收件箱」**（`00` §6.14㉕：`UiSettings.importConflict` 默认 `"inbox"`）。
+此时**外部通道投递的剪藏不会落盘**，回执是 `202` + `status="pending"` + `path=null`，
+所以下面的字节断言**会如实失败**（不是实现坏了）。
+
+**要验「落盘字节」**（本配方的主用途），二选一：
+
+1. 在 `设置 · 导入与接口` 里把「先进入收件箱」**关掉**（选「直接新建」等）→ 再跑本配方 → 期望 `201 created`；或
+2. 保留默认设置，按下面 **§3 变体表第一行**（`202 pending` + 磁盘上没有新 `.md`）来验证 ——
+   然后在收件箱里点「确认入库」，`待入库.md` 才会落盘。
+
+> 也就是说：**先看设置，再看回执**。同一段命令在两种设置下期望值不同，这是 0.3.0 的设计，不是脚本的毛病。
+
+---
+
+## 1. 准备（30 秒）
 
 1. 打开 Opennote 桌面版，打开一个**临时工作区**（别用真笔记库）。
 2. 进 `设置 · 文件 · 导入与接口`，点「启用本地接口」，把**端口**和**令牌**复制出来。
@@ -20,7 +36,7 @@ $env:OPNN_WS    = 'C:\Users\me\opennote-临时'  # 上面打开的那个工作�
 
 ---
 
-## 1. 方式 A（推荐）：一段完整命令，直接跑
+## 2. 方式 A（推荐）：一段完整命令，直接跑
 
 **把下面整块复制进 PowerShell 回车即可**（`@'` … `'@` 是 PowerShell here-string，不需要转义引号）：
 
@@ -136,15 +152,18 @@ npx vitest run src/lib/clip/ src/data/importLog.test.ts
 
 | 想验什么 | 改哪里 | 期望 |
 |---|---|---|
-| 幂等（同一次导入重投） | `importId` 不变，其余照旧 | HTTP **200**、`status=deduped`、`dedupedBy="importId"`、`path` 是**首次**落点、文件字节不变 |
-| 重复内容（新 id、同 URL 同正文） | `importId=randomUUID()`，`body` 不变 | HTTP **200**、`status=duplicate`、`deduped=true`、`dedupedBy="contentHash"`、**零写入** |
-| 选区二次剪藏（追加） | `source.selection=true`、`body` 改一段 | HTTP **200**、`status=appended`、`revertible=true`、`preimage{path,bytes,sha256}` 齐备、原文逐字节保留为前缀 |
+| **默认设置（先进入收件箱，0.3.0 默认）** | 什么都不改（通道是 `local-bridge`） | HTTP **202**、`status=pending`、`path=null`、`inboxId` 是**收件箱目录名**（`<YYYYMMDDTHHMMSS>-<importId 前 8>`）、`revertible=true`、**磁盘上没有任何新 `.md`**；点「确认入库」后才落盘 |
+| 幂等（同一次导入重投） | `importId` 不变，其余照旧 | HTTP **200**、`status=deduped`、`dedupedBy="importId"`、`path` 是**首次**落点（若首次是 pending，则 `path=null` + `inboxId` 还是那个目录名）、文件字节不变 |
+| 重复内容（新 id、同 URL 同正文） | `importId=randomUUID()`，`body` 不变 | HTTP **200**、`status=duplicate`、`deduped=true`、`dedupedBy="contentHash"`、**零写入**（⚠️ 仅在**关掉**「先进入收件箱」时；开着时按上一行走 `pending`） |
+| 选区二次剪藏（追加） | `source.selection=true`、`body` 改一段 | HTTP **200**、`status=appended`、`revertible=true`、`preimage{path,bytes,sha256}` 齐备、原文逐字节保留为前缀（⚠️ 同上，需关掉「先进入收件箱」） |
 | 整页二次剪藏（进收件箱） | `selection=false`（缺省）、`body` 改一段 | HTTP **202**、`status=pending`、`path=null`、`inboxId` 是**收件箱目录名**（`20260929T132929-<importId 前 8>`） |
-| 没有工作区 | 关掉笔记本再投 | HTTP **409**、`code=IMP-4007`、`retryable=true`、**磁盘零残留** |
+| 没有工作区 | 关掉笔记本再投 | HTTP **409**、`code=IMP-4007`、`retryable=true`、**磁盘零残留**、文案 `Opennote 里还没有打开笔记本文件夹。请在 Opennote 左侧选一个文件夹，或新建一个，再试一次。`（`00` §6.14㉗ 逐字） |
 | 信封不是 JSON 对象 | 把 `JSON.stringify(envelope)` 换成 `"[]"` | HTTP **400**、`code=IMP-4001` |
 | 目录写不进去 | `target.folder = "..\\..\\etc"` | HTTP **422**、`code=IMP-4008` |
 
 > 每个变体都建议先 `importId=randomUUID()`，避免幂等命中把结果吃掉。
+> **同一封信封重投两次**（`importId` 不变）在默认设置下：第一次 `pending`、第二次 `deduped`，
+> 收件箱里**只有 1 条**（`00` §6.14㉕「第 1 步依然优先」）。
 
 ---
 

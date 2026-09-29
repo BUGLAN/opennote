@@ -111,15 +111,31 @@ export const IMPORT_ERRORS: Record<string, ProblemTemplate> = {
     http: 413,
     retryable: false,
   },
+  // 00 §6.14㉗（0.3.0，逐字冻结，**优先于** 02/03 的旧文案）：用户把旧文案
+  // 「Opennote 里还没有打开笔记本」读成「要先打开某一篇笔记」，所以这里明确写「笔记本文件夹」，
+  // 并把下一步动作说到「左侧选一个文件夹 / 新建一个」。**禁止**再用
+  // 「还没有打开笔记本」「请先打开一个文件夹（或新建浏览器笔记本）」这类措辞。
+  // 本接收端不产出 `IMP-4006`（那是桥/扩展侧的「应用没运行」），但把它一起放进表里：
+  // `toImportErrorBody()` 需要按码给跨模块来的错误补 `http`/`retryable`，且㉗ 的三态区分
+  // （应用没运行 / 工作区没打开 / 某一篇笔记没打开）需要一个权威副本。
+  "IMP-4006": {
+    message: "应用窗口不在场（应用没运行 / 窗口已关闭）",
+    userMessage: "Opennote 没有在运行。请先打开 Opennote，再试一次。",
+    http: 409,
+    retryable: true,
+  },
   "IMP-4007": {
     message: "工作区未打开",
-    userMessage: "Opennote 里还没有打开笔记本，请先打开一个文件夹（或新建浏览器笔记本）。",
+    userMessage: "Opennote 里还没有打开笔记本文件夹。请在 Opennote 左侧选一个文件夹，或新建一个，再试一次。",
     http: 409,
     retryable: true,
   },
   "IMP-4008": {
     message: "target 路径非法",
-    userMessage: "目标目录不合法：不能使用 `..`、绝对路径或系统保留字符。",
+    // 注意：**不要**写成 `` `..` `` —— `02` 附录 A.3 表格里的反引号是 Markdown 内联代码标记，
+    // 抄进字符串就会连反引号一起显示给用户。`electron/bridge.cjs:129` 与 `src/data/inbox.ts` 都无引号，
+    // `envelope.test.ts` 有一条「全表不得含反引号 + 与桥逐字相等」的护栏盯着这里。
+    userMessage: "目标目录不合法：不能使用 ..、绝对路径或系统保留字符。",
     http: 422,
     retryable: false,
   },

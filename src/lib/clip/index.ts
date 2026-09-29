@@ -75,6 +75,11 @@ export {
   setImportChannelContext,
   getImportChannelContext,
   resetImportChannelContext,
+  // 0.3.0 落点偏好（00 §6.14㉕㉖）：界面侧把 `UiSettings.importConflict` 接进来，
+  // 否则「先进入收件箱」就只是个改 UI 值的假开关。
+  setImportLandingPreference,
+  getImportLandingPreference,
+  resetImportLandingPreference,
   setImportConflictResolver,
   setImportNotifications,
   DUPLICATE_MESSAGE,
@@ -88,6 +93,7 @@ export type {
   ImportConflictChoice,
   ImportConflictPrompt,
   ImportConflictResolver,
+  ImportLandingPreference,
   ImportReceipt,
   ImportUndoResult,
 } from "./receive";

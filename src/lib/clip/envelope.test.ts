@@ -152,7 +152,7 @@ describe("信封校验（契约 §2 / §10.1）", () => {
     if (!isImportRejection(thrown)) return;
     expect(thrown.code).toBe("IMP-4008");
     expect(thrown.message).toBe("target 路径非法");
-    expect(thrown.userMessage).toBe("目标目录不合法：不能使用 `..`、绝对路径或系统保留字符。");
+    expect(thrown.userMessage).toBe("目标目录不合法：不能使用 ..、绝对路径或系统保留字符。");
     expect(thrown.http).toBe(422);
     expect(thrown.retryable).toBe(false);
   });
@@ -203,7 +203,9 @@ describe("信封校验（契约 §2 / §10.1）", () => {
 
 describe("错误码表（契约 §6.2 逐字）", () => {
   it("userMessage 是规范文案，message 只是开发短句，两者不混用", () => {
-    expect(IMPORT_ERRORS["IMP-4008"].userMessage).toBe("目标目录不合法：不能使用 `..`、绝对路径或系统保留字符。");
+    // `IMP-4008` 的 `..` **不带反引号**：`02` 附录 A.3 表格里的反引号只是 Markdown 代码标记，
+    // 抄进字符串会显示给用户。三边对齐由 `errorTable.test.ts`（C-6f 单元版）独立盯着。
+    expect(IMPORT_ERRORS["IMP-4008"].userMessage).toBe("目标目录不合法：不能使用 ..、绝对路径或系统保留字符。");
     expect(IMPORT_ERRORS["IMP-4003"].userMessage).toBe("导入内容缺少必要信息（标题、来源时间或地址），请重试。");
     expect(IMPORT_ERRORS["IMP-4009"].userMessage).toBe("找不到要追加的那篇笔记，或目标目录无法创建（可能没有写入权限）。");
     for (const entry of Object.values(IMPORT_ERRORS)) {

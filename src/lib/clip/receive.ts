@@ -150,6 +150,64 @@ export function resetImportChannelContext(): void {
   channelContext = { channel: "in-app", overwriteEnabled: false };
 }
 
+/* ============================== 落点偏好（00 §6.14㉕㉖） ============================== */
+
+/**
+ * 应用侧「导入落点偏好」= `UiSettings.importConflict` 的**行为层输入**。
+ * 四个值与设置面板的选项一一对应，`"inbox"` 就是「先进入收件箱（默认）」。
+ */
+export type ImportLandingPreference = "new" | "append" | "skip" | "inbox";
+
+/**
+ * 默认 `"inbox"`，与 `DEFAULT_UI.importConflict`（00 §6.14㉕：由 `"new"` 改为 `"inbox"`）一致。
+ * 这样即使界面接线（task-14）还没落地，行为层也已经是 0.3.0 的语义 —— 不会再出现「改了设置没反应」。
+ */
+const DEFAULT_LANDING_PREFERENCE: ImportLandingPreference = "inbox";
+const LANDING_PREFERENCES: readonly ImportLandingPreference[] = ["new", "append", "skip", "inbox"];
+
+let landingPreference: ImportLandingPreference = DEFAULT_LANDING_PREFERENCE;
+
+/**
+ * 接线入口（00 §6.14㉖）：把 UI 层的 `UiSettings.importConflict` 接到行为层。
+ *
+ * **为什么必须有这个函数**：0.2.0 里 `importConflict` 只被 `ImportApiPanel`（改 UI 值）与 `AppDialogs`（传值）
+ * 引用，`receive.ts` 从不读它 —— 用户改了「先进入收件箱」而行为不变，是**假开关**（第 4 例同类缺陷：
+ * UI 层的偏好没有通向行为层）。界面侧 mount 时与设置变更时各调一次即可。
+ *
+ * 运行时脏值（持久化里存的旧值 / 未类型化的调用方）**不采信**：保持当前值并告警，绝不静默落到某个选项上。
+ */
+export function setImportLandingPreference(pref: ImportLandingPreference): void {
+  if (!LANDING_PREFERENCES.includes(pref)) {
+    console.warn("[opennote] 忽略非法的导入落点偏好", pref);
+    return;
+  }
+  landingPreference = pref;
+}
+
+/** 读回当前偏好（自证 / 设置面板诊断用；不是 `useStore`，不触发渲染）。 */
+export function getImportLandingPreference(): ImportLandingPreference {
+  return landingPreference;
+}
+
+/** 复位到默认（`"inbox"`）；测试与「恢复默认设置」用。 */
+export function resetImportLandingPreference(): void {
+  landingPreference = DEFAULT_LANDING_PREFERENCE;
+}
+
+/**
+ * 这次投递是不是「外部通道投递」（需要按偏好强制进收件箱）。
+ *
+ * - `in-app`：应用内自己发起（AI 面板粘贴等）→ **不受偏好影响**，仍直接落盘 + 可撤销（㉕）。
+ * - `inbox`：`commitInbox()` 复投收件箱里那条信封（`src/data/inbox.ts` 传 `channel: "inbox"`）。
+ *   这是**用户已经做过决定**的动作（他点了「确认入库」），再强制 pending 会把条目原样塞回收件箱；
+ *   所以它**不算外部投递**。㉕ 括号里列了「收件箱」，那指的是「投递进收件箱」这种通道语义，
+ *   而确认入库复用了同一个通道值 —— 这里必须排除，否则确认入库会变成死循环。
+ * - `local-bridge`（插件 / CLI / MCP / Skill / URL scheme）与 `inpage`（页面内桥）→ 外部投递。
+ */
+function isExternalDeliveryChannel(channel: ImportChannel): boolean {
+  return channel !== "in-app" && channel !== "inbox";
+}
+
 /* ============================ 冲突决策挂钩 ============================ */
 
 export type ImportConflictChoice = "new" | "append" | "skip" | "inbox";
@@ -296,6 +354,18 @@ async function runCommit(backend: FileSystemBackend, envelope: ImportEnvelope, h
     if (await backend.exists(byId.path)) return dedupedReceipt(envelope, byId);
     // 索引说 `a.md`，文件已不在 → 以磁盘为准，剔除该条继续往下判定（契约 §4.3.2）。
     await forgetImport(envelope.importId, backend);
+  }
+
+  // ── 00 §6.14㉕（0.3.0 核心规则）：应用侧「先进入收件箱」是**行为层的真输入**。
+  // `importConflict === "inbox"`（本接收端的默认值）且**外部通道投递** → 强制 `pending`，
+  // **跳过判定链第 2–6 步**（含第 2 步的 duplicate、第 3/4 步的追加、以及 `overwrite` 分支），
+  // 并且**不写笔记文件**。第 1 步在它之前：重投同一 `importId` 仍然幂等（见 §6.14㉕ 第二点）。
+  //
+  // 为什么连 `conflict: "overwrite"` 也拦：㉕.2 已裁定「该设置优先于客户端下发的 conflict」——
+  // 覆盖是本系统里**最不可逆的无审阅写入**，正是这个设置要拦的对象；若客户端能靠显式传值绕过它，
+  // 这个设置又会变成假开关（本项目已抓过 4 个）。四道闸门代码保留不动（纵深防御），只是此偏好下不可达。
+  if (landingPreference === "inbox" && isExternalDeliveryChannel(getImportChannelContext().channel)) {
+    return enqueuePending(envelope, hashes);
   }
 
   // ── 第 2 步：同 `source.url` 且 `bodyHash` 相同 → duplicate，**不追加、不写盘**。
@@ -674,8 +744,64 @@ async function resolveInboxDirName(module: InboxModule, result: unknown, entryId
   throw new ImportRejection(importProblem("IMP-4014", { reason: "inbox-dir-name-missing", importId: entryId }));
 }
 
-/** 第 4 步：整页二次剪藏 → 进收件箱（`pending`，HTTP 202，`path` 为 `null`）。 */
-async function enqueuePending(envelope: ImportEnvelope, hashes: CommitHashes): Promise<ImportReceipt> {
+/** 收件箱条目里已有的标签（`InboxDetail.entry.tags`）。 */
+function readEntryTags(detail: unknown): string[] {
+  if (!detail || typeof detail !== "object") return [];
+  const entry = (detail as Record<string, unknown>).entry;
+  if (!entry || typeof entry !== "object") return [];
+  const tags = (entry as Record<string, unknown>).tags;
+  return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === "string") : [];
+}
+
+/**
+ * 同 `importId` 是否**已经在收件箱里排队**？（00 §6.14㉕「第 1 步依然优先」在半路的落点）
+ *
+ * 为什么要在收件箱侧再判一次：笔记索引（`import-index.json`）只记得**落过盘的笔记**，
+ * 而「先进入收件箱」的条目一个笔记文件都没写 → 索引里没有它。若不查收件箱，
+ * 第二次投递会假报 `pending`（明明没有新增条目），客户端会以为又入队了一条。
+ *
+ * 为什么不改索引去记 `path: null`：`.opennote/import-index.json` 的 `path` 是非空字符串
+ * （契约 §4.3.3 的磁盘格式），为收件箱条目放宽它会把「索引 = 笔记落点表」的语义搞混，
+ * 而收件箱本身就是 pending 条目的权威记录（`entry.json` 里有完整 `importId`）。
+ *
+ * 查不到（C2 侧 `IMP-4017`）或读不动 → 返回 `null`，交给 `enqueueInbox()` 定夺
+ * （它自己也做同 id 幂等：同 id 已有条目就直接返回既有条目）。
+ */
+async function findQueuedInboxEntry(module: InboxModule, importId: string): Promise<{ dirName: string; tags: string[] } | null> {
+  if (typeof module.readInboxDetail !== "function" || !importId) return null;
+  try {
+    const detail = await module.readInboxDetail(importId);
+    const dirName = readString(detail, "dirName");
+    if (!dirName || dirName.includes("/")) return null;
+    return { dirName, tags: readEntryTags(detail) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 同 `importId` 重投、而首次落点是**收件箱**时的回执：`deduped` + 首次入队的 `inboxId`。
+ * `path` 为 `null`：这次导入从来没写过笔记文件，不能编一个路径出来。
+ * 与 `dedupedReceipt()` 一样静默（`message: ""`）——同一封信封重复投递不是错误，也不该弹提示。
+ */
+function dedupedPendingReceipt(envelope: ImportEnvelope, queued: { dirName: string; tags: string[] }): ImportReceipt {
+  return {
+    status: "deduped",
+    importId: envelope.importId,
+    path: null,
+    inboxId: queued.dirName,
+    deduped: true,
+    dedupedBy: "importId",
+    revertible: true,
+    preimage: null,
+    assets: [],
+    tags: queued.tags.length ? queued.tags : envelope.tags,
+    warnings: [],
+    message: "",
+  };
+}
+
+/** 第 4 步：整页二次剪藏 → 进收件箱（`pending`，HTTP 202，`path` 为 `null`）。 */async function enqueuePending(envelope: ImportEnvelope, hashes: CommitHashes): Promise<ImportReceipt> {
   let module: InboxModule;
   try {
     module = (await import("../../data/inbox")) as InboxModule;
@@ -685,6 +811,16 @@ async function enqueuePending(envelope: ImportEnvelope, hashes: CommitHashes): P
   if (typeof module.enqueueInbox !== "function") {
     throw new ImportRejection(importProblem("IMP-5001", { reason: "inbox-unavailable" }));
   }
+
+  // ── 幂等（00 §6.14㉕「第 1 步依然优先」在收件箱场景的落点）：同 `importId` 已经在收件箱里排队
+  // → 返回 `deduped` + 首次入队的 `inboxId`，**不再产生第二条条目**。
+  // `enqueueInbox()` 自身也做同 id 幂等（返回既有条目），这里显式先判一次是为了把 `status`
+  // 如实报成 `deduped`（否则第二次投递会假报 `pending`，客户端会以为又入队了一条）。
+  // 注意顺序：**笔记索引优先于收件箱** —— 条目若已被「确认入库」，第 1 步会先在索引里命中，
+  // 回执给的是笔记落点，而不是过期的收件箱目录。
+  const queued = await findQueuedInboxEntry(module, envelope.importId);
+  if (queued) return dedupedPendingReceipt(envelope, queued);
+
   const meta: InboxMeta = {
     title: envelope.title,
     sourceUrl: envelope.source.url,
