@@ -1,0 +1,481 @@
+/* ============================================================================
+   Opennote — prose layer
+   The typography of the document itself. Shared by the editor's rendered
+   widgets, the reading surface and the print stylesheet, so a note looks the
+   same whether you are writing, previewing or printing it.
+   ========================================================================= */
+
+.prose {
+  font-family: var(--font-doc);
+  font-size: var(--doc-fs);
+  line-height: var(--doc-lh);
+  color: var(--ink);
+  font-variant-ligatures: common-ligatures;
+  hanging-punctuation: first allow-end;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* ---- headings ---------------------------------------------------------- */
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+  font-weight: 600;
+  line-height: 1.32;
+  letter-spacing: -0.004em;
+  scroll-margin-top: 60px;
+}
+
+.prose h1 {
+  font-size: 1.85em;
+  margin: 1.1em 0 0.7em;
+  padding-bottom: 0.28em;
+  border-bottom: 2px solid var(--rule);
+  letter-spacing: -0.012em;
+}
+
+.prose h2 {
+  font-size: 1.45em;
+  margin: 1.7em 0 0.6em;
+  padding-bottom: 0.24em;
+  border-bottom: 1px solid var(--rule);
+}
+
+.prose h3 {
+  font-size: 1.2em;
+  margin: 1.6em 0 0.5em;
+}
+
+.prose h4 {
+  font-size: 1.06em;
+  margin: 1.5em 0 0.45em;
+}
+
+.prose h5 {
+  font-size: 0.95em;
+  margin: 1.4em 0 0.4em;
+  color: var(--ink-2);
+}
+
+.prose h6 {
+  font-size: 0.83em;
+  margin: 1.4em 0 0.4em;
+  color: var(--ink-3);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+.prose h1:first-child,
+.prose h2:first-child,
+.prose h3:first-child {
+  margin-top: 0.2em;
+}
+
+/* ---- flow ------------------------------------------------------------- */
+.prose p {
+  margin: 0.85em 0;
+}
+
+.prose strong {
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.prose em {
+  font-style: italic;
+}
+
+.prose del {
+  color: var(--ink-3);
+  text-decoration-thickness: 1.5px;
+}
+
+.prose mark {
+  background: var(--mark);
+  color: var(--ink);
+  padding: 0.06em 0.22em;
+  border-radius: 3px;
+}
+
+.prose a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-line);
+  transition: border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.prose a:hover {
+  border-bottom-color: var(--accent);
+}
+
+/* ---- lists ------------------------------------------------------------ */
+.prose ul,
+.prose ol {
+  margin: 0.85em 0;
+  padding-left: 1.5em;
+}
+
+.prose li {
+  margin: 0.3em 0;
+}
+
+.prose li::marker {
+  color: var(--ink-3);
+}
+
+.prose ul ul,
+.prose ol ol,
+.prose ul ol,
+.prose ol ul {
+  margin: 0.25em 0;
+}
+
+.prose li.task-list-item {
+  list-style: none;
+  margin-left: -1.5em;
+  padding-left: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5em;
+}
+
+.prose li.task-list-item > input[type="checkbox"],
+.prose .task-checkbox {
+  appearance: none;
+  flex: none;
+  width: 1.02em;
+  height: 1.02em;
+  margin-top: 0.34em;
+  border: 1.5px solid var(--rule-strong);
+  border-radius: 4px;
+  background: var(--paper-2);
+  cursor: pointer;
+  position: relative;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.prose .task-checkbox:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.prose .task-checkbox:checked::after {
+  content: "";
+  position: absolute;
+  left: 0.26em;
+  top: 0.1em;
+  width: 0.3em;
+  height: 0.55em;
+  border: solid var(--accent-ink);
+  border-width: 0 2px 2px 0;
+  transform: rotate(42deg);
+}
+
+.prose ::marker {
+  color: var(--ink-3);
+}
+
+/* ---- blockquote ------------------------------------------------------- */
+.prose blockquote {
+  margin: 1.1em 0;
+  padding: 0.1em 0 0.1em 1.1em;
+  border-left: 2px solid var(--rule-strong);
+  color: var(--ink-2);
+}
+
+.prose blockquote blockquote {
+  margin: 0.6em 0;
+}
+
+.prose blockquote > :first-child {
+  margin-top: 0;
+}
+
+.prose blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---- code ------------------------------------------------------------- */
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.12em 0.34em;
+  white-space: break-spaces;
+}
+
+.prose pre {
+  margin: 1.05em 0;
+  padding: 0.9em 1.05em;
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--accent-line);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  line-height: 1.62;
+  tab-size: 2;
+}
+
+.prose pre code {
+  display: block;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.85em;
+  white-space: pre;
+  color: var(--ink);
+}
+
+.prose .code-lang {
+  display: block;
+  margin: -0.9em -1.05em 0.7em;
+  padding: 0.3em 0.9em;
+  border-bottom: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--paper-3) 60%, var(--code-bg));
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.68em;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* syntax highlight tokens (shared by the editor and exported HTML) */
+.tok-keyword {
+  color: color-mix(in srgb, var(--accent) 82%, var(--ink));
+  font-weight: 600;
+}
+.tok-string {
+  color: color-mix(in srgb, var(--accent) 46%, var(--ink-2));
+}
+.tok-number,
+.tok-bool {
+  color: color-mix(in srgb, var(--accent) 62%, var(--ink-3));
+}
+.tok-comment {
+  color: var(--ink-3);
+  font-style: italic;
+}
+.tok-func {
+  color: color-mix(in srgb, var(--accent) 30%, var(--ink));
+}
+.tok-type {
+  color: color-mix(in srgb, var(--accent) 70%, var(--ink-2));
+}
+.tok-punct,
+.tok-op {
+  color: var(--ink-2);
+}
+.tok-var {
+  color: var(--ink);
+}
+
+/* ---- rule ------------------------------------------------------------- */
+.prose hr {
+  border: none;
+  margin: 1.9em 0;
+}
+
+.dinkus {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55em;
+  color: var(--ink-3);
+  user-select: none;
+  line-height: 1;
+}
+
+.dinkus span {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* ---- table ------------------------------------------------------------ */
+.prose table,
+.table-widget {
+  border-collapse: collapse;
+  margin: 1.05em 0;
+  font-size: 0.94em;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.prose th,
+.prose td,
+.table-widget th,
+.table-widget td {
+  border: 1px solid var(--rule);
+  padding: 0.42em 0.7em;
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose thead th,
+.table-widget thead th {
+  background: var(--paper-3);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.prose tbody tr:hover,
+.table-widget tbody tr:hover {
+  background: color-mix(in srgb, var(--paper-3) 55%, transparent);
+}
+
+/* ---- images & figures ------------------------------------------------- */
+.prose img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  background: var(--paper-2);
+}
+
+.prose figure {
+  margin: 1.2em 0;
+  text-align: center;
+}
+
+.prose figcaption {
+  margin-top: 0.5em;
+  font-size: 0.82em;
+  color: var(--ink-3);
+}
+
+/* ---- math & diagrams -------------------------------------------------- */
+.prose .katex {
+  font-size: 1.06em;
+}
+
+.prose .math-block {
+  margin: 1.1em 0;
+  padding: 0.2em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+}
+
+.katex-error {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+.prose .mermaid-block {
+  margin: 1.2em 0;
+  padding: 0.8em;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  overflow-x: auto;
+  text-align: center;
+}
+
+.mermaid-block svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaid-error {
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  color: var(--accent);
+  text-align: left;
+  white-space: pre-wrap;
+}
+
+/* ---- footnotes -------------------------------------------------------- */
+.prose .footnotes {
+  margin-top: 2.4em;
+  padding-top: 1em;
+  border-top: 1px solid var(--rule);
+  font-size: 0.88em;
+  color: var(--ink-2);
+}
+
+.prose .footnotes ol {
+  padding-left: 1.2em;
+}
+
+/* ---- table of contents (exported HTML) -------------------------------- */
+.prose .toc {
+  margin: 1.2em 0;
+  padding: 0.8em 1em;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+}
+
+.prose .toc ol {
+  margin: 0;
+  padding-left: 1.1em;
+}
+
+/* ============================ print ==================================== */
+@media print {
+  body {
+    overflow: visible;
+    background: #fff;
+    color: #000;
+  }
+
+  body::before,
+  .app__sidebar,
+  .app__outline,
+  .app__tabbar,
+  .app__statusbar,
+  .overlay-root,
+  .toast-root {
+    display: none !important;
+  }
+
+  .app,
+  .app__main,
+  .app__editor,
+  .editor-host,
+  .cm-editor,
+  .cm-scroller {
+    display: block !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    grid-template-columns: none !important;
+  }
+
+  .cm-content {
+    width: 100% !important;
+    max-width: none !important;
+    padding: 0 !important;
+  }
+
+  .prose,
+  .cm-content {
+    font-size: 11.5pt;
+  }
+
+  .prose a {
+    color: #000;
+    border-bottom: none;
+  }
+
+  .prose pre,
+  .prose table {
+    break-inside: avoid;
+  }
+
+  .prose h1,
+  .prose h2,
+  .prose h3 {
+    break-after: avoid;
+  }
+}

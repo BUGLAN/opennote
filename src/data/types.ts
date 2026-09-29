@@ -1,0 +1,155 @@
+/** Domain types for the Opennote library. */
+
+export type Id = string;
+
+export interface Folder {
+  id: Id;
+  name: string;
+  parentId: Id | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface Note {
+  id: Id;
+  folderId: Id | null;
+  /** Denormalised title, kept in sync with the content (or with `titleOverride`). */
+  title: string;
+  /** Set when the user renames a note from the tree; wins over the derived title. */
+  titleOverride: string | null;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+  /** Last time the note was opened in a tab — drives "recent" ordering. */
+  openedAt: number;
+  starred: boolean;
+  tags: string[];
+  chars: number;
+  words: number;
+  trashed: boolean;
+  trashedAt: number | null;
+}
+
+export type SnapshotReason = "auto" | "manual" | "restore";
+
+export interface Snapshot {
+  id: Id;
+  noteId: Id;
+  title: string;
+  content: string;
+  createdAt: number;
+  reason: SnapshotReason;
+}
+
+export interface Asset {
+  id: Id;
+  name: string;
+  mime: string;
+  size: number;
+  createdAt: number;
+  blob: Blob;
+}
+
+export type ThemeId = "paper" | "celadon" | "sepia" | "night" | "ink";
+export type ThemeKind = "light" | "dark";
+export type AccentId = "seal" | "indigo" | "pine" | "gamboge";
+export type FontId = "serif" | "sans" | "wenkai" | "mono";
+export type WidthId = "narrow" | "normal" | "wide" | "full";
+export type SortKey = "updated" | "created" | "title";
+export type SidebarTab = "files" | "search" | "tags" | "starred";
+
+export interface ThemeMeta {
+  id: ThemeId;
+  name: string;
+  latin: string;
+  kind: ThemeKind;
+  hint: string;
+}
+
+export const THEMES: ThemeMeta[] = [
+  { id: "paper", name: "素笺", latin: "Paper", kind: "light", hint: "暖白纸面，默认" },
+  { id: "celadon", name: "青瓷", latin: "Celadon", kind: "light", hint: "冷调青灰" },
+  { id: "sepia", name: "琥珀", latin: "Amber", kind: "light", hint: "旧书暖黄" },
+  { id: "night", name: "夜读", latin: "Night", kind: "dark", hint: "暖黑，夜里写字" },
+  { id: "ink", name: "砚池", latin: "Inkstone", kind: "dark", hint: "冷黑，高对比" },
+];
+
+export const ACCENTS: { id: AccentId; name: string; latin: string; swatch: string }[] = [
+  { id: "seal", name: "朱砂", latin: "Seal", swatch: "#b23a2e" },
+  { id: "indigo", name: "靛青", latin: "Indigo", swatch: "#34558b" },
+  { id: "pine", name: "松绿", latin: "Pine", swatch: "#2f6f5e" },
+  { id: "gamboge", name: "藤黄", latin: "Gamboge", swatch: "#9a6b12" },
+];
+
+export const FONTS: { id: FontId; name: string; hint: string }[] = [
+  { id: "serif", name: "衬线", hint: "Newsreader / 宋体，适合阅读" },
+  { id: "sans", name: "黑体", hint: "系统无衬线，界面感" },
+  { id: "wenkai", name: "文楷", hint: "霞鹜文楷（联网加载，回退楷体）" },
+  { id: "mono", name: "等宽", hint: "JetBrains Mono，代码与草稿" },
+];
+
+export const WIDTHS: { id: WidthId; name: string }[] = [
+  { id: "narrow", name: "窄" },
+  { id: "normal", name: "标准" },
+  { id: "wide", name: "宽" },
+  { id: "full", name: "满幅" },
+];
+
+export interface UiSettings {
+  /** Active theme id. */
+  theme: ThemeId;
+  /** Remembered light/dark pair, so the toggle round-trips. */
+  appearance: ThemeKind;
+  lightTheme: ThemeId;
+  darkTheme: ThemeId;
+  accent: AccentId;
+  font: FontId;
+  width: WidthId;
+  fontSize: number;
+  lineHeight: number;
+  typewriter: boolean;
+  focus: boolean;
+  spellcheck: boolean;
+  showWordCount: boolean;
+  snapshots: boolean;
+  imageMode: "asset" | "inline";
+  sidebarOpen: boolean;
+  outlineOpen: boolean;
+  sidebarTab: SidebarTab;
+  sort: SortKey;
+  /** Open tabs (note ids, in order) and the active one. */
+  tabs: Id[];
+  activeId: Id | null;
+  /** Folders the user expanded in the tree. */
+  expanded: Id[];
+  /** Folders the user collapsed while in "expand all" mode — keeps siblings open. */
+  collapsed: Id[];
+  lastNoteId: Id | null;
+}
+
+export const DEFAULT_UI: UiSettings = {
+  theme: "paper",
+  appearance: "light",
+  lightTheme: "paper",
+  darkTheme: "night",
+  accent: "seal",
+  font: "serif",
+  width: "normal",
+  fontSize: 16.5,
+  lineHeight: 1.78,
+  typewriter: false,
+  focus: false,
+  spellcheck: true,
+  showWordCount: true,
+  snapshots: true,
+  imageMode: "asset",
+  sidebarOpen: true,
+  outlineOpen: false,
+  sidebarTab: "files",
+  sort: "updated",
+  tabs: [],
+  activeId: null,
+  expanded: [],
+  collapsed: [],
+  lastNoteId: null,
+};

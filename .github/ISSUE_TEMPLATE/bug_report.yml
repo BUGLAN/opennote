@@ -1,0 +1,50 @@
+name: Bug 反馈
+description: 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Opennote 的笔记只保存在你自己的浏览器里，我们看不到任何内容。反馈时请不要粘贴私人笔记正文。
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 发生了什么？你期望的结果是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 ...
+        2. 点击 ...
+        3. 出现 ...
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: 运行方式
+      options:
+        - 线上部署（GitHub Pages / Vercel / Netlify 等）
+        - 本地开发（pnpm dev）
+        - 本地生产构建（pnpm preview）
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: 浏览器与版本
+      placeholder: 例如 Chrome 141 / Edge 141 / Safari 18
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 控制台报错、截图或其他线索。
+    validations:
+      required: false

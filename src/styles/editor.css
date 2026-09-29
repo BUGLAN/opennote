@@ -1,0 +1,385 @@
+/* ============================================================================
+   Opennote — the document surface inside CodeMirror
+   Selectors are intentionally two-to-three classes deep: CodeMirror injects its
+   base theme at runtime, so anything less specific would lose the cascade.
+   ========================================================================= */
+
+.cm-editor .cm-content {
+  position: relative;
+}
+
+.cm-editor .cm-line {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
+/* ---- empty document hint ---------------------------------------------- */
+.editor-host.md-empty .cm-content::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  top: 56px;
+  left: 12px;
+  color: var(--ink-3);
+  font-family: var(--font-doc);
+  font-size: var(--doc-fs);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ---- headings ---------------------------------------------------------- */
+.cm-content .cm-line.md-h1,
+.cm-content .cm-line.md-h2,
+.cm-content .cm-line.md-h3,
+.cm-content .cm-line.md-h4,
+.cm-content .cm-line.md-h5,
+.cm-content .cm-line.md-h6 {
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+.cm-content .cm-line.md-h1 {
+  font-size: 1.85em;
+  line-height: 1.28;
+  padding-top: 0.85em;
+  padding-bottom: 0.3em;
+  border-bottom: 2px solid var(--rule);
+  letter-spacing: -0.014em;
+}
+
+.cm-content .cm-line.md-h2 {
+  font-size: 1.45em;
+  line-height: 1.3;
+  padding-top: 0.8em;
+  padding-bottom: 0.26em;
+  border-bottom: 1px solid var(--rule);
+}
+
+.cm-content .cm-line.md-h3 {
+  font-size: 1.2em;
+  line-height: 1.35;
+  padding-top: 0.75em;
+}
+
+.cm-content .cm-line.md-h4 {
+  font-size: 1.06em;
+  line-height: 1.4;
+  padding-top: 0.7em;
+}
+
+.cm-content .cm-line.md-h5 {
+  font-size: 0.95em;
+  color: var(--ink-2);
+  padding-top: 0.65em;
+}
+
+.cm-content .cm-line.md-h6 {
+  font-size: 0.84em;
+  color: var(--ink-3);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  padding-top: 0.65em;
+}
+
+.cm-content .cm-line:first-child.md-h1,
+.cm-content .cm-line:first-child.md-h2 {
+  padding-top: 0.1em;
+}
+
+/* Lines CodeMirror keeps in the document but the reader should not see. */
+.cm-content .cm-line.md-hide-line {
+  display: none;
+}
+
+/* ---- inline marks ------------------------------------------------------ */
+.cm-content .md-strong {
+  font-weight: 650;
+}
+
+.cm-content .md-em {
+  font-style: italic;
+}
+
+.cm-content .md-del {
+  color: var(--ink-3);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+
+.cm-content .md-mark {
+  background: var(--mark);
+  border-radius: 3px;
+  padding: 0.04em 0.16em;
+  box-decoration-break: clone;
+}
+
+.cm-content .md-code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.1em 0.32em;
+}
+
+.cm-content .md-link {
+  color: var(--accent);
+  border-bottom: 1px solid var(--accent-line);
+}
+
+.cm-content .md-src {
+  color: var(--ink-3);
+}
+
+.cm-content .md-num {
+  color: var(--ink-3);
+}
+
+.cm-content .md-bullet {
+  color: var(--accent);
+  font-weight: 700;
+  padding-right: 0.1em;
+}
+
+.cm-content .md-task {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: baseline;
+  margin-right: 0.35em;
+}
+
+.cm-content .md-task .task-checkbox {
+  appearance: none;
+  width: 1.02em;
+  height: 1.02em;
+  border: 1.5px solid var(--rule-strong);
+  border-radius: 4px;
+  background: var(--paper-2);
+  position: relative;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+  translate: 0 0.16em;
+}
+
+.cm-content .md-task .task-checkbox:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.cm-content .md-task .task-checkbox:checked::after {
+  content: "";
+  position: absolute;
+  left: 0.27em;
+  top: 0.11em;
+  width: 0.28em;
+  height: 0.52em;
+  border: solid var(--accent-ink);
+  border-width: 0 2px 2px 0;
+  transform: rotate(42deg);
+}
+
+/* ---- wiki links -------------------------------------------------------- */
+.cm-content .md-wikilink {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+  padding: 0.08em 0.34em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.cm-content .md-wikilink:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.cm-content .md-wikilink.is-missing {
+  color: var(--ink-3);
+  background: var(--paper-3);
+  border: 1px dashed var(--rule-strong);
+}
+
+/* ---- blockquote -------------------------------------------------------- */
+.cm-content .cm-line.md-quote {
+  border-left: 2px solid var(--rule-strong);
+  padding-left: 14px;
+  color: var(--ink-2);
+}
+
+.cm-content .cm-line.md-quote-2 {
+  margin-left: 0;
+  padding-left: 26px;
+  border-left-width: 2px;
+}
+
+.cm-content .cm-line.md-quote-3 {
+  padding-left: 38px;
+}
+
+/* ---- code blocks ------------------------------------------------------- */
+.cm-content .cm-line.md-code-line {
+  background: var(--code-bg);
+  border-left: 2px solid var(--accent-line);
+  border-right: 1px solid var(--rule);
+  padding-left: 14px;
+  padding-right: 14px;
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  line-height: 1.65;
+}
+
+.cm-content .cm-line.md-code-first {
+  border-top: 1px solid var(--rule);
+  border-radius: 8px 8px 0 0;
+  padding-top: 8px;
+}
+
+.cm-content .cm-line.md-code-last {
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0 0 8px 8px;
+  padding-bottom: 8px;
+}
+
+.cm-content .cm-line.md-code-first[data-lang]::before {
+  content: attr(data-lang);
+  display: block;
+  margin: -8px -14px 6px;
+  padding: 2px 10px;
+  border-bottom: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--paper-3) 60%, var(--code-bg));
+  border-radius: 7px 7px 0 0;
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  line-height: 1.7;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--ink-3);
+  user-select: none;
+}
+
+.cm-content .cm-line.md-code-fence {
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  color: var(--ink-3);
+}
+
+/* ---- table source view ------------------------------------------------- */
+.cm-content .cm-line.md-table-src {
+  font-family: var(--font-mono);
+  font-size: 0.84em;
+  line-height: 1.7;
+  color: var(--ink-2);
+  letter-spacing: -0.02em;
+}
+
+.cm-content .md-table-delim {
+  color: var(--ink-3);
+  opacity: 0.65;
+}
+
+.cm-content .cm-line.md-math-src {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  color: var(--ink-2);
+}
+
+/* ---- widgets ----------------------------------------------------------- */
+.cm-content .md-media {
+  display: inline-block;
+}
+
+.cm-content .md-media img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  vertical-align: middle;
+  background: var(--paper-2);
+}
+
+.cm-content .md-media--block {
+  display: block;
+  text-align: center;
+  padding: 0.6em 0;
+}
+
+.cm-content .md-media.is-missing {
+  display: inline-block;
+  padding: 0.3em 0.7em;
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink-3);
+  font-size: 0.86em;
+}
+
+.cm-content .cm-line.md-media-line {
+  text-align: center;
+}
+
+.cm-content .md-hr {
+  padding: 1.35em 0;
+}
+
+.cm-content .md-math {
+  display: inline-block;
+}
+
+.cm-content .md-math.math-block {
+  display: block;
+  text-align: center;
+  padding: 0.45em 0;
+  overflow-x: auto;
+}
+
+.cm-content .md-math.is-loading {
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+.cm-content .md-table {
+  padding: 0.55em 0;
+  cursor: text;
+}
+
+.cm-content .md-mermaid {
+  padding: 0.8em;
+  cursor: text;
+}
+
+.cm-content .md-mermaid.is-loading {
+  color: var(--ink-3);
+  font-size: 0.86em;
+  text-align: center;
+}
+
+/* ============================ modes ==================================== */
+
+/* typewriter: room above and below so the caret can sit in the middle */
+.editor-host.md-typewriter .cm-content {
+  padding-top: 28vh;
+  padding-bottom: 62vh;
+}
+
+.editor-host.md-typewriter.md-empty .cm-content::before {
+  top: 28vh;
+}
+
+/* focus: everything but the block under the caret fades back */
+.editor-host.md-focus-mode .cm-line:not(.md-focus-on) {
+  color: color-mix(in srgb, var(--ink) 26%, transparent);
+  transition: color var(--dur) var(--ease);
+}
+
+.editor-host.md-focus-mode .cm-line:not(.md-focus-on) * {
+  color: inherit !important;
+  background-color: transparent !important;
+  border-color: color-mix(in srgb, var(--rule) 55%, transparent) !important;
+  box-shadow: none !important;
+}
+
+.editor-host.md-focus-mode .cm-line:not(.md-focus-on) img,
+.editor-host.md-focus-mode .cm-line:not(.md-focus-on) .md-mermaid,
+.editor-host.md-focus-mode .cm-line:not(.md-focus-on) .md-table {
+  opacity: 0.35;
+  filter: saturate(0.4);
+}

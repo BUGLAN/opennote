@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#fbf8f3" />
+    <title>Opennote · 开源笔记</title>
+    <meta
+      name="description"
+      content="Opennote —— 纯前端、开源、Typora 风格的 Markdown 笔记应用。笔记只存在你的浏览器里。"
+    />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./favicon.svg" />
+    <link rel="mask-icon" href="./favicon.svg" color="#b23a2e" />
+    <script>
+      // Apply the persisted theme before first paint to avoid a flash of the wrong palette.
+      try {
+        var raw = localStorage.getItem('opennote.ui.v1');
+        var ui = raw ? JSON.parse(raw) : null;
+        var dark = ui && ui.theme ? /night|dark|ye/.test(ui.theme) : false;
+        if (!ui && window.matchMedia('(prefers-color-scheme: dark)').matches) dark = true;
+        if (ui && ui.appearance === 'dark') dark = true;
+        if (ui && ui.appearance === 'light') dark = false;
+        document.documentElement.dataset.appearance = dark ? 'dark' : 'light';
+        if (ui && ui.theme) document.documentElement.dataset.theme = ui.theme;
+        if (ui && ui.accent) document.documentElement.dataset.accent = ui.accent;
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="boot" class="boot">
+      <div class="boot__seal" aria-hidden="true">記</div>
+      <div class="boot__name">Opennote</div>
+      <div class="boot__hint">开源笔记 · 正在打开你的书桌</div>
+    </div>
+    <noscript>
+      <div class="boot__noscript">
+        Opennote 是一个纯前端应用，需要启用 JavaScript 才能运行。你的笔记只保存在本机浏览器中。
+      </div>
+    </noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
