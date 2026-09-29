@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="paper" data-accent="seal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>剪藏到 Opennote</title>
+<!-- 设计令牌：构建期整份复制自 src/styles/tokens.css，哈希比对见 BUILD-INFO.json（不手抄色值） -->
+<link rel="stylesheet" href="../styles/tokens.css">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<div class="clip" id="clip" data-state="checking">
+  <div class="clip__head">
+    <span class="seal" aria-hidden="true">記</span>
+    <span class="clip__name">Opennote<small>剪藏</small></span>
+    <span class="clip__head-right">
+      <span class="status-chip" id="chip" role="status" aria-live="polite" tabindex="-1"><i class="status-chip__dot" aria-hidden="true"></i><span id="chipText">正在连接本地接口…</span></span>
+    </span>
+  </div>
+
+  <div class="clip__body" id="body">
+    <div class="clip__seg" id="seg">
+      <div class="segmented" role="radiogroup" aria-label="剪藏范围" id="segmented">
+        <button type="button" role="radio" aria-checked="true" data-mode="selection" class="is-active">选中片段</button>
+        <button type="button" role="radio" aria-checked="false" data-mode="page">整页正文</button>
+      </div>
+    </div>
+
+    <div class="clip__region" id="region"></div>
+
+    <div class="clip__rows" id="rows">
+      <div class="clip__row">
+        <label for="folder">存到</label>
+        <input id="folder" class="field clip__sel" list="folderOptions" placeholder="根目录" autocomplete="off" spellcheck="false">
+        <datalist id="folderOptions"></datalist>
+      </div>
+      <div class="clip__row">
+        <label for="tags">标签</label>
+        <input id="tags" class="field" placeholder="用逗号分隔，可留空" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+  </div>
+
+  <div class="clip__foot" id="foot">
+    <div class="clip__acts" id="footActs"></div>
+    <button type="button" class="btn btn--primary" id="primary">剪藏到 Opennote</button>
+    <button type="button" class="clip__more" id="more" title="更多" aria-label="更多" aria-haspopup="menu" aria-expanded="false"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.4" fill="currentColor"></circle><circle cx="8" cy="8" r="1.4" fill="currentColor"></circle><circle cx="13" cy="8" r="1.4" fill="currentColor"></circle></svg></button>
+  </div>
+
+  <div class="clip__menu" id="menu" role="menu" aria-label="更多" hidden>
+    <!--
+      判定链纪律（BLOCK-1 回归点）：这个菜单里任何「落点策略」类选项都**不得**下发 `conflict: "new"`。
+      语义映射：缺省（不下发该键）= 交给接收端判定链（选区二次剪藏自动追加、整页二次剪藏进收件箱）；
+      「追加」= `conflict: "append"`；「跳过」= `conflict: "skip"`；`overwrite` 永不接受。
+    -->
+    <button type="button" role="menuitem" data-action="inbox" disabled title="收件箱模式是 P1（03 §UI-01 的 ⋯ 菜单第 1 项）">剪藏到收件箱</button>
+    <button type="button" role="menuitem" data-action="tag-from-selection">用当前选区新建标签…</button>
+    <button type="button" role="menuitem" data-action="copy">复制 Markdown</button>
+    <button type="button" role="menuitem" data-action="stage">暂存在插件里</button>
+    <button type="button" role="menuitem" data-action="open-settings">打开 Opennote</button>
+    <button type="button" role="menuitem" data-action="settings">插件设置</button>
+    <button type="button" role="menuitem" data-action="forget">断开配对（清除本地令牌）</button>
+  </div>
+</div>
+<script type="module" src="popup.js"></script>
+</body>
+</html>

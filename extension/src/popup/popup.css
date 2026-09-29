@@ -1,0 +1,133 @@
+/* ============================================================================
+   Opennote 剪藏扩展 · popup（UI-01）
+   规则来源：docs/import/mockups/01-extension-popup.html（视觉基准）与
+   03-UI设计规范-剪藏与导入.md §UI-01。
+   **本文件不定义任何设计令牌、不出现任何色值**：所有颜色/间距/字体/圆角/阴影
+   一律 `var(--…)`，取自构建期整份复制的 src/styles/tokens.css。
+   （唯一的例外是 `.seal` 的 1px 内高光，逐字复制自 mockup 的 base.css 层，
+     它不是令牌定义、也不是新令牌，见 README「不新增设计令牌」一节。）
+   ========================================================================= */
+
+/* ── base 层（逐字复制自 mockup 的 base.css 公共层） ─────────────────── */
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;width:360px}
+body{
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--font-ui);
+  font-size:var(--fs-md);
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  font-synthesis-weight:none;
+}
+button,input,select{font:inherit;color:inherit;background:none;border:none;margin:0}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+::selection{background:var(--sel)}
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px;border-radius:3px}
+*{scrollbar-width:thin;scrollbar-color:var(--rule-strong) transparent}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);height:28px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--rule-strong);color:var(--ink);background:var(--paper-2);font-size:var(--fs-md);transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease)}
+.btn:hover{background:var(--paper-3)}
+.btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn--primary:hover{filter:brightness(1.06);background:var(--accent)}
+.btn--ghost{border-color:transparent;background:transparent}
+.btn--ghost:hover{background:var(--paper-3)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.field{width:100%;height:30px;padding:0 9px;border-radius:var(--radius-sm);border:1px solid var(--rule-strong);background:var(--paper-2);color:var(--ink);font-size:var(--fs-md)}
+.field:focus-visible{outline:none;border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-soft)}
+.seal{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:5px;background:var(--accent);color:var(--accent-ink);font-family:var(--font-serif);font-size:13px;line-height:1;box-shadow:inset 0 0 0 1px rgb(255 255 255/.32)}
+.segmented{display:inline-flex;padding:2px;gap:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper)}
+.segmented button{height:24px;padding:0 10px;border-radius:4px;color:var(--ink-2);font-size:var(--fs-sm)}
+.segmented button.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.spinner{width:12px;height:12px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
+
+/* ── UI-01 弹窗外壳 ─────────────────────────────────────────────────── */
+.clip{
+  width:360px;
+  min-height:380px;
+  max-height:600px;
+  display:flex;
+  flex-direction:column;
+  background:var(--paper);
+  border:1px solid var(--rule-strong);
+  border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-3);
+  overflow:hidden;
+}
+.clip__head{display:flex;align-items:center;gap:var(--s2);height:40px;padding:0 var(--s3);border-bottom:1px solid var(--rule);background:var(--paper-2);flex:none}
+.clip__name{font-family:var(--font-display);font-size:var(--fs-lg);font-weight:600;letter-spacing:-.01em}
+.clip__name small{display:block;font-family:var(--font-ui);font-size:10.5px;font-weight:400;letter-spacing:var(--tracking-wide);color:var(--ink-3);margin-top:-2px}
+.clip__head-right{margin-left:auto;display:inline-flex;align-items:center;min-width:0}
+.clip__body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
+
+.status-chip{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border-radius:99px;border:1px solid var(--rule);background:var(--paper-2);color:var(--ink-2);font-size:var(--fs-xs);white-space:nowrap;flex:none}
+.status-chip__dot{width:6px;height:6px;border-radius:50%;background:var(--ink-3);flex:none}
+.status-chip.is-on{background:var(--accent-soft);border-color:var(--accent-soft);color:var(--ink)}
+.status-chip.is-on .status-chip__dot{background:var(--accent)}
+.status-chip.is-busy .status-chip__dot{background:var(--ink-3);animation:pulse 1.8s var(--ease) infinite}
+.status-chip.is-error{border-color:var(--accent-line);color:var(--ink)}
+.status-chip.is-error .status-chip__dot{background:var(--accent)}
+
+.clip__seg{padding:var(--s3) var(--s3) 0}
+.clip__region{display:block}
+.clip__preview{margin:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2)}
+.clip__title-row{display:flex;gap:8px;align-items:baseline}
+.clip__title-in{font-family:var(--font-ui);font-size:var(--fs-md);font-weight:600;color:var(--ink);border-bottom:1px dashed var(--rule);padding-bottom:6px;width:100%}
+.clip__count{font-size:var(--fs-xs);color:var(--ink-3);white-space:nowrap;flex:none}
+.clip__excerpt{margin-top:8px;font-family:var(--font-serif);font-size:var(--fs-sm);line-height:1.75;color:var(--ink-2);display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}
+.clip__src{margin-top:8px;padding-top:7px;border-top:1px solid var(--rule);font-size:var(--fs-xs);color:var(--ink-3);display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.clip__src em{font-style:normal;color:var(--ink-2)}
+
+.clip__rows{padding:0 var(--s3)}
+.clip__row{display:flex;align-items:center;gap:var(--s2);padding:7px 0;border-bottom:1px solid var(--rule)}
+.clip__row:last-child{border-bottom:none}
+.clip__row>label{width:44px;flex:none;font-size:var(--fs-sm);color:var(--ink-3)}
+.clip__row .field{height:26px;font-size:var(--fs-sm)}
+
+.clip__foot{display:flex;align-items:center;gap:var(--s2);padding:var(--s3);border-top:1px solid var(--rule);background:var(--paper-2);flex:none}
+.clip__foot .btn{flex:1;height:30px}
+.clip__acts{display:flex;gap:var(--s2);flex:1;flex-wrap:wrap}
+.clip__acts:empty{display:none}
+.clip__more{width:30px;height:30px;flex:none;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);color:var(--ink-2);background:var(--paper)}
+.clip__more:hover{background:var(--paper-3);color:var(--ink)}
+
+.clip__menu{position:absolute;right:var(--s3);bottom:52px;z-index:10;min-width:190px;padding:4px;border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--paper-2);box-shadow:var(--shadow-2);display:flex;flex-direction:column}
+.clip__menu[hidden]{display:none}
+.clip__menu button{height:28px;padding:0 8px;border-radius:var(--radius-sm);text-align:left;font-size:var(--fs-sm);color:var(--ink)}
+.clip__menu button:hover:not(:disabled){background:var(--paper-3)}
+.clip__menu button:disabled{opacity:.45;cursor:not-allowed}
+.clip__menu hr{margin:4px 0;border:none;border-top:1px solid var(--rule)}
+
+.clip__block{margin:var(--s3);padding:var(--s3);border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--paper-2);animation:rise var(--dur) var(--ease-out) both}
+.clip__block p{font-size:var(--fs-sm);color:var(--ink);line-height:1.7}
+.clip__alert{margin:var(--s3);padding:var(--s3) var(--s3) var(--s3) 11px;border:1px solid var(--rule-strong);border-left:2px solid var(--accent);border-radius:var(--radius-sm);background:var(--paper-2);animation:rise var(--dur) var(--ease-out) both}
+.clip__alert p{font-size:var(--fs-sm);line-height:1.7;color:var(--ink)}
+.clip__alert .next{margin-top:6px;color:var(--ink-2)}
+.clip__alert .code{margin-top:6px;font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--ink-3)}
+.clip__alert .acts{display:flex;gap:var(--s2);margin-top:10px;flex-wrap:wrap}
+.clip__alert.is-quiet{border-left-color:var(--rule-strong)}
+.clip__code{margin-top:10px;font-family:var(--font-mono);font-size:18px;letter-spacing:.34em;text-align:center;height:34px}
+.clip__hint{margin-top:10px;font-size:var(--fs-xs);color:var(--ink-2);line-height:1.7}
+.clip__manual{margin-top:10px;width:100%;height:110px;padding:8px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink);font-family:var(--font-mono);font-size:var(--fs-xs);resize:vertical}
+.clip__skeleton{margin:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2)}
+.clip__bar{height:9px;border-radius:99px;background:var(--paper-3)}
+.clip__bar+.clip__bar{margin-top:8px}
+.clip__ok{margin:var(--s3);display:flex;gap:var(--s2);align-items:flex-start;padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2);animation:rise var(--dur) var(--ease-out) both}
+.clip__ok .dot{width:14px;height:14px;border-radius:50%;background:var(--accent);flex:none;margin-top:2px}
+.clip__ok .msg{font-size:var(--fs-md);color:var(--ink)}
+.clip__ok .detail{font-size:var(--fs-xs);color:var(--ink-3);margin-top:2px}
+.clip__empty{margin:var(--s3);padding:var(--s5) var(--s3);text-align:center}
+.clip__empty .empty__seal{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;font-size:23px;border-radius:var(--radius);background:var(--accent);color:var(--accent-ink);font-family:var(--font-serif);margin-bottom:10px;box-shadow:inset 0 0 0 1px rgb(255 255 255/.32)}
+.clip__empty h3{font-size:var(--fs-md);font-weight:600}
+.clip__empty p{margin-top:4px;font-size:var(--fs-sm);color:var(--ink-3);line-height:1.7}
+
+/* 提交中：L3/L4 降到 60% 不透明度并停止响应（S7 / S-C5） */
+.clip[data-busy="true"] .clip__region,
+.clip[data-busy="true"] .clip__rows,
+.clip[data-busy="true"] .clip__seg{opacity:.6;pointer-events:none}
+.clip[data-busy="true"] #primary{min-width:150px}

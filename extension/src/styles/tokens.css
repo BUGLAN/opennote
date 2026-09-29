@@ -1,0 +1,257 @@
+/* ============================================================================
+   Opennote — design tokens
+   One warm "paper & ink" system with several finished palettes. Every visual
+   decision in the app reads from these variables; themes only swap values.
+   ========================================================================= */
+
+:root {
+  /* ---- layout ---------------------------------------------------------- */
+  --sidebar-w: 268px;
+  --outline-w: 232px;
+  --tabbar-h: 40px;
+  --statusbar-h: 30px;
+  --radius-sm: 5px;
+  --radius: 8px;
+  --radius-lg: 14px;
+  --measure: 46rem; /* editor column width, user adjustable */
+  --doc-fs: 16.5px; /* document font size, user adjustable */
+  --doc-lh: 1.78;
+
+  /* ---- spacing --------------------------------------------------------- */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  /* ---- motion ---------------------------------------------------------- */
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur: 220ms;
+  --dur-slow: 460ms;
+
+  /* ---- type stacks ----------------------------------------------------- */
+  --font-ui: "Figtree Variable", "Figtree", system-ui, -apple-system, "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-serif: "Newsreader Variable", "Newsreader", "Iowan Old Style", Georgia,
+    "Songti SC", "Noto Serif SC", "Source Han Serif SC", "SimSun", serif;
+  --font-display: "Fraunces Variable", "Fraunces", "Newsreader Variable", Georgia,
+    "Songti SC", serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace,
+    "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-cjk-serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "SimSun", serif;
+  --font-cjk-sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+
+  /* document font is overridden by [data-font] presets below */
+  --font-doc: var(--font-serif);
+
+  --fs-xs: 11.5px;
+  --fs-sm: 12.5px;
+  --fs-md: 13.5px;
+  --fs-lg: 15px;
+  --tracking-wide: 0.08em;
+}
+
+/* ============================ palettes ================================== */
+
+/* 素笺 — warm light, the default */
+:root,
+[data-theme="paper"] {
+  --paper: #fbf8f3;
+  --paper-2: #fffdf9;
+  --paper-3: #f2ece1;
+  --paper-4: #e9e1d3;
+  --ink: #221d17;
+  --ink-2: #5c5347;
+  --ink-3: #97897a;
+  --rule: #e8dfd1;
+  --rule-strong: #d7cbb8;
+  --code-bg: #f4eee4;
+  --mark: #f6e3a8;
+  --sel: rgba(178, 58, 46, 0.16);
+  --shadow-c: 52 39 22;
+  --shadow-1: 0 1px 2px rgb(var(--shadow-c) / 0.06);
+  --shadow-2: 0 2px 6px -2px rgb(var(--shadow-c) / 0.1), 0 12px 28px -18px rgb(var(--shadow-c) / 0.28);
+  --shadow-3: 0 24px 60px -28px rgb(var(--shadow-c) / 0.36), 0 2px 8px -4px rgb(var(--shadow-c) / 0.12);
+  --grain: 0.035;
+  color-scheme: light;
+}
+
+/* 青瓷 — cool light */
+[data-theme="celadon"] {
+  --paper: #f4f7f5;
+  --paper-2: #fbfdfc;
+  --paper-3: #e8efec;
+  --paper-4: #dde7e2;
+  --ink: #17221f;
+  --ink-2: #4c5c57;
+  --ink-3: #86968f;
+  --rule: #dce5e1;
+  --rule-strong: #c6d3cd;
+  --code-bg: #eaf0ed;
+  --mark: #d7ecd6;
+  --sel: rgba(47, 111, 94, 0.16);
+  --shadow-c: 22 44 38;
+  --shadow-1: 0 1px 2px rgb(var(--shadow-c) / 0.06);
+  --shadow-2: 0 2px 6px -2px rgb(var(--shadow-c) / 0.1), 0 12px 28px -18px rgb(var(--shadow-c) / 0.26);
+  --shadow-3: 0 24px 60px -28px rgb(var(--shadow-c) / 0.34), 0 2px 8px -4px rgb(var(--shadow-c) / 0.12);
+  --grain: 0.03;
+  color-scheme: light;
+}
+
+/* 琥珀 — amber light */
+[data-theme="sepia"] {
+  --paper: #faf3e6;
+  --paper-2: #fffbf3;
+  --paper-3: #f1e6d2;
+  --paper-4: #e6d8bf;
+  --ink: #2a2118;
+  --ink-2: #6a5a45;
+  --ink-3: #9d8a70;
+  --rule: #e7d9c0;
+  --rule-strong: #d3c1a2;
+  --code-bg: #f3e9d8;
+  --mark: #f3dfa6;
+  --sel: rgba(168, 100, 42, 0.18);
+  --shadow-c: 60 44 20;
+  --shadow-1: 0 1px 2px rgb(var(--shadow-c) / 0.07);
+  --shadow-2: 0 2px 6px -2px rgb(var(--shadow-c) / 0.12), 0 12px 28px -18px rgb(var(--shadow-c) / 0.3);
+  --shadow-3: 0 24px 60px -28px rgb(var(--shadow-c) / 0.38), 0 2px 8px -4px rgb(var(--shadow-c) / 0.14);
+  --grain: 0.045;
+  color-scheme: light;
+}
+
+/* 夜读 — warm dark */
+[data-theme="night"] {
+  --paper: #14120f;
+  --paper-2: #1c1915;
+  --paper-3: #262119;
+  --paper-4: #322b21;
+  --ink: #eae3d7;
+  --ink-2: #b0a796;
+  --ink-3: #7d7466;
+  --rule: #2e2820;
+  --rule-strong: #413930;
+  --code-bg: #1f1b15;
+  --mark: #4a3b1e;
+  --sel: rgba(224, 102, 79, 0.24);
+  --shadow-c: 0 0 0;
+  --shadow-1: 0 1px 2px rgb(var(--shadow-c) / 0.4);
+  --shadow-2: 0 2px 8px -2px rgb(var(--shadow-c) / 0.5), 0 16px 34px -20px rgb(var(--shadow-c) / 0.7);
+  --shadow-3: 0 26px 64px -28px rgb(var(--shadow-c) / 0.8), 0 2px 10px -4px rgb(var(--shadow-c) / 0.6);
+  --grain: 0.05;
+  color-scheme: dark;
+}
+
+/* 砚池 — cool dark */
+[data-theme="ink"] {
+  --paper: #0e1113;
+  --paper-2: #151a1d;
+  --paper-3: #1d2428;
+  --paper-4: #273034;
+  --ink: #dfe6e6;
+  --ink-2: #9faeae;
+  --ink-3: #6e7d7e;
+  --rule: #232b2f;
+  --rule-strong: #333d42;
+  --code-bg: #161c20;
+  --mark: #2c3b33;
+  --sel: rgba(79, 181, 154, 0.22);
+  --shadow-c: 0 0 0;
+  --shadow-1: 0 1px 2px rgb(var(--shadow-c) / 0.4);
+  --shadow-2: 0 2px 8px -2px rgb(var(--shadow-c) / 0.5), 0 16px 34px -20px rgb(var(--shadow-c) / 0.7);
+  --shadow-3: 0 26px 64px -28px rgb(var(--shadow-c) / 0.8), 0 2px 10px -4px rgb(var(--shadow-c) / 0.6);
+  --grain: 0.04;
+  color-scheme: dark;
+}
+
+/* ============================ accents =================================== */
+/* 朱砂 (default) */
+:root,
+[data-accent="seal"] {
+  --accent: #b23a2e;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(178, 58, 46, 0.12);
+  --accent-line: rgba(178, 58, 46, 0.34);
+}
+[data-theme="night"][data-accent="seal"],
+[data-theme="ink"][data-accent="seal"] {
+  --accent: #e0664f;
+  --accent-ink: #1a0f0c;
+  --accent-soft: rgba(224, 102, 79, 0.16);
+  --accent-line: rgba(224, 102, 79, 0.4);
+}
+/* 靛青 */
+[data-accent="indigo"] {
+  --accent: #34558b;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(52, 85, 139, 0.12);
+  --accent-line: rgba(52, 85, 139, 0.34);
+}
+[data-theme="night"][data-accent="indigo"],
+[data-theme="ink"][data-accent="indigo"] {
+  --accent: #7ea6e0;
+  --accent-ink: #0b1420;
+  --accent-soft: rgba(126, 166, 224, 0.16);
+  --accent-line: rgba(126, 166, 224, 0.4);
+}
+/* 松绿 */
+[data-accent="pine"] {
+  --accent: #2f6f5e;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(47, 111, 94, 0.12);
+  --accent-line: rgba(47, 111, 94, 0.34);
+}
+[data-theme="night"][data-accent="pine"],
+[data-theme="ink"][data-accent="pine"] {
+  --accent: #4fb59a;
+  --accent-ink: #08130f;
+  --accent-soft: rgba(79, 181, 154, 0.16);
+  --accent-line: rgba(79, 181, 154, 0.4);
+}
+/* 藤黄 */
+[data-accent="gamboge"] {
+  --accent: #9a6b12;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(154, 107, 18, 0.14);
+  --accent-line: rgba(154, 107, 18, 0.36);
+}
+[data-theme="night"][data-accent="gamboge"],
+[data-theme="ink"][data-accent="gamboge"] {
+  --accent: #d9a537;
+  --accent-ink: #171004;
+  --accent-soft: rgba(217, 165, 55, 0.16);
+  --accent-line: rgba(217, 165, 55, 0.4);
+}
+
+/* ======================= document font presets ========================== */
+[data-font="serif"] {
+  --font-doc: var(--font-serif);
+}
+[data-font="sans"] {
+  --font-doc: var(--font-ui);
+}
+[data-font="wenkai"] {
+  --font-doc: "LXGW WenKai", "LXGW WenKai Screen", "KaiTi", "STKaiti", "Kaiti SC",
+    var(--font-serif);
+}
+[data-font="mono"] {
+  --font-doc: var(--font-mono);
+}
+
+/* Width presets */
+[data-width="narrow"] {
+  --measure: 38rem;
+}
+[data-width="normal"] {
+  --measure: 46rem;
+}
+[data-width="wide"] {
+  --measure: 56rem;
+}
+[data-width="full"] {
+  --measure: 100%;
+}

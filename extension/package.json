@@ -1,0 +1,20 @@
+{
+  "name": "opennote-clip-extension",
+  "version": "0.1.4",
+  "private": true,
+  "description": "Opennote 浏览器剪藏扩展（Manifest V3）· 与主项目物理隔离的独立构建单元",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "verify": "node verify.mjs",
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "check": "node build.mjs && node --test \"tests/**/*.test.mjs\" && node verify.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
