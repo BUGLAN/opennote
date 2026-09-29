@@ -98,12 +98,14 @@ export function Modal({
   footer,
   onClose,
   wide = false,
+  settings = false,
 }: {
   title: ReactNode;
   children: ReactNode;
   footer?: ReactNode;
   onClose: () => void;
   wide?: boolean;
+  settings?: boolean;
 }): ReactNode {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -119,7 +121,12 @@ export function Modal({
   return (
     <div className="overlay-root">
       <div className="scrim" onMouseDown={onClose} />
-      <div className={cn("dialog", wide && "dialog--wide")} role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : undefined}>
+      <div
+        className={cn("dialog", settings ? "dialog--settings" : wide && "dialog--wide")}
+        role="dialog"
+        aria-modal="true"
+        aria-label={typeof title === "string" ? title : undefined}
+      >
         <header className="dialog__head">
           <h2 className="dialog__title">{title}</h2>
           <button type="button" className="icon-btn" onClick={onClose} aria-label="关闭">

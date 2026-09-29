@@ -63,6 +63,11 @@ const bridge = {
     addRecentWorkspace: (absolutePath) => invoke('opennote:app:addRecentWorkspace', absolutePath),
   },
 
+  window: {
+    /** 同步无边框标题栏上那三个原生按钮的底色与符号色（macOS 返回 false）。 */
+    setTitleBarOverlay: (colors) => invoke('opennote:window:titlebar', colors),
+  },
+
   /** 订阅主进程菜单命令，返回取消订阅函数。 */
   onMenu(callback) {
     if (typeof callback !== 'function') return () => {}

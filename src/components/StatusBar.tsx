@@ -24,14 +24,14 @@ export function StatusBar(props: StatusBarProps): ReactNode {
   const { settings } = props;
   return (
     <footer className="statusbar">
-      <span className="statusbar__item" title="笔记存放位置">
+      <span className="statusbar__item statusbar__item--path" title={`笔记存放位置：${props.storageLabel}`}>
         <Icon name="layers" size={12} />
         {props.storageLabel}
       </span>
-      <span className="statusbar__item" title={`${props.stats.files} 个文件`}>
+      <span className="statusbar__item statusbar__item--compact" title={`${props.stats.files} 个文件`}>
         {props.stats.files} 个文件
       </span>
-      <span className="statusbar__item" title="当前笔记所在文件夹">
+      <span className="statusbar__item statusbar__item--compact" title="当前笔记所在文件夹">
         <Icon name="folder" size={12} />
         {props.locationLabel}
       </span>
@@ -42,7 +42,7 @@ export function StatusBar(props: StatusBarProps): ReactNode {
       <span className="statusbar__spacer" />
 
       {settings.showWordCount ? (
-        <span className="statusbar__item" title="字数统计">
+        <span className="statusbar__item statusbar__item--compact" title="字数统计">
           {props.counts.words.toLocaleString("zh-CN")} 字 · {props.counts.chars.toLocaleString("zh-CN")} 字符 · 约{" "}
           {props.counts.minutes} 分钟
         </span>

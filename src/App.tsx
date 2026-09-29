@@ -7,6 +7,7 @@ import {
   createNote,
   cycleTab,
   flushAll,
+  flushMeta,
   folderPathLabel,
   initLibrary,
   listSnapshots,
@@ -110,13 +111,25 @@ export default function App(): ReactNode {
   useEffect(() => watchLibraryErrors((message) => notify(message, { kind: "danger" })), []);
 
   useEffect(() => {
-    const timer = setInterval(() => flushAll(), 20_000);
+    const timer = setInterval(() => { void flushAll().catch(() => undefined); }, 20_000);
     return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
     document.title = activeNote ? `${activeNote.title} · Opennote` : "Opennote · 开源笔记";
   }, [activeNote]);
+
+  // 无边框标题栏：窗口按钮的底色跟随当前主题，避免亮色按钮压在暗色界面上。
+  useEffect(() => {
+    if (!bridge) return;
+    const frame = requestAnimationFrame(() => {
+      const style = getComputedStyle(document.documentElement);
+      const color = style.getPropertyValue("--paper-2").trim() || "#fbf8f3";
+      const symbolColor = style.getPropertyValue("--ink-3").trim() || "#97897a";
+      void bridge.window.setTitleBarOverlay({ color, symbolColor }).catch(() => undefined);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [bridge, ui.appearance, ui.theme, ui.accent]);
 
   useEffect(() => {
     if (!activeId) {
@@ -246,7 +259,13 @@ export default function App(): ReactNode {
       confirmLabel: "关闭",
     });
     if (!ok || !library.workspace) return;
-    flushAll();
+    try {
+      await flushAll();
+      await flushMeta();
+    } catch {
+      notify("笔记还没有写入磁盘，已取消关闭笔记本", { kind: "danger" });
+      return;
+    }
     await forgetWorkspace(library.workspace.id);
     const next = listWorkspaces()[0];
     if (next) await openRecord(next);
@@ -328,8 +347,9 @@ export default function App(): ReactNode {
           setTab("search");
         },
         saveNow: () => {
-          flushAll();
-          void rescanWorkspace().then(() => notify("已与磁盘同步"));
+          void rescanWorkspace()
+            .then(() => notify("已与磁盘同步"))
+            .catch(() => notify("磁盘写入失败，笔记未同步", { kind: "danger" }));
         },
         closeTab: () => {
           if (activeId) closeTab(activeId);
@@ -423,8 +443,9 @@ export default function App(): ReactNode {
         import: () => fileInputRef.current?.click(),
         export: () => void exportLibrary(),
         save: () => {
-          flushAll();
-          notify("已保存到磁盘");
+          void flushAll()
+            .then(() => notify("已保存到磁盘"))
+            .catch(() => notify("磁盘写入失败", { kind: "danger" }));
         },
         print: () => window.print(),
         settings: () => setSettingsOpen(true),
@@ -542,7 +563,7 @@ export default function App(): ReactNode {
   const workspaceName = library.workspace?.name ?? "";
 
   return (
-    <div className={cn("app", dropping && "is-dropping", ui.sidebarOpen && "is-sidebar-open")}>
+    <div className={cn("app", bridge && "app--desktop", dropping && "is-dropping", ui.sidebarOpen && "is-sidebar-open")}>
       <Sidebar
         library={library}
         ui={ui}
@@ -708,6 +729,8 @@ export default function App(): ReactNode {
           settings={ui}
           workspace={library.workspace}
           stats={library.stats}
+          commands={commands}
+          onRunCommand={(id) => commandsRef.current.find((command) => command.id === id)?.run()}
           onClose={() => setSettingsOpen(false)}
           onImport={() => fileInputRef.current?.click()}
           onExport={() => void exportLibrary()}

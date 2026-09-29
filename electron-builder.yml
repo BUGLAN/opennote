@@ -52,6 +52,8 @@ artifactName: '${productName}-${version}-${os}-${arch}.${ext}'
 npmRebuild: false
 
 win:
+  # 与界面左上角印章一致的「記」图标（scripts/make_icons.py 生成多尺寸 ico）
+  icon: build/icon.ico
   target:
     - target: zip
       arch:

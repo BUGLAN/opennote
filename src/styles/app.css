@@ -6,9 +6,50 @@
 .app {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
+  /* 单行必须显式限高：默认 auto 行会被内容撑高，侧栏/大纲内部的滚动容器就永远不溢出 */
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
+}
+
+/* ===================== frameless title bar (desktop) =================== */
+/* 桌面端窗口没有系统标题栏：应用自己的头部就是标题栏。
+   头部空白处可拖动窗口；其中的按钮与输入框必须 no-drag，否则点不动。
+   Windows/Linux 的原生窗口按钮以叠加层形式压在右上角，需要留出宽度。 */
+
+.app--desktop {
+  --titlebar-inset: 148px;
+}
+
+.app--desktop .sidebar__head,
+.app--desktop .tabbar,
+.app--desktop .outline__head {
+  -webkit-app-region: drag;
+}
+
+.app--desktop .sidebar__head *,
+.app--desktop .tabbar *,
+.app--desktop .outline__head * {
+  -webkit-app-region: no-drag;
+}
+
+/* 标签栏的空白处（标签右侧）依然可以拖动窗口，标签本身仍是 no-drag */
+.app--desktop .tabbar__scroll {
+  -webkit-app-region: drag;
+}
+
+.app--desktop .tabbar {
+  padding-right: var(--titlebar-inset);
+}
+
+/* 大纲面板展开时，右上角属于它，留白跟着搬过去（关闭时大纲只是折叠，仍在 DOM 里） */
+.app--desktop:has(.outline:not(.is-collapsed)) .tabbar {
+  padding-right: 0;
+}
+
+.app--desktop:has(.outline:not(.is-collapsed)) .outline__head {
+  padding-right: var(--titlebar-inset);
 }
 
 /* ============================== sidebar ================================= */
@@ -18,6 +59,9 @@
   flex-direction: column;
   width: var(--sidebar-w);
   min-width: var(--sidebar-w);
+  /* grid 子项默认 min-height:auto 会被内容撑高，导致内部滚动容器永远不溢出 */
+  min-height: 0;
+  overflow: hidden;
   border-right: 1px solid var(--rule);
   background: color-mix(in srgb, var(--paper-2) 62%, var(--paper));
   transition: margin-left var(--dur) var(--ease-out);
@@ -423,6 +467,7 @@ mark.hit {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -559,6 +604,8 @@ mark.hit {
   font-size: var(--fs-xs);
   color: var(--ink-3);
   user-select: none;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 
 .statusbar__spacer {
@@ -575,6 +622,24 @@ mark.hit {
   color: inherit;
   transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
   font-variant-numeric: tabular-nums;
+  flex: none;
+  white-space: nowrap;
+}
+
+/* 存储位置可能很长（本机路径 / OPFS 名称）：省略号而不是把底栏挤成两行 */
+.statusbar__item--path {
+  min-width: 0;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+  line-height: 20px;
+}
+
+@media (max-width: 1180px) {
+  .statusbar__item--compact {
+    display: none;
+  }
 }
 
 .statusbar__item--button:hover {
@@ -615,6 +680,8 @@ mark.hit {
   display: flex;
   flex-direction: column;
   width: var(--outline-w);
+  min-height: 0;
+  overflow: hidden;
   border-left: 1px solid var(--rule);
   background: color-mix(in srgb, var(--paper-2) 40%, var(--paper));
   transition: margin-right var(--dur) var(--ease-out);
@@ -907,6 +974,11 @@ mark.hit {
   width: min(760px, calc(100vw - 32px));
 }
 
+/* 设置里有两栏内容 + 命令网格，需要比普通对话框更宽 */
+.dialog--settings {
+  width: min(900px, calc(100vw - 32px));
+}
+
 .dialog__head {
   display: flex;
   align-items: center;
@@ -955,6 +1027,166 @@ mark.hit {
 }
 
 /* ------------------------------- settings ------------------------------ */
+
+.settings {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  gap: var(--s4);
+  align-items: start;
+}
+
+.settings__rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-right: 1px solid var(--rule);
+  padding-right: var(--s3);
+}
+
+.settings__tab {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  color: var(--ink-2);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.settings__tab span {
+  display: block;
+  font-size: var(--fs-md);
+}
+
+.settings__tab small {
+  display: block;
+  margin-top: 1px;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  line-height: 1.4;
+}
+
+.settings__tab:hover {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.settings__tab.is-active {
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.settings__tab.is-active small {
+  color: color-mix(in srgb, var(--accent) 70%, var(--ink-3));
+}
+
+.settings__pane {
+  min-width: 0;
+  max-height: min(62vh, 560px);
+  overflow-y: auto;
+}
+
+.setting--stack {
+  display: block;
+}
+
+.setting--stack .setting__label {
+  width: auto;
+  margin-bottom: var(--s2);
+}
+
+.setting__value {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.setting__path {
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+  word-break: break-all;
+}
+
+.setting__meta {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.switch-row {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.cmd-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
+  gap: 6px;
+}
+
+.cmd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+  text-align: left;
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.cmd:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.cmd:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.cmd__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmd kbd {
+  flex: none;
+  height: 17px;
+  font-size: 10px;
+}
+
+@media (max-width: 720px) {
+  .settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings__rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: none;
+    border-bottom: 1px solid var(--rule);
+    padding-right: 0;
+    padding-bottom: var(--s2);
+  }
+
+  .settings__tab {
+    width: auto;
+  }
+
+  .settings__tab small {
+    display: none;
+  }
+}
 
 .setting {
   display: flex;

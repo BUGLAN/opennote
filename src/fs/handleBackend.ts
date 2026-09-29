@@ -51,6 +51,22 @@ export function createHandleBackend(root: FileSystemDirectoryHandle, kind: Backe
     throw new Error("当前浏览器不支持读取文件夹列表");
   }
 
+  async function copyDirectory(source: FileSystemDirectoryHandle, destination: FileSystemDirectoryHandle): Promise<void> {
+    for (const [name, handle] of await entriesOf(source)) {
+      if (handle.kind === "directory") {
+        await copyDirectory(handle as FileSystemDirectoryHandle, await destination.getDirectoryHandle(name, { create: true }));
+      } else {
+        const bytes = await (await (handle as FileSystemFileHandle).getFile()).arrayBuffer();
+        const writer = await (await destination.getFileHandle(name, { create: true })).createWritable();
+        try {
+          await writer.write(bytes);
+        } finally {
+          await writer.close();
+        }
+      }
+    }
+  }
+
   return {
     kind,
     label: kind === "fsa" ? "浏览器文件夹" : "浏览器本地",
@@ -112,21 +128,41 @@ export function createHandleBackend(root: FileSystemDirectoryHandle, kind: Backe
       const safe = assertSafeRelative(relPath);
       if (!safe) return;
       const parent = await directory(parentPath(safe));
-      await parent.removeEntry(baseName(safe), { recursive: options?.recursive ?? true });
+      await parent.removeEntry(baseName(safe), { recursive: options?.recursive ?? false });
     },
 
     async move(from, to) {
       const source = assertSafeRelative(from);
       const target = assertSafeRelative(to);
+      if (!source || !target) throw new Error("不能移动笔记本根目录");
       if (source === target) return;
-      const bytes = await this.readBytes(source);
-      await ensureParent(target);
-      const handle = await file(target, true);
-      const writable = await handle.createWritable();
-      await writable.write(new Blob([bytes as BlobPart]));
-      await writable.close();
-      const parent = await directory(parentPath(source));
-      await parent.removeEntry(baseName(source));
+      if (target.startsWith(`${source}/`)) throw new Error("不能将文件夹移动到自身内部");
+      const sourceParent = await directory(parentPath(source));
+      const sourceName = baseName(source);
+      const sourceFile = await sourceParent.getFileHandle(sourceName).catch(() => null);
+      const sourceDir = sourceFile ? null : await sourceParent.getDirectoryHandle(sourceName);
+      const targetParent = await directory(parentPath(target), true);
+      const targetName = baseName(target);
+      if ((await entriesOf(targetParent)).some(([name]) => name === targetName)) {
+        throw new Error(`目标路径已存在：${target}`);
+      }
+      try {
+        if (sourceFile) {
+          const bytes = await (await sourceFile.getFile()).arrayBuffer();
+          const writer = await (await targetParent.getFileHandle(targetName, { create: true })).createWritable();
+          try {
+            await writer.write(bytes);
+          } finally {
+            await writer.close();
+          }
+        } else if (sourceDir) {
+          await copyDirectory(sourceDir, await targetParent.getDirectoryHandle(targetName, { create: true }));
+        }
+        await sourceParent.removeEntry(sourceName, { recursive: Boolean(sourceDir) });
+      } catch (error) {
+        await targetParent.removeEntry(targetName, { recursive: true }).catch(() => undefined);
+        throw error;
+      }
     },
 
     async exists(relPath) {

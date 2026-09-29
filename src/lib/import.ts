@@ -1,9 +1,9 @@
 import JSZip from "jszip";
 import {
   ASSETS_DIR,
-  HISTORY_DIR,
-  TRASH_DIR,
+  assertSafeRelative,
   baseName,
+  isHiddenPath,
   isImagePath,
   isMarkdownPath,
   joinPath,
@@ -12,6 +12,7 @@ import {
   uniquePath,
 } from "../fs";
 import { getLegacyAsset, readLegacyNotes } from "../data/legacy";
+import { listOptionalDirectory } from "../data/optionalFiles";
 import {
   createFolder,
   currentBackend,
@@ -85,49 +86,65 @@ export async function importIntoWorkspace(
 
   const writeAttachment = async (blob: Blob, name: string, folderId: Id | null): Promise<Id> => {
     const dir = joinPath(folderId ?? "", ASSETS_DIR);
-    const existing = await backend.list(dir).catch(() => []);
+    const existing = await listOptionalDirectory(backend, dir);
     const used = new Set(existing.map((entry) => entry.name));
     const finalName = uniquePath(sanitizeName(name, "attachment"), used);
-    await backend.writeBytes(joinPath(dir, finalName), blob);
+    const path = joinPath(dir, finalName);
+    await backend.writeBytes(path, blob);
     result.attachments += 1;
-    return dir;
+    return path;
   };
 
   const handleZip = async (file: File): Promise<void> => {
     const zip = await JSZip.loadAsync(file);
     const entries = Object.values(zip.files).filter((entry) => !entry.dir);
     if (entries.length > 5000) throw new Error("压缩包条目过多，已中止导入");
-    const notes = entries.filter((entry) => isMarkdownPath(entry.name) && !entry.name.startsWith(`${TRASH_DIR}/`));
-    const images: { name: string; blob: Blob }[] = [];
-
-    for (const entry of entries) {
-      if (entry.name.startsWith(`${HISTORY_DIR}/`) || entry.name.startsWith(`${ASSETS_DIR}/`)) continue;
-      if (isImagePath(entry.name)) {
-        const blob = await entry.async("blob");
-        if (blob.size > MAX_ENTRY_BYTES) {
-          result.skipped += 1;
-          continue;
-        }
-        images.push({ name: baseName(entry.name), blob });
+    const safe = entries.filter((entry) => {
+      try {
+        assertSafeRelative(entry.name);
+        return !isHiddenPath(entry.name) && entry.name !== "README.txt";
+      } catch {
+        result.skipped += 1;
+        return false;
       }
-    }
+    });
+    const notes = safe.filter((entry) => isMarkdownPath(entry.name));
+    const images = safe.filter((entry) => isImagePath(entry.name));
+    const legacyPrefix = notes.length > 0 && notes.every((entry) => entry.name.startsWith("notes/")) ? "notes/" : "";
+    const movedImages = new Map<string, string>();
 
-    // if the archive is a full notebook, mirror its structure
-    const rootTrim = notes.every((entry) => entry.name.startsWith("notes/")) ? 4 : 0;
-    for (const entry of notes) {
-      const relative = entry.name.slice(rootTrim);
-      const segments = relative.split("/").filter(Boolean);
-      const fileName = segments.pop() ?? "未命名.md";
-      const folderId = await ensureFolder(segments);
-      const text = await entry.async("string");
-      if (!text.trim()) {
+    // Write images first so a renamed attachment can be reflected in the
+    // markdown that refers to it. Keep each assets/ folder next to its notes.
+    for (const entry of images) {
+      const parts = entry.name.split("/").filter(Boolean);
+      const name = parts.pop() ?? "image.png";
+      if (parts.at(-1) === ASSETS_DIR) parts.pop();
+      const folderId = await ensureFolder(parts);
+      const blob = await entry.async("blob");
+      if (blob.size > MAX_ENTRY_BYTES) {
         result.skipped += 1;
         continue;
       }
-      await writeNote(text, folderId, stripExtension(fileName));
+      movedImages.set(entry.name, await writeAttachment(blob, name, folderId));
     }
-    for (const image of images) {
-      await writeAttachment(image.blob, image.name, targetFolder);
+
+    for (const entry of notes) {
+      const relative = entry.name.slice(legacyPrefix.length);
+      const segments = relative.split("/").filter(Boolean);
+      const fileName = segments.pop() ?? "未命名.md";
+      const folderId = await ensureFolder(segments);
+      let text = await entry.async("string");
+      if (!text.trim() || new TextEncoder().encode(text).length > MAX_ENTRY_BYTES) {
+        result.skipped += 1;
+        continue;
+      }
+      const sourceDir = entry.name.slice(0, entry.name.lastIndexOf("/") + 1);
+      for (const [original, destination] of movedImages) {
+        if (original !== `${sourceDir}${ASSETS_DIR}/${baseName(original)}`) continue;
+        text = text.split(`](./${ASSETS_DIR}/${baseName(original)})`)
+          .join(`](./${ASSETS_DIR}/${baseName(destination)})`);
+      }
+      await writeNote(text, folderId, stripExtension(fileName));
     }
   };
 
@@ -203,7 +220,7 @@ export async function migrateLegacyData(): Promise<ImportResult> {
         const blob = await getLegacyAsset(assetId);
         if (!blob) continue;
         const dir = joinPath(folderId ?? "", ASSETS_DIR);
-        const existing = await backend.list(dir).catch(() => []);
+        const existing = await listOptionalDirectory(backend, dir);
         name = uniquePath(sanitizeName(`legacy-${assetId.slice(0, 8)}.png`), new Set(existing.map((e) => e.name)));
         await backend.writeBytes(joinPath(dir, name), blob);
         assetNames.set(assetId, name);

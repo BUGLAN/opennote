@@ -22,9 +22,8 @@ export function assertSafeRelative(input: string): string {
   const value = String(input ?? "");
   if (value.includes("\0")) throw new Error("路径包含非法字符");
   if (/^([a-zA-Z]:|[\\/])/.test(value.trim())) throw new Error("不允许使用绝对路径");
-  const normalized = normalizePath(value);
-  if (normalized.split("/").includes("..")) throw new Error("路径越界");
-  return normalized;
+  if (value.replace(/\\/g, "/").split("/").includes("..")) throw new Error("路径越界");
+  return normalizePath(value);
 }
 
 export function joinPath(...parts: (string | null | undefined)[]): string {

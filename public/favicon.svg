@@ -1,12 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
   <rect width="64" height="64" rx="13" fill="#b23a2e" />
-  <rect x="4.5" y="4.5" width="55" height="55" rx="10" fill="none" stroke="#fbf8f3" stroke-opacity=".45" stroke-width="1.2" />
-  <path
-    d="M18 22h28M18 32h28M18 42h17"
-    stroke="#fbf8f3"
-    stroke-width="3.4"
-    stroke-linecap="round"
-    fill="none"
-  />
-  <circle cx="43.5" cy="42" r="3.6" fill="#fbf8f3" />
+  <rect x="4.5" y="4.5" width="55" height="55" rx="10" fill="none"
+        stroke="#fbf8f3" stroke-opacity=".45" stroke-width="1.2" />
+  <text x="32" y="33" fill="#fbf8f3" font-size="40" text-anchor="middle"
+        dominant-baseline="central"
+        font-family="Songti SC, Noto Serif SC, Source Han Serif SC, SimSun, serif">記</text>
 </svg>

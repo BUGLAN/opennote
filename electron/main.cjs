@@ -17,13 +17,25 @@
  */
 
 const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron')
-const { copyFile, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } = require('node:fs/promises')
+const { copyFile, cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } = require('node:fs/promises')
+const { existsSync } = require('node:fs')
 const path = require('node:path')
 
 const APP_ID = 'com.opennote.app'
 const APP_NAME = 'Opennote'
-const MENU_CHANNEL = 'opennote:menu'
 const RECENT_LIMIT = 12
+/** 与界面左上角印章一致的图标；打包后 exe 内嵌同一份 build/icon.ico。 */
+const WINDOW_ICON = path.join(app.getAppPath(), 'build', 'icon.ico')
+
+/**
+ * 无边框标题栏：Windows 自带的那条标题栏（标题文字 + 最小化/最大化/关闭）
+ * 和应用自己的头部（印章、标签页）功能重复，所以标题栏交给页面自己画。
+ * Windows / Linux 用 titleBarOverlay 保留原生的三个窗口按钮，
+ * macOS 用系统红绿灯（trafficLightPosition 让它落在印章右侧）。
+ */
+const IS_MAC = process.platform === 'darwin'
+const TITLEBAR_HEIGHT = 40
+const TITLEBAR_FALLBACK = { color: '#fbf8f3', symbolColor: '#97897a' }
 
 /** 开发模式：scripts/dev-electron.mjs 会注入该变量；打包运行时不设置。 */
 const DEV_URL = process.env.OPENNOTE_DEV_URL || ''
@@ -167,12 +179,18 @@ function registerFsHandlers() {
       // 返回全部条目（包含点文件/点目录），由渲染层自行过滤 .opennote。
       const items = []
       for (const entry of entries) {
+        const full = path.join(dir, entry.name)
         let info
+        let link
         try {
-          info = await stat(path.join(dir, entry.name))
+          link = await lstat(full)
+          info = link.isSymbolicLink() ? await stat(full) : link
         } catch {
           continue // 失效的符号链接等无法读取的条目直接跳过
         }
+        // 目录符号链接/junction 一律不进入：既可能形成循环（扫描永不结束），
+        // 也可能指向工作区之外。链接到文件则照常列出、照常可读。
+        if (link.isSymbolicLink() && info.isDirectory()) continue
         items.push({
           name: entry.name,
           kind: info.isDirectory() ? 'directory' : 'file',
@@ -265,6 +283,7 @@ function registerFsHandlers() {
   handle(
     'opennote:fs:remove',
     async (root, relPath, options) => {
+      if (relPath === '' || relPath === undefined || relPath === null) throw new Error('不能删除笔记本根目录')
       const target = resolveInsideRoot(root, relPath)
       const recursive = options && typeof options === 'object' ? options.recursive === true : false
       try {
@@ -279,9 +298,17 @@ function registerFsHandlers() {
   handle(
     'opennote:fs:move',
     async (root, from, to) => {
+      if (!from || !to) throw new Error('不能移动笔记本根目录')
       const source = resolveInsideRoot(root, from)
       const target = resolveInsideRoot(root, to)
       if (source === target) return
+      if (target.startsWith(`${source}${path.sep}`)) throw new Error('不能将文件夹移动到自身内部')
+      try {
+        await stat(target)
+        throw new Error(`目标路径已存在：${to}`)
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error
+      }
       try {
         await ensureParentDir(target)
         await rename(source, target)
@@ -473,6 +500,18 @@ function registerIpcHandlers() {
   registerShellHandlers()
   registerAppHandlers()
 
+  // 主题切换时同步标题栏按钮（叠加层）的底色与符号色。
+  ipcMain.handle('opennote:window:titlebar', (event, colors) => {
+    if (IS_MAC) return false
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window || window.isDestroyed()) return false
+    const color = colors && typeof colors.color === 'string' ? colors.color : TITLEBAR_FALLBACK.color
+    const symbolColor =
+      colors && typeof colors.symbolColor === 'string' ? colors.symbolColor : TITLEBAR_FALLBACK.symbolColor
+    window.setTitleBarOverlay({ color, symbolColor, height: TITLEBAR_HEIGHT })
+    return true
+  })
+
   // preload 需要同步拿到 app.getVersion()（sandbox 下 preload 拿不到 app 模块）。
   ipcMain.on('opennote:app:version', (event) => {
     event.returnValue = app.getVersion()
@@ -480,79 +519,28 @@ function registerIpcHandlers() {
 }
 
 // ---------------------------------------------------------------------------
-// 原生菜单（中文标签，点击后向聚焦窗口发送 opennote:menu 命令）
+// 菜单：桌面端不使用窗口内的菜单栏
 // ---------------------------------------------------------------------------
+//
+// 「文件 / 编辑 / 视图 / 帮助」的操作已经全部收进应用内的设置面板，
+// 快捷键由渲染层的命令注册表统一处理（见 src/lib/appCommands.ts）。
+// Windows / Linux 直接移除菜单栏，避免窗口顶部多出一条横条；
+// macOS 例外：系统要求存在应用菜单，否则 ⌘C/⌘V/⌘Q 等标准快捷键不生效，
+// 因此只在 darwin 上安装一份纯 role 的最小菜单（不额外增加自定义项）。
 
-function sendMenuCommand(command) {
-  const target = focusedWindow() || BrowserWindow.getAllWindows()[0]
-  if (!target || target.isDestroyed()) return
-  target.webContents.send(MENU_CHANNEL, command)
-}
-
-function commandItem(label, command, accelerator) {
-  return { label, accelerator, click: () => sendMenuCommand(command) }
-}
-
-function buildMenuTemplate() {
-  return [
-    {
-      label: '文件',
-      submenu: [
-        commandItem('新建笔记', 'new-note', 'CmdOrCtrl+N'),
-        commandItem('新建文件夹', 'new-folder', 'CmdOrCtrl+Shift+N'),
-        commandItem('打开文件夹', 'open-folder', 'CmdOrCtrl+O'),
-        { type: 'separator' },
-        commandItem('导入', 'import'),
-        commandItem('导出', 'export'),
-        { type: 'separator' },
-        commandItem('保存', 'save', 'CmdOrCtrl+S'),
-        commandItem('打印', 'print', 'CmdOrCtrl+P'),
-        { type: 'separator' },
-        { label: '退出', role: 'quit' },
-      ],
-    },
-    {
-      label: '编辑',
-      submenu: [
-        { label: '撤销', role: 'undo' },
-        { label: '重做', role: 'redo' },
-        { type: 'separator' },
-        { label: '剪切', role: 'cut' },
-        { label: '复制', role: 'copy' },
-        { label: '粘贴', role: 'paste' },
-        { label: '全选', role: 'selectAll' },
-        { type: 'separator' },
-        commandItem('查找', 'find', 'CmdOrCtrl+F'),
-      ],
-    },
-    {
-      label: '视图',
-      submenu: [
-        commandItem('折叠侧栏', 'toggle-sidebar', 'CmdOrCtrl+B'),
-        commandItem('大纲', 'toggle-outline', 'CmdOrCtrl+Shift+O'),
-        commandItem('打字机模式', 'toggle-typewriter'),
-        commandItem('专注模式', 'toggle-focus'),
-        commandItem('亮暗切换', 'toggle-theme', 'CmdOrCtrl+Shift+L'),
-        { type: 'separator' },
-        { label: '重新加载', role: 'reload' },
-        { label: '强制重新加载', role: 'forceReload' },
-        ...(IS_DEV ? [{ label: '开发者工具', role: 'toggleDevTools' }] : []),
-        { type: 'separator' },
-        { label: '实际大小', role: 'resetZoom' },
-        { label: '放大', role: 'zoomIn' },
-        { label: '缩小', role: 'zoomOut' },
-      ],
-    },
-    {
-      label: '帮助',
-      submenu: [
-        commandItem('快捷键', 'shortcuts'),
-        commandItem('设置', 'settings', 'CmdOrCtrl+,'),
-        { type: 'separator' },
-        commandItem('关于 Opennote', 'about'),
-      ],
-    },
-  ]
+function installApplicationMenu() {
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null)
+    console.log(`[opennote] 已移除窗口菜单栏（applicationMenu=${Menu.getApplicationMenu() === null ? 'null' : 'set'}）`)
+    return
+  }
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      { role: 'editMenu' },
+      IS_DEV ? { role: 'viewMenu' } : { role: 'windowMenu' },
+    ]),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -602,7 +590,15 @@ async function createWindow() {
     minHeight: 600,
     title: APP_NAME,
     backgroundColor: '#fbf8f3',
-    autoHideMenuBar: false,
+    // 无边框标题栏：标题文字不再占用一行，页面自己的头部就是标题栏。
+    // 原生窗口按钮由 titleBarOverlay（Windows/Linux）或系统红绿灯（macOS）提供。
+    titleBarStyle: 'hidden',
+    ...(IS_MAC
+      ? { trafficLightPosition: { x: 14, y: 13 } }
+      : { titleBarOverlay: { ...TITLEBAR_FALLBACK, height: TITLEBAR_HEIGHT } }),
+    // 不显示窗口内的菜单栏：操作都在应用内设置里（见 installApplicationMenu）。
+    autoHideMenuBar: true,
+    icon: existsSync(WINDOW_ICON) ? WINDOW_ICON : undefined,
     show: false,
     webPreferences: {
       preload: PRELOAD_PATH,
@@ -640,13 +636,17 @@ async function createWindow() {
 
 app.whenReady().then(async () => {
   registerIpcHandlers()
-  Menu.setApplicationMenu(Menu.buildFromTemplate(buildMenuTemplate()))
+  installApplicationMenu()
 
   try {
     await createWindow()
     if (!readyLogged) {
       readyLogged = true
-      console.log(`[opennote] desktop ready ${app.getVersion()}`)
+      const iconNote = existsSync(WINDOW_ICON) ? WINDOW_ICON : 'exe 内嵌图标'
+      const frameNote = mainWindow && !mainWindow.isDestroyed()
+        ? `窗口=${mainWindow.getBounds().height}px 内容=${mainWindow.getContentBounds().height}px`
+        : '窗口未就绪'
+      console.log(`[opennote] desktop ready ${app.getVersion()}（icon=${iconNote}；${frameNote}）`)
     }
   } catch (error) {
     console.error(`[opennote] 启动失败：${error instanceof Error ? error.message : String(error)}`)

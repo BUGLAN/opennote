@@ -7,6 +7,7 @@ import {
   baseName,
   extName,
   formatStamp,
+  isHiddenPath,
   isMarkdownPath,
   joinPath,
   parentPath,
@@ -17,6 +18,7 @@ import {
 } from "../fs";
 import { createStore, useStore } from "../lib/store";
 import { countText, deriveTags, deriveTitle, normalizeEol, splitFrontMatter, stripMarkdown, uid } from "../lib/utils";
+import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
 import type { Folder, Id, Note, Snapshot, SnapshotReason, SortKey } from "./types";
 import { getUi, patchUi } from "./ui";
 import { activeWorkspaceRecord, resolveBackend, setActiveWorkspace, type WorkspaceRecord } from "./workspaces";
@@ -76,6 +78,7 @@ let backend: FileSystemBackend | null = null;
 let meta: WorkspaceMeta = { ...defaultMeta };
 let metaTimer: ReturnType<typeof setTimeout> | null = null;
 const writeTimers = new Map<Id, ReturnType<typeof setTimeout>>();
+const pendingWrites = new Map<Id, Promise<void>>();
 const lastSnapshotAt = new Map<Id, number>();
 const SNAPSHOT_INTERVAL = 3 * 60_000;
 const SNAPSHOT_KEEP = 60;
@@ -189,8 +192,9 @@ export interface ScanResult {
 }
 
 async function readMeta(target: FileSystemBackend): Promise<WorkspaceMeta> {
+  const raw = await readOptionalText(target, STATE_FILE);
+  if (raw === undefined) return { ...defaultMeta };
   try {
-    const raw = await target.readText(STATE_FILE);
     const parsed = JSON.parse(raw) as Partial<WorkspaceMeta>;
     return {
       version: 1,
@@ -198,7 +202,8 @@ async function readMeta(target: FileSystemBackend): Promise<WorkspaceMeta> {
       expanded: Array.isArray(parsed.expanded) ? parsed.expanded.map(String) : [],
       lastOpened: parsed.lastOpened ? String(parsed.lastOpened) : null,
     };
-  } catch {
+  } catch (error) {
+    console.warn("[opennote] 笔记本状态文件无法解析，使用默认状态", error);
     return { ...defaultMeta };
   }
 }
@@ -221,10 +226,9 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
     for (const entry of entries) {
       const path = joinPath(dir, entry.name);
       if (entry.kind === "directory") {
-        if (path === META_DIR) continue;
-        const isTrash = path === TRASH_DIR;
-        if (!isTrash) folders[path] = makeFolder(path, entry.mtimeMs);
-        await walk(path, inTrash || isTrash);
+        if (!inTrash && (isHiddenPath(path) || entry.name === ASSETS_DIR || entry.name === "node_modules" || entry.name === "dist" || entry.name === "release")) continue;
+        if (!inTrash) folders[path] = makeFolder(path, entry.mtimeMs);
+        await walk(path, inTrash);
         continue;
       }
       if (!isMarkdownPath(path)) continue;
@@ -244,6 +248,7 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
   };
 
   await walk("", false);
+  if (await target.exists(TRASH_DIR)) await walk(TRASH_DIR, true);
   const workspaceMeta = await readMeta(target);
   for (const path of workspaceMeta.starred) {
     if (notes[path]) notes[path] = { ...notes[path], starred: true };
@@ -278,6 +283,8 @@ export async function openWorkspace(
 ): Promise<void> {
   setState((prev) => ({ ...prev, loading: true, error: null }));
   try {
+    await flushAll();
+    await flushMeta();
     const resolved = await resolveBackend(record, options.requestPermission ?? false);
     backend = resolved;
     const scanned = await scanWorkspace(resolved);
@@ -314,9 +321,9 @@ async function ensureWorkspaceScaffold(target: FileSystemBackend): Promise<void>
   await target.mkdir(META_DIR).catch(() => undefined);
 }
 
-export function closeWorkspace(): void {
-  flushAll();
-  flushMeta();
+export async function closeWorkspace(): Promise<void> {
+  await flushAll();
+  await flushMeta();
   backend = null;
   meta = { ...defaultMeta };
   libraryStore.set({ ...emptyState, ready: true });
@@ -326,6 +333,8 @@ export function closeWorkspace(): void {
 export async function rescanWorkspace(): Promise<void> {
   const target = backend;
   if (!target) return;
+  await flushAll();
+  if (target !== backend) return;
   const scanned = await scanWorkspace(target);
   meta = { ...scanned.meta, expanded: getUi().expanded, lastOpened: getUi().activeId ?? scanned.meta.lastOpened };
   invalidateSearchCache();
@@ -351,7 +360,7 @@ function markClean(id: Id): void {
   });
 }
 
-function flushNote(id: Id): void {
+async function flushNote(id: Id): Promise<void> {
   const timer = writeTimers.get(id);
   if (timer) {
     clearTimeout(timer);
@@ -359,41 +368,54 @@ function flushNote(id: Id): void {
   }
   const note = libraryStore.get().notes[id];
   const target = backend;
-  if (!note || !target) return;
-  target
-    .writeText(note.id, note.content)
-    .then(() => markClean(id))
-    .catch((error) => reportError(error, "写入笔记失败"));
+  if (!note || !target) {
+    await pendingWrites.get(id);
+    return;
+  }
+  const prior = pendingWrites.get(id);
+  const write = (prior?.catch(() => undefined) ?? Promise.resolve()).then(() => target.writeText(id, note.content));
+  pendingWrites.set(id, write);
+  try {
+    await write;
+    if (backend === target && libraryStore.get().notes[id]?.content === note.content) markClean(id);
+  } catch (error) {
+    reportError(error, "写入笔记失败");
+    throw error;
+  } finally {
+    if (pendingWrites.get(id) === write) pendingWrites.delete(id);
+  }
 }
 
 function persistNoteSoon(id: Id, delay = 450): void {
   const existing = writeTimers.get(id);
   if (existing) clearTimeout(existing);
-  writeTimers.set(
-    id,
-    setTimeout(() => flushNote(id), delay),
-  );
+  writeTimers.set(id, setTimeout(() => { void flushNote(id).catch(() => undefined); }, delay));
 }
 
-export function flushAll(): void {
-  for (const id of [...writeTimers.keys()]) flushNote(id);
+export async function flushAll(): Promise<void> {
+  const ids = new Set([...writeTimers.keys(), ...Object.keys(libraryStore.get().dirty)]);
+  await Promise.all([...ids].map((id) => flushNote(id)));
+  await Promise.all([...pendingWrites.values()]);
 }
 
 function scheduleMeta(delay = 700): void {
   if (metaTimer) clearTimeout(metaTimer);
-  metaTimer = setTimeout(() => flushMeta(), delay);
+  metaTimer = setTimeout(() => { void flushMeta(); }, delay);
 }
 
-export function flushMeta(): void {
+export async function flushMeta(): Promise<void> {
   if (metaTimer) {
     clearTimeout(metaTimer);
     metaTimer = null;
   }
   const target = backend;
   if (!target) return;
-  target
-    .writeText(STATE_FILE, `${JSON.stringify(meta, null, 2)}\n`)
-    .catch((error) => reportError(error, "写入笔记本元数据失败"));
+  const contents = `${JSON.stringify(meta, null, 2)}\n`;
+  try {
+    await target.writeText(STATE_FILE, contents);
+  } catch (error) {
+    reportError(error, "写入笔记本元数据失败");
+  }
 }
 
 if (typeof window !== "undefined") {
@@ -428,7 +450,7 @@ export function createNote(options: { folderId?: Id | null; content?: string; ti
   const note = makeNote(path, content, Date.now());
   patchNotes((notes) => ({ ...notes, [note.id]: note }));
   setState((prev) => ({ ...prev, dirty: { ...prev.dirty, [note.id]: true } }));
-  void target?.writeText(path, content).then(() => markClean(note.id)).catch((error) => reportError(error, "新建笔记失败"));
+  void flushNote(note.id).catch(() => undefined);
   if (folderId) expandFolder(folderId);
   if (options.open !== false) openNote(note.id);
   return note;
@@ -441,28 +463,32 @@ export function updateNoteContent(id: Id, content: string, options: { immediate?
   next.updatedAt = Date.now();
   patchNotes((notes) => ({ ...notes, [id]: next }));
   setState((prev) => ({ ...prev, dirty: { ...prev.dirty, [id]: true } }));
-  if (options.immediate) flushNote(id);
+  if (options.immediate) void flushNote(id).catch(() => undefined);
   else persistNoteSoon(id);
   maybeSnapshot(previous, next);
 }
 
-export function renameNote(id: Id, title: string): void {
+export async function renameNote(id: Id, title: string): Promise<void> {
   const note = libraryStore.get().notes[id];
-  if (!note) return;
-  const clean = sanitizeName(title, "无标题");
   const target = backend;
+  if (!note || !target) return;
+  const clean = sanitizeName(title, "无标题");
   const taken = new Set(Object.keys(libraryStore.get().notes));
   taken.delete(id);
-  const nextPath = uniquePath(joinPath(parentPath(id), `${clean}${extName(id) || ".md"}`), taken);
+  let nextPath = uniquePath(joinPath(parentPath(id), `${clean}${extName(id) || ".md"}`), taken);
   if (nextPath === id) return;
-  patchNotes((notes) => {
-    const next = { ...notes };
-    delete next[id];
-    next[nextPath] = { ...note, id: nextPath, title: clean, updatedAt: Date.now() };
-    return next;
-  });
-  remapIds(id, nextPath);
-  void target?.move(id, nextPath).catch((error) => reportError(error, "重命名失败"));
+  try {
+    await flushNote(id);
+    while (await target.exists(nextPath)) {
+      taken.add(nextPath);
+      nextPath = uniquePath(joinPath(parentPath(id), `${clean}${extName(id) || ".md"}`), taken);
+    }
+    await target.move(id, nextPath);
+    remapIds(id, nextPath);
+    patchNotes((notes) => ({ ...notes, [nextPath]: { ...notes[nextPath], title: clean, updatedAt: Date.now() } }));
+  } catch (error) {
+    reportError(error, "重命名失败");
+  }
 }
 
 export function setStarred(id: Id, starred: boolean): void {
@@ -476,20 +502,25 @@ export function setStarred(id: Id, starred: boolean): void {
   scheduleMeta(200);
 }
 
-export function moveNote(id: Id, folderId: Id | null): void {
+export async function moveNote(id: Id, folderId: Id | null): Promise<void> {
   const note = libraryStore.get().notes[id];
-  if (!note || (note.folderId ?? null) === folderId) return;
+  const target = backend;
+  if (!note || !target || (note.folderId ?? null) === folderId) return;
   const taken = new Set(Object.keys(libraryStore.get().notes));
   taken.delete(id);
-  const nextPath = uniquePath(joinPath(folderId ?? "", baseName(id)), taken);
-  patchNotes((notes) => {
-    const next = { ...notes };
-    delete next[id];
-    next[nextPath] = { ...note, id: nextPath, folderId: folderId ?? null, updatedAt: Date.now() };
-    return next;
-  });
-  remapIds(id, nextPath);
-  void backend?.move(id, nextPath).catch((error) => reportError(error, "移动笔记失败"));
+  const requested = joinPath(folderId ?? "", baseName(id));
+  let nextPath = uniquePath(requested, taken);
+  try {
+    await flushNote(id);
+    while (await target.exists(nextPath)) {
+      taken.add(nextPath);
+      nextPath = uniquePath(requested, taken);
+    }
+    await target.move(id, nextPath);
+    remapIds(id, nextPath);
+  } catch (error) {
+    reportError(error, "移动笔记失败");
+  }
 }
 
 export function duplicateNote(id: Id): Note | null {
@@ -509,51 +540,97 @@ export function touchNoteOpened(id: Id): void {
 
 /* --------------------------------------------------------------------- trash */
 
-export function trashNote(id: Id): void {
+export async function trashNote(id: Id): Promise<void> {
   const note = libraryStore.get().notes[id];
-  if (!note) return;
-  const trashed: Note = { ...note, trashed: true, trashedAt: Date.now() };
-  const target = joinPath(TRASH_DIR, id);
-  patchNotes((notes) => {
-    const next = { ...notes };
-    delete next[id];
-    return next;
-  });
-  setState((prev) => ({ ...prev, trash: { ...prev.trash, [target]: trashed } }));
-  closeTab(id);
-  void backend?.move(id, target).catch((error) => reportError(error, "移入回收站失败"));
+  const target = backend;
+  if (!note || !target) return;
+  const requested = joinPath(TRASH_DIR, id);
+  const taken = new Set(Object.keys(libraryStore.get().trash));
+  let trashPath = uniquePath(requested, taken);
+  try {
+    await flushNote(id);
+    while (await target.exists(trashPath)) {
+      taken.add(trashPath);
+      trashPath = uniquePath(requested, taken);
+    }
+    await target.move(id, trashPath);
+    const current = libraryStore.get().notes[id] ?? note;
+    setState((prev) => {
+      const notes = { ...prev.notes };
+      delete notes[id];
+      return {
+        ...prev,
+        notes,
+        trash: { ...prev.trash, [trashPath]: { ...current, id: trashPath, trashed: true, trashedAt: Date.now() } },
+      };
+    });
+    closeTab(id);
+  } catch (error) {
+    reportError(error, "移入回收站失败");
+  }
 }
 
-export function restoreNote(id: Id): void {
+export async function restoreNote(id: Id): Promise<void> {
   const note = libraryStore.get().trash[id];
-  if (!note) return;
+  const target = backend;
+  if (!note || !target) return;
   const original = id.startsWith(`${TRASH_DIR}/`) ? id.slice(TRASH_DIR.length + 1) : baseName(id);
   const taken = new Set(Object.keys(libraryStore.get().notes));
-  const nextPath = uniquePath(original, taken);
-  const restored: Note = { ...note, id: nextPath, folderId: parentPath(nextPath) || null, trashed: false, trashedAt: null };
-  setState((prev) => {
-    const trash = { ...prev.trash };
-    delete trash[id];
-    return { ...prev, trash, notes: { ...prev.notes, [nextPath]: restored } };
-  });
-  if (parentPath(nextPath)) expandFolder(parentPath(nextPath));
-  void backend?.move(id, nextPath).catch((error) => reportError(error, "恢复失败"));
+  let nextPath = uniquePath(original, taken);
+  try {
+    while (await target.exists(nextPath)) {
+      taken.add(nextPath);
+      nextPath = uniquePath(original, taken);
+    }
+    await target.move(id, nextPath);
+    const sourceAssets = joinPath(parentPath(id), ASSETS_DIR);
+    const restoredAssets = joinPath(parentPath(nextPath), ASSETS_DIR);
+    if (await target.exists(sourceAssets) && !(await target.exists(restoredAssets))) {
+      await target.move(sourceAssets, restoredAssets);
+    }
+    setState((prev) => {
+      const trash = { ...prev.trash };
+      delete trash[id];
+      return {
+        ...prev,
+        trash,
+        notes: { ...prev.notes, [nextPath]: { ...note, id: nextPath, folderId: parentPath(nextPath) || null, trashed: false, trashedAt: null } },
+      };
+    });
+    if (parentPath(nextPath)) expandFolder(parentPath(nextPath));
+  } catch (error) {
+    reportError(error, "恢复失败");
+    await rescanWorkspace().catch(() => undefined);
+  }
 }
 
 export async function purgeNote(id: Id): Promise<void> {
-  setState((prev) => {
-    const trash = { ...prev.trash };
-    delete trash[id];
-    return { ...prev, trash };
-  });
-  await backend?.remove(id, { recursive: false }).catch((error) => reportError(error, "删除失败"));
+  const target = backend;
+  if (!target) return;
+  try {
+    await target.remove(id, { recursive: false });
+    setState((prev) => {
+      const trash = { ...prev.trash };
+      delete trash[id];
+      return { ...prev, trash };
+    });
+  } catch (error) {
+    reportError(error, "删除失败");
+  }
 }
 
 export async function emptyTrash(): Promise<number> {
+  const target = backend;
+  if (!target) return 0;
   const count = Object.keys(libraryStore.get().trash).length;
-  setState((prev) => ({ ...prev, trash: {} }));
-  await backend?.remove(TRASH_DIR, { recursive: true }).catch((error) => reportError(error, "清空回收站失败"));
-  return count;
+  try {
+    if (await target.exists(TRASH_DIR)) await target.remove(TRASH_DIR, { recursive: true });
+    setState((prev) => ({ ...prev, trash: {} }));
+    return count;
+  } catch (error) {
+    reportError(error, "清空回收站失败");
+    return 0;
+  }
 }
 
 /* ------------------------------------------------------------------- folders */
@@ -574,14 +651,21 @@ export function createFolder(name: string, parentId: Id | null = null): Folder {
   return folder;
 }
 
-export function renameFolder(id: Id, name: string): void {
+export async function renameFolder(id: Id, name: string): Promise<void> {
   const folder = libraryStore.get().folders[id];
-  if (!folder) return;
+  const target = backend;
+  if (!folder || !target) return;
   const clean = sanitizeName(name, "文件夹");
   const nextPath = joinPath(parentPath(id), clean);
   if (nextPath === id) return;
-  remapIds(id, nextPath, { prefix: true });
-  void backend?.move(id, nextPath).catch((error) => reportError(error, "重命名文件夹失败"));
+  try {
+    if (await target.exists(nextPath)) throw new Error(`目标文件夹已存在：${nextPath}`);
+    await flushAll();
+    await target.move(id, nextPath);
+    remapIds(id, nextPath, { prefix: true });
+  } catch (error) {
+    reportError(error, "重命名文件夹失败");
+  }
 }
 
 export function descendantFolderIds(id: Id, folders = libraryStore.get().folders): Id[] {
@@ -603,46 +687,71 @@ export function isDescendant(candidate: Id, ancestor: Id): boolean {
 }
 
 export async function deleteFolder(id: Id, mode: "trash" | "promote"): Promise<void> {
-  const folders = libraryStore.get().folders;
-  const folder = folders[id];
-  if (!folder) return;
-  const doomed = [id, ...descendantFolderIds(id, folders)];
+  const folder = libraryStore.get().folders[id];
   const target = backend;
-  const affected = Object.values(libraryStore.get().notes).filter(
-    (note) => note.folderId && doomed.includes(note.folderId),
-  );
-
-  if (mode === "trash") {
-    for (const note of affected) trashNote(note.id);
-    await target?.remove(id, { recursive: true }).catch((error) => reportError(error, "删除文件夹失败"));
-    await target?.remove(joinPath(TRASH_DIR, id), { recursive: true }).catch(() => undefined);
-  } else {
-    const parent = folder.parentId;
-    for (const note of affected) moveNote(note.id, parent);
-    for (const folderId of doomed.slice(1)) {
-      const child = folders[folderId];
-      moveFolder(folderId, parent && child ? parent : null);
+  if (!folder || !target) return;
+  try {
+    await flushAll();
+    if (mode === "trash") {
+      const requested = joinPath(TRASH_DIR, id);
+      const taken = new Set<string>();
+      let trashPath = requested;
+      while (await target.exists(trashPath)) {
+        taken.add(trashPath);
+        trashPath = uniquePath(requested, taken);
+      }
+      // Move the entire directory, including nested notes and their assets,
+      // before touching the in-memory tree. No recursive delete follows this.
+      await target.move(id, trashPath);
+      meta = {
+        ...meta,
+        starred: meta.starred.filter((path) => path !== id && !path.startsWith(`${id}/`)),
+        expanded: meta.expanded.filter((path) => path !== id && !path.startsWith(`${id}/`)),
+        lastOpened: meta.lastOpened?.startsWith(`${id}/`) ? null : meta.lastOpened,
+      };
+    } else {
+      const parent = folder.parentId ?? "";
+      const entries = await target.list(id);
+      // Preflight every destination so assets/ and markdown relative links keep
+      // their names. A conflict leaves the original directory untouched.
+      for (const entry of entries) {
+        if (await target.exists(joinPath(parent, entry.name))) {
+          throw new Error(`上级目录已有同名文件或文件夹：${entry.name}`);
+        }
+      }
+      for (const entry of entries) {
+        const source = joinPath(id, entry.name);
+        const destination = joinPath(parent, entry.name);
+        await target.move(source, destination);
+        remapIds(source, destination, { prefix: entry.kind === "directory" });
+      }
+      await target.remove(id, { recursive: false });
+      meta = { ...meta, expanded: meta.expanded.filter((path) => path !== id) };
     }
-    await target?.remove(id, { recursive: true }).catch((error) => reportError(error, "删除文件夹失败"));
+    patchUi({ expanded: getUi().expanded.filter((path) => path !== id && !path.startsWith(`${id}/`)) });
+    await flushMeta();
+    await rescanWorkspace();
+  } catch (error) {
+    reportError(error, "删除文件夹失败");
+    await rescanWorkspace().catch(() => undefined);
   }
-
-  patchFolders((all) => {
-    const next = { ...all };
-    for (const folderId of doomed) delete next[folderId];
-    return next;
-  });
-  patchUi({ expanded: getUi().expanded.filter((folderId) => !doomed.includes(folderId)) });
 }
 
-export function moveFolder(id: Id, parentId: Id | null): void {
-  const folders = libraryStore.get().folders;
-  const folder = folders[id];
-  if (!folder || (folder.parentId ?? null) === (parentId ?? null)) return;
+export async function moveFolder(id: Id, parentId: Id | null): Promise<void> {
+  const folder = libraryStore.get().folders[id];
+  const target = backend;
+  if (!folder || !target || (folder.parentId ?? null) === (parentId ?? null)) return;
   if (parentId && (parentId === id || isDescendant(parentId, id))) return;
   const nextPath = joinPath(parentId ?? "", baseName(id));
-  remapIds(id, nextPath, { prefix: true });
-  if (parentId) expandFolder(parentId);
-  void backend?.move(id, nextPath).catch((error) => reportError(error, "移动文件夹失败"));
+  try {
+    if (await target.exists(nextPath)) throw new Error(`目标文件夹已存在：${nextPath}`);
+    await flushAll();
+    await target.move(id, nextPath);
+    remapIds(id, nextPath, { prefix: true });
+    if (parentId) expandFolder(parentId);
+  } catch (error) {
+    reportError(error, "移动文件夹失败");
+  }
 }
 
 export function folderPath(id: Id, folders = libraryStore.get().folders): Folder[] {
@@ -674,7 +783,7 @@ function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): voi
     const next: Record<Id, Note> = {};
     for (const [key, note] of Object.entries(notes)) {
       const id = replace(key);
-      next[id] = { ...note, id, folderId: note.folderId ? replace(note.folderId) : null };
+      next[id] = { ...note, id, folderId: parentPath(id) || null };
     }
     return next;
   });
@@ -969,7 +1078,7 @@ async function pruneSnapshots(noteId: Id): Promise<void> {
   const target = backend;
   if (!target) return;
   const dir = joinPath(HISTORY_DIR, noteId);
-  const entries = await target.list(dir).catch(() => []);
+  const entries = await listOptionalDirectory(target, dir);
   const files = entries.filter((entry) => entry.kind === "file").sort((a, b) => b.mtimeMs - a.mtimeMs);
   for (const entry of files.slice(SNAPSHOT_KEEP)) {
     await target.remove(joinPath(dir, entry.name)).catch(() => undefined);
@@ -980,7 +1089,13 @@ export async function listSnapshots(noteId: Id): Promise<Snapshot[]> {
   const target = backend;
   if (!target) return [];
   const dir = joinPath(HISTORY_DIR, noteId);
-  const entries = await target.list(dir).catch(() => []);
+  let entries;
+  try {
+    entries = await listOptionalDirectory(target, dir);
+  } catch (error) {
+    reportError(error, "读取历史版本失败");
+    return [];
+  }
   const snapshots: Snapshot[] = [];
   for (const entry of entries) {
     if (entry.kind !== "file") continue;
@@ -1025,7 +1140,7 @@ export function assetsDirectory(): string {
 export async function saveImage(blob: Blob, suggestedName: string, baseDir = ""): Promise<{ path: string; markdown: string }> {
   const target = requireBackend();
   const dir = joinPath(baseDir, ASSETS_DIR);
-  const existing = await target.list(dir).catch(() => []);
+  const existing = await listOptionalDirectory(target, dir);
   const taken = new Set(existing.map((entry) => entry.name));
   const name = uniquePath(sanitizeName(suggestedName, `图片-${Date.now()}.png`), taken);
   const path = joinPath(dir, name);
@@ -1038,11 +1153,7 @@ export async function saveImage(blob: Blob, suggestedName: string, baseDir = "")
 /** Seed a brand-new workspace with the welcome note (awaits the disk write). */
 export async function seedWelcome(content: string, title = "欢迎来到 Opennote"): Promise<Note> {
   const note = createNote({ folderId: null, content, title });
-  const target = backend;
-  if (target) {
-    await target.writeText(note.id, note.content);
-    markClean(note.id);
-  }
+  await flushNote(note.id);
   return note;
 }
 

@@ -1,4 +1,5 @@
 import type { EditorView } from "@codemirror/view";
+import { redo, undo } from "@codemirror/commands";
 import type { IconName } from "../components/Icons";
 import { THEMES, type Id, type ThemeId } from "../data/types";
 import { markdownCommands, setHeading, toggleLinePrefix } from "../editor/commands";
@@ -40,7 +41,16 @@ export interface CommandContext {
   notify(message: string): void;
 }
 
-export type CommandGroup = "笔记" | "笔记本" | "导航" | "视图" | "格式" | "数据" | "外观" | "帮助";
+export type CommandGroup =
+  | "笔记"
+  | "笔记本"
+  | "导航"
+  | "视图"
+  | "编辑"
+  | "格式"
+  | "数据"
+  | "外观"
+  | "帮助";
 
 export interface AppCommand {
   id: string;
@@ -61,10 +71,17 @@ export function accel(key: string): string {
 }
 
 export function buildAppCommands(ctx: CommandContext): AppCommand[] {
-  const editorCommand = (id: string, label: string, icon: IconName, shortcut: string, run: (view: EditorView) => void): AppCommand => ({
+  const editorCommand = (
+    id: string,
+    label: string,
+    icon: IconName,
+    shortcut: string,
+    run: (view: EditorView) => void,
+    group: CommandGroup = "格式",
+  ): AppCommand => ({
     id,
     label,
-    group: "格式",
+    group,
     icon,
     shortcut,
     enabled: () => ctx.view() !== null,
@@ -241,6 +258,18 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       run: () => ctx.toggleWordCount(),
     },
 
+    editorCommand("undo", "撤销", "rotate", accel("Z"), (view) => void undo(view), "编辑"),
+    editorCommand("redo", "重做", "rotate", `${accel("Shift")} + Z`, (view) => void redo(view), "编辑"),
+    editorCommand(
+      "select-all",
+      "全选当前笔记",
+      "check",
+      accel("A"),
+      (view) => {
+        view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+      },
+      "编辑",
+    ),
     editorCommand("bold", "加粗", "edit", accel("B"), markdownCommands.bold),
     editorCommand("italic", "斜体", "edit", accel("I"), markdownCommands.italic),
     editorCommand("inline-code", "行内代码", "edit", accel("E"), markdownCommands.inlineCode),

@@ -40,6 +40,10 @@ export interface OpennoteBridge {
     getRecentWorkspaces(): Promise<string[]>;
     addRecentWorkspace(absolutePath: string): Promise<void>;
   };
+  window: {
+    /** Overlay colours for the frameless title bar (false on macOS). */
+    setTitleBarOverlay(colors: { color: string; symbolColor: string }): Promise<boolean>;
+  };
   onMenu(callback: (command: string) => void): () => void;
 }
 

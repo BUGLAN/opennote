@@ -46,8 +46,10 @@ describe("assertSafeRelative", () => {
     expect(() => assertSafeRelative("\\\\server\\share")).toThrow();
   });
 
-  it("rejects NUL bytes", () => {
+  it("rejects NUL bytes and parent traversal", () => {
     expect(() => assertSafeRelative("a\0b.md")).toThrow();
+    expect(() => assertSafeRelative("../private.md")).toThrow("路径越界");
+    expect(() => assertSafeRelative("a\\..\\private.md")).toThrow("路径越界");
   });
 });
 
