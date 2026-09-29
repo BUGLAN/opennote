@@ -17,6 +17,41 @@ const FLUSH_REQUEST_CHANNEL = 'opennote:app:request-flush'
 const FLUSH_DONE_CHANNEL = 'opennote:app:flush-done'
 /** D08 工作区外部变更（去抖后由主进程广播）。 */
 const WORKSPACE_CHANGED_CHANNEL = 'opennote:fs:workspace-changed'
+/**
+ * 导入与本地桥。命名一律 `opennote:<group>:<op>`，**只追加、不改既有频道名**。
+ * 方法名与参数个数由 `scripts/ipc-safety-check.cjs` 冻结，改动会让护栏变红。
+ */
+const BRIDGE_STATUS_CHANNEL = 'opennote:bridge:status'
+const BRIDGE_START_CHANNEL = 'opennote:bridge:start'
+const BRIDGE_STOP_CHANNEL = 'opennote:bridge:stop'
+const BRIDGE_NEW_TOKEN_CHANNEL = 'opennote:bridge:newToken'
+const BRIDGE_NEW_PAIR_CODE_CHANNEL = 'opennote:bridge:newPairCode'
+const BRIDGE_REMOVE_ORIGIN_CHANNEL = 'opennote:bridge:removeOrigin'
+const BRIDGE_OPEN_LOG_CHANNEL = 'opennote:bridge:openLog'
+const BRIDGE_SET_LOG_ENABLED_CHANNEL = 'opennote:bridge:setLogEnabled'
+const IMPORT_RECENT_CHANNEL = 'opennote:import:recent'
+const IMPORT_UNDO_CHANNEL = 'opennote:import:undo'
+const IMPORT_LOG_CHANNEL = 'opennote:import:log'
+const INBOX_LIST_CHANNEL = 'opennote:inbox:list'
+const INBOX_COMMIT_CHANNEL = 'opennote:inbox:commit'
+const INBOX_DISCARD_CHANNEL = 'opennote:inbox:discard'
+/** 入库完成后主进程广播（`deduped`/`duplicate`/`skipped` 不发）。 */
+const IMPORT_NOTICE_CHANNEL = 'opennote:import:notice'
+/** 收件箱目录变化。`.opennote/**` 被工作区 watcher 跳过，故这是独立 watcher。 */
+const INBOX_CHANGED_CHANNEL = 'opennote:inbox:changed'
+/**
+ * 主进程 → 渲染层的落盘转交。
+ *
+ * 为什么需要它：桥只做「传输 + 安全校验」，信封落盘必须回到渲染层——渲染层才是
+ * 工作区状态的唯一持有者，主进程直接写正文会被 `rescanWorkspace()` 起始的
+ * `flushAll()` 覆盖。收件箱的入库/丢弃/列表同理，只有一份实现（`src/data/inbox.ts`）。
+ *
+ * `opennote:import:receipt` 专用于信封（契约 §10 命名），`opennote:import:request`
+ * 用于其余操作；两者共用一条回执频道，靠 `reqId` 配对。
+ */
+const IMPORT_RECEIPT_CHANNEL = 'opennote:import:receipt'
+const IMPORT_REQUEST_CHANNEL = 'opennote:import:request'
+const IMPORT_REPLY_CHANNEL = 'opennote:import:reply'
 
 const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args)
 
@@ -97,6 +132,41 @@ const bridge = {
     setTitleBarOverlay: (colors) => invoke('opennote:window:titlebar', colors),
   },
 
+  /**
+   * 本地桥的控制面。设置面板读桥状态**只经 IPC**——绝不为了它放开
+   * CSP `connect-src`，页面也不会去 fetch 本地 HTTP。
+   */
+  bridge: {
+    status: () => invoke(BRIDGE_STATUS_CHANNEL),
+    start: (options) => invoke(BRIDGE_START_CHANNEL, options),
+    stop: () => invoke(BRIDGE_STOP_CHANNEL),
+    /** 唯一一次返回令牌明文；主进程只存 sha256 与后四位。 */
+    newToken: (options) => invoke(BRIDGE_NEW_TOKEN_CHANNEL, options),
+    newPairCode: () => invoke(BRIDGE_NEW_PAIR_CODE_CHANNEL),
+    removeOrigin: (options) => invoke(BRIDGE_REMOVE_ORIGIN_CHANNEL, options),
+    openLog: () => invoke(BRIDGE_OPEN_LOG_CHANNEL),
+    // R8「记录本地接口日志」：开关的真实行为在主进程（决定是否往 bridge.log 落行）。
+    setLogEnabled: (options) => invoke(BRIDGE_SET_LOG_ENABLED_CHANNEL, options),
+  },
+
+  /** 导入查询、撤销与收件箱操作。 */
+  import: {
+    recent: (options) => invoke(IMPORT_RECENT_CHANNEL, options),
+    undo: (options) => invoke(IMPORT_UNDO_CHANNEL, options),
+    log: (options) => invoke(IMPORT_LOG_CHANNEL, options),
+    inboxList: () => invoke(INBOX_LIST_CHANNEL),
+    inboxCommit: (options) => invoke(INBOX_COMMIT_CHANNEL, options),
+    inboxDiscard: (options) => invoke(INBOX_DISCARD_CHANNEL, options),
+    /**
+     * 回执一次主进程转交（信封或收件箱操作）。必须与 reqId 一一对应，
+     * 且 outcome 要能 JSON 序列化——主进程把抛出的异常退化成字符串，
+     * 所以这里传的是 `{ ok:true, result }` 或 `{ ok:false, error }`。
+     */
+    replyToImport: (reqId, outcome) => {
+      ipcRenderer.send(IMPORT_REPLY_CHANNEL, { reqId, outcome })
+    },
+  },
+
   /** 订阅主进程菜单命令，返回取消订阅函数。 */
   onMenu(callback) {
     if (typeof callback !== 'function') return () => {}
@@ -108,6 +178,24 @@ const bridge = {
       ipcRenderer.removeListener(MENU_CHANNEL, listener)
     }
   },
+
+  /** 入库完成后主进程的通知（`deduped`/`duplicate`/`skipped` 不发）。 */
+  onImportNotice: (callback) => subscribe(IMPORT_NOTICE_CHANNEL, callback),
+
+  /** 收件箱目录变化（独立 watcher，去抖 450ms）；浏览器后端下不可用。 */
+  onInboxChanged: (callback) => subscribe(INBOX_CHANGED_CHANNEL, callback),
+
+  /**
+   * 本地桥转交来的信封：回调收到 `{ reqId, envelope, client }`，
+   * 必须用 `import.replyToImport(reqId, outcome)` 回执。
+   */
+  onImportReceipt: (callback) => subscribe(IMPORT_RECEIPT_CHANNEL, callback),
+
+  /**
+   * 主进程转交的导入/收件箱操作：回调收到 `{ reqId, op, args }`，
+   * 同样用 `import.replyToImport(reqId, outcome)` 回执。
+   */
+  onImportRequest: (callback) => subscribe(IMPORT_REQUEST_CHANNEL, callback),
 }
 
 contextBridge.exposeInMainWorld('opennote', bridge)

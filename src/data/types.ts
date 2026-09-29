@@ -125,7 +125,20 @@ export interface UiSettings {
   /** Folders the user collapsed while in "expand all" mode — keeps siblings open. */
   collapsed: Id[];
   lastNoteId: Id | null;
+  /**
+   * 「设置 · 文件 · 导入与接口」里的三项（设计稿 R1/R2/R8）。
+   * 只影响本机应用的行为，绝不上传、绝不随笔记同步。
+   * `overwrite` **刻意不在枚举里**：常规选项只允许 new/append/skip 与「先进入收件箱」。
+   */
+  importConflict: ImportConflictPreference;
+  /** 入库成功后是否弹提示（关掉后仍写导入日志，只是不打扰）。 */
+  importNotify: boolean;
+  /** 是否记录 `userData/bridge.log`（关掉后桥照样工作，只是不留痕）。 */
+  bridgeLog: boolean;
 }
+
+/** R1「导入方式」：外部导入的默认落法。`overwrite` 不在其中，这是有意的。 */
+export type ImportConflictPreference = "new" | "append" | "skip" | "inbox";
 
 export const DEFAULT_UI: UiSettings = {
   theme: "paper",
@@ -152,4 +165,8 @@ export const DEFAULT_UI: UiSettings = {
   expanded: [],
   collapsed: [],
   lastNoteId: null,
+  // R1 默认「新建一篇」：不猜用户意图、不覆盖任何既有笔记。
+  importConflict: "new",
+  importNotify: true,
+  bridgeLog: true,
 };

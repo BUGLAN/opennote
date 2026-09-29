@@ -196,6 +196,13 @@
   background: var(--accent-soft);
 }
 
+/* 单选/键盘选中的那一项：必须和 hover 区分开，否则 ↑↓ 移动看不出落点。 */
+.choice.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 .choice:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -1524,9 +1531,260 @@ mark.hit {
 }
 
 .toast__action {
+  /*
+   * `.toast-root` 是 pointer-events: none（提示不该挡住正文的点击），
+   * 所以带动作的按钮必须显式把命中测试打开——否则「撤销」永远点不到，
+   * 而撤销窗口只有 10 秒，用户会以为功能坏了。
+   */
+  pointer-events: auto;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
   color: inherit;
+  cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+/* ---------------------------- 导入收件箱 (UI-03) ------------------------ */
+/*
+ * 骨架沿用「历史版本」对话框的两栏，条目沿用文件树的树行手感。
+ * 命名与取值逐字来自设计稿 `docs/import/mockups/02-import-inbox.html`，
+ * **未引入任何新令牌**。
+ */
+
+.inbox__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--paper-3) 40%, var(--paper-2));
+}
+
+.inbox {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: var(--s4);
+  min-height: 340px;
+}
+
+.inbox__list {
+  border-right: 1px solid var(--rule);
+  padding-right: var(--s3);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.inbox__item {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border-left: 2px solid transparent;
+  text-align: left;
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.inbox__item:hover {
+  background: var(--paper-3);
+}
+
+.inbox__item.is-active {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.inbox__item.is-error {
+  border-left-color: var(--accent);
+}
+
+/* 失败原因用强调色，不用 --ink-3：那个令牌对比度不足，错误句必须看得清。 */
+.inbox__item.is-error .inbox__sub {
+  color: var(--accent);
+}
+
+.inbox__row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.inbox__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-md);
+}
+
+.inbox__sub {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  line-height: 1.5;
+}
+
+.inbox__kind {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+
+.inbox__check {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin-top: 3px;
+}
+
+/* 入库中的旋转环：必须是 flex 容器的直接子元素才拿得到 12px 尺寸。 */
+.inbox__item .busy__spinner {
+  align-self: center;
+}
+
+.inbox__detail {
+  min-width: 0;
+}
+
+.inbox__group {
+  margin-top: var(--s3);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--ink-3);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inbox__group::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+.inbox__dl {
+  margin-top: 6px;
+  display: grid;
+  gap: 2px;
+}
+
+.inbox__dl div {
+  display: flex;
+  gap: var(--s2);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+.inbox__dl dt {
+  width: 60px;
+  flex: none;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  padding-top: 2px;
+}
+
+.inbox__dl dd {
+  margin: 0;
+  color: var(--ink-2);
+  min-width: 0;
+  word-break: break-all;
+}
+
+.inbox__mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.inbox__preview {
+  margin-top: var(--s3);
+  padding: var(--s3);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper);
+  font-family: var(--font-serif);
+  font-size: var(--fs-sm);
+  line-height: 1.8;
+  color: var(--ink-2);
+  max-height: 150px;
+  overflow: auto;
+}
+
+.inbox__hint {
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+  color: var(--ink);
+}
+
+.inbox__tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.inbox__empty {
+  padding: var(--s6) var(--s3);
+  text-align: center;
+}
+
+.inbox__empty .empty__seal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-serif);
+  font-size: 23px;
+  box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.32);
+  margin-bottom: var(--s3);
+}
+
+.inbox__empty h3 {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.inbox__empty p {
+  margin-top: 4px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+  line-height: 1.7;
+}
+
+/* 落点/冲突的说明句：必须能看清，且不能长得像错误。 */
+.inbox__field-err {
+  margin-top: 6px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--accent);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  background: var(--paper);
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 99px;
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  background: var(--paper);
 }
 
 /* ------------------------------- drop zone ----------------------------- */

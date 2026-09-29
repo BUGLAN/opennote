@@ -9,6 +9,7 @@ import { askConfirm } from "../lib/dialogs";
 import { notify } from "../lib/toast";
 import { cn, formatBytes, formatDateTime } from "../lib/utils";
 import { Icon } from "./Icons";
+import { ImportApiPanel } from "./ImportApiPanel";
 import { Modal } from "./Overlays";
 
 /* ================================ settings ============================== */
@@ -29,6 +30,9 @@ const SECTIONS = [
 
 type SectionId = (typeof SECTIONS)[number]["id"];
 
+/** 设置面板的分栏 id。导出是为了让「打开某个分栏」的入口有稳定取值。 */
+export type SettingsSectionId = SectionId;
+
 export function SettingsDialog({
   settings,
   workspace,
@@ -42,6 +46,9 @@ export function SettingsDialog({
   onCloseWorkspace,
   onMigrateLegacy,
   onShortcuts,
+  initialSection,
+  isDesktop,
+  onOpenInbox,
 }: {
   settings: UiSettings;
   workspace: WorkspaceRecord | null;
@@ -55,8 +62,12 @@ export function SettingsDialog({
   onCloseWorkspace(): void;
   onMigrateLegacy(): void;
   onShortcuts(): void;
+  /** 直接落到某一栏（`opennote://settings/import` 与命令面板都要用）。 */
+  initialSection?: SectionId;
+  isDesktop: boolean;
+  onOpenInbox(): void;
 }): ReactNode {
-  const [section, setSection] = useState<SectionId>("外观");
+  const [section, setSection] = useState<SectionId>(initialSection ?? "外观");
   const [legacy, setLegacy] = useState(false);
   useEffect(() => {
     void hasLegacyData().then(setLegacy);
@@ -198,6 +209,22 @@ export function SettingsDialog({
 
           {section === "文件" ? (
             <>
+              {/*
+                「设置 · 文件 · 导入与接口」——设计稿把它放在「文件」分类里作为一段，
+                不是独立的分栏。面板读桥状态**只走 IPC**，绝不 fetch 127.0.0.1，
+                所以 CSP 的 connect-src 不需要也不会被放宽。
+              */}
+              <ImportApiPanel
+                desktop={isDesktop}
+                importConflict={settings.importConflict}
+                onImportConflict={(value) => patchUi({ importConflict: value })}
+                importNotify={settings.importNotify}
+                onImportNotify={(value) => patchUi({ importNotify: value })}
+                bridgeLog={settings.bridgeLog}
+                onBridgeLog={(value) => patchUi({ bridgeLog: value })}
+                onOpenInbox={onOpenInbox}
+              />
+
               <SettingRow label="当前笔记本" hint={workspace ? workspaceHint(workspace) : "还没有打开任何文件夹"}>
                 {workspace ? (
                   <>

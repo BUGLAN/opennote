@@ -62,6 +62,9 @@ export interface SidebarProps {
   onNewFolder(parentId?: Id | null): void;
   onOpenSettings(): void;
   onCollapse(): void;
+  /** 待确认的收件箱条目数（0 时不显示计数）。 */
+  inboxPending: number;
+  onOpenInbox(): void;
 }
 
 /** Drag state lives outside React: it only matters between two native events. */
@@ -354,6 +357,14 @@ function TreeBody(props: TreeProps): ReactNode {
         count={counts.trash}
         active={scope.kind === "trash"}
         onClick={() => props.onScope({ kind: "trash" })}
+      />
+      {/* 外部导入的待确认内容在这里，不属于文件树，所以不参与 scope 高亮。 */}
+      <ScopeRow
+        icon="download"
+        label="导入收件箱"
+        count={props.inboxPending}
+        active={false}
+        onClick={() => props.onOpenInbox()}
       />
 
       {scope.kind === "trash" ? <TrashList library={library} /> : null}

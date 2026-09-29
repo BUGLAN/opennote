@@ -676,6 +676,9 @@ function registerFsWatchHandlers() {
     async (root) => {
       const safeRoot = requireAuthorizedRoot(root)
       const identity = pathIdentity(safeRoot)
+      // 渲染层打开笔记本时必调 watchWorkspace —— 这是主进程辨认「当前工作区」的信号，
+      // 收件箱状态写入（唯一允许主进程写的文件）要用它定位绝对路径。
+      currentWorkspaceRoot = safeRoot
       if (workspaceWatchers.has(identity)) return true
 
       const schedule = () => {
@@ -709,6 +712,11 @@ function registerFsWatchHandlers() {
       }
       watcher.on('error', () => closeWorkspaceWatcher(identity))
       workspaceWatchers.set(identity, { watcher, timer: null })
+
+      // 收件箱变更检测是**独立**的一条链路：`.opennote/**` 被上面的 onChange
+      // 显式跳过（避免自写自读），所以它不能复用这个 watcher，也走独立频道。
+      // 监听不到时如实降级为轮询，不假装有 watcher。
+      void startInboxWatcher(safeRoot).catch(() => {})
       return true
     },
     '监听工作区失败',
@@ -719,7 +727,12 @@ function registerFsWatchHandlers() {
     async (root) => {
       const normalized = normalizeAbsolutePath(root)
       if (!normalized) return false
-      return closeWorkspaceWatcher(pathIdentity(normalized))
+      const identity = pathIdentity(normalized)
+      if (currentWorkspaceRoot && pathIdentity(currentWorkspaceRoot) === identity) {
+        currentWorkspaceRoot = null
+      }
+      closeInboxWatcher(identity)
+      return closeWorkspaceWatcher(identity)
     },
     '取消监听失败',
   )
@@ -905,6 +918,7 @@ function registerIpcHandlers() {
   registerDialogHandlers()
   registerShellHandlers()
   registerAppHandlers()
+  registerImportHandlers()
 
   // 主题切换时同步标题栏按钮（叠加层）的底色与符号色。
   ipcMain.handle('opennote:window:titlebar', (event, colors) => {
@@ -925,6 +939,498 @@ function registerIpcHandlers() {
 
   // D11：渲染层 flush 完成后通知主进程放行关窗（见 requestRendererFlush）。
   ipcMain.on('opennote:app:flush-done', (event) => resolveFlushWaiters(event.sender))
+}
+
+// ---------------------------------------------------------------------------
+// 导入通道：本地桥（默认关闭）+ 收件箱独立 watcher
+// ---------------------------------------------------------------------------
+//
+// 三条不变式（违反任何一条都要返工）：
+//   1) 主进程**不写笔记内容**。桥只做「传输 + 安全校验」，信封一律经
+//      `opennote:import:receipt` 转交渲染层落盘——主进程直接写正文会被
+//      `rescanWorkspace()` 起始的 `flushAll()` 覆盖，用户看到的是「导入成功但没东西」。
+//      唯一例外是 `.opennote/inbox/<entry>/state.json`（队列状态，不是笔记内容）。
+//   2) 桥**默认关闭**，必须由用户在设置里显式开启；窗口不在场时一律 IMP-4006，
+//      **绝不假装成功**。
+//   3) 收件箱的变更检测**不能复用**工作区 watcher：`.opennote/**` 被它显式跳过，
+//      所以这里是一条独立的 watch，广播独立的 `opennote:inbox:changed`。
+
+const INBOX_DEBOUNCE_MS = 450
+/** 主进程 → 渲染层转交的等待上限。超时按「窗口不在场」处理，绝不假成功。 */
+const RELAY_TIMEOUT_MS = 5000
+/** 应用自己写 state.json 之后的静默窗口：避免自写自读的重扫循环。 */
+const INBOX_SELF_WRITE_MUTE_MS = 500
+const INBOX_DIR_NAME = 'inbox'
+
+/**
+ * 惰性加载本地桥。缺文件（或加载失败）时退化为「接口不存在」，
+ * 而不是让整个桌面端起不来——导入接口是可选能力。
+ */
+let bridgeModule = null
+let bridgeModuleTried = false
+function loadBridgeModule() {
+  if (bridgeModuleTried) return bridgeModule
+  bridgeModuleTried = true
+  try {
+    // eslint-disable-next-line global-require
+    bridgeModule = require('./bridge.cjs')
+  } catch (error) {
+    console.error(
+      `[opennote] 本地接口模块加载失败，导入接口不可用：${error instanceof Error ? error.message : String(error)}`,
+    )
+    bridgeModule = null
+  }
+  return bridgeModule
+}
+
+let bridgeController = null
+/**
+ * `conflict:"overwrite"` 的第三道闸门（用户显式开启的进阶开关）。
+ *
+ * 本轮**没有**提供这个开关的界面，因此它恒为 false —— 任何 `overwrite` 请求
+ * 都会在 L2 降级为 `new` + `IMP-4011`。这是**有意的保守选择**：契约要求
+ * overwrite「四道闸门同时满足」，少一道就必须降级，而「静默覆盖用户内容」
+ * 是绝不允许的失败模式。
+ */
+function getAdvancedOverwrite() {
+  return false
+}
+
+/**
+ * R8「记录本地接口日志」。渲染层经 `opennote:bridge:setLogEnabled` 推过来，
+ * 桥用它决定是否往 `bridge.log` 落行。默认 `true`（与 `DEFAULT_UI.bridgeLog` 一致）。
+ */
+let bridgeLogEnabled = true
+
+/** reqId → { resolve, timer }：主进程在等渲染层的回执。 */
+const importRelays = new Map()
+let importRelaySeq = 0
+
+function isTrustedSender(event) {
+  const window = mainWindow
+  if (!window || window.isDestroyed()) return false
+  return event && event.sender === window.webContents
+}
+
+/**
+ * 把一次操作转交给渲染层，等它用 `opennote:import:reply` 回执。
+ * 返回 null 表示**窗口不在场或没回执**——调用方必须据此报 IMP-4006，不得假成功。
+ */
+function relayToRenderer(channel, payload) {
+  return new Promise((resolve) => {
+    const window = mainWindow
+    if (!window || window.isDestroyed()) {
+      resolve(null)
+      return
+    }
+    const reqId = `r${++importRelaySeq}`
+    const timer = setTimeout(() => {
+      importRelays.delete(reqId)
+      resolve(null)
+    }, RELAY_TIMEOUT_MS)
+    timer.unref?.()
+    importRelays.set(reqId, { resolve, timer })
+    try {
+      window.webContents.send(channel, { reqId, ...payload })
+    } catch {
+      clearTimeout(timer)
+      importRelays.delete(reqId)
+      resolve(null)
+    }
+  })
+}
+
+function settleImportRelay(payload) {
+  if (!payload || typeof payload !== 'object') return
+  const reqId = payload.reqId
+  if (typeof reqId !== 'string') return
+  const pending = importRelays.get(reqId)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  importRelays.delete(reqId)
+  pending.resolve(payload.outcome === undefined ? null : payload.outcome)
+}
+
+/** 契约 §6.1 的错误体；`detail` 绝不带宿主机绝对路径、用户名或令牌。 */
+function importError(code, userMessage, http, retryable) {
+  return { ok: false, error: { code, message: code, userMessage, http, retryable } }
+}
+
+const NO_WINDOW_ERROR = () =>
+  importError(
+    'IMP-4006',
+    'Opennote 的窗口已关闭。请重新打开 Opennote，再试一次。',
+    409,
+    true,
+  )
+
+// --- 收件箱：独立 watcher + 状态文件 ------------------------------------------
+
+/** identity → { watcher, timer } */
+const inboxWatchers = new Map()
+let inboxSelfWriteUntil = 0
+
+async function countInboxPending(root) {
+  const dir = path.join(root, '.opennote', INBOX_DIR_NAME)
+  let entries
+  try {
+    entries = await readdir(dir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  let pending = 0
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    try {
+      const raw = await readFile(path.join(dir, entry.name, 'state.json'), 'utf8')
+      const parsed = JSON.parse(raw)
+      const status = parsed && typeof parsed.status === 'string' ? parsed.status : 'pending'
+      if (status === 'pending') pending += 1
+    } catch {
+      // 没有 state.json = 外部投递还没登记，算待确认。
+      pending += 1
+    }
+  }
+  return pending
+}
+
+async function notifyInboxChanged(root) {
+  const pending = await countInboxPending(root)
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window || window.isDestroyed()) continue
+    try {
+      window.webContents.send('opennote:inbox:changed', { root, pending })
+    } catch {
+      /* 窗口正在销毁：忽略 */
+    }
+  }
+}
+
+function closeInboxWatcher(identity) {
+  const state = inboxWatchers.get(identity)
+  if (!state) return false
+  inboxWatchers.delete(identity)
+  if (state.timer) clearTimeout(state.timer)
+  try {
+    state.watcher.close()
+  } catch {
+    /* 已经关闭 */
+  }
+  return true
+}
+
+/**
+ * 为已授权工作区启动收件箱监听；目录不存在先建。
+ * 返回 'watch' | 'poll' —— 监听不可用时如实降级为轮询（设置面板要显示真实状态）。
+ */
+async function startInboxWatcher(root) {
+  const identity = pathIdentity(root)
+  if (inboxWatchers.has(identity)) return 'watch'
+  const dir = path.join(root, '.opennote', INBOX_DIR_NAME)
+  try {
+    await mkdir(dir, { recursive: true })
+  } catch {
+    return 'poll'
+  }
+
+  const schedule = () => {
+    const state = inboxWatchers.get(identity)
+    if (!state) return
+    if (state.timer) clearTimeout(state.timer)
+    state.timer = setTimeout(() => {
+      const current = inboxWatchers.get(identity)
+      if (current) current.timer = null
+      // 应用自己写的 state.json 不触发通知（否则会自写自读转圈）。
+      if (Date.now() < inboxSelfWriteUntil) return
+      void notifyInboxChanged(root).catch(() => {})
+    }, INBOX_DEBOUNCE_MS)
+    state.timer.unref?.()
+  }
+
+  let watcher
+  try {
+    watcher = watch(dir, { recursive: true, persistent: false }, schedule)
+  } catch {
+    try {
+      watcher = watch(dir, { persistent: false }, schedule)
+    } catch {
+      return 'poll'
+    }
+  }
+  watcher.on('error', () => closeInboxWatcher(identity))
+  inboxWatchers.set(identity, { watcher, timer: null })
+  return 'watch'
+}
+
+/** 收件箱监听是否真的在跑（供 status 如实汇报）。 */
+function inboxWatchMode() {
+  return inboxWatchers.size > 0 ? 'watch' : 'off'
+}
+
+/**
+ * 唯一允许主进程写的内容：`.opennote/inbox/<entry>/state.json`。
+ * 仍然走 `safePath`（授权 root + 相对路径校验 + realpath 边界），原子写 tmp + rename，
+ * 写完广播 `opennote:inbox:changed`。绝不写笔记正文、索引、日志或前像。
+ */
+const INBOX_ENTRY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+
+/**
+ * 当前打开的工作区根。主进程不持有工作区状态，但 `watchWorkspace` 就是
+ * 「用户打开了这个笔记本」的信号（渲染层打开工作区时必调），所以这里跟着它走。
+ * 收件箱状态写入需要绝对路径，而桥给的状态写入挂钩只带条目 id。
+ */
+let currentWorkspaceRoot = null
+
+async function writeInboxStateAtomic(root, entryId, stateJson) {
+  const safeRoot = requireAuthorizedRoot(root)
+  if (typeof entryId !== 'string' || !INBOX_ENTRY_ID_PATTERN.test(entryId)) {
+    throw new Error('写收件箱状态失败：条目 id 不合法')
+  }
+  if (typeof stateJson !== 'string' || stateJson.trim() === '') {
+    throw new Error('写收件箱状态失败：状态内容无效')
+  }
+  // 只接受 JSON 文本，避免把任意字节写进工作区。
+  JSON.parse(stateJson)
+  const relPath = `.opennote/${INBOX_DIR_NAME}/${entryId}/state.json`
+  const target = await safePath(safeRoot, relPath, 'target')
+  await ensureParentDir(target)
+  inboxSelfWriteUntil = Date.now() + INBOX_SELF_WRITE_MUTE_MS
+  await writeFileAtomic(target, stateJson)
+  void notifyInboxChanged(safeRoot).catch(() => {})
+  return true
+}
+
+/** 桥的挂钩形态是 `onInboxStateWrite(entryId, stateJson)`（根由主进程自己认）。 */
+function writeInboxStateForBridge(entryId, stateJson) {
+  const root = currentWorkspaceRoot
+  if (!root) throw new Error('写收件箱状态失败：当前没有打开的工作区')
+  return writeInboxStateAtomic(root, entryId, stateJson)
+}
+
+// --- 本地桥装配 ---------------------------------------------------------------
+
+function bridgeStatusPayload() {
+  const controller = bridgeController
+  if (!controller) {
+    // 桥模块加载失败（打包缺文件等）。状态如实报 `failed`，并给出可执行的下一步，
+    // 其余可选字段一律给 `null` 而不是省略——渲染层不必为「字段不存在」写分支。
+    return {
+      state: 'failed',
+      port: null,
+      endpoint: null,
+      tokenLast4: null,
+      tokenSet: false,
+      origins: [],
+      logPath: null,
+      inboxWatch: inboxWatchMode(),
+      tokenPersisted: false,
+      address: null,
+      error: '本地接口模块没能加载，请重新安装 Opennote。',
+      lastRejectedOrigin: null,
+      startPort: null,
+      portRange: null,
+      lastPairing: null,
+    }
+  }
+  const raw = controller.status() || {}
+  return {
+    // `...raw` 必须在最前面：桥的状态里还有 address / error / lastRejectedOrigin /
+    // startPort / portRange / lastPairing 等字段，逐字段重建会把它们**静默丢掉**
+    // ——渲染层拿不到 `lastPairing` 就永远看不到配对轮换警告，拿不到
+    // `lastRejectedOrigin` 就永远显示不了 R8 的拒绝记录行。显式字段在下面覆盖，
+    // 仍会赢；这份白名单只用来把类型收紧到 contract 那样。
+    ...raw,
+    state: raw.state,
+    port: typeof raw.port === 'number' ? raw.port : null,
+    endpoint: typeof raw.endpoint === 'string' ? raw.endpoint : null,
+    tokenLast4: typeof raw.tokenLast4 === 'string' ? raw.tokenLast4 : null,
+    tokenSet: raw.tokenSet === true,
+    origins: Array.isArray(raw.origins) ? raw.origins.filter((item) => typeof item === 'string') : [],
+    logPath: typeof raw.logPath === 'string' ? raw.logPath : null,
+    // 桥自己不知道收件箱 watcher，由主进程如实填。
+    inboxWatch: raw.inboxWatch === true ? 'watch' : inboxWatchMode(),
+    tokenPersisted: raw.tokenPersisted === true,
+  }
+}
+
+function ensureBridge() {
+  if (bridgeController) return bridgeController
+  const module = loadBridgeModule()
+  if (!module || typeof module.createBridge !== 'function') return null
+
+  bridgeController = module.createBridge({
+    // 契约要求 userData/bridge.json（只存 sha256 + last4）与 userData/bridge.log。
+    dataDir: app.getPath('userData'),
+    getWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+    /**
+     * 桥不落盘：把信封转交渲染层，拿回执映射成 HTTP 状态码。
+     * 渲染层不在场 → IMP-4006（409，retryable），绝不假成功。
+     */
+    onEnvelope: async (envelopeJson, client) => {
+      const outcome = await relayToRenderer('opennote:import:receipt', {
+        envelope: envelopeJson,
+        client,
+      })
+      if (!outcome || typeof outcome !== 'object') return NO_WINDOW_ERROR()
+      return outcome
+    },
+    onInboxStateWrite: (entryId, stateJson) => writeInboxStateForBridge(entryId, stateJson),
+    getAdvancedOverwrite,
+    // R8：关掉后桥不再往 bridge.log 落行（既有日志不删）。
+    isLogEnabled: () => bridgeLogEnabled,
+    log: (event, fields) => {
+      // 契约要求日志不含令牌、配对码、正文与 userData 绝对路径；
+      // 桥自己已经脱敏，这里只补一条事件名，避免把整个 fields 打进主进程日志。
+      const code = fields && typeof fields.code === 'string' ? ` code=${fields.code}` : ''
+      console.log(`[opennote] bridge ${event}${code}`)
+    },
+  })
+  return bridgeController
+}
+
+/** 桥的生命周期跟随窗口：窗口关闭即停止监听。 */
+function stopBridgeQuietly() {
+  const controller = bridgeController
+  if (!controller) return Promise.resolve()
+  return Promise.resolve(controller.stop()).catch(() => {})
+}
+
+async function registerImportHandlers() {
+  // 渲染层回执（信封与收件箱操作共用一条频道，靠 reqId 配对）。
+  ipcMain.on('opennote:import:reply', (event, payload) => {
+    if (!isTrustedSender(event)) return
+    settleImportRelay(payload)
+  })
+
+  handle(
+    'opennote:bridge:status',
+    async () => bridgeStatusPayload(),
+    '读取本地接口状态失败',
+  )
+
+  handle(
+    'opennote:bridge:start',
+    async (options) => {
+      const controller = ensureBridge()
+      if (!controller) {
+        return { ...bridgeStatusPayload(), state: 'failed' }
+      }
+      // 未设置令牌时桥不允许开启（桥自己会拒绝），界面先引导「生成令牌」。
+      const port = options && typeof options === 'object' ? options.port : undefined
+      await controller.startWithPort(port)
+      return bridgeStatusPayload()
+    },
+    '开启本地接口失败',
+  )
+
+  handle(
+    'opennote:bridge:stop',
+    async () => {
+      await stopBridgeQuietly()
+      return bridgeStatusPayload()
+    },
+    '停止本地接口失败',
+  )
+
+  handle(
+    'opennote:bridge:newToken',
+    async (options) => {
+      const controller = ensureBridge()
+      if (!controller) throw new Error('生成令牌失败：本地接口模块不可用')
+      const origin = options && typeof options === 'object' ? options.origin : undefined
+      const token = controller.regenerateToken()
+      if (typeof origin === 'string' && origin !== '') controller.addAllowedOrigin(origin)
+      // 唯一一次返回明文；服务端只留 sha256 与后四位。
+      return { token, last4: token.slice(-4) }
+    },
+    '生成令牌失败',
+  )
+
+  handle(
+    'opennote:bridge:newPairCode',
+    async () => {
+      const controller = ensureBridge()
+      if (!controller) throw new Error('生成配对码失败：本地接口模块不可用')
+      const result = controller.newPairCode()
+      return { code: result.code, expiresAt: result.expiresAt }
+    },
+    '生成配对码失败',
+  )
+
+  handle(
+    'opennote:bridge:removeOrigin',
+    async (options) => {
+      const controller = ensureBridge()
+      const origin = options && typeof options === 'object' ? options.origin : undefined
+      if (!controller) throw new Error('移除来源失败：本地接口模块不可用')
+      if (typeof origin !== 'string' || origin === '') throw new Error('移除来源失败：来源无效')
+      controller.removeAllowedOrigin(origin)
+      return bridgeStatusPayload()
+    },
+    '移除来源失败',
+  )
+
+  handle(
+    'opennote:bridge:openLog',
+    async () => {
+      const controller = ensureBridge()
+      const logPath = controller && controller.getLogPath()
+      if (typeof logPath !== 'string' || logPath === '') return
+      if (existsSync(logPath)) shell.showItemInFolder(logPath)
+      else shell.showItemInFolder(path.dirname(logPath))
+    },
+    '打开本地接口日志失败',
+  )
+
+  /**
+   * R8「记录本地接口日志」。开关的真实行为在**主进程**：它决定桥是否往
+   * `bridge.log` 落行。渲染层只管把用户的偏好推过来——否则就是个「开关能点、
+   * 但落盘行为不变」的假开关。用户关掉后，之前的日志**不删除**（那是用户的
+   * 文件，删它比留着更糟），只是不再增长。
+   */
+  handle(
+    'opennote:bridge:setLogEnabled',
+    async (args) => {
+      const enabled = !args || args.enabled !== false
+      bridgeLogEnabled = enabled
+      return { enabled: bridgeLogEnabled }
+    },
+    '设置本地接口日志开关失败',
+  )
+
+  /**
+   * 其余导入/收件箱操作只有一份实现：渲染层的 `src/data/*`。
+   * 主进程不复制一套读写逻辑（否则会与渲染层漂移）。
+   */
+  const relayHandler = (op) =>
+    handle(
+      `opennote:${op === 'recent' || op === 'undo' || op === 'log' ? 'import' : 'inbox'}:${
+        op === 'inboxList' ? 'list' : op === 'inboxCommit' ? 'commit' : op === 'inboxDiscard' ? 'discard' : op
+      }`,
+      async (args) => {
+        const outcome = await relayToRenderer('opennote:import:request', { op, args })
+        if (!outcome || typeof outcome !== 'object') {
+          throw asUserError(NO_WINDOW_ERROR(), '转交失败')
+        }
+        if (outcome.ok === false) {
+          const error = new Error(
+            (outcome.error && outcome.error.userMessage) || '导入操作失败',
+          )
+          error.userMessage = outcome.error && outcome.error.userMessage
+          error.code = outcome.error && outcome.error.code
+          throw error
+        }
+        return outcome.result
+      },
+      '导入操作失败',
+    )
+
+  relayHandler('recent')
+  relayHandler('undo')
+  relayHandler('log')
+  relayHandler('inboxList')
+  relayHandler('inboxCommit')
+  relayHandler('inboxDiscard')
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,6 +1629,8 @@ async function createWindow() {
   })
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null
+    // 桥的生命周期跟随窗口：窗口没了就不该还有人在监听 127.0.0.1。
+    void stopBridgeQuietly()
     // macOS ⌘Q：第一次 app.quit() 被 close 的 preventDefault 中止，flush 完成后要补一次。
     if (quitRequested) app.quit()
   })
@@ -1185,6 +1693,16 @@ app.whenReady().then(async () => {
         `[opennote] desktop ready ${app.getVersion()}（icon=${iconNote}；${frameNote}；持久授权工作区=${persistentRoots.size}）`,
       )
     }
+
+    // 本地接口：默认关闭。只有用户上次显式开启过（bridge.json 里 enabled=true，
+    // 此时桥的初始状态是 stopped 而不是 disabled）才在启动时自动恢复监听。
+    const controller = ensureBridge()
+    if (controller) {
+      const raw = controller.status() || {}
+      if (raw.state === 'stopped') {
+        void Promise.resolve(controller.start()).catch(() => {})
+      }
+    }
   } catch (error) {
     console.error(`[opennote] 启动失败：${error instanceof Error ? error.message : String(error)}`)
   }
@@ -1200,6 +1718,8 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   quitRequested = true
+  // 契约：关掉本地接口 = 立刻 server.close() + 断开全部 keep-alive 连接。
+  void stopBridgeQuietly()
 })
 
 app.on('window-all-closed', () => {

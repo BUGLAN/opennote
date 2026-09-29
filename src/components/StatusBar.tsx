@@ -18,6 +18,9 @@ interface StatusBarProps {
   onToggleAppearance(): void;
   onOpenHistory(): void;
   onOpenSettings(): void;
+  /** 待确认的收件箱条目数（0 时只显示「收件箱」）。 */
+  inboxPending: number;
+  onOpenInbox(): void;
 }
 
 export function StatusBar(props: StatusBarProps): ReactNode {
@@ -76,6 +79,15 @@ export function StatusBar(props: StatusBarProps): ReactNode {
         onClick={() => props.onToggle("focus")}
       >
         <Icon name="focus" size={13} />
+      </button>
+      <button
+        type="button"
+        className="statusbar__item statusbar__item--button statusbar__item--compact"
+        title="打开导入收件箱"
+        onClick={props.onOpenInbox}
+      >
+        <Icon name="layers" size={13} />
+        {props.inboxPending ? `收件箱 ${props.inboxPending}` : "收件箱"}
       </button>
       <button
         type="button"

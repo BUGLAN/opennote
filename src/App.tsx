@@ -37,8 +37,25 @@ import {
   type WorkspaceRecord,
 } from "./data/workspaces";
 import { hasLegacyData } from "./data/legacy";
+import {
+  commitInboxResult,
+  discardInbox,
+  inboxCount,
+  refreshInbox,
+  startInboxWatch,
+  stopInboxWatch,
+  listInbox,
+} from "./data/inbox";
+import { findImportLogEntry, readImportIndex, readImportLog } from "./data/importLog";
+import {
+  receiveEnvelopeOutcome,
+  setImportNotifications,
+  undoImport,
+  type ImportUndoResult,
+  type ImportReceipt,
+} from "./lib/clip";
 import { importFilesIntoOpfs, pickFiles, supportsFileSystemAccess, supportsOpfs } from "./fs";
-import { desktopBridge } from "./desktop/bridge";
+import { desktopBridge, type ImportOutcome } from "./desktop/bridge";
 import { patchUi, setTheme as applyTheme, toggleAppearance, useUi } from "./data/ui";
 import type { Id, Snapshot, ThemeId, UiSettings } from "./data/types";
 import { buildAppCommands, isEditableTarget, matchesShortcut } from "./lib/appCommands";
@@ -50,8 +67,10 @@ import { notify } from "./lib/toast";
 import { cn, formatRelativeTime } from "./lib/utils";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { EditorPane, type CursorInfo } from "./components/EditorPane";
-import { HistoryDialog, SettingsDialog, ShortcutsDialog } from "./components/AppDialogs";
+import { HistoryDialog, SettingsDialog, ShortcutsDialog, type SettingsSectionId } from "./components/AppDialogs";
 import { Icon } from "./components/Icons";
+import { InboxPanel } from "./components/InboxPanel";
+import { ConflictDialogHost, installImportConflictDialog, uninstallImportConflictDialog } from "./components/ConflictDialog";
 import { DialogHost, MenuHost, Toasts, openMenu } from "./components/Overlays";
 import { Outline } from "./components/Outline";
 import { Sidebar, currentFolderId, type Scope } from "./components/Sidebar";
@@ -73,6 +92,8 @@ export default function App(): ReactNode {
   const [cursor, setCursor] = useState<CursorInfo>({ line: 1, column: 1, selected: 0 });
   const [palette, setPalette] = useState<null | "all" | "commands">(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 从命令面板 / `opennote://settings/import` 直接落到「导入与接口」。 */
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
@@ -80,6 +101,8 @@ export default function App(): ReactNode {
   const [busy, setBusy] = useState<string | null>(null);
   const [needsPermission, setNeedsPermission] = useState<WorkspaceRecord | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [inboxPending, setInboxPending] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -127,6 +150,173 @@ export default function App(): ReactNode {
   }, [library.ready]);
 
   useEffect(() => watchLibraryErrors((message) => notify(message, { kind: "danger" })), []);
+
+  /* ------------------------------------------------------- 导入与收件箱接线 */
+  //
+  // 三条不变式（见 electron/main.cjs 的同名注释）：
+  //   1) 落盘只发生在渲染层。桥把信封转交上来，这里算完把结构化回执交回去——
+  //      主进程不写正文，否则会被 rescanWorkspace() 起始的 flushAll() 覆盖。
+  //   2) 回执**永不抛异常**：ipcMain.handle 会把异常退化成字符串，code/http 会丢，
+  //      桥就没法把 IMP-4008 映射成 422。所以这里用 receiveEnvelopeOutcome()。
+  //   3) 窗口不在场/渲染层不回，由主进程侧超时报 IMP-4006，绝不假成功。
+
+  useEffect(() => {
+    const api = bridge;
+    if (!api || typeof api.onImportReceipt !== "function") return;
+    return api.onImportReceipt(({ reqId, envelope }) => {
+      void (async () => {
+        let outcome: ImportOutcome;
+        try {
+          outcome = await receiveEnvelopeOutcome(envelope);
+        } catch (error) {
+          // receiveEnvelopeOutcome 理论上不抛；真抛了也只能如实报 500，不能假装成功。
+          outcome = {
+            ok: false,
+            error: {
+              code: "IMP-5001",
+              message: error instanceof Error ? error.message : String(error),
+              userMessage: "写入笔记失败，磁盘可能已满或没有权限。原内容没有丢失。",
+              http: 500,
+              retryable: true,
+            },
+          };
+        }
+        api.import.replyToImport(reqId, outcome);
+      })();
+    });
+  }, [bridge]);
+
+  /**
+   * 主进程转交的其余导入/收件箱操作。只有一份实现（就是这里的 data/*），
+   * 主进程只是转发——两处各写一份读写逻辑必然漂移。
+   */
+  useEffect(() => {
+    const api = bridge;
+    if (!api || typeof api.onImportRequest !== "function") return;
+    return api.onImportRequest(({ reqId, op, args }) => {
+      void (async () => {
+        try {
+          let result: unknown = null;
+          if (op === "recent") {
+            // 标题/客户端只在幂等索引里（导入日志按契约只有落点与错误码）。
+            const index = await readImportIndex();
+            const limit = typeof args?.limit === "number" ? args.limit : 20;
+            result = index.slice(0, limit).map((entry) => ({
+              importId: entry.importId,
+              path: entry.path,
+              title: entry.title,
+              client: entry.client,
+              action: entry.action,
+              at: entry.at,
+            }));
+          } else if (op === "log") {
+            const entries = await readImportLog();
+            result = typeof args?.limit === "number" ? entries.slice(0, args.limit) : entries;
+          } else if (op === "undo") {
+            result = await undoImportById(String(args?.importId ?? ""));
+          } else if (op === "inboxList") {
+            result = await listInbox();
+          } else if (op === "inboxCommit") {
+            // 契约要求回 `ImportResult`；Entry 已入库时 `null`（幂等），不算失败。
+            result = await commitInboxResult(String(args?.id ?? ""));
+          } else if (op === "inboxDiscard") {
+            await discardInbox(String(args?.id ?? ""));
+            result = null;
+          } else {
+            throw Object.assign(new Error(`未知的导入操作：${String(op)}`), { code: "IMP-4014" });
+          }
+          api.import.replyToImport(reqId, { ok: true, result });
+        } catch (error) {
+          const shaped = error as { code?: unknown; userMessage?: unknown };
+          const code = typeof shaped?.code === "string" ? shaped.code : "IMP-5001";
+          const userMessage =
+            typeof shaped?.userMessage === "string"
+              ? shaped.userMessage
+              : "导入时出现了内部错误，已记录日志。请重试一次。";
+          api.import.replyToImport(reqId, {
+            ok: false,
+            error: {
+              code,
+              message: error instanceof Error ? error.message : String(error),
+              userMessage,
+              http: code.startsWith("IMP-4") ? 422 : 500,
+              retryable: true,
+            },
+          });
+        }
+      })();
+    });
+  }, [bridge]);
+
+  // R2「入库后提示」：关掉后只是不打扰，导入日志照写。
+  useEffect(() => {
+    setImportNotifications(ui.importNotify);
+  }, [ui.importNotify]);
+
+  // R8「记录本地接口日志」：真实行为在主进程（决定是否往 bridge.log 落行）。
+  // 启动时也要推一次，否则用户上次关掉的开关会在重启后悄悄失效。
+  useEffect(() => {
+    const api = bridge;
+    if (!api || typeof api.bridge?.setLogEnabled !== "function") return;
+    void api.bridge.setLogEnabled({ enabled: ui.bridgeLog }).catch(() => undefined);
+  }, [bridge, ui.bridgeLog]);
+
+  // UI-06 冲突对话框：L2 接收端遇到第 5 步 pending 冲突时回调这里。
+  // 卸载时立刻 settle，避免接收端永远等一个已经不在的对话框。
+  useEffect(() => {
+    installImportConflictDialog();
+    return () => uninstallImportConflictDialog();
+  }, []);
+
+  // 收件箱变更检测：桌面端用主进程的独立 watcher（`.opennote/**` 被工作区
+  // watcher 跳过，所以必须是另一条链路）；浏览器后端退化为轮询。
+  //
+  // 保留期清理（打开扫一遍 + 每 6 小时一次）已包含在 `startInboxWatch()` 里，
+  // 这里不再重复挂定时器。`stopInboxWatch()` 同时清空视图，换笔记本不会留旧计数。
+  useEffect(() => {
+    if (!library.workspace) return;
+    startInboxWatch();
+    return () => stopInboxWatch();
+  }, [library.workspace]);
+
+  // 主进程广播的入库通知：无 dirty 直接重载，有 dirty 绝不静默覆盖。
+  useEffect(() => {
+    const api = bridge;
+    if (!api || typeof api.onImportNotice !== "function") return;
+    return api.onImportNotice((notice) => {
+      if (!notice || notice.action === undefined) return;
+      void (async () => {
+        await rescanWorkspace();
+        if (notice.path) openNote(notice.path);
+        // 撤销入口由 L2 的 announce() 负责（唯一一份实现，避免双 toast）。
+        // 这里只在通知里补一次收件箱计数刷新，保证徽标即时。
+        await refreshInbox().catch(() => undefined);
+        setInboxPending(inboxCount());
+      })();
+    });
+  }, [bridge]);
+
+  // 收件箱目录变化（主进程独立 watcher，去抖 450ms）。
+  useEffect(() => {
+    const api = bridge;
+    if (!api || typeof api.onInboxChanged !== "function") return;
+    return api.onInboxChanged((changed) => {
+      if (!changed || typeof changed.pending !== "number") return;
+      setInboxPending(changed.pending);
+      void refreshInbox().catch(() => undefined);
+    });
+  }, [bridge]);
+
+  // 打开工作区后把收件箱计数拉起来（徽标不能等到第一次变动才出现）。
+  useEffect(() => {
+    if (!library.workspace) {
+      setInboxPending(0);
+      return;
+    }
+    void refreshInbox()
+      .then(() => setInboxPending(inboxCount()))
+      .catch(() => undefined);
+  }, [library.workspace]);
 
   useEffect(() => {
     const timer = setInterval(() => { void flushAll().catch(() => undefined); }, 20_000);
@@ -382,6 +572,12 @@ export default function App(): ReactNode {
         openSettings: () => setSettingsOpen(true),
         openHistory: () => setHistoryOpen(true),
         openShortcuts: () => setShortcutsOpen(true),
+        openInbox: () => setInboxOpen(true),
+        openImportSettings: () => {
+          // 设计稿把「导入与接口」放在「文件」分类里，所以落到「文件」栏。
+          setSettingsSection("文件");
+          setSettingsOpen(true);
+        },
         exportNote: (kind) => void exportNote(kind),
         exportLibrary: () => void exportLibrary(),
         importFiles: () => fileInputRef.current?.click(),
@@ -606,6 +802,8 @@ export default function App(): ReactNode {
         onCloseWorkspace={() => void closeCurrentWorkspace()}
         supportsLocalFolder={Boolean(bridge) || supportsFileSystemAccess()}
         supportsBrowserWorkspace={supportsOpfs()}
+        inboxPending={inboxPending}
+        onOpenInbox={() => setInboxOpen(true)}
       />
 
       <button type="button" className="scrim--menu" aria-label="收起侧栏" onClick={() => patchUi({ sidebarOpen: false })} />
@@ -730,6 +928,8 @@ export default function App(): ReactNode {
           onToggleAppearance={toggleAppearance}
           onOpenHistory={() => setHistoryOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
+          inboxPending={inboxPending}
+          onOpenInbox={() => setInboxOpen(true)}
         />
       </div>
 
@@ -749,7 +949,10 @@ export default function App(): ReactNode {
           stats={library.stats}
           commands={commands}
           onRunCommand={(id) => commandsRef.current.find((command) => command.id === id)?.run()}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => {
+            setSettingsOpen(false);
+            setSettingsSection(null);
+          }}
           onImport={() => fileInputRef.current?.click()}
           onExport={() => void exportLibrary()}
           onOpenLocalFolder={() => void openLocalFolder()}
@@ -760,6 +963,12 @@ export default function App(): ReactNode {
               .catch((error) => notify(error instanceof Error ? error.message : "导入失败", { kind: "danger" }));
           }}
           onShortcuts={() => setShortcutsOpen(true)}
+          initialSection={settingsSection ?? undefined}
+          isDesktop={Boolean(bridge)}
+          onOpenInbox={() => {
+            setSettingsOpen(false);
+            setInboxOpen(true);
+          }}
         />
       ) : null}
       {historyOpen && activeId ? (
@@ -772,6 +981,15 @@ export default function App(): ReactNode {
         />
       ) : null}
       {shortcutsOpen ? <ShortcutsDialog onClose={() => setShortcutsOpen(false)} /> : null}
+      {/* UI-03：外部导入的待确认内容。入库走 L2 接收端，落盘始终在渲染层。 */}
+      <InboxPanel
+        open={inboxOpen}
+        onClose={() => {
+          setInboxOpen(false);
+          setInboxPending(inboxCount());
+        }}
+        onOpenNote={(path) => openNote(path)}
+      />
       {needsPermission ? (
         <PermissionDialog
           record={needsPermission}
@@ -792,6 +1010,7 @@ export default function App(): ReactNode {
 
       <MenuHost />
       <DialogHost />
+      <ConflictDialogHost />
       <Toasts />
 
       <input
@@ -922,6 +1141,27 @@ function PermissionDialog({
 }
 
 /* --------------------------------------------------------------- helpers */
+
+/**
+ * 按 `importId` 撤销一次导入（`opennote:import:undo` 的渲染层实现）。
+ *
+ * 用导入日志还原出前像凭据：有前像 → 逐字节覆盖回导入前的版本；没有 → 只能
+ * 降级为「移入回收站」，且 `mode` 如实返回（UI 不得在不可回退时承诺「恢复原样」）。
+ */
+async function undoImportById(importId: string): Promise<ImportUndoResult> {
+  if (!importId) return { ok: false, mode: "none", message: "没有指定要撤销的导入。" };
+  const entry = await findImportLogEntry(importId);
+  if (!entry) return { ok: false, mode: "none", message: "没有找到这条导入记录。" };
+  const receipt = {
+    importId: entry.importId,
+    path: entry.path,
+    preimage:
+      entry.revertible && entry.preimagePath
+        ? { path: entry.preimagePath, bytes: entry.preimageBytes ?? 0, sha256: entry.preimageSha256 ?? "" }
+        : null,
+  } as unknown as ImportReceipt;
+  return undoImport(receipt);
+}
 
 function storageLabel(record: WorkspaceRecord): string {
   if (record.kind === "node") return `本机磁盘 · ${record.location}`;

@@ -39,6 +39,10 @@ export interface CommandContext {
   printNote(): void;
   setTheme(theme: ThemeId): void;
   notify(message: string): void;
+  /** 打开导入收件箱（外部导入的待确认内容）。 */
+  openInbox(): void;
+  /** 打开「设置 · 导入与接口」，剪藏通道与本地接口都在那一栏。 */
+  openImportSettings(): void;
 }
 
 export type CommandGroup =
@@ -256,6 +260,21 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       group: "视图",
       icon: "hash",
       run: () => ctx.toggleWordCount(),
+    },
+
+    {
+      id: "open-inbox",
+      label: "打开导入收件箱",
+      group: "数据",
+      icon: "download",
+      run: () => ctx.openInbox(),
+    },
+    {
+      id: "open-import-settings",
+      label: "导入与接口设置",
+      group: "数据",
+      icon: "layers",
+      run: () => ctx.openImportSettings(),
     },
 
     editorCommand("undo", "撤销", "rotate", accel("Z"), (view) => void undo(view), "编辑"),
