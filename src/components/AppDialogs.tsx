@@ -580,8 +580,8 @@ const SHORTCUTS: [string, string][] = [
   ["切换亮 / 暗", "Ctrl/⌘ + Alt + T"],
   ["打字机 / 专注模式", "Ctrl/⌘ + Shift + Y / D"],
   ["设置 / 快捷键", "Ctrl/⌘ + , / Ctrl/⌘ + /"],
-  ["打印或导出 PDF", "Ctrl/⌘ + P"],
-  ["编辑器内查找 / 替换", "Ctrl/⌘ + F / Ctrl/⌘ + Alt + F"],
+  ["打印或导出 PDF", "Ctrl/⌘ + P（别名 Ctrl/⌘ + Alt + P）"],
+  ["编辑器内查找 / 替换", "Ctrl/⌘ + F（查找面板内含替换输入框；Ctrl/⌘ + Shift + L 选中全部匹配）"],
   ["移动行 / 复制行", "Alt + ↑ / ↓ · Shift + Alt + ↑ / ↓"],
 ];
 

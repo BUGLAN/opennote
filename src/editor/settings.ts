@@ -11,8 +11,6 @@ export interface EditorSettings {
   spellcheck: boolean;
   /** Folder of the note being edited — relative image paths resolve against it. */
   baseDir: string;
-  /** Bumped whenever an image finishes loading so image widgets re-render. */
-  assetTick: number;
 }
 
 export const defaultEditorSettings: EditorSettings = {
@@ -23,7 +21,6 @@ export const defaultEditorSettings: EditorSettings = {
   imageMode: "asset",
   spellcheck: true,
   baseDir: "",
-  assetTick: 0,
 };
 
 export const setEditorSettings = StateEffect.define<Partial<EditorSettings>>();

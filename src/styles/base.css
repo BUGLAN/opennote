@@ -397,3 +397,89 @@ kbd {
   text-align: center;
   font-family: var(--font-ui);
 }
+
+/* ---- boot failure card (see D04) --------------------------------------- */
+.boot--failed {
+  gap: 6px;
+  padding: 32px 24px;
+  text-align: center;
+}
+
+.boot--failed .boot__seal {
+  animation: none;
+}
+
+.boot__actions {
+  display: flex;
+  gap: var(--s2);
+  margin-top: 6px;
+}
+
+.boot__retry {
+  padding: 6px 18px;
+  border-radius: 99px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+
+.boot__detail {
+  max-width: min(680px, 100%);
+  max-height: 30vh;
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--paper-3);
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.boot__note {
+  max-width: 520px;
+  margin: 4px 0 0;
+  color: var(--ink-3);
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+}
+
+/* ---- storage notice (site data blocked, see D04) ------------------------ */
+.storage-notice {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  max-width: min(720px, calc(100vw - 32px));
+  padding: 7px 8px 7px 14px;
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: var(--fs-sm);
+  box-shadow: var(--shadow-2);
+  transform: translateX(-50%);
+  animation: rise var(--dur) var(--ease-out) both;
+}
+
+.storage-notice__text {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.storage-notice__close {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--paper) 35%, transparent);
+  border-radius: 99px;
+  color: inherit;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}

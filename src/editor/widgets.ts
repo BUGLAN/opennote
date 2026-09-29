@@ -169,16 +169,12 @@ export class BulletWidget extends WidgetType {
 }
 
 export class CheckboxWidget extends WidgetType {
-  constructor(
-    readonly checked: boolean,
-    readonly from: number,
-    readonly to: number,
-  ) {
+  constructor(readonly checked: boolean) {
     super();
   }
 
   eq(other: CheckboxWidget): boolean {
-    return other.checked === this.checked && other.from === this.from && other.to === this.to;
+    return other.checked === this.checked;
   }
 
   toDOM(view: EditorView): HTMLElement {
@@ -191,8 +187,12 @@ export class CheckboxWidget extends WidgetType {
     box.checked = this.checked;
     box.setAttribute("aria-label", this.checked ? "标记为未完成" : "标记为已完成");
     box.addEventListener("change", () => {
+      // The decoration may have been moved by an edit since the widget was
+      // built, so resolve the marker from the DOM instead of caching it.
+      const from = view.posAtDOM(host);
+      if (!/^\[[ xX]\]$/.test(view.state.sliceDoc(from, from + 3))) return;
       view.dispatch({
-        changes: { from: this.from, to: this.to, insert: box.checked ? "[x]" : "[ ]" },
+        changes: { from, to: from + 3, insert: box.checked ? "[x]" : "[ ]" },
         userEvent: "input.task",
       });
       view.focus();
@@ -240,14 +240,13 @@ export class WikiLinkWidget extends WidgetType {
 export class TableWidget extends WidgetType {
   constructor(
     readonly html: string,
-    readonly from: number,
     readonly rows: number,
   ) {
     super();
   }
 
   eq(other: TableWidget): boolean {
-    return other.html === this.html && other.from === this.from && other.rows === this.rows;
+    return other.html === this.html && other.rows === this.rows;
   }
 
   toDOM(view: EditorView): HTMLElement {
@@ -265,7 +264,8 @@ export class TableWidget extends WidgetType {
         return;
       }
       event.preventDefault();
-      view.dispatch({ selection: { anchor: this.from }, scrollIntoView: true });
+      // resolved from the DOM: the table may have moved since it was rendered
+      view.dispatch({ selection: { anchor: view.posAtDOM(host) }, scrollIntoView: true });
       view.focus();
     });
     return host;

@@ -12,8 +12,25 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 const MENU_CHANNEL = 'opennote:menu'
 const VERSION_CHANNEL = 'opennote:app:version'
+/** D11 关窗握手：主进程请求落盘 / 渲染层确认落盘完成。 */
+const FLUSH_REQUEST_CHANNEL = 'opennote:app:request-flush'
+const FLUSH_DONE_CHANNEL = 'opennote:app:flush-done'
+/** D08 工作区外部变更（去抖后由主进程广播）。 */
+const WORKSPACE_CHANGED_CHANNEL = 'opennote:fs:workspace-changed'
 
 const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args)
+
+/** 订阅一个主进程频道，返回退订函数（与 onMenu 同一套写法）。 */
+function subscribe(channel, callback) {
+  if (typeof callback !== 'function') return () => {}
+  const listener = (_event, payload) => {
+    callback(payload)
+  }
+  ipcRenderer.on(channel, listener)
+  return () => {
+    ipcRenderer.removeListener(channel, listener)
+  }
+}
 
 /**
  * app.getVersion() 只能在主进程读取，而版本号必须是同步可用的属性，
@@ -45,6 +62,12 @@ const bridge = {
     move: (root, from, to) => invoke('opennote:fs:move', root, from, to),
     exists: (root, relPath) => invoke('opennote:fs:exists', root, relPath),
     stat: (root, relPath) => invoke('opennote:fs:stat', root, relPath),
+    /** D20：把「最近工作区」里的路径重新登记为会话授权；主进程只认自己的持久列表。 */
+    authorizeRoot: (root) => invoke('opennote:fs:authorizeRoot', root),
+    /** D08：监听/取消监听已授权工作区（外部改动去抖通知）。 */
+    watchWorkspace: (root) => invoke('opennote:fs:watchWorkspace', root),
+    unwatchWorkspace: (root) => invoke('opennote:fs:unwatchWorkspace', root),
+    onWorkspaceChanged: (callback) => subscribe(WORKSPACE_CHANGED_CHANNEL, callback),
   },
 
   dialog: {
@@ -61,6 +84,12 @@ const bridge = {
   app: {
     getRecentWorkspaces: () => invoke('opennote:app:getRecentWorkspaces'),
     addRecentWorkspace: (absolutePath) => invoke('opennote:app:addRecentWorkspace', absolutePath),
+    /** D11：主进程请求关窗前落盘，返回退订函数。 */
+    onFlushRequest: (callback) => subscribe(FLUSH_REQUEST_CHANNEL, callback),
+    /** D11：落盘完成，允许主进程继续关窗。 */
+    flushDone: () => {
+      ipcRenderer.send(FLUSH_DONE_CHANNEL)
+    },
   },
 
   window: {

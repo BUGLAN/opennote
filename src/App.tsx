@@ -7,6 +7,7 @@ import {
   createNote,
   cycleTab,
   flushAll,
+  flushForClose,
   flushMeta,
   folderPathLabel,
   initLibrary,
@@ -18,6 +19,7 @@ import {
   reconcileTabs,
   rescanWorkspace,
   seedWelcome,
+  setSidebarTab,
   setStarred,
   trashNote,
   updateNoteContent,
@@ -52,7 +54,7 @@ import { HistoryDialog, SettingsDialog, ShortcutsDialog } from "./components/App
 import { Icon } from "./components/Icons";
 import { DialogHost, MenuHost, Toasts, openMenu } from "./components/Overlays";
 import { Outline } from "./components/Outline";
-import { Sidebar, currentFolderId, type Scope, type SidebarTab } from "./components/Sidebar";
+import { Sidebar, currentFolderId, type Scope } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { TabBar } from "./components/TabBar";
 import { setBridge } from "./editor/bridge";
@@ -64,7 +66,10 @@ export default function App(): ReactNode {
 
   const viewRef = useRef<EditorView | null>(null);
   const [scope, setScope] = useState<Scope>({ kind: "all" });
-  const [tab, setTab] = useState<SidebarTab>("files");
+  // D27: the sidebar tab is real state — it lives in the UI settings and in the
+  // notebook's state.json, so it survives a reload (see `setSidebarTab`).
+  const tab = ui.sidebarTab;
+  const setTab = setSidebarTab;
   const [cursor, setCursor] = useState<CursorInfo>({ line: 1, column: 1, selected: 0 });
   const [palette, setPalette] = useState<null | "all" | "commands">(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -97,6 +102,19 @@ export default function App(): ReactNode {
   useEffect(() => {
     void initLibrary();
   }, []);
+
+  // D11: the desktop shell asks before it closes the window, so the last ≤450ms
+  // of typing still reach the disk (flushAll, then the metadata). `flushForClose`
+  // never rejects, and the main process gives up waiting after ~1.5s — the window
+  // can never hang on this. Packaged preloads older than this hook simply have no
+  // `onFlushRequest`, and browsers never see the event at all.
+  useEffect(() => {
+    const app = bridge?.app;
+    if (typeof app?.onFlushRequest !== "function") return;
+    return app.onFlushRequest(() => {
+      void flushForClose().finally(() => app.flushDone());
+    });
+  }, [bridge]);
 
   useEffect(() => {
     if (!library.ready) return;

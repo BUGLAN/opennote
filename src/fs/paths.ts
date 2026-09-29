@@ -22,6 +22,12 @@ export function assertSafeRelative(input: string): string {
   const value = String(input ?? "");
   if (value.includes("\0")) throw new Error("路径包含非法字符");
   if (/^([a-zA-Z]:|[\\/])/.test(value.trim())) throw new Error("不允许使用绝对路径");
+  // D36: Windows 上 `a.md:secret` 是 NTFS 备用数据流——list() 看不到、内容却真实存在，
+  // 破坏「文件即笔记」的不变量。主进程按同样规则拒绝段内 ':'；sanitizeName 本来就会
+  // 剥掉 ':'，所以正常笔记名不受影响。
+  for (const segment of value.replace(/\\/g, "/").split("/")) {
+    if (segment.includes(":")) throw new Error("路径不能包含冒号");
+  }
   if (value.replace(/\\/g, "/").split("/").includes("..")) throw new Error("路径越界");
   return normalizePath(value);
 }
@@ -85,25 +91,39 @@ export function sanitizeName(name: string, fallback = "未命名"): string {
   return (cleaned || fallback).slice(0, 80);
 }
 
-/** `a.md` → `a 2.md` when `a.md` is taken. */
-export function uniquePath(candidate: string, taken: Set<string>): string {
-  if (!taken.has(candidate)) return candidate;
+/**
+ * `a.md` → `a 2.md` when `a.md` is taken.
+ *
+ * D30: 调用方可以要求按大小写折叠比较（Windows / macOS 的磁盘上 `README.md` 与
+ * `readme.md` 是同一个文件）。默认保持大小写敏感，因为浏览器 OPFS 实测是大小写
+ * 敏感的——「哪个后端不敏感」是后端的能力，不能靠平台猜测写死在这里。
+ */
+export function uniquePath(
+  candidate: string,
+  taken: Set<string>,
+  options: { foldCase?: boolean } = {},
+): string {
+  const key = (value: string) => (options.foldCase ? value.toLowerCase() : value);
+  const has = (value: string): boolean => {
+    if (taken.has(value)) return true;
+    if (!options.foldCase) return false;
+    const folded = key(value);
+    for (const entry of taken) {
+      if (key(entry) === folded) return true;
+    }
+    return false;
+  };
+  if (!has(candidate)) return candidate;
   const dir = parentPath(candidate);
   const ext = extName(candidate);
   const base = baseName(stripExtension(candidate));
   let counter = 2;
   let next = joinPath(dir, `${base} ${counter}${ext}`);
-  while (taken.has(next)) {
+  while (has(next)) {
     counter += 1;
     next = joinPath(dir, `${base} ${counter}${ext}`);
   }
   return next;
-}
-
-/** Snapshot files live flat in `.opennote/history`, so paths must be encoded. */
-export function encodeHistoryName(path: string, stamp: number): string {
-  const safe = normalizePath(path).replace(/[^\w\u4e00-\u9fff.-]+/g, "_").slice(-60);
-  return `${safe}.${stamp}.md`;
 }
 
 export function formatStamp(ms: number): string {

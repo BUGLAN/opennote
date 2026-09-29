@@ -14,12 +14,14 @@ import {
   sanitizeName,
   stripExtension,
   uniquePath,
+  type EntryInfo,
   type FileSystemBackend,
 } from "../fs";
 import { createStore, useStore } from "../lib/store";
 import { countText, deriveTags, deriveTitle, normalizeEol, splitFrontMatter, stripMarkdown, uid } from "../lib/utils";
+import { desktopBridge } from "../desktop/bridge";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
-import type { Folder, Id, Note, Snapshot, SnapshotReason, SortKey } from "./types";
+import type { Folder, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
 import { getUi, patchUi } from "./ui";
 import { activeWorkspaceRecord, resolveBackend, setActiveWorkspace, type WorkspaceRecord } from "./workspaces";
 
@@ -70,9 +72,17 @@ interface WorkspaceMeta {
   starred: Id[];
   expanded: Id[];
   lastOpened: Id | null;
+  /** UI bits that belong to this notebook rather than to this machine (D27). */
+  ui?: { sidebarTab: SidebarTab };
 }
 
 const defaultMeta: WorkspaceMeta = { version: 1, starred: [], expanded: [], lastOpened: null };
+
+const SIDEBAR_TABS: SidebarTab[] = ["files", "search", "tags", "starred"];
+
+function isSidebarTab(value: unknown): value is SidebarTab {
+  return typeof value === "string" && (SIDEBAR_TABS as string[]).includes(value);
+}
 
 let backend: FileSystemBackend | null = null;
 let meta: WorkspaceMeta = { ...defaultMeta };
@@ -80,8 +90,27 @@ let metaTimer: ReturnType<typeof setTimeout> | null = null;
 const writeTimers = new Map<Id, ReturnType<typeof setTimeout>>();
 const pendingWrites = new Map<Id, Promise<void>>();
 const lastSnapshotAt = new Map<Id, number>();
+/** Snapshot file names handed out this session, so two clicks in one millisecond differ (D14). */
+const snapshotNames = new Map<Id, Set<string>>();
+/** Notes whose last snapshot write failed: the next edit retries instead of waiting 3 min (D22). */
+const snapshotFailures = new Set<Id>();
+/** In-flight snapshot writes; `flushAll` waits for them so closing cannot drop one (D22). */
+const pendingSnapshots = new Set<Promise<void>>();
 const SNAPSHOT_INTERVAL = 3 * 60_000;
 const SNAPSHOT_KEEP = 60;
+/** Per-note memory of handed-out names; the on-disk check still catches recycled ones. */
+const SNAPSHOT_NAME_MEMORY = 200;
+/** Backend calls a workspace scan keeps in flight — the walk used to be one IPC call at a time (D25). */
+const SCAN_CONCURRENCY = 12;
+
+/** Bumped by every open/close: a slow scan must never publish into a newer workspace (D02). */
+let generation = 0;
+/** Last stamp we know for a file on disk; a mismatch means somebody else edited it (D08). */
+const knownStats = new Map<Id, { size: number; mtimeMs: number }>();
+/** In-flight create preflights. Writes wait for them, so a late clash cannot clobber a file (D03). */
+const createGuards = new Map<Id, Promise<void>>();
+/** Raised while reading a broken state file, surfaced once the workspace state has settled (D10). */
+let metaWarning: string | null = null;
 
 export function currentBackend(): FileSystemBackend | null {
   return backend;
@@ -189,71 +218,186 @@ export interface ScanResult {
   meta: WorkspaceMeta;
   files: number;
   bytes: number;
+  /** On-disk stamps per note id, seeded into `knownStats` by open/rescan (D08). */
+  stamps: Record<Id, { size: number; mtimeMs: number }>;
+}
+
+/**
+ * A broken state file used to be silently replaced with defaults (D10). Keep the
+ * original bytes next to it so nothing is unrecoverable.
+ */
+async function backupCorruptState(target: FileSystemBackend, raw: string): Promise<string> {
+  const backup = `${STATE_FILE}.corrupt-${Date.now()}`;
+  try {
+    await target.writeText(backup, raw);
+  } catch (error) {
+    console.warn("[opennote] 无法备份损坏的状态文件", error);
+  }
+  return backup;
 }
 
 async function readMeta(target: FileSystemBackend): Promise<WorkspaceMeta> {
-  const raw = await readOptionalText(target, STATE_FILE);
+  let raw: string | undefined;
+  try {
+    raw = await readOptionalText(target, STATE_FILE);
+  } catch (error) {
+    // A state file that cannot be read (locked, EACCES, a directory in its
+    // place) must not take the whole notebook down with it (D26).
+    console.warn("[opennote] 无法读取笔记本状态文件", error);
+    metaWarning = "状态文件无法读取，本次使用默认状态";
+    return { ...defaultMeta };
+  }
   if (raw === undefined) return { ...defaultMeta };
   try {
     const parsed = JSON.parse(raw) as Partial<WorkspaceMeta>;
+    const sidebarTab = parsed.ui?.sidebarTab;
     return {
       version: 1,
       starred: Array.isArray(parsed.starred) ? parsed.starred.map(String) : [],
       expanded: Array.isArray(parsed.expanded) ? parsed.expanded.map(String) : [],
       lastOpened: parsed.lastOpened ? String(parsed.lastOpened) : null,
+      ...(isSidebarTab(sidebarTab) ? { ui: { sidebarTab } } : {}),
     };
   } catch (error) {
-    console.warn("[opennote] 笔记本状态文件无法解析，使用默认状态", error);
+    const backup = await backupCorruptState(target, raw);
+    metaWarning = `原文件已备份为 ${backup}，本次使用默认状态`;
+    console.warn("[opennote] 笔记本状态文件无法解析", backup, error);
     return { ...defaultMeta };
   }
 }
 
+/** One directory of a scan; `entries` keeps the order `list()` returned. */
+interface ScanDir {
+  path: string;
+  inTrash: boolean;
+  entries: EntryInfo[];
+  listed: boolean;
+}
+
+/** Run `work` over `items` with at most `limit` calls in flight (D25). */
+async function forEachLimited<T>(items: T[], limit: number, work: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = cursor;
+      if (index >= items.length) return;
+      cursor += 1;
+      await work(items[index]);
+    }
+  });
+  await Promise.all(workers);
+}
+
+/**
+ * Read the folder on disk into memory. Directories are discovered level by
+ * level and notes are read afterwards, both with a bounded number of backend
+ * calls in flight: the old walk awaited every `list()` and `readText()` before
+ * issuing the next one, i.e. one IPC round trip per file (D25). The published
+ * records are still emitted in the same depth-first order as before, and a
+ * directory or note that cannot be read is still skipped with a warning.
+ */
 export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResult> {
   const notes: Record<Id, Note> = {};
   const folders: Record<Id, Folder> = {};
   const trash: Record<Id, Note> = {};
+  const stamps: Record<Id, { size: number; mtimeMs: number }> = {};
   let files = 0;
   let bytes = 0;
 
-  const walk = async (dir: string, inTrash: boolean): Promise<void> => {
-    let entries;
+  const children = new Map<Id, ScanDir>();
+  const root: ScanDir = { path: "", inTrash: false, entries: [], listed: false };
+
+  const listDir = async (node: ScanDir): Promise<void> => {
     try {
-      entries = await target.list(dir);
+      node.entries = await target.list(node.path);
+      node.listed = true;
     } catch (error) {
-      console.warn("[opennote] 无法读取目录", dir || "/", error);
-      return;
-    }
-    for (const entry of entries) {
-      const path = joinPath(dir, entry.name);
-      if (entry.kind === "directory") {
-        if (!inTrash && (isHiddenPath(path) || entry.name === ASSETS_DIR || entry.name === "node_modules" || entry.name === "dist" || entry.name === "release")) continue;
-        if (!inTrash) folders[path] = makeFolder(path, entry.mtimeMs);
-        await walk(path, inTrash);
-        continue;
-      }
-      if (!isMarkdownPath(path)) continue;
-      let content = "";
-      try {
-        content = await target.readText(path);
-      } catch (error) {
-        console.warn("[opennote] 无法读取笔记", path, error);
-        continue;
-      }
-      files += 1;
-      bytes += entry.size || content.length;
-      const note = makeNote(path, content, entry.mtimeMs, { trashed: inTrash });
-      if (inTrash) trash[path] = note;
-      else notes[path] = note;
+      console.warn("[opennote] 无法读取目录", node.path || "/", error);
     }
   };
 
-  await walk("", false);
-  if (await target.exists(TRASH_DIR)) await walk(TRASH_DIR, true);
+  // Phase 1: discover the tree. Each wave lists its directories concurrently.
+  const discover = async (start: ScanDir): Promise<void> => {
+    let wave: ScanDir[] = [start];
+    while (wave.length) {
+      await forEachLimited(wave, SCAN_CONCURRENCY, listDir);
+      const next: ScanDir[] = [];
+      for (const node of wave) {
+        if (!node.listed) continue;
+        for (const entry of node.entries) {
+          if (entry.kind !== "directory") continue;
+          const path = joinPath(node.path, entry.name);
+          if (!node.inTrash && (isHiddenPath(path) || entry.name === ASSETS_DIR || entry.name === "node_modules" || entry.name === "dist" || entry.name === "release")) continue;
+          const child: ScanDir = { path, inTrash: node.inTrash, entries: [], listed: false };
+          children.set(path, child);
+          next.push(child);
+        }
+      }
+      wave = next;
+    }
+  };
+
+  await discover(root);
+  // The trash keeps whatever layout it was given, so it is walked on its own —
+  // after the main tree, exactly like the recursive walk it replaces.
+  let trashRoot: ScanDir | null = null;
+  if (await target.exists(TRASH_DIR)) {
+    trashRoot = { path: TRASH_DIR, inTrash: true, entries: [], listed: false };
+    children.set(TRASH_DIR, trashRoot);
+    await discover(trashRoot);
+  }
+
+  // Phase 2: read every markdown file, again with bounded concurrency.
+  const pending: { path: Id; size: number; mtimeMs: number }[] = [];
+  for (const node of [root, ...children.values()]) {
+    if (!node.listed) continue;
+    for (const entry of node.entries) {
+      if (entry.kind !== "file") continue;
+      const path = joinPath(node.path, entry.name);
+      if (!isMarkdownPath(path)) continue;
+      pending.push({ path, size: entry.size, mtimeMs: entry.mtimeMs });
+    }
+  }
+  const contents = new Map<Id, string>();
+  await forEachLimited(pending, SCAN_CONCURRENCY, async (item) => {
+    try {
+      contents.set(item.path, await target.readText(item.path));
+    } catch (error) {
+      console.warn("[opennote] 无法读取笔记", item.path, error);
+    }
+  });
+
+  // Phase 3: publish in depth-first order, without touching the backend again.
+  const emit = (node: ScanDir): void => {
+    if (!node.listed) return;
+    for (const entry of node.entries) {
+      const path = joinPath(node.path, entry.name);
+      if (entry.kind === "directory") {
+        const child = children.get(path);
+        if (!child) continue;
+        if (!node.inTrash) folders[path] = makeFolder(path, entry.mtimeMs);
+        emit(child);
+        continue;
+      }
+      if (!isMarkdownPath(path)) continue;
+      const content = contents.get(path);
+      if (content === undefined) continue;
+      files += 1;
+      bytes += entry.size || content.length;
+      const note = makeNote(path, content, entry.mtimeMs, { trashed: node.inTrash });
+      stamps[path] = { size: entry.size || content.length, mtimeMs: entry.mtimeMs || note.updatedAt };
+      if (node.inTrash) trash[path] = note;
+      else notes[path] = note;
+    }
+  };
+  emit(root);
+  if (trashRoot) emit(trashRoot);
+
   const workspaceMeta = await readMeta(target);
   for (const path of workspaceMeta.starred) {
     if (notes[path]) notes[path] = { ...notes[path], starred: true };
   }
-  return { notes, folders, trash, meta: workspaceMeta, files, bytes };
+  return { notes, folders, trash, meta: workspaceMeta, files, bytes, stamps };
 }
 
 /** Restore the workspace the user had open last time. */
@@ -277,18 +421,48 @@ export async function initLibrary(): Promise<void> {
   }
 }
 
+/** Remember what the notes looked like on disk, so a later save can spot an external edit. */
+function applyStamps(stamps: ScanResult["stamps"]): void {
+  knownStats.clear();
+  for (const [id, stamp] of Object.entries(stamps)) knownStats.set(id, stamp);
+}
+
+/** Surface a warning collected while scanning, once the new state is in place (D10). */
+function flushMetaWarning(): void {
+  if (!metaWarning) return;
+  const warning = metaWarning;
+  metaWarning = null;
+  reportError(new Error(warning), "笔记本状态文件损坏");
+}
+
 export async function openWorkspace(
   record: WorkspaceRecord,
   options: { silent?: boolean; requestPermission?: boolean } = {},
 ): Promise<void> {
+  const myGen = ++generation;
+  // The notebook being replaced must not deliver change notifications into the
+  // next one (a failed open leaves no watcher behind either) — see D02/D08.
+  stopWatching();
   setState((prev) => ({ ...prev, loading: true, error: null }));
+  // The notebook that is being replaced is only abandoned once its edits are on
+  // disk; a failure before that point must not throw them away.
+  let flushed = false;
   try {
     await flushAll();
     await flushMeta();
+    flushed = true;
     const resolved = await resolveBackend(record, options.requestPermission ?? false);
-    backend = resolved;
     const scanned = await scanWorkspace(resolved);
+    // A newer open/close won the race: dropping this result beats publishing a
+    // stale tree (and later writing its notes into the wrong folder) — see D02.
+    if (myGen !== generation) return;
+    backend = resolved;
+    // The throttle keys are note paths, and the same path in another notebook
+    // is a different note, so nothing may carry over (D22).
+    resetWorkspaceTransients();
     meta = scanned.meta;
+    applyStamps(scanned.stamps);
+    invalidateSearchCache();
     setActiveWorkspace(record.id);
     setState((prev) => ({
       ...prev,
@@ -303,16 +477,51 @@ export async function openWorkspace(
       lastSavedAt: Date.now(),
       stats: { files: scanned.files, bytes: scanned.bytes },
     }));
-    patchUi({ expanded: meta.expanded, tabs: [], activeId: null });
+    patchUi({
+      expanded: meta.expanded,
+      tabs: [],
+      activeId: null,
+      ...(meta.ui ? { sidebarTab: meta.ui.sidebarTab } : {}),
+    });
     const last = meta.lastOpened && scanned.notes[meta.lastOpened] ? meta.lastOpened : null;
     if (last) openNote(last);
     if (!options.silent) {
       await ensureWorkspaceScaffold(resolved);
     }
+    flushMetaWarning();
+    startWatching(record.location);
   } catch (error) {
-    setState((prev) => ({ ...prev, loading: false, ready: true }));
+    if (myGen === generation) {
+      stopWatching();
+      if (flushed) {
+        // A failed open must not leave a live backend behind a "no notebook"
+        // UI: the next keystroke would land in a folder nobody can see (D26).
+        backend = null;
+        meta = { ...defaultMeta };
+        knownStats.clear();
+        resetWorkspaceTransients();
+        invalidateSearchCache();
+        setState(() => ({
+          ...emptyState,
+          ready: true,
+          error: error instanceof Error ? error.message : "无法打开笔记本",
+        }));
+      } else {
+        setState((prev) => ({ ...prev, loading: false, ready: true }));
+      }
+    }
     throw error;
   }
+}
+
+/** Drop everything that only means something while one notebook is open (D22/D26). */
+function resetWorkspaceTransients(): void {
+  lastSnapshotAt.clear();
+  snapshotNames.clear();
+  snapshotFailures.clear();
+  createGuards.clear();
+  for (const timer of writeTimers.values()) clearTimeout(timer);
+  writeTimers.clear();
 }
 
 /** Make sure the workspace has the folders the notebook expects. */
@@ -321,11 +530,125 @@ async function ensureWorkspaceScaffold(target: FileSystemBackend): Promise<void>
   await target.mkdir(META_DIR).catch(() => undefined);
 }
 
+/* ------------------------------------------------------------------ watching */
+
+/**
+ * D08, second half: the main process watches the workspace folder and tells us
+ * when something changed outside the app (editor, sync client, git). Its own
+ * debounce is 450ms, so this layer only waits for the writes to settle before
+ * reading — two layers, not a chain of them.
+ */
+const WATCH_DEBOUNCE_MS = 500;
+
+/** Unsubscribe function of the current `fs.onWorkspaceChanged` listener. */
+let watchUnsubscribe: (() => void) | null = null;
+/** Absolute root we are currently watching; also filters foreign events. */
+let watchedRoot: string | null = null;
+/** Pending debounce timer for a change notification. */
+let watchTimer: ReturnType<typeof setTimeout> | null = null;
+/** A rescan is in flight; further notifications only ask for one trailing pass. */
+let watchRescanRunning = false;
+let watchRescanQueued = false;
+
+/** The main process reports absolute paths; Windows/macOS compare case-insensitively. */
+function sameRoot(a: string | null, b: string | null): boolean {
+  if (!a || !b) return false;
+  const normalize = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return normalize(a) === normalize(b);
+}
+
+/**
+ * Subscribe to external changes of `root` and ask the main process to watch the
+ * folder. Older preloads and the browser fallback have no such API, so this is a
+ * silent no-op there (D08 must not change the startup path).
+ */
+function startWatching(root: string): void {
+  stopWatching();
+  const bridge = desktopBridge();
+  const fs = bridge?.fs;
+  if (typeof fs?.watchWorkspace !== "function" || typeof fs.onWorkspaceChanged !== "function") return;
+  watchedRoot = root;
+  watchUnsubscribe = fs.onWorkspaceChanged((changed) => {
+    // The event is broadcast to every window: ignore other notebooks.
+    if (!sameRoot(changed, watchedRoot)) return;
+    scheduleWatchRescan();
+  });
+  void fs.watchWorkspace(root).catch((error) => {
+    console.warn("[opennote] 无法监听工作区变化", error);
+  });
+}
+
+/** Drop the listener, the pending rescan and the main-process watcher. */
+function stopWatching(): void {
+  if (watchTimer) {
+    clearTimeout(watchTimer);
+    watchTimer = null;
+  }
+  // A trailing pass that was queued for a notebook we just left is meaningless.
+  watchRescanQueued = false;
+  const unsubscribe = watchUnsubscribe;
+  watchUnsubscribe = null;
+  if (unsubscribe) {
+    try {
+      unsubscribe();
+    } catch (error) {
+      console.warn("[opennote] 退订工作区变更失败", error);
+    }
+  }
+  const root = watchedRoot;
+  watchedRoot = null;
+  if (!root) return;
+  const bridge = desktopBridge();
+  if (typeof bridge?.fs?.unwatchWorkspace !== "function") return;
+  void bridge.fs.unwatchWorkspace(root).catch((error) => {
+    console.warn("[opennote] 取消监听工作区失败", error);
+  });
+}
+
+function scheduleWatchRescan(): void {
+  if (watchTimer) clearTimeout(watchTimer);
+  watchTimer = setTimeout(() => {
+    watchTimer = null;
+    void runWatchRescan();
+  }, WATCH_DEBOUNCE_MS);
+  watchTimer.unref?.();
+}
+
+/**
+ * A sync client can touch hundreds of files in a second. Only one rescan runs at
+ * a time; everything that arrives meanwhile collapses into a single trailing
+ * pass, so a storm never queues up a backlog of scans.
+ */
+async function runWatchRescan(): Promise<void> {
+  if (watchRescanRunning) {
+    watchRescanQueued = true;
+    return;
+  }
+  watchRescanRunning = true;
+  try {
+    do {
+      watchRescanQueued = false;
+      await rescanWorkspace();
+    } while (watchRescanQueued);
+  } catch (error) {
+    console.warn("[opennote] 重扫工作区失败", error);
+  } finally {
+    watchRescanRunning = false;
+  }
+}
+
 export async function closeWorkspace(): Promise<void> {
+  generation += 1;
+  // Leaving the notebook: no late notification may rescan into it (D02/D08).
+  stopWatching();
   await flushAll();
   await flushMeta();
   backend = null;
   meta = { ...defaultMeta };
+  knownStats.clear();
+  // Snapshot throttling is per notebook, so closing releases the table (D22).
+  resetWorkspaceTransients();
+  invalidateSearchCache();
   libraryStore.set({ ...emptyState, ready: true });
 }
 
@@ -333,20 +656,66 @@ export async function closeWorkspace(): Promise<void> {
 export async function rescanWorkspace(): Promise<void> {
   const target = backend;
   if (!target) return;
+  const myGen = generation;
+  // A broken state file is reported after the new state is published; a conflict
+  // notice raised while flushing below must survive this rescan as well (D08).
+  const errorBefore = libraryStore.get().error;
+  // Everything that is still only in memory when the scan starts. `flushAll()`
+  // writes it, but a scan that raced with a slow write can still read the older
+  // bytes, so these ids are compared against the scan before publishing (D01/D08).
+  const dirtyBefore = new Set(Object.keys(libraryStore.get().dirty));
   await flushAll();
-  if (target !== backend) return;
+  if (myGen !== generation || target !== backend) return;
   const scanned = await scanWorkspace(target);
+  if (myGen !== generation || target !== backend) return;
   meta = { ...scanned.meta, expanded: getUi().expanded, lastOpened: getUi().activeId ?? scanned.meta.lastOpened };
+  applyStamps(scanned.stamps);
   invalidateSearchCache();
-  setState((prev) => ({
-    ...prev,
-    notes: scanned.notes,
-    folders: scanned.folders,
-    trash: scanned.trash,
-    error: null,
-    stats: { files: scanned.files, bytes: scanned.bytes },
-  }));
+  const keptDirty: Id[] = [];
+  setState((prev) => {
+    const notes = { ...scanned.notes };
+    const dirty: Record<Id, true> = {};
+    for (const id of new Set([...Object.keys(prev.dirty), ...dirtyBefore])) {
+      const disk = notes[id];
+      // The file is gone (deleted or moved outside): a dirty key could never be
+      // flushed again, so it is dropped like before.
+      if (!disk) continue;
+      const local = prev.notes[id];
+      // Disk is at least as new as memory: nothing to protect.
+      if (!local || local.content === disk.content) continue;
+      // The scan read bytes older than what the user has typed: keep the local
+      // text (and its title/tags) so a rescan never reverts an open editor, and
+      // keep the key dirty so the next flush writes it.
+      notes[id] = {
+        ...disk,
+        content: local.content,
+        title: local.title,
+        titleOverride: local.titleOverride,
+        tags: local.tags,
+        words: local.words,
+        chars: local.chars,
+        updatedAt: local.updatedAt,
+        starred: local.starred || disk.starred,
+      };
+      dirty[id] = true;
+      keptDirty.push(id);
+    }
+    const error = prev.error && prev.error !== errorBefore ? prev.error : null;
+    return {
+      ...prev,
+      notes,
+      folders: scanned.folders,
+      trash: scanned.trash,
+      dirty,
+      error,
+      stats: { files: scanned.files, bytes: scanned.bytes },
+    };
+  });
+  // A kept note whose write already finished has no timer left: arm one so the
+  // "unsaved" marker clears by itself instead of staying forever.
+  for (const id of keptDirty) if (!writeTimers.has(id)) persistNoteSoon(id, 300);
   reconcileTabs();
+  flushMetaWarning();
 }
 
 /* -------------------------------------------------------------------- writes */
@@ -360,12 +729,59 @@ function markClean(id: Id): void {
   });
 }
 
+function markDirty(id: Id): void {
+  setState((prev) => ({ ...prev, dirty: { ...prev.dirty, [id]: true } }));
+}
+
+/**
+ * The first candidate path that neither memory nor the backend reports as taken.
+ * `ignore` is the path the caller is moving away from: on a case-insensitive
+ * disk `exists()` still answers true for its own case-variant (D07/D30).
+ */
+export async function resolveAvailablePath(
+  target: FileSystemBackend,
+  requested: string,
+  taken: Set<string>,
+  ignore?: Id,
+): Promise<string> {
+  const ignored = ignore?.toLowerCase();
+  let candidate = requested;
+  let guard = 0;
+  while ((await target.exists(candidate)) && candidate.toLowerCase() !== ignored) {
+    taken.add(candidate);
+    candidate = uniquePath(requested, taken);
+    guard += 1;
+    if (guard > 500) break;
+  }
+  return candidate;
+}
+
+/**
+ * Keep the disk version of a file that was changed behind our back; the caller
+ * then writes the in-memory version, so both survive (D08).
+ */
+async function preserveConflictCopy(target: FileSystemBackend, id: Id): Promise<string> {
+  const content = await target.readText(id);
+  const dir = parentPath(id);
+  const ext = extName(id) || ".md";
+  const base = baseName(stripExtension(id));
+  const stamp = formatStamp(Date.now()).replace(/[: ]/g, "-");
+  const taken = new Set<string>();
+  const path = await resolveAvailablePath(target, joinPath(dir, `${base}.conflict-${stamp}${ext}`), taken);
+  await target.writeText(path, content);
+  return path;
+}
+
 async function flushNote(id: Id): Promise<void> {
   const timer = writeTimers.get(id);
   if (timer) {
     clearTimeout(timer);
     writeTimers.delete(id);
   }
+  // A brand-new note waits for its name preflight: writing before it settles is
+  // exactly how an existing file used to get emptied (D03).
+  const gate = createGuards.get(id);
+  if (gate) await gate.catch(() => undefined);
   const note = libraryStore.get().notes[id];
   const target = backend;
   if (!note || !target) {
@@ -373,7 +789,24 @@ async function flushNote(id: Id): Promise<void> {
     return;
   }
   const prior = pendingWrites.get(id);
-  const write = (prior?.catch(() => undefined) ?? Promise.resolve()).then(() => target.writeText(id, note.content));
+  const write = (prior?.catch(() => undefined) ?? Promise.resolve()).then(async () => {
+    const known = knownStats.get(id);
+    const current = await target.stat(id).catch(() => null);
+    if (known && current && (current.mtimeMs !== known.mtimeMs || current.size !== known.size)) {
+      const onDisk = await target.readText(id).catch(() => null);
+      if (onDisk === null || normalizeEol(onDisk) !== note.content) {
+        const copy = await preserveConflictCopy(target, id);
+        reportError(
+          new Error(`磁盘上的文件在应用外被修改，原内容已保留为 ${copy}`),
+          "检测到外部修改",
+        );
+      }
+    }
+    await target.writeText(id, note.content);
+    const after = await target.stat(id).catch(() => null);
+    if (after) knownStats.set(id, after);
+    else knownStats.delete(id);
+  });
   pendingWrites.set(id, write);
   try {
     await write;
@@ -393,14 +826,38 @@ function persistNoteSoon(id: Id, delay = 450): void {
 }
 
 export async function flushAll(): Promise<void> {
+  if (createGuards.size) await Promise.allSettled([...createGuards.values()]);
   const ids = new Set([...writeTimers.keys(), ...Object.keys(libraryStore.get().dirty)]);
   await Promise.all([...ids].map((id) => flushNote(id)));
   await Promise.all([...pendingWrites.values()]);
+  // History counts as "written": a snapshot that is still on its way must not be
+  // left behind by a close, and a rename must not move the directory it writes into (D22).
+  if (pendingSnapshots.size) await Promise.allSettled([...pendingSnapshots.values()]);
 }
 
 function scheduleMeta(delay = 700): void {
   if (metaTimer) clearTimeout(metaTimer);
   metaTimer = setTimeout(() => { void flushMeta(); }, delay);
+}
+
+/**
+ * D10: 元数据（`.opennote/state.json`）落盘。
+ *
+ * 三种后端的 `writeText` 本身就已经是「先写临时文件、再覆盖目标」：
+ * node 走主进程的 tmp+rename，fsa/opfs 走 `writeFileSafely`。所以一次 `writeText`
+ * 就等价于过去 tmp + move 的加固，而且**没有**「目标已删掉、新内容还没就位」的窗口。
+ *
+ * 这里曾经写成「写 tmp → move(tmp, state.json)，失败再 remove + move」：所有后端的
+ * `move` 都不覆盖已存在的目标（见 FileSystemBackend.move 契约），于是第二次起的那次
+ * move 是**注定失败**的。渲染层 catch 得住，但 Electron 会为每个被拒绝的
+ * `ipcMain.handle` 打印一条错误 —— 每次元数据落盘都在控制台刷一条
+ * `Error occurred in handler for 'opennote:fs:move': 目标路径已存在：.opennote/state.json`，
+ * 真正的故障被淹没。别再拿一次注定失败的调用当探测手段。
+ */
+async function writeStateFile(target: FileSystemBackend, contents: string): Promise<void> {
+  await target.writeText(STATE_FILE, contents);
+  // 清掉旧方案（tmp + move）可能在磁盘上留下的临时文件；缺失时静默忽略。
+  await target.remove(`${STATE_FILE}.tmp`).catch(() => undefined);
 }
 
 export async function flushMeta(): Promise<void> {
@@ -412,48 +869,87 @@ export async function flushMeta(): Promise<void> {
   if (!target) return;
   const contents = `${JSON.stringify(meta, null, 2)}\n`;
   try {
-    await target.writeText(STATE_FILE, contents);
+    await writeStateFile(target, contents);
   } catch (error) {
     reportError(error, "写入笔记本元数据失败");
   }
 }
 
+/** Notes first, metadata second, never a floating rejection (D11). */
+export async function flushForClose(): Promise<void> {
+  try {
+    await flushAll();
+  } catch (error) {
+    console.warn("[opennote] 关闭前仍有笔记没有写入磁盘", error);
+  }
+  try {
+    await flushMeta();
+  } catch (error) {
+    console.warn("[opennote] 关闭前元数据写入失败", error);
+  }
+}
+
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => {
-    flushAll();
-    flushMeta();
+    void flushForClose();
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") {
-      flushAll();
-      flushMeta();
-    }
+    if (document.visibilityState === "hidden") void flushForClose();
   });
 }
 
 /* --------------------------------------------------------------------- notes */
 
-function uniqueNotePath(title: string, folderId: Id | null, taken: Set<string>): string {
-  const dir = folderId ?? "";
-  const name = `${sanitizeName(title, "无标题")}.md`;
-  return uniquePath(joinPath(dir, name), taken);
-}
-
 export function createNote(options: { folderId?: Id | null; content?: string; title?: string | null; open?: boolean } = {}): Note {
   const target = backend;
   const folderId = options.folderId ?? null;
   const title = options.title ?? "无标题";
-  const path = target
-    ? uniqueNotePath(title, folderId, new Set(Object.keys(libraryStore.get().notes)))
-    : `${sanitizeName(title, "无标题")}.md`;
+  const fileName = `${sanitizeName(title, "无标题")}.md`;
+  const taken = new Set(Object.keys(libraryStore.get().notes));
+  const path = target ? uniquePath(joinPath(folderId ?? "", fileName), taken) : fileName;
   const content = options.content ?? "";
   const note = makeNote(path, content, Date.now());
   patchNotes((notes) => ({ ...notes, [note.id]: note }));
-  setState((prev) => ({ ...prev, dirty: { ...prev.dirty, [note.id]: true } }));
-  void flushNote(note.id).catch(() => undefined);
+  markDirty(note.id);
   if (folderId) expandFolder(folderId);
   if (options.open !== false) openNote(note.id);
+  if (target) preflightCreateNote(target, note.id);
+  else void flushNote(note.id).catch(() => undefined);
   return note;
+}
+
+/**
+ * Names are reserved in memory first and then re-checked against the disk. A
+ * file that appeared after the last scan (external editor, sync client, git)
+ * must never be emptied by a new note that happens to share its name (D03/D30).
+ */
+function preflightCreateNote(target: FileSystemBackend, id: Id): void {
+  const taken = new Set(Object.keys(libraryStore.get().notes));
+  let settle!: () => void;
+  const gate = new Promise<void>((resolve) => { settle = resolve; });
+  createGuards.set(id, gate);
+  void (async () => {
+    let free = id;
+    try {
+      if (backend === target) {
+        free = await resolveAvailablePath(target, id, taken);
+        if (free !== id) remapIds(id, free);
+      }
+    } catch (error) {
+      reportError(error, "新建笔记失败");
+    } finally {
+      // Release the gate before the write, otherwise flushNote() would await itself.
+      createGuards.delete(id);
+      settle();
+    }
+    if (backend === target) await flushNote(free).catch(() => undefined);
+  })();
+}
+
+function replaceExpandedId(oldId: Id, newId: Id): void {
+  const ui = getUi();
+  if (!ui.expanded.includes(oldId)) return;
+  patchUi({ expanded: [...new Set(ui.expanded.map((id) => (id === oldId ? newId : id)))] });
 }
 
 export function updateNoteContent(id: Id, content: string, options: { immediate?: boolean } = {}): void {
@@ -462,10 +958,65 @@ export function updateNoteContent(id: Id, content: string, options: { immediate?
   const next = refresh(previous, content);
   next.updatedAt = Date.now();
   patchNotes((notes) => ({ ...notes, [id]: next }));
-  setState((prev) => ({ ...prev, dirty: { ...prev.dirty, [id]: true } }));
+  markDirty(id);
+  invalidateSearchCache(id);
   if (options.immediate) void flushNote(id).catch(() => undefined);
   else persistNoteSoon(id);
   maybeSnapshot(previous, next);
+}
+
+/** Case-only rename: away to a hidden temp name and back (D07). */
+async function moveCaseOnly(target: FileSystemBackend, id: Id, nextPath: Id): Promise<void> {
+  const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const temp = joinPath(parentPath(id), `.opennote-tmp-${token}${extName(id)}`);
+  await target.move(id, temp);
+  try {
+    await target.move(temp, nextPath);
+  } catch (error) {
+    await target.move(temp, id).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Snapshot directories are keyed by the note's path, so a rename/move has to
+ * take the directory along: otherwise the history is orphaned and a brand-new
+ * note that reuses the old name inherits it — including a "restore" that would
+ * paste somebody else's text into the new note (D15).
+ *
+ * Never throws: a rename that succeeded on disk must not be reported as failed
+ * because its history could not follow.
+ */
+async function moveHistory(target: FileSystemBackend, oldId: Id, newId: Id): Promise<void> {
+  const from = joinPath(HISTORY_DIR, oldId);
+  const to = joinPath(HISTORY_DIR, newId);
+  if (from === to) return;
+  try {
+    if (!(await target.exists(from))) return;
+    // A case-only rename points at the very same directory on a case-insensitive
+    // disk, where `exists(to)` answers true for the source itself (D07).
+    const caseOnly = from.toLowerCase() === to.toLowerCase();
+    if (!caseOnly && (await target.exists(to))) {
+      await mergeHistory(target, from, to);
+      return;
+    }
+    await target.mkdir(parentPath(to)).catch(() => undefined);
+    await target.move(from, to);
+  } catch (error) {
+    console.warn("[opennote] 历史快照未能跟随移动", oldId, error);
+  }
+}
+
+/** Two history directories for one path (an older layout left one behind): keep both. */
+async function mergeHistory(target: FileSystemBackend, from: Id, to: Id): Promise<void> {
+  const entries = await listOptionalDirectory(target, from);
+  const taken = new Set((await listOptionalDirectory(target, to)).map((entry) => entry.name));
+  for (const entry of entries) {
+    const name = uniquePath(entry.name, taken, { foldCase: true });
+    taken.add(name);
+    await target.move(joinPath(from, entry.name), joinPath(to, name)).catch(() => undefined);
+  }
+  await target.remove(from, { recursive: true }).catch(() => undefined);
 }
 
 export async function renameNote(id: Id, title: string): Promise<void> {
@@ -473,18 +1024,21 @@ export async function renameNote(id: Id, title: string): Promise<void> {
   const target = backend;
   if (!note || !target) return;
   const clean = sanitizeName(title, "无标题");
+  const requested = joinPath(parentPath(id), `${clean}${extName(id) || ".md"}`);
+  if (requested === id) return;
+  // Only the casing changes: a temp-name round trip is what every backend
+  // accepts on a case-insensitive disk, while uniquePath() would hand back
+  // "名字 2.md" because exists() still sees the file itself (D07).
+  const caseOnly = requested.toLowerCase() === id.toLowerCase();
   const taken = new Set(Object.keys(libraryStore.get().notes));
   taken.delete(id);
-  let nextPath = uniquePath(joinPath(parentPath(id), `${clean}${extName(id) || ".md"}`), taken);
-  if (nextPath === id) return;
   try {
     await flushNote(id);
-    while (await target.exists(nextPath)) {
-      taken.add(nextPath);
-      nextPath = uniquePath(joinPath(parentPath(id), `${clean}${extName(id) || ".md"}`), taken);
-    }
-    await target.move(id, nextPath);
+    const nextPath = caseOnly ? requested : await resolveAvailablePath(target, requested, taken, id);
+    if (caseOnly) await moveCaseOnly(target, id, nextPath);
+    else await target.move(id, nextPath);
     remapIds(id, nextPath);
+    await moveHistory(target, id, nextPath);
     patchNotes((notes) => ({ ...notes, [nextPath]: { ...notes[nextPath], title: clean, updatedAt: Date.now() } }));
   } catch (error) {
     reportError(error, "重命名失败");
@@ -502,6 +1056,17 @@ export function setStarred(id: Id, starred: boolean): void {
   scheduleMeta(200);
 }
 
+/**
+ * The sidebar tab is real state: it lives in the local UI settings and travels
+ * with the notebook's state.json (D27).
+ */
+export function setSidebarTab(tab: SidebarTab): void {
+  if (!isSidebarTab(tab)) return;
+  if (getUi().sidebarTab !== tab) patchUi({ sidebarTab: tab });
+  meta = { ...meta, ui: { ...(meta.ui ?? {}), sidebarTab: tab } };
+  scheduleMeta();
+}
+
 export async function moveNote(id: Id, folderId: Id | null): Promise<void> {
   const note = libraryStore.get().notes[id];
   const target = backend;
@@ -509,15 +1074,14 @@ export async function moveNote(id: Id, folderId: Id | null): Promise<void> {
   const taken = new Set(Object.keys(libraryStore.get().notes));
   taken.delete(id);
   const requested = joinPath(folderId ?? "", baseName(id));
-  let nextPath = uniquePath(requested, taken);
   try {
     await flushNote(id);
-    while (await target.exists(nextPath)) {
-      taken.add(nextPath);
-      nextPath = uniquePath(requested, taken);
-    }
+    const nextPath = await resolveAvailablePath(target, requested, taken, id);
+    // Same file, only the folder name differs in casing: it is already there.
+    if (nextPath.toLowerCase() === id.toLowerCase()) return;
     await target.move(id, nextPath);
     remapIds(id, nextPath);
+    await moveHistory(target, id, nextPath);
   } catch (error) {
     reportError(error, "移动笔记失败");
   }
@@ -546,14 +1110,11 @@ export async function trashNote(id: Id): Promise<void> {
   if (!note || !target) return;
   const requested = joinPath(TRASH_DIR, id);
   const taken = new Set(Object.keys(libraryStore.get().trash));
-  let trashPath = uniquePath(requested, taken);
   try {
     await flushNote(id);
-    while (await target.exists(trashPath)) {
-      taken.add(trashPath);
-      trashPath = uniquePath(requested, taken);
-    }
+    const trashPath = await resolveAvailablePath(target, requested, taken, id);
     await target.move(id, trashPath);
+    await moveHistory(target, id, trashPath);
     const current = libraryStore.get().notes[id] ?? note;
     setState((prev) => {
       const notes = { ...prev.notes };
@@ -576,13 +1137,11 @@ export async function restoreNote(id: Id): Promise<void> {
   if (!note || !target) return;
   const original = id.startsWith(`${TRASH_DIR}/`) ? id.slice(TRASH_DIR.length + 1) : baseName(id);
   const taken = new Set(Object.keys(libraryStore.get().notes));
-  let nextPath = uniquePath(original, taken);
   try {
-    while (await target.exists(nextPath)) {
-      taken.add(nextPath);
-      nextPath = uniquePath(original, taken);
-    }
+    await flushAll();
+    const nextPath = await resolveAvailablePath(target, original, taken, id);
     await target.move(id, nextPath);
+    await moveHistory(target, id, nextPath);
     const sourceAssets = joinPath(parentPath(id), ASSETS_DIR);
     const restoredAssets = joinPath(parentPath(nextPath), ASSETS_DIR);
     if (await target.exists(sourceAssets) && !(await target.exists(restoredAssets))) {
@@ -597,10 +1156,59 @@ export async function restoreNote(id: Id): Promise<void> {
         notes: { ...prev.notes, [nextPath]: { ...note, id: nextPath, folderId: parentPath(nextPath) || null, trashed: false, trashedAt: null } },
       };
     });
-    if (parentPath(nextPath)) expandFolder(parentPath(nextPath));
+    // Rebuild every ancestor folder node, otherwise a restore into a folder
+    // that only existed inside the trash is invisible in the tree (D09).
+    for (const ancestor of ancestorPaths(nextPath)) {
+      const known = libraryStore.get().folders[ancestor];
+      if (!known) patchFolders((folders) => ({ ...folders, [ancestor]: makeFolder(ancestor, Date.now()) }));
+      expandFolder(ancestor);
+    }
   } catch (error) {
     reportError(error, "恢复失败");
     await rescanWorkspace().catch(() => undefined);
+  }
+}
+
+/** `a/b/c.md` → ["a", "a/b"] */
+function ancestorPaths(path: Id): Id[] {
+  const out: Id[] = [];
+  let current = parentPath(path);
+  while (current) {
+    out.unshift(current);
+    current = parentPath(current);
+  }
+  return out;
+}
+
+/** Notes still living in (or trashed from) `dir`, so a purge keeps their images (D16). */
+function otherNoteInFolder(dir: Id, except: Id): boolean {
+  const state = libraryStore.get();
+  const inside = (path: Id) => (dir ? path.startsWith(`${dir}/`) : true);
+  for (const note of [...Object.values(state.notes), ...Object.values(state.trash)]) {
+    if (note.id === except) continue;
+    if ((note.folderId ?? "") === dir) return true;
+    // A trashed note keeps the path it came from; it may be restored later.
+    if (inside(note.id) || inside(note.id.slice(`${TRASH_DIR}/`.length))) return true;
+  }
+  return false;
+}
+
+/**
+ * Snapshots and the note's own `assets/` folder used to outlive the note (D16).
+ * A shared `assets/` folder is only dropped when no other note lives there —
+ * images in it may belong to the siblings that are still around.
+ */
+async function removeNoteArtifacts(target: FileSystemBackend, id: Id): Promise<void> {
+  const history = joinPath(HISTORY_DIR, id);
+  if (await target.exists(history)) await target.remove(history, { recursive: true });
+  const folders = new Set<Id>([parentPath(id)]);
+  // A trashed note keeps the path it came from, and its images stay there.
+  if (id.startsWith(`${TRASH_DIR}/`)) folders.add(parentPath(id.slice(TRASH_DIR.length + 1)));
+  for (const dir of folders) {
+    const assets = joinPath(dir, ASSETS_DIR);
+    if (!(await target.exists(assets))) continue;
+    if (otherNoteInFolder(dir, id)) continue;
+    await target.remove(assets, { recursive: true });
   }
 }
 
@@ -608,7 +1216,8 @@ export async function purgeNote(id: Id): Promise<void> {
   const target = backend;
   if (!target) return;
   try {
-    await target.remove(id, { recursive: false });
+    await target.remove(id, { recursive: true });
+    await removeNoteArtifacts(target, id);
     setState((prev) => {
       const trash = { ...prev.trash };
       delete trash[id];
@@ -622,8 +1231,10 @@ export async function purgeNote(id: Id): Promise<void> {
 export async function emptyTrash(): Promise<number> {
   const target = backend;
   if (!target) return 0;
-  const count = Object.keys(libraryStore.get().trash).length;
+  const ids = Object.keys(libraryStore.get().trash);
+  const count = ids.length;
   try {
+    for (const id of ids) await removeNoteArtifacts(target, id);
     if (await target.exists(TRASH_DIR)) await target.remove(TRASH_DIR, { recursive: true });
     setState((prev) => ({ ...prev, trash: {} }));
     return count;
@@ -637,7 +1248,9 @@ export async function emptyTrash(): Promise<number> {
 
 export function createFolder(name: string, parentId: Id | null = null): Folder {
   const folderName = sanitizeName(name, "新文件夹");
-  const path = uniquePath(joinPath(parentId ?? "", folderName), new Set(Object.keys(libraryStore.get().folders)));
+  const requested = joinPath(parentId ?? "", folderName);
+  const taken = new Set(Object.keys(libraryStore.get().folders));
+  const path = uniquePath(requested, taken);
   const folder: Folder = {
     id: path,
     name: baseName(path),
@@ -646,9 +1259,65 @@ export function createFolder(name: string, parentId: Id | null = null): Folder {
     updatedAt: Date.now(),
   };
   patchFolders((folders) => ({ ...folders, [path]: folder }));
-  void backend?.mkdir(path).catch((error) => reportError(error, "新建文件夹失败"));
   expandFolder(path);
+  const target = backend;
+  if (target) preflightCreateFolder(target, folder, requested, taken);
   return folder;
+}
+
+/** A folder that only differs in casing from one on disk must not be created twice (D30). */
+function preflightCreateFolder(target: FileSystemBackend, folder: Folder, requested: string, taken: Set<string>): void {
+  const id = folder.id;
+  let settle!: () => void;
+  const gate = new Promise<void>((resolve) => { settle = resolve; });
+  createGuards.set(id, gate);
+  void (async () => {
+    let path = id;
+    try {
+      if (backend === target) {
+        path = await resolveAvailablePath(target, requested, taken);
+        if (path !== id) {
+          remapIds(id, path, { prefix: true });
+          replaceExpandedId(id, path);
+          // Callers keep the object they got back; let them see the final id.
+          folder.id = path;
+          folder.name = baseName(path);
+        }
+      }
+    } catch (error) {
+      reportError(error, "新建文件夹失败");
+    } finally {
+      createGuards.delete(id);
+      settle();
+    }
+    if (backend !== target) return;
+    try {
+      await target.mkdir(path);
+    } catch (error) {
+      reportError(error, "新建文件夹失败");
+      rollbackFolder(target, path);
+    }
+  })();
+}
+
+/**
+ * The folder node was published before the disk was asked to create it; if that
+ * fails the node has to go, otherwise the tree shows a folder that does not
+ * exist and every note "inside" it keeps failing to write (D26).
+ */
+function rollbackFolder(target: FileSystemBackend, path: Id): void {
+  if (backend !== target) return;
+  const index = folderIndexOf(getLibrary());
+  // Anything the user managed to put inside in the meantime keeps the node alive.
+  if (index.notesByFolder.get(path)?.length) return;
+  if (index.childFolders.get(path)?.length) return;
+  patchFolders((folders) => {
+    if (!folders[path]) return folders;
+    const next = { ...folders };
+    delete next[path];
+    return next;
+  });
+  patchUi({ expanded: getUi().expanded.filter((id) => id !== path) });
 }
 
 export async function renameFolder(id: Id, name: string): Promise<void> {
@@ -658,11 +1327,15 @@ export async function renameFolder(id: Id, name: string): Promise<void> {
   const clean = sanitizeName(name, "文件夹");
   const nextPath = joinPath(parentPath(id), clean);
   if (nextPath === id) return;
+  const caseOnly = nextPath.toLowerCase() === id.toLowerCase();
   try {
-    if (await target.exists(nextPath)) throw new Error(`目标文件夹已存在：${nextPath}`);
+    if (!caseOnly && (await target.exists(nextPath))) throw new Error(`目标文件夹已存在：${nextPath}`);
     await flushAll();
-    await target.move(id, nextPath);
+    if (caseOnly) await moveCaseOnly(target, id, nextPath);
+    else await target.move(id, nextPath);
     remapIds(id, nextPath, { prefix: true });
+    // One directory move carries the history of every note below it (D15).
+    await moveHistory(target, id, nextPath);
   } catch (error) {
     reportError(error, "重命名文件夹失败");
   }
@@ -690,25 +1363,30 @@ export async function deleteFolder(id: Id, mode: "trash" | "promote"): Promise<v
   const folder = libraryStore.get().folders[id];
   const target = backend;
   if (!folder || !target) return;
+  const within = (path: Id): boolean => path === id || path.startsWith(`${id}/`);
   try {
     await flushAll();
     if (mode === "trash") {
       const requested = joinPath(TRASH_DIR, id);
       const taken = new Set<string>();
-      let trashPath = requested;
-      while (await target.exists(trashPath)) {
-        taken.add(trashPath);
-        trashPath = uniquePath(requested, taken);
-      }
+      const trashPath = await resolveAvailablePath(target, requested, taken);
       // Move the entire directory, including nested notes and their assets,
       // before touching the in-memory tree. No recursive delete follows this.
       await target.move(id, trashPath);
+      await moveHistory(target, id, trashPath);
       meta = {
         ...meta,
-        starred: meta.starred.filter((path) => path !== id && !path.startsWith(`${id}/`)),
-        expanded: meta.expanded.filter((path) => path !== id && !path.startsWith(`${id}/`)),
-        lastOpened: meta.lastOpened?.startsWith(`${id}/`) ? null : meta.lastOpened,
+        starred: meta.starred.filter((path) => !within(path)),
+        expanded: meta.expanded.filter((path) => !within(path)),
+        lastOpened: meta.lastOpened && within(meta.lastOpened) ? null : meta.lastOpened,
       };
+      // Text typed while the directory was moving still belongs to these notes:
+      // let their ids follow the files into the trash, so the pending flush
+      // lands in the trashed copy instead of being rolled back by the rescan (D01).
+      for (const noteId of Object.keys(libraryStore.get().notes)) {
+        if (!within(noteId)) continue;
+        remapIds(noteId, `${trashPath}${noteId.slice(id.length)}`);
+      }
     } else {
       const parent = folder.parentId ?? "";
       const entries = await target.list(id);
@@ -724,11 +1402,14 @@ export async function deleteFolder(id: Id, mode: "trash" | "promote"): Promise<v
         const destination = joinPath(parent, entry.name);
         await target.move(source, destination);
         remapIds(source, destination, { prefix: entry.kind === "directory" });
+        await moveHistory(target, source, destination);
       }
-      await target.remove(id, { recursive: false });
-      meta = { ...meta, expanded: meta.expanded.filter((path) => path !== id) };
+      // Everything moved out, so the now-empty directory must go recursively:
+      // `recursive: false` throws ERR_FS_EISDIR on the desktop backend (D06).
+      await target.remove(id, { recursive: true });
+      meta = { ...meta, expanded: meta.expanded.filter((path) => !within(path)) };
     }
-    patchUi({ expanded: getUi().expanded.filter((path) => path !== id && !path.startsWith(`${id}/`)) });
+    patchUi({ expanded: getUi().expanded.filter((path) => !within(path)) });
     await flushMeta();
     await rescanWorkspace();
   } catch (error) {
@@ -744,10 +1425,17 @@ export async function moveFolder(id: Id, parentId: Id | null): Promise<void> {
   if (parentId && (parentId === id || isDescendant(parentId, id))) return;
   const nextPath = joinPath(parentId ?? "", baseName(id));
   try {
-    if (await target.exists(nextPath)) throw new Error(`目标文件夹已存在：${nextPath}`);
+    // A folder name that already exists under a different casing is the same
+    // directory on a case-insensitive disk: silently "moving" into it is what
+    // produced two ids pointing at one folder (D30).
+    if (nextPath.toLowerCase() !== id.toLowerCase() && (await target.exists(nextPath))) {
+      throw new Error(`目标文件夹已存在：${nextPath}`);
+    }
     await flushAll();
+    if (nextPath.toLowerCase() === id.toLowerCase()) return;
     await target.move(id, nextPath);
     remapIds(id, nextPath, { prefix: true });
+    await moveHistory(target, id, nextPath);
     if (parentId) expandFolder(parentId);
   } catch (error) {
     reportError(error, "移动文件夹失败");
@@ -774,6 +1462,16 @@ export function folderPathLabel(id: Id | null, folders = libraryStore.get().fold
   return parts.length ? parts.join(" / ") : baseName(id);
 }
 
+/** Move the keys of an id-keyed map along with a rename/move. */
+function remapKeyed<V>(map: Map<Id, V>, replace: (id: Id) => Id): void {
+  for (const [key, value] of [...map]) {
+    const id = replace(key);
+    if (id === key) continue;
+    map.delete(key);
+    map.set(id, value);
+  }
+}
+
 /** Rewrite every id that starts with (or equals) `oldId` after a rename/move. */
 function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): void {
   const replace = (value: Id): Id =>
@@ -795,11 +1493,32 @@ function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): voi
     }
     return next;
   });
+  // Edits typed while the operation was in flight are keyed by the old id: they
+  // must follow their note, or the text is silently dropped and `dirty` keeps a
+  // ghost key forever (D01).
+  const movedDirty: [Id, Id][] = [];
   setState((prev) => {
     const trash: Record<Id, Note> = {};
     for (const [key, note] of Object.entries(prev.trash)) trash[replace(key)] = note;
-    return { ...prev, trash };
+    const dirty: Record<Id, true> = {};
+    for (const [key, value] of Object.entries(prev.dirty)) {
+      const id = replace(key);
+      if (id !== key) movedDirty.push([key, id]);
+      dirty[id] = value;
+    }
+    return { ...prev, trash, dirty };
   });
+  for (const [from, to] of movedDirty) {
+    const timer = writeTimers.get(from);
+    if (timer) {
+      clearTimeout(timer);
+      writeTimers.delete(from);
+    }
+    persistNoteSoon(to, 200);
+  }
+  remapKeyed(plainCache, replace);
+  remapKeyed(knownStats, replace);
+  remapKeyed(lastSnapshotAt, replace);
   const ui = getUi();
   const patch: Record<string, unknown> = {};
   if (ui.activeId) patch.activeId = replace(ui.activeId);
@@ -914,6 +1633,96 @@ export function sortNotes(notes: Note[], sort: SortKey): Note[] {
   return copy;
 }
 
+/* -------------------------------------------------------------- folder index */
+
+/**
+ * One `Map<folderId, Note[]>` per state object, built on first use (D25).
+ *
+ * The sidebar asks for every folder's notes and counters on every render, and
+ * each of those used to walk all notes and rebuild the descendant list. The
+ * cache is keyed by the state object itself: every mutation publishes a fresh
+ * object (see `patchNotes`/`patchFolders`), so a stale index is impossible and
+ * a superseded one is simply collected.
+ */
+interface FolderIndex {
+  all: Note[];
+  childFolders: Map<Id | null, Folder[]>;
+  notesByFolder: Map<Id | null, Note[]>;
+  totals: Map<Id, { notes: number; folders: number }>;
+  scope: Map<Id, Set<Id>>;
+  scopedNotes: Map<Id, Note[]>;
+}
+
+const folderIndexCache = new WeakMap<LibraryState, FolderIndex>();
+
+function folderIndexOf(state: LibraryState): FolderIndex {
+  const cached = folderIndexCache.get(state);
+  if (cached) return cached;
+  const all = Object.values(state.notes);
+  const folders = Object.values(state.folders);
+  const childFolders = new Map<Id | null, Folder[]>();
+  for (const folder of folders) {
+    const key = folder.parentId ?? null;
+    const siblings = childFolders.get(key);
+    if (siblings) siblings.push(folder);
+    else childFolders.set(key, [folder]);
+  }
+  for (const siblings of childFolders.values()) {
+    siblings.sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
+  }
+  const notesByFolder = new Map<Id | null, Note[]>();
+  for (const note of all) {
+    const key = note.folderId ?? null;
+    const list = notesByFolder.get(key);
+    if (list) list.push(note);
+    else notesByFolder.set(key, [note]);
+  }
+  // A single bottom-up pass gives every folder its descendant note/folder
+  // counts, so `folderStats` becomes a lookup instead of a walk per folder.
+  const totals = new Map<Id, { notes: number; folders: number }>();
+  const visiting = new Set<Id>();
+  const visit = (id: Id): { notes: number; folders: number } => {
+    const known = totals.get(id);
+    if (known) return known;
+    // A parentId cycle would recurse forever; cut it at the closing edge.
+    if (visiting.has(id)) return { notes: 0, folders: 0 };
+    visiting.add(id);
+    let notes = (notesByFolder.get(id) ?? []).length;
+    let below = 0;
+    for (const child of childFolders.get(id) ?? []) {
+      const nested = visit(child.id);
+      notes += nested.notes;
+      below += 1 + nested.folders;
+    }
+    visiting.delete(id);
+    const total = { notes, folders: below };
+    totals.set(id, total);
+    return total;
+  };
+  for (const folder of folders) visit(folder.id);
+  const index: FolderIndex = { all, childFolders, notesByFolder, totals, scope: new Map(), scopedNotes: new Map() };
+  folderIndexCache.set(state, index);
+  return index;
+}
+
+/** `folderId` plus every folder below it, built once per state and folder. */
+function scopeOf(index: FolderIndex, folderId: Id): Set<Id> {
+  const cached = index.scope.get(folderId);
+  if (cached) return cached;
+  const scope = new Set<Id>([folderId]);
+  const stack: Id[] = [folderId];
+  while (stack.length) {
+    const current = stack.pop() as Id;
+    for (const child of index.childFolders.get(current) ?? []) {
+      if (scope.has(child.id)) continue;
+      scope.add(child.id);
+      stack.push(child.id);
+    }
+  }
+  index.scope.set(folderId, scope);
+  return scope;
+}
+
 export function notesInFolder(
   state: LibraryState,
   folderId: Id | null | undefined,
@@ -921,33 +1730,27 @@ export function notesInFolder(
 ): Note[] {
   const { descendants = false, sort = "updated", includeTrashed = false } = options;
   if (includeTrashed) return sortNotes(Object.values(state.trash), sort);
-  const scope =
-    folderId && descendants ? new Set([folderId, ...descendantFolderIds(folderId, state.folders)]) : null;
-  const list = Object.values(state.notes).filter((note) => {
-    if (folderId === undefined) return true;
-    if (scope) return note.folderId !== null && scope.has(note.folderId);
-    return (note.folderId ?? null) === (folderId ?? null);
-  });
-  return sortNotes(list, sort);
+  const index = folderIndexOf(state);
+  if (folderId === undefined) return sortNotes(index.all, sort);
+  if (!descendants || folderId === null) {
+    return sortNotes(index.notesByFolder.get(folderId ?? null) ?? [], sort);
+  }
+  let scoped = index.scopedNotes.get(folderId);
+  if (!scoped) {
+    const scope = scopeOf(index, folderId);
+    scoped = index.all.filter((note) => note.folderId !== null && scope.has(note.folderId));
+    index.scopedNotes.set(folderId, scoped);
+  }
+  return sortNotes(scoped, sort);
 }
 
 export function childFolders(state: LibraryState, parentId: Id | null): Folder[] {
-  return Object.values(state.folders)
-    .filter((folder) => (folder.parentId ?? null) === (parentId ?? null))
-    .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
+  return [...(folderIndexOf(state).childFolders.get(parentId ?? null) ?? [])];
 }
 
 export function folderStats(state: LibraryState, folderId: Id): { notes: number; folders: number } {
-  const scope = new Set([folderId, ...descendantFolderIds(folderId, state.folders)]);
-  let notes = 0;
-  for (const note of Object.values(state.notes)) {
-    if (note.folderId && scope.has(note.folderId)) notes += 1;
-  }
-  let folders = 0;
-  for (const folder of Object.values(state.folders)) {
-    if (folder.parentId && scope.has(folder.parentId) && scope.has(folder.id)) folders += 1;
-  }
-  return { notes, folders };
+  const total = folderIndexOf(state).totals.get(folderId);
+  return total ? { notes: total.notes, folders: total.folders } : { notes: 0, folders: 0 };
 }
 
 export function starredNotes(state: LibraryState, sort: SortKey = "updated"): Note[] {
@@ -969,12 +1772,19 @@ export function allTags(state: LibraryState): { tag: string; count: number }[] {
 }
 
 const plainCache = new Map<Id, string>();
+/** Bound the body cache so a huge notebook cannot grow it without limit (D05). */
+const PLAIN_CACHE_LIMIT = 400;
 
 function plainOf(note: Note): string {
   const cached = plainCache.get(note.id);
   if (cached !== undefined) return cached;
   const text = stripMarkdown(note.content).toLowerCase();
   plainCache.set(note.id, text);
+  while (plainCache.size > PLAIN_CACHE_LIMIT) {
+    const oldest = plainCache.keys().next();
+    if (oldest.done) break;
+    plainCache.delete(oldest.value);
+  }
   return text;
 }
 
@@ -1051,27 +1861,92 @@ export function foldersArray(state: LibraryState = libraryStore.get()): Folder[]
 
 /* ----------------------------------------------------------------- snapshots */
 
+/**
+ * Milliseconds, not minutes: `formatStamp` stops at the minute, so two manual
+ * snapshots inside the same minute used to share one name and the second one
+ * silently replaced the first (D14).
+ */
+function snapshotStamp(at: number): string {
+  const date = new Date(at);
+  const pad = (value: number, width = 2): string => String(value).padStart(width, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`
+  );
+}
+
+/**
+ * Reserve a file name before writing it. The session-level set covers two
+ * clicks inside the same millisecond; the `exists()` loop in `writeSnapshot`
+ * covers a name an earlier session (or another process) already took.
+ */
+function reserveSnapshotName(noteId: Id, reason: SnapshotReason): string {
+  const used = snapshotNames.get(noteId) ?? new Set<string>();
+  snapshotNames.set(noteId, used);
+  const name = uniquePath(`${snapshotStamp(Date.now()).replace(/[: ]/g, "-")}-${reason}.md`, used, { foldCase: true });
+  used.add(name);
+  if (used.size > SNAPSHOT_NAME_MEMORY) {
+    used.clear();
+    used.add(name);
+  }
+  return name;
+}
+
+/** `false` means nothing reached the disk, so the caller can retry later (D22). */
+async function writeSnapshot(
+  noteId: Id,
+  content: string,
+  reason: SnapshotReason,
+  options: { quiet?: boolean } = {},
+): Promise<boolean> {
+  const target = backend;
+  if (!target) return false;
+  const dir = joinPath(HISTORY_DIR, noteId);
+  let file = joinPath(dir, reserveSnapshotName(noteId, reason));
+  try {
+    let guard = 0;
+    while (await target.exists(file)) {
+      file = joinPath(dir, reserveSnapshotName(noteId, reason));
+      guard += 1;
+      if (guard > 20) break;
+    }
+    await target.writeText(file, content);
+    await pruneSnapshots(noteId);
+    return true;
+  } catch (error) {
+    // One toast per failing streak beats one per keystroke; the failure stays
+    // visible in the console either way (D22).
+    if (options.quiet) console.warn("[opennote] 快照仍未能写入", noteId, error);
+    else reportError(error, "记录历史版本失败");
+    return false;
+  }
+}
+
+/**
+ * Auto snapshots are throttled per note, but the throttle may only start once a
+ * snapshot is really on disk: a failed write used to block retries for three
+ * minutes, and the table used to survive a notebook switch, where the same note
+ * path means a different note (D22).
+ */
 function maybeSnapshot(previous: Note, next: Note): void {
   const ui = getUi();
   if (!ui.snapshots || !backend) return;
-  const last = lastSnapshotAt.get(next.id) ?? 0;
-  if (Date.now() - last < SNAPSHOT_INTERVAL) return;
   if (previous.content.trim() === next.content.trim()) return;
-  lastSnapshotAt.set(next.id, Date.now());
-  void writeSnapshot(next.id, previous.content, "auto");
-}
-
-async function writeSnapshot(noteId: Id, content: string, reason: SnapshotReason): Promise<void> {
-  const target = backend;
-  if (!target) return;
-  const dir = joinPath(HISTORY_DIR, noteId);
-  const file = joinPath(dir, `${formatStamp(Date.now()).replace(/[: ]/g, "-")}-${reason}.md`);
-  try {
-    await target.writeText(file, content);
-    await pruneSnapshots(noteId);
-  } catch (error) {
-    console.warn("[opennote] 快照写入失败", error);
-  }
+  const noteId = next.id;
+  const failing = snapshotFailures.has(noteId);
+  if (!failing && Date.now() - (lastSnapshotAt.get(noteId) ?? 0) < SNAPSHOT_INTERVAL) return;
+  const work = writeSnapshot(noteId, previous.content, "auto", { quiet: failing })
+    .then((ok) => {
+      if (ok) {
+        lastSnapshotAt.set(noteId, Date.now());
+        snapshotFailures.delete(noteId);
+      } else {
+        snapshotFailures.add(noteId);
+      }
+    })
+    .catch(() => undefined);
+  pendingSnapshots.add(work);
+  void work.then(() => pendingSnapshots.delete(work));
 }
 
 async function pruneSnapshots(noteId: Id): Promise<void> {
@@ -1119,8 +1994,14 @@ export async function listSnapshots(noteId: Id): Promise<Snapshot[]> {
 export async function takeManualSnapshot(noteId: Id): Promise<void> {
   const note = libraryStore.get().notes[noteId];
   if (!note) return;
-  lastSnapshotAt.set(noteId, Date.now());
-  await writeSnapshot(noteId, note.content, "manual");
+  const ok = await writeSnapshot(noteId, note.content, "manual");
+  // The three-minute throttle starts after the file exists, not before (D22).
+  if (ok) {
+    lastSnapshotAt.set(noteId, Date.now());
+    snapshotFailures.delete(noteId);
+  } else {
+    snapshotFailures.add(noteId);
+  }
 }
 
 export async function restoreSnapshot(snapshot: Snapshot): Promise<void> {

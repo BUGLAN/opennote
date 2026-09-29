@@ -30,6 +30,14 @@ export interface FileSystemBackend {
   remove(relPath: string, options?: { recursive?: boolean }): Promise<void>;
   move(from: string, to: string): Promise<void>;
   exists(relPath: string): Promise<boolean>;
+  /**
+   * 文件元数据。**只对文件有保证**：`size` 为字节数，`mtimeMs` 为毫秒时间戳；
+   * 缺失路径一律返回 `null`。
+   *
+   * 目录不受保证：`handleBackend`（FSA / OPFS）对目录返回 `null`（浏览器不暴露目录
+   * 元数据），而 `node` 后端会返回宿主机的真实值。因此调用方不得依赖目录的
+   * `size` / `mtimeMs`，判定目录是否存在请用 `exists()`（D33）。
+   */
   stat(relPath: string): Promise<{ size: number; mtimeMs: number } | null>;
 }
 

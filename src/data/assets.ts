@@ -1,6 +1,7 @@
 import { createStore } from "../lib/store";
 import { joinPath, normalizePath } from "../fs";
-import { currentBackend } from "./library";
+import { currentBackend, libraryStore } from "./library";
+import { getUi, uiStore } from "./ui";
 import { getLegacyAsset } from "./legacy";
 
 /**
@@ -11,6 +12,8 @@ import { getLegacyAsset } from "./legacy";
  */
 export const imageUrlStore = createStore<Record<string, string>>({});
 const inflight = new Map<string, Promise<string | null>>();
+/** Bumped whenever the cached URLs stop being valid (workspace switched). */
+let assetEpoch = 0;
 
 export function imageUrl(path: string): string | undefined {
   return imageUrlStore.get()[path];
@@ -46,10 +49,17 @@ export async function ensureImageUrl(path: string, candidates: string[] = []): P
   const task = (async () => {
     const backend = currentBackend();
     if (!backend) return null;
+    const epoch = assetEpoch;
     for (const candidate of [path, ...candidates]) {
       try {
         const bytes = await backend.readBytes(candidate);
         const url = URL.createObjectURL(new Blob([bytes as BlobPart]));
+        // The workspace was closed/switched while we were reading: this URL
+        // belongs to a folder the app no longer shows.
+        if (epoch !== assetEpoch) {
+          URL.revokeObjectURL(url);
+          return null;
+        }
         imageUrlStore.set((prev) => ({ ...prev, [path]: url }));
         return url;
       } catch {
@@ -87,10 +97,77 @@ export async function preloadImages(markdown: string, baseDir: string): Promise<
   await Promise.all(collectImagePaths(markdown).map((src) => resolveImageSrc(src, baseDir)));
 }
 
+/** Drop every cached blob URL (workspace closed, or a different notebook opened). */
 export function releaseImageUrls(): void {
-  for (const url of Object.values(imageUrlStore.get())) URL.revokeObjectURL(url);
+  assetEpoch += 1;
+  for (const url of Object.values(imageUrlStore.get())) revoke(url);
   imageUrlStore.set({});
 }
+
+/**
+ * Blob URLs used to live for the whole app session, so opening notes leaked
+ * memory (D27). Release the ones no open tab can display any more.
+ */
+export function releaseUnusedImageUrls(): number {
+  const keep = imagePathsInUse();
+  const current = imageUrlStore.get();
+  const next: Record<string, string> = {};
+  let released = 0;
+  for (const [path, url] of Object.entries(current)) {
+    if (keep.has(path) || path.startsWith("asset://")) {
+      next[path] = url;
+      continue;
+    }
+    revoke(url);
+    released += 1;
+  }
+  if (released) imageUrlStore.set(next);
+  return released;
+}
+
+/** Workspace-relative paths referenced by the notes that are open in tabs. */
+function imagePathsInUse(): Set<string> {
+  const state = libraryStore.get();
+  const keep = new Set<string>();
+  for (const id of getUi().tabs) {
+    const note = state.notes[id];
+    if (!note) continue;
+    for (const src of collectImagePaths(note.content)) {
+      const path = resolveWorkspacePath(src, note.folderId ?? "");
+      if (path) keep.add(path);
+    }
+  }
+  return keep;
+}
+
+function revoke(url: string): void {
+  try {
+    URL.revokeObjectURL(url);
+  } catch {
+    /* already revoked or unsupported */
+  }
+}
+
+let releaseTimer: ReturnType<typeof setTimeout> | null = null;
+let activeWorkspaceId: string | null = libraryStore.get().workspace?.id ?? null;
+
+function scheduleImageRelease(): void {
+  if (releaseTimer) clearTimeout(releaseTimer);
+  releaseTimer = setTimeout(() => {
+    releaseTimer = null;
+    releaseUnusedImageUrls();
+  }, 250);
+}
+
+// Closing a tab frees its images; switching notebooks must free all of them,
+// because paths are only unique inside one workspace.
+uiStore.subscribe(scheduleImageRelease);
+libraryStore.subscribe(() => {
+  const id = libraryStore.get().workspace?.id ?? null;
+  if (id === activeWorkspaceId) return;
+  activeWorkspaceId = id;
+  releaseImageUrls();
+});
 
 export function isImageName(name: string, mime = ""): boolean {
   if (mime.startsWith("image/")) return true;

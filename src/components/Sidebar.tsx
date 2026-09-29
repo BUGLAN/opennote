@@ -5,6 +5,7 @@ import {
   collapseFolder,
   deleteFolder,
   descendantFolderIds,
+  emptyTrash,
   expandFolder,
   folderStats,
   moveFolder,
@@ -401,12 +402,24 @@ function FolderBranch({ folder, depth, dropZoneProps, ...props }: BranchProps): 
 
   return (
     <>
-      <button
-        type="button"
+      <div
+        role="treeitem"
+        tabIndex={0}
+        aria-expanded={hasChildren ? open : undefined}
+        aria-selected={active}
         draggable
         className={cn("tree__row", active && "is-active", props.dropTarget === `folder:${folder.id}` && "is-drop")}
         style={{ paddingLeft: 6 + depth * 13 }}
         onClick={() => {
+          props.onScope({ kind: "folder", id: folder.id });
+          if (open) collapseFolder(folder.id);
+          else expandFolder(folder.id);
+        }}
+        onKeyDown={(event) => {
+          // The row itself is the tree item; the inner "more" button owns its own keys.
+          if (event.target !== event.currentTarget) return;
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
           props.onScope({ kind: "folder", id: folder.id });
           if (open) collapseFolder(folder.id);
           else expandFolder(folder.id);
@@ -451,7 +464,7 @@ function FolderBranch({ folder, depth, dropZoneProps, ...props }: BranchProps): 
           </button>
         </span>
         {!open && stats.notes ? <span className="tree__meta">{stats.notes}</span> : null}
-      </button>
+      </div>
 
       {open ? (
         <>
@@ -567,12 +580,21 @@ function NoteRow({
     ]);
 
   return (
-    <button
-      type="button"
+    <div
+      role="treeitem"
+      tabIndex={0}
+      aria-selected={active}
       draggable
       className={cn("tree__row", active && "is-active", dropTarget === key && "is-drop", variant === "list" && "tree__row--stacked")}
       style={{ paddingLeft: 6 + depth * 13 }}
       onClick={() => onOpen(note.id)}
+      onKeyDown={(event) => {
+        // The row itself is the tree item; the inner "more" button owns its own keys.
+        if (event.target !== event.currentTarget) return;
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        onOpen(note.id);
+      }}
       onContextMenu={(event) => {
         event.preventDefault();
         menu(event.clientX, event.clientY);
@@ -622,7 +644,7 @@ function NoteRow({
       </span>
       {variant === "list" ? <span className="tree__meta">{formatRelativeTime(note.updatedAt)}</span> : null}
       {dirty ? <span className="tree__meta" title="有未写入的改动">●</span> : null}
-    </button>
+    </div>
   );
 }
 
@@ -686,7 +708,7 @@ function TrashList({ library }: { library: LibraryState }): ReactNode {
               onClick={async () => {
                 const ok = await askConfirm({
                   title: `彻底删除「${note.title}」？`,
-                  message: "此操作不可撤销，笔记及其历史快照都会被清除。",
+                  message: "此操作不可撤销：笔记、它的历史快照，以及同目录 assets/ 里的附件都会被删除。",
                   confirmLabel: "彻底删除",
                   danger: true,
                 });
@@ -707,13 +729,17 @@ function TrashList({ library }: { library: LibraryState }): ReactNode {
           onClick={async () => {
             const ok = await askConfirm({
               title: "清空回收站？",
-              message: `${notes.length} 条笔记将被永久删除。`,
+              message: `${notes.length} 条笔记将被永久删除，连同各自的历史快照与同目录 assets/ 里的附件。`,
               confirmLabel: "清空",
               danger: true,
             });
             if (!ok) return;
-            for (const note of notes) await purgeNote(note.id);
-            notify("回收站已清空");
+            const removed = await emptyTrash();
+            notify(
+              removed
+                ? `已清空回收站：${removed} 条笔记及其历史快照、附件都已删除`
+                : "回收站里没有可清除的笔记",
+            );
           }}
         >
           清空

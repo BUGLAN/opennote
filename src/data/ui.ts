@@ -1,13 +1,53 @@
 import { createStore, useStore } from "../lib/store";
 import { DEFAULT_UI, THEMES, type ThemeId, type UiSettings } from "./types";
 
-const STORAGE_KEY = "opennote.ui.v1";
+export const STORAGE_KEY = "opennote.ui.v1";
+
+/**
+ * `localStorage` is not always reachable: when the browser blocks site data
+ * (blocked cookies, enterprise policy, some embedded webviews) even *reading*
+ * the property throws a `SecurityError`. Every access goes through these two
+ * helpers so the app degrades to an in-memory session instead of a white page.
+ */
+let blockedReason: string | null = null;
+
+function describeStorageError(error: unknown): string {
+  if (error instanceof Error && error.message) return `${error.name}：${error.message}`;
+  return String(error);
+}
+
+function readItem(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch (error) {
+    blockedReason ??= describeStorageError(error);
+    return null;
+  }
+}
+
+function writeItem(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch (error) {
+    blockedReason ??= describeStorageError(error);
+    /* Settings simply don't persist — the app keeps working in memory. */
+  }
+}
+
+/** True when the browser refuses `localStorage` (see D04). */
+export function isStorageBlocked(): boolean {
+  return blockedReason !== null;
+}
+
+/** Why storage is unavailable, or `null` when it works. Used for the UI notice. */
+export function storageBlockedReason(): string | null {
+  return blockedReason;
+}
 
 function load(): UiSettings {
-  if (typeof localStorage === "undefined") return DEFAULT_UI;
+  const raw = readItem(STORAGE_KEY);
+  if (!raw) return DEFAULT_UI;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULT_UI;
     const parsed = JSON.parse(raw) as Partial<UiSettings>;
     const ui = { ...DEFAULT_UI, ...parsed };
     // Guard against theme ids removed in a later version.
@@ -39,11 +79,20 @@ export function patchUi(patch: Partial<UiSettings>): void {
 }
 
 function persist(ui: UiSettings): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(ui));
-  } catch {
-    /* storage may be full or blocked — the app still works in this session */
-  }
+  writeItem(STORAGE_KEY, JSON.stringify(ui));
+}
+
+/**
+ * First visit: follow the operating system instead of forcing a light page.
+ * Only ever writes when nothing was stored before, and never throws when
+ * storage is blocked (the choice then simply lasts for this session).
+ */
+export function applySystemThemeOnFirstVisit(): void {
+  const ui = uiStore.get();
+  if (ui.theme !== "paper" || ui.appearance !== "light") return;
+  if (readItem(STORAGE_KEY)) return; // anything stored (even "") means the user chose before
+  if (!systemPrefersDark()) return;
+  patchUi({ theme: ui.darkTheme, appearance: "dark" });
 }
 
 export function themeKind(id: ThemeId): "light" | "dark" {

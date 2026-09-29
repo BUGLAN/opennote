@@ -1,5 +1,7 @@
+import { syntaxTree } from "@codemirror/language";
+import type { SyntaxNode } from "@lezer/common";
 import { EditorView } from "@codemirror/view";
-import type { Extension } from "@codemirror/state";
+import type { EditorState, Extension } from "@codemirror/state";
 import { imageNameForPaste } from "../data/assets";
 import { saveImage } from "../data/library";
 import { blobToDataUrl } from "../lib/utils";
@@ -89,7 +91,7 @@ export function linkClickHandler(): Extension {
       if (target?.closest(".md-wikilink, a")) return false;
       const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
       if (pos == null) return false;
-      const url = findLinkAt(view, pos);
+      const url = findLinkAt(view.state, pos);
       if (!url) return false;
       event.preventDefault();
       window.open(url, "_blank", "noopener,noreferrer");
@@ -98,10 +100,34 @@ export function linkClickHandler(): Extension {
   });
 }
 
-function findLinkAt(view: EditorView, pos: number): string | null {
-  const state = view.state;
+/** Blocks whose text is code, not prose — URLs inside them are not links. */
+const CODE_NODES = /^(?:InlineCode|FencedCode|CodeBlock)$/;
+
+function normalizeUrl(raw: string): string {
+  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+}
+
+/**
+ * The URL under `pos`, or null when there is nothing to open there. The syntax
+ * tree decides first — it knows a link's own URL, and it knows that a URL inside
+ * inline code or a fenced block is just text. A scan of the line covers raw
+ * autolinks and bare URLs the tree does not mark up.
+ */
+export function findLinkAt(state: EditorState, pos: number): string | null {
+  const tree = syntaxTree(state);
+  const inner = tree.resolveInner(pos, 1);
+  for (let node: SyntaxNode | null = inner; node; node = node.parent) {
+    if (CODE_NODES.test(node.name)) return null;
+  }
+  for (let node: SyntaxNode | null = inner; node; node = node.parent) {
+    if (node.name !== "Link" && node.name !== "Image") continue;
+    const url = node.getChild("URL");
+    if (!url) continue;
+    const raw = state.sliceDoc(url.from, url.to);
+    if (raw) return normalizeUrl(raw);
+  }
+
   const line = state.doc.lineAt(pos);
-  // Prefer the syntax tree, fall back to a scan of the line for raw autolinks.
   const text = state.sliceDoc(line.from, line.to);
   const offset = pos - line.from;
   const patterns = [/\[[^\]]*\]\(([^)\s]+)[^)]*\)/g, /<(https?:\/\/[^>\s]+)>/g, /(https?:\/\/[^\s)]+)/g];
@@ -111,7 +137,7 @@ function findLinkAt(view: EditorView, pos: number): string | null {
       const end = start + match[0].length;
       if (offset >= start && offset <= end) {
         const url = match[1] ?? match[0];
-        return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+        return normalizeUrl(url);
       }
     }
   }

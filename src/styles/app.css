@@ -321,6 +321,7 @@
   text-align: left;
   font-size: var(--fs-md);
   line-height: 1.35;
+  cursor: pointer;
   transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 

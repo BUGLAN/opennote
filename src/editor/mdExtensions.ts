@@ -43,7 +43,14 @@ export const MathInline: InlineParser = {
 
 /* -------------------------------------------------------------- block math */
 
-/** `$$ … $$` — one line or many; an unclosed block runs to the end, like a code fence. */
+/**
+ * `$$ … $$` — one line or many. A closed block spans everything up to its closing
+ * fence. An *unclosed* block stops at the first blank line instead of running to
+ * the end of the document (D13): otherwise the whole rest of the note becomes a
+ * single formula widget and its headings/paragraphs vanish from the rendered view.
+ * A block that is never closed and has no blank line after it still runs to the
+ * end, exactly like a code fence.
+ */
 export const MathBlock: BlockParser = {
   name: "MathBlock",
   parse(cx: BlockContext, line: Line) {
@@ -63,10 +70,14 @@ export const MathBlock: BlockParser = {
     }
 
     // multi-line: scan forward for the closing fence, then step past it so the
-    // block context keeps tracking the right line (same dance as FencedCode)
+    // block context keeps tracking the right line (same dance as FencedCode).
+    // A blank line ends the scan: it is the boundary between this (so far
+    // unclosed) formula and the rest of the note.
     let to = -1;
     while (cx.nextLine()) {
-      if (line.text.indexOf("$$", Math.max(line.pos, 0)) > -1) {
+      const rest = line.text.slice(line.pos);
+      if (!rest.trim()) break;
+      if (rest.indexOf("$$") > -1) {
         cx.nextLine();
         to = cx.prevLineEnd();
         break;

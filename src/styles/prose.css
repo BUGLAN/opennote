@@ -428,18 +428,18 @@
   }
 
   body::before,
-  .app__sidebar,
-  .app__outline,
-  .app__tabbar,
-  .app__statusbar,
+  .sidebar,
+  .outline,
+  .tabbar,
+  .statusbar,
   .overlay-root,
-  .toast-root {
+  .toast-root,
+  .storage-notice {
     display: none !important;
   }
 
   .app,
-  .app__main,
-  .app__editor,
+  .main,
   .editor-host,
   .cm-editor,
   .cm-scroller {

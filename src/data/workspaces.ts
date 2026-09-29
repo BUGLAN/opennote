@@ -26,7 +26,8 @@ export interface WorkspaceRecord {
   kind: BackendKind;
   /**
    * `node`: absolute folder path on disk.
-   * `fsa`: key of the directory handle stored in IndexedDB.
+   * `fsa`: key of the directory handle stored in IndexedDB — a uid, because the
+   * old fixed `""` key made a second browser folder overwrite the first (D32).
    * `opfs`: directory name inside the browser's private file system.
    */
   location: string;
@@ -40,8 +41,11 @@ interface RegistryState {
 }
 
 function load(): RegistryState {
-  if (typeof localStorage === "undefined") return { workspaces: [], activeId: null };
   try {
+    // D04 同源：浏览器「阻止所有站点数据」时 localStorage 是一个抛 SecurityError 的
+    // getter，`typeof localStorage` 本身就会抛。守卫必须在 try 里，否则模块加载阶段
+    // 就炸掉整个应用（白屏），而不是退化成「空注册表」。
+    if (typeof localStorage === "undefined") return { workspaces: [], activeId: null };
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { workspaces: [], activeId: null };
     const parsed = JSON.parse(raw) as Partial<RegistryState>;
@@ -134,23 +138,66 @@ export class WorkspacePermissionError extends Error {
   }
 }
 
+/**
+ * D32: 0.1 时代的 FSA 记录 location 恒为 `""`，句柄存在 IndexedDB 的 `""` 键下，
+ * 于是第二个浏览器文件夹必然覆盖第一个。旧句柄还能读到就重新登记到新的 uid 键；
+ * 读不到时无法猜测它原本是哪个文件夹，只能明确要求用户重新选择。
+ */
+async function migrateLegacyFsaRecord(record: WorkspaceRecord): Promise<WorkspaceRecord> {
+  if (record.location !== "") return record;
+  const legacy = await getDirectoryHandle("").catch(() => null);
+  if (!legacy) throw new Error("旧版本的浏览器文件夹记录已失效，请用「添加文件夹」重新选择一次");
+  const key = uid();
+  await putDirectoryHandle(key, legacy, legacy.name);
+  await deleteDirectoryHandle("").catch(() => undefined);
+  const updated: WorkspaceRecord = { ...record, location: key };
+  const state = workspaceStore.get();
+  workspaceStore.set({
+    workspaces: state.workspaces.map((workspace) => (workspace.id === record.id ? updated : workspace)),
+    activeId: state.activeId,
+  });
+  persist();
+  return updated;
+}
+
 /** Resolve a record into a live backend, asking for permission when required. */
 export async function resolveBackend(record: WorkspaceRecord, requestPermission = false): Promise<FileSystemBackend> {
   if (record.kind === "node") {
     const bridge = desktopBridge();
     if (!bridge) throw new Error("桌面版本才能直接读写本机文件夹");
+    // D20: 主进程只接受「本次会话里用户授权过的 root」。旧版 preload 没有这道闸门时
+    // 跳过探测，保证开发态 / 旧安装包还能用。
+    if (typeof bridge.fs.authorizeRoot === "function") {
+      const granted = await bridge.fs.authorizeRoot(record.location);
+      if (!granted) throw new Error("这个文件夹还没有授权，请用「添加文件夹」重新选择一次");
+    }
     return createNodeBackend(record.location, bridge);
   }
   if (record.kind === "fsa") {
-    const handle = await getDirectoryHandle(record.location);
+    const current = record.location === "" ? await migrateLegacyFsaRecord(record) : record;
+    const handle = await getDirectoryHandle(current.location);
     if (!handle) throw new Error("找不到之前授权的文件夹，请重新添加");
-    if (!(await hasPermission(handle, requestPermission))) throw new WorkspacePermissionError(record);
+    if (!(await hasPermission(handle, requestPermission))) throw new WorkspacePermissionError(current);
     return createHandleBackend(handle, "fsa");
   }
   return createHandleBackend(await opfsWorkspaceDir(record.location), "opfs");
 }
 
 /* ------------------------------------------------------------ add / create */
+
+/** 同一个文件夹被再次选中时复用旧记录，而不是多出一个句柄键。 */
+async function findWorkspaceForHandle(handle: FileSystemDirectoryHandle): Promise<WorkspaceRecord | null> {
+  const canCompare = (handle as { isSameEntry?: unknown }).isSameEntry;
+  if (typeof canCompare !== "function") return null;
+  for (const workspace of workspaceStore.get().workspaces) {
+    if (workspace.kind !== "fsa" || !workspace.location) continue;
+    const stored = await getDirectoryHandle(workspace.location).catch(() => null);
+    if (!stored) continue;
+    const same = await (handle as FileSystemDirectoryHandle).isSameEntry(stored).catch(() => false);
+    if (same) return workspace;
+  }
+  return null;
+}
 
 export async function addLocalFolder(): Promise<WorkspaceRecord | null> {
   const bridge = desktopBridge();
@@ -165,7 +212,14 @@ export async function addLocalFolder(): Promise<WorkspaceRecord | null> {
   if (!supportsFileSystemAccess()) throw new Error("这个浏览器不能直接读写磁盘文件夹，请改用「导入文件夹」");
   const handle = await pickDirectory();
   if (!handle) return null;
-  const record = rememberWorkspace({ name: `${handle.name}（浏览器）`, kind: "fsa", location: "" });
+  const existing = await findWorkspaceForHandle(handle);
+  if (existing) {
+    await putDirectoryHandle(existing.location, handle, handle.name);
+    return rememberWorkspace({ name: existing.name, kind: "fsa", location: existing.location });
+  }
+  // D32: 句柄键必须是唯一的。旧实现固定用 ""，第二个浏览器文件夹会把第一个的句柄覆盖掉。
+  const key = uid();
+  const record = rememberWorkspace({ name: `${handle.name}（浏览器）`, kind: "fsa", location: key });
   await putDirectoryHandle(record.location, handle, handle.name);
   return record;
 }

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   assertSafeRelative,
   baseName,
-  encodeHistoryName,
   extName,
   isHiddenPath,
   isImagePath,
@@ -50,6 +49,16 @@ describe("assertSafeRelative", () => {
     expect(() => assertSafeRelative("a\0b.md")).toThrow();
     expect(() => assertSafeRelative("../private.md")).toThrow("路径越界");
     expect(() => assertSafeRelative("a\\..\\private.md")).toThrow("路径越界");
+  });
+
+  it("rejects ':' inside a segment (D36: NTFS alternate data streams)", () => {
+    expect(() => assertSafeRelative("a.md:secret")).toThrow("路径不能包含冒号");
+    expect(() => assertSafeRelative("日记/九月.md:ads")).toThrow("路径不能包含冒号");
+    expect(() => assertSafeRelative("notes/a:b/c.md")).toThrow("路径不能包含冒号");
+    expect(() => assertSafeRelative("C:/Windows/system32")).toThrow();
+    // 正常笔记名不受影响（sanitizeName 本来就会剥掉 ':'）
+    expect(assertSafeRelative("日记/九月.md")).toBe("日记/九月.md");
+    expect(assertSafeRelative("a-1_2.txt")).toBe("a-1_2.txt");
   });
 });
 
@@ -102,14 +111,16 @@ describe("sanitizeName / uniquePath", () => {
     const taken = new Set(["日记/九月.md"]);
     expect(uniquePath("日记/九月.md", taken)).toBe("日记/九月 2.md");
   });
-});
 
-describe("encodeHistoryName", () => {
-  it("keeps snapshots flat and readable", () => {
-    const name = encodeHistoryName("日记/九月.md", Date.parse("2025-05-05T10:20:00"));
-    expect(name).toMatch(/\.md$/);
-    expect(name).not.toContain("/");
-    expect(name).toContain(String(Date.parse("2025-05-05T10:20:00")));
+  it("keeps case-sensitive behaviour by default (browser OPFS is case-sensitive)", () => {
+    expect(uniquePath("readme.md", new Set(["README.md"]))).toBe("readme.md");
+  });
+
+  it("folds case only when the caller asks for it (D30, Windows/macOS disks)", () => {
+    expect(uniquePath("README.md", new Set(["readme.md"]), { foldCase: true })).toBe("README 2.md");
+    expect(uniquePath("笔记.md", new Set(["笔记.md"]), { foldCase: true })).toBe("笔记 2.md");
+    expect(uniquePath("readme.md", new Set(["README.md", "ReAdMe 2.MD"]), { foldCase: true })).toBe("readme 3.md");
+    expect(uniquePath("其他.md", new Set(["readme.md"]), { foldCase: true })).toBe("其他.md");
   });
 });
 

@@ -87,6 +87,39 @@ describe("block math", () => {
     const source = "$$\n未闭合\n更多\n";
     expect(sliceFor(source, "MathBlock")?.trimEnd()).toBe(source.trimEnd());
   });
+
+  it("stops an unclosed block at the first blank line (D13)", () => {
+    const source = "$$\n\\frac{1}{2}\n\n## 标题\n\n正文段落\n";
+    expect(sliceFor(source, "MathBlock")).toBe("$$\n\\frac{1}{2}");
+    const names = nodeNames(source);
+    expect(names).toContain("ATXHeading2");
+    expect(names).toContain("Paragraph");
+    // the CodeMirror parser the editor actually uses must agree
+    expect(cmNodeNames(source)).toContain("ATXHeading2");
+  });
+
+  it("keeps the text after an unclosed block reachable as ordinary blocks (D13)", () => {
+    const source = "$$\na = b\n\n- 列表项\n\n```ts\nconst a = 1\n```\n";
+    const names = nodeNames(source);
+    expect(sliceFor(source, "MathBlock")).toBe("$$\na = b");
+    expect(names).toContain("BulletList");
+    expect(names).toContain("FencedCode");
+  });
+
+  it("an empty line also ends a block whose first line carries the formula (D13)", () => {
+    const source = "$$a = b\n\n## 标题\n";
+    expect(sliceFor(source, "MathBlock")).toBe("$$a = b");
+    expect(nodeNames(source)).toContain("ATXHeading2");
+  });
+
+  it("a blank line inside a later-closed block ends it (documented rule)", () => {
+    // Keep this documented: an unclosed `$$` stops at the blank line, so a fence
+    // that only shows up after a blank line opens a second block. Display math
+    // with a blank line inside is a TeX paragraph break, which KaTeX rejects.
+    const source = "$$\na\n\nb\n$$\n";
+    expect(sliceFor(source, "MathBlock")).toBe("$$\na");
+    expect(nodeNames(source)).toContain("Paragraph");
+  });
 });
 
 describe("highlight", () => {

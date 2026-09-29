@@ -324,7 +324,17 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       run: () => ctx.exportNote("md-inline"),
     },
     { id: "export-html", label: "导出当前笔记为独立 HTML", group: "数据", icon: "external", run: () => ctx.exportNote("html") },
-    { id: "print", label: "打印 / 导出 PDF", group: "数据", icon: "print", shortcut: accel("P"), run: () => ctx.printNote() },
+    {
+      id: "print",
+      label: "打印 / 导出 PDF",
+      group: "数据",
+      icon: "print",
+      shortcut: accel("P"),
+      // `mod+alt+p` is the escape hatch for browsers that keep Ctrl/⌘+P for
+      // themselves (D19) — both run the app's own print styles.
+      keys: ["mod+p", "mod+alt+p"],
+      run: () => ctx.printNote(),
+    },
     {
       id: "export-zip",
       label: "导出整库备份（zip）",

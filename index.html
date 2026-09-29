@@ -14,18 +14,132 @@
     <link rel="apple-touch-icon" href="./favicon.svg" />
     <link rel="mask-icon" href="./favicon.svg" color="#b23a2e" />
     <script>
-      // Apply the persisted theme before first paint to avoid a flash of the wrong palette.
-      try {
-        var raw = localStorage.getItem('opennote.ui.v1');
-        var ui = raw ? JSON.parse(raw) : null;
-        var dark = ui && ui.theme ? /night|dark|ye/.test(ui.theme) : false;
-        if (!ui && window.matchMedia('(prefers-color-scheme: dark)').matches) dark = true;
-        if (ui && ui.appearance === 'dark') dark = true;
-        if (ui && ui.appearance === 'light') dark = false;
-        document.documentElement.dataset.appearance = dark ? 'dark' : 'light';
-        if (ui && ui.theme) document.documentElement.dataset.theme = ui.theme;
-        if (ui && ui.accent) document.documentElement.dataset.accent = ui.accent;
-      } catch (e) {}
+      // Two jobs, both of which must run before the app module:
+      // 1. apply the persisted theme before first paint (no flash of the wrong palette);
+      // 2. install the boot safety net: if the app never mounts, say *why* and offer a
+      //    retry instead of leaving the splash on screen forever (D04).
+      (function () {
+        var STORAGE_KEY = 'opennote.ui.v1';
+
+        try {
+          var raw = localStorage.getItem(STORAGE_KEY);
+          var ui = raw ? JSON.parse(raw) : null;
+          var dark = ui && ui.theme ? /night|dark|ye/.test(ui.theme) : false;
+          if (!ui && window.matchMedia('(prefers-color-scheme: dark)').matches) dark = true;
+          if (ui && ui.appearance === 'dark') dark = true;
+          if (ui && ui.appearance === 'light') dark = false;
+          document.documentElement.dataset.appearance = dark ? 'dark' : 'light';
+          if (ui && ui.theme) document.documentElement.dataset.theme = ui.theme;
+          if (ui && ui.accent) document.documentElement.dataset.accent = ui.accent;
+        } catch (e) {}
+
+        var mounted = false;
+        // main.tsx calls this once React has rendered: from then on the splash is not "stuck".
+        window.__opennoteMounted = function () {
+          mounted = true;
+        };
+
+        // A browser that blocks site data throws a SecurityError from the `localStorage`
+        // getter itself, so even reading the property needs a try/catch.
+        try {
+          localStorage.getItem('opennote.probe');
+        } catch (error) {
+          window.__opennoteStorageBlocked =
+            ((error && error.name) || 'Error') + '：' + ((error && error.message) || String(error));
+        }
+
+        var pending = null;
+
+        function describe(error, fallback) {
+          if (!error) return fallback;
+          if (typeof error === 'string') return error;
+          var name = error.name || '';
+          var message = error.message || '';
+          if (name && message) return name + '：' + message;
+          return message || name || fallback;
+        }
+
+        function render(reason, detail) {
+          var boot = document.getElementById('boot');
+          if (!boot || boot.classList.contains('is-gone')) return false;
+          boot.className = 'boot boot--failed';
+          boot.setAttribute('role', 'alert');
+          while (boot.firstChild) boot.removeChild(boot.firstChild);
+
+          var seal = document.createElement('div');
+          seal.className = 'boot__seal';
+          seal.setAttribute('aria-hidden', 'true');
+          seal.textContent = '記';
+
+          var title = document.createElement('div');
+          title.className = 'boot__name';
+          title.textContent = 'Opennote 没能启动';
+
+          var hint = document.createElement('div');
+          hint.className = 'boot__hint';
+          hint.textContent = reason;
+
+          var actions = document.createElement('div');
+          actions.className = 'boot__actions';
+          var retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'boot__retry';
+          retry.textContent = '重试';
+          retry.addEventListener('click', function () {
+            location.reload();
+          });
+          actions.appendChild(retry);
+
+          var detailEl = document.createElement('pre');
+          detailEl.className = 'boot__detail';
+          detailEl.hidden = !detail;
+          detailEl.textContent = detail || '';
+
+          var note = document.createElement('p');
+          note.className = 'boot__note';
+          note.textContent =
+            '笔记正文保存在你选择的笔记本文件夹里，不会因此丢失。若浏览器禁用了「Cookie 与站点数据」，请在站点设置里允许后再点重试。';
+
+          boot.appendChild(seal);
+          boot.appendChild(title);
+          boot.appendChild(hint);
+          boot.appendChild(actions);
+          boot.appendChild(detailEl);
+          boot.appendChild(note);
+          return true;
+        }
+
+        function bootFailure(reason, detail) {
+          if (mounted) return;
+          // An error can fire before <body> is parsed: remember it and show it later.
+          if (!render(reason, detail)) pending = [reason, detail];
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+          if (!pending || mounted) return;
+          var queued = pending;
+          pending = null;
+          render(queued[0], queued[1]);
+        });
+
+        window.addEventListener('error', function (event) {
+          bootFailure('启动时出错', describe(event.error, event.message || '脚本执行失败'));
+        });
+        window.addEventListener('unhandledrejection', function (event) {
+          bootFailure('启动时出错', describe(event.reason, '未处理的异步错误'));
+        });
+        // The module never even ran (blocked in transit, blocked by CSP, …).
+        window.setTimeout(function () {
+          bootFailure('启动超时：15 秒内没有完成挂载', '');
+        }, 15000);
+        // React did render, but the notebook never became ready.
+        window.setTimeout(function () {
+          var boot = document.getElementById('boot');
+          if (boot && !boot.classList.contains('is-gone')) {
+            render('启动卡住了：笔记本初始化没有完成', '');
+          }
+        }, 30000);
+      })();
     </script>
   </head>
   <body>

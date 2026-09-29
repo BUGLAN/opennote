@@ -9,7 +9,6 @@ import {
   joinPath,
   sanitizeName,
   stripExtension,
-  uniquePath,
 } from "../fs";
 import { getLegacyAsset, readLegacyNotes } from "../data/legacy";
 import { listOptionalDirectory } from "../data/optionalFiles";
@@ -21,6 +20,7 @@ import {
   invalidateSearchCache,
   libraryStore,
   rescanWorkspace,
+  resolveAvailablePath,
   updateNoteContent,
 } from "../data/library";
 import type { Id } from "../data/types";
@@ -78,7 +78,10 @@ export async function importIntoWorkspace(
 
   const writeNote = async (content: string, folderId: Id | null, name: string): Promise<void> => {
     const dir = folderId ?? "";
-    const path = uniquePath(joinPath(dir, `${sanitizeName(name, "未命名")}.md`), taken);
+    const requested = joinPath(dir, `${sanitizeName(name, "未命名")}.md`);
+    // Check the disk too: a file that appeared after the last scan must not be
+    // overwritten just because memory has never heard of it (D03).
+    const path = await resolveAvailablePath(backend, requested, taken);
     taken.add(path);
     await backend.writeText(path, normalizeEol(content));
     result.notes += 1;
@@ -87,12 +90,11 @@ export async function importIntoWorkspace(
   const writeAttachment = async (blob: Blob, name: string, folderId: Id | null): Promise<Id> => {
     const dir = joinPath(folderId ?? "", ASSETS_DIR);
     const existing = await listOptionalDirectory(backend, dir);
-    const used = new Set(existing.map((entry) => entry.name));
-    const finalName = uniquePath(sanitizeName(name, "attachment"), used);
-    const path = joinPath(dir, finalName);
-    await backend.writeBytes(path, blob);
+    const used = new Set(existing.map((entry) => joinPath(dir, entry.name)));
+    const finalName = await resolveAvailablePath(backend, joinPath(dir, sanitizeName(name, "attachment")), used);
+    await backend.writeBytes(finalName, blob);
     result.attachments += 1;
-    return path;
+    return finalName;
   };
 
   const handleZip = async (file: File): Promise<void> => {
@@ -184,8 +186,8 @@ export async function importIntoWorkspace(
 
   if (!result.notes && !result.attachments && !result.folders) throw new Error("没有找到可以导入的内容");
 
-  flushAll();
-  flushMeta();
+  await flushAll();
+  await flushMeta();
   await rescanWorkspace();
   invalidateSearchCache();
   return result;
@@ -221,7 +223,9 @@ export async function migrateLegacyData(): Promise<ImportResult> {
         if (!blob) continue;
         const dir = joinPath(folderId ?? "", ASSETS_DIR);
         const existing = await listOptionalDirectory(backend, dir);
-        name = uniquePath(sanitizeName(`legacy-${assetId.slice(0, 8)}.png`), new Set(existing.map((e) => e.name)));
+        const used = new Set(existing.map((entry) => joinPath(dir, entry.name)));
+        const suggested = sanitizeName(`legacy-${assetId.slice(0, 8)}.png`);
+        name = baseName(await resolveAvailablePath(backend, joinPath(dir, suggested), used));
         await backend.writeBytes(joinPath(dir, name), blob);
         assetNames.set(assetId, name);
         result.attachments += 1;
@@ -229,15 +233,15 @@ export async function migrateLegacyData(): Promise<ImportResult> {
       content = content.split(`asset://${assetId}`).join(`./${ASSETS_DIR}/${name}`);
     }
     const title = sanitizeName(note.title || stripExtension(baseName(`legacy-${uid()}.md`)), "旧笔记");
-    const path = uniquePath(joinPath(folderId ?? "", `${title}.md`), taken);
+    const path = await resolveAvailablePath(backend, joinPath(folderId ?? "", `${title}.md`), taken);
     taken.add(path);
     await backend.writeText(path, normalizeEol(content));
     result.notes += 1;
     result.migrated = (result.migrated ?? 0) + 1;
   }
 
-  flushAll();
-  flushMeta();
+  await flushAll();
+  await flushMeta();
   await rescanWorkspace();
   invalidateSearchCache();
   return result;
