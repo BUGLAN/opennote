@@ -38,6 +38,7 @@ import {
 } from "../desktop/bridge";
 import { assertSafeRelative, baseName, joinPath, sanitizeName } from "../fs/paths";
 import type { FileSystemBackend } from "../fs/types";
+import { normalizeFolder } from "../lib/clip/envelope";
 import { createStore, useStore } from "../lib/store";
 import { currentBackend, currentWorkspace, rescanWorkspace } from "./library";
 
@@ -47,6 +48,12 @@ export type { InboxEntry, InboxStatus } from "../desktop/bridge";
 
 /** 收件箱根目录（工作区相对路径）。 */
 export const INBOX_DIR = ".opennote/inbox";
+
+/** 「保存到」选择器里代表**工作区根目录**的选项值（`null` 在 `<select>` 里也是它）。 */
+export const INBOX_ROOT_VALUE = "";
+
+/** 工作区根目录的用户可见说法（`03` UI-03 落点行用的就是它）。 */
+export const INBOX_ROOT_LABEL = "笔记本根目录";
 
 const ENTRY_FILE = "entry.json";
 const STATE_FILE = "state.json";
@@ -102,6 +109,11 @@ export class InboxError extends Error {
  * `code` → 中文用户文案（逐字取自 `02` §6.2 的「中文用户文案」列）。
  * `empty_body` 是 `01`/`03` 冻结的客户端本地状态（不是 `IMP-` 码），一并收在这里，
  * 免得界面把内部码原样显示给用户。
+ *
+ * **抄表格单元格时必须剥掉 Markdown 内联代码标记（反引号）**：文档里写的
+ * ``不能使用 `..`、绝对路径`` 是**排版**，不是文案的一部分——带进来用户就会看见字面反引号
+ * （`C-6f` 抓到的 `IMP-4008` 就是这个坑）。这里的每一句都要与 `electron/bridge.cjs`
+ * 的 `ERROR_TABLE` 逐字相同；`src/data/inbox.test.ts` 有逐字比对护栏。
  */
 const MESSAGES: Record<string, string> = {
   "IMP-1001": "本地接口未开启。请在 Opennote 的「设置 · 文件 · 导入与接口」里开启，然后重试。",
@@ -115,9 +127,9 @@ const MESSAGES: Record<string, string> = {
   "IMP-4003": "导入内容缺少必要信息（标题、来源时间或地址），请重试。",
   "IMP-4004": "正文太长了（超过 8 MB），请分次导入。",
   "IMP-4005": "这次剪藏的内容太大（超过 16 MB），请分次导入或去掉图片。",
-  "IMP-4006": "Opennote 的窗口已关闭。请重新打开 Opennote，再试一次。",
-  "IMP-4007": "Opennote 里还没有打开笔记本，请先打开一个文件夹（或新建浏览器笔记本）。",
-  "IMP-4008": "目标目录不合法：不能使用 `..`、绝对路径或系统保留字符。",
+  "IMP-4006": "Opennote 没有在运行。请先打开 Opennote，再试一次。",
+  "IMP-4007": "Opennote 里还没有打开笔记本文件夹。请在 Opennote 左侧选一个文件夹，或新建一个，再试一次。",
+  "IMP-4008": "目标目录不合法：不能使用 ..、绝对路径或系统保留字符。",
   "IMP-4009": "找不到要追加的那篇笔记，或目标目录无法创建（可能没有写入权限）。",
   "IMP-4010": "这个目录里同名文件太多了，请换一个目录或改标题。",
   "IMP-4011": "「追加」的目标不存在，已改为新建一篇。",
@@ -961,10 +973,24 @@ async function resolveReceiver(): Promise<InboxReceiver> {
   throw new InboxError("IMP-4014", "导入接收端还没有就绪，请重启 Opennote 后再试。");
 }
 
-/** 把条目信封还原成**纯内联**形态交给接收端（正文与附件都内联，路径不再是问题）。 */
-async function envelopeForReceiver(target: FileSystemBackend, dirName: string): Promise<string> {
+/**
+ * 把条目信封还原成**纯内联**形态交给接收端（正文与附件都内联，路径不再是问题）。
+ *
+ * `folderOverride`（`00` §6.14㉜）非 `undefined` 时**覆盖**信封的 `target.folder`：
+ * 用户在收件箱里选的「保存到」以选中值为准。值已经在 `resolveInboxFolder()` 里规范化过，
+ * 这里只负责写进信封——接收端与后端仍会各自再校验一遍（落点层不得信任上一层，`02` §7.3）。
+ */
+async function envelopeForReceiver(
+  target: FileSystemBackend,
+  dirName: string,
+  folderOverride?: string,
+): Promise<string> {
   const raw = await target.readText(entryFilePath(dirName));
   const envelope = JSON.parse(raw) as ImportEnvelope;
+  if (folderOverride !== undefined) {
+    // `""` = 工作区根目录（与信封的 `folder: null` 同义）。
+    envelope.target = { ...(envelope.target ?? {}), folder: folderOverride || null };
+  }
   if (envelope.bodyFile) {
     const path = safeJoinWithin(dirName, envelope.bodyFile);
     envelope.body = path ? await target.readText(path).catch(() => "") : "";
@@ -1007,30 +1033,76 @@ function describeFailure(error: unknown): { code: string; message: string } {
  * 失败时把 `code` 写进 `state.json.lastError` 并把状态置 `failed`，然后**抛出**
  * `InboxError`（`code` + 中文 `userMessage`），让面板能弹 `UI-07` 的提示——
  * 条目本身留在收件箱里，用户可重试或丢弃。
+ *
+ * 签名保持不变（`00` §6.14㉜ 要求「纯增量」）：要改落点用 `commitInboxResult(id, { folder })`。
  */
 export async function commitInbox(id: string): Promise<void> {
   await commitInboxResult(id);
+}
+
+/** `commitInboxResult` 的可选覆盖参数（`00` §6.14㉜）。 */
+export interface InboxCommitOptions {
+  /**
+   * 落点目录：工作区相对 POSIX 路径。
+   * - **不传这个键**（`undefined`）→ 沿用信封 `target.folder`（= 0.2.0 行为，缺省工作区根）；
+   * - `null` 或 `""` → 工作区根目录；
+   * - 字符串 → 该工作区相对目录（逐段 `sanitizeName()` 清洗）。
+   */
+  folder?: string | null;
+}
+
+/**
+ * 规范化「保存到」的目标目录。
+ *
+ * 复用契约里的 `normalizeFolder()`（`src/lib/clip/envelope.ts:495`）：
+ * `assertSafeRelative()`（拒绝对路径 / `..` / `\0` / 段内 `:`，`src/fs/paths.ts:21`）
+ * → 层级与单段长度上限 → 每段 `sanitizeName()`。返回 `""` 表示**工作区根目录**。
+ *
+ * 非法值抛 `InboxError("IMP-4008")`（文案逐字来自契约 §6.2），调用方在任何写盘动作
+ * 之前就能拒绝它——条目的状态机不会被无谓地推到 `failed`。
+ * 这只做**词法**校验；「根目录之外的写盘」由后端授权（D20）兜住，两层都不省。
+ *
+ * 文案取**本模块**的 `MESSAGES`，不转发上游 `IMPORT_ERRORS` 的原文（只在上游码不在本表时兜底）：
+ * `IMP-4008` 是我们自己拥有的码，转发等于把「同一句话的第二个产地」又引回用户可见路径上
+ * ——`C-6f` 抓的正是这个（转发时用户看到的仍是 `envelope.ts` 那份）。
+ */
+export function resolveInboxFolder(folder: string | null | undefined): string {
+  try {
+    return normalizeFolder(folder);
+  } catch (error) {
+    const described = describeFailure(error);
+    throw new InboxError(described.code, MESSAGES[described.code] ?? described.message, { retryable: false });
+  }
 }
 
 /**
  * 与 `commitInbox` 同一份实现，额外把接收端的 `ImportResult` 交回调用方
  * （IPC 转交层 `opennote:inbox:commit` 的契约返回形状就是它）。
  * 已经入库的条目返回 `null`（幂等，不重复写盘）。
+ *
+ * `options.folder`（`00` §6.14㉜）覆盖信封的落点：不传 = 沿用信封；`null`/`""` = 根；
+ * 字符串 = 该工作区相对目录。非法值在**任何写盘之前**抛 `IMP-4008`。
  */
-export async function commitInboxResult(id: string): Promise<ImportResult | null> {
+export async function commitInboxResult(id: string, options?: InboxCommitOptions): Promise<ImportResult | null> {
   const target = currentBackend();
   if (!target) throw new InboxError("IMP-4007", inboxFailureMessage("IMP-4007"));
+  // 先把选项校验干净：非法落点绝不写 state.json、也绝不调接收端。
+  const override = options && options.folder !== undefined ? resolveInboxFolder(options.folder) : undefined;
   // 同一进程里的并发护栏：两次点击/Enter+点击不会跑两遍接收端。
   if (inFlight.has(id)) throw new InboxError("IMP-4020", inboxFailureMessage("IMP-4020"), { retryable: true });
   inFlight.add(id);
   try {
-    return await runCommit(target, id);
+    return await runCommit(target, id, override);
   } finally {
     inFlight.delete(id);
   }
 }
 
-async function runCommit(target: FileSystemBackend, id: string): Promise<ImportResult | null> {
+async function runCommit(
+  target: FileSystemBackend,
+  id: string,
+  folderOverride?: string,
+): Promise<ImportResult | null> {
   const found = await findDir(target, id);
   if (!found) throw new InboxError("IMP-4017", inboxFailureMessage("IMP-4017"));
   const status = found.detail.entry.status;
@@ -1060,7 +1132,7 @@ async function runCommit(target: FileSystemBackend, id: string): Promise<ImportR
   let result: ImportResult;
   try {
     const receive = await resolveReceiver();
-    const envelopeJson = await envelopeForReceiver(target, found.dirName);
+    const envelopeJson = await envelopeForReceiver(target, found.dirName, folderOverride);
     result = await receive(envelopeJson, { channel: "inbox" });
   } catch (error) {
     const described = describeFailure(error);

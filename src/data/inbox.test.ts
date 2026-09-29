@@ -10,6 +10,8 @@
  * 让 `library.ts` 使用它——收件箱读写全部走既有的 `FileSystemBackend`，不碰真实磁盘。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { baseName, joinPath, parentPath } from "../fs/paths";
 import type { EntryInfo, FileSystemBackend } from "../fs/types";
 import type { ImportResult } from "../desktop/bridge";
@@ -34,11 +36,13 @@ import {
   discardInbox,
   enqueueInbox,
   inboxCount,
+  inboxFailureMessage,
   inboxWatchMode,
   listInbox,
   listInboxDetails,
   readInboxEntry,
   refreshInbox,
+  resolveInboxFolder,
   setInboxReceiver,
   setInboxStatus,
   startInboxWatch,
@@ -577,6 +581,176 @@ describe("commitInbox：确认入库", () => {
   });
 });
 
+/* --------------------- 落点覆盖（00 §6.14㉜） --------------------- */
+
+/**
+ * 「在收件箱里把文件保存到相应的位置」：`commitInboxResult(id, { folder })`
+ * 覆盖信封的 `target.folder`。不传 = 0.2.0 行为；`null`/`""` = 根；非法 = `IMP-4008`
+ * 且**一个字节都不写**（走 `normalizeFolder` = `assertSafeRelative` + 逐段 sanitize）。
+ */
+describe("commitInboxResult(id, { folder })：入库前选落点", () => {
+  const ILLEGAL = [
+    "../逃逸",
+    "a/../../逃逸",
+    "/etc/passwd",
+    "C:/Windows",
+    "C:ws",
+    "\\\\server\\share",
+    "剪藏:ADS",
+    "a\\b",
+    "a\0b",
+    "剪藏/../../../etc",
+  ];
+
+  it("① 指定目录 → 笔记落到该目录（目录不存在时与信封同一套规则：逐段创建）", async () => {
+    const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    setInboxReceiver(null); // 走 C1 的真实接收端
+
+    const result = await commitInboxResult(entry.id, { folder: "剪藏/新目录" });
+
+    expect(result).toMatchObject({ status: "created", path: "剪藏/新目录/中文排版指北.md" });
+    const committed = (await readInboxEntry(entry.id))!;
+    expect(committed.status).toBe("committed");
+    expect(committed.notePath).toBe("剪藏/新目录/中文排版指北.md");
+    expect(committed.committedPath).toBe(committed.notePath);
+    expect(readState(await firstDirName()).committedPath).toBe("剪藏/新目录/中文排版指北.md");
+    expect(testBackend.files.has("剪藏/新目录/中文排版指北.md")).toBe(true);
+    expect(testBackend.dirs.has("剪藏/新目录")).toBe(true);
+    expect(Object.keys(getLibrary().notes)).toContain("剪藏/新目录/中文排版指北.md");
+    // 信封里的 读书笔记 没有被写入。
+    expect(testBackend.files.has("读书笔记/中文排版指北.md")).toBe(false);
+  });
+
+  it("② { folder: null } 与 { folder: \"\" } → 工作区根目录", async () => {
+    for (const folder of [null, ""] as const) {
+      const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+      const calls = installReceiver();
+      await commitInboxResult(entry.id, { folder });
+      const envelope = calls[0].envelope as { target: { folder: string | null } };
+      expect(envelope.target.folder, `folder=${JSON.stringify(folder)}`).toBeNull();
+      const committed = (await readInboxEntry(entry.id))!;
+      expect(committed.notePath).toBe("中文排版指北.md");
+      expect(testBackend.files.has("中文排版指北.md")).toBe(true);
+      expect(testBackend.files.has("读书笔记/中文排版指北.md")).toBe(false);
+      await discardInbox(entry.id);
+    }
+  });
+
+  it("③ 不传 folder → 与 0.2.0 完全一致（沿用信封 target.folder）", async () => {
+    const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    const calls = installReceiver();
+    await commitInboxResult(entry.id);
+    expect((calls[0].envelope as { target: { folder: string | null } }).target.folder).toBe("读书笔记");
+    expect((await readInboxEntry(entry.id))!.notePath).toBe("读书笔记/中文排版指北.md");
+  });
+
+  it("③b commitInbox(id) 签名与行为不变（只能沿用信封）", async () => {
+    const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    const calls = installReceiver();
+    await commitInbox(entry.id);
+    expect((calls[0].envelope as { target: { folder: string | null } }).target.folder).toBe("读书笔记");
+    expect((await readInboxEntry(entry.id))!.notePath).toBe("读书笔记/中文排版指北.md");
+  });
+
+  it("④ 非法落点一律 IMP-4008：不写盘、不调接收端、条目仍 pending", async () => {
+    for (const folder of ILLEGAL) {
+      const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+      const dirName = await firstDirName();
+      const receiverCalls = installReceiver();
+      const filesBefore = [...testBackend.files.keys()].sort();
+      const dirsBefore = [...testBackend.dirs].sort();
+      const stateBefore = readState(dirName);
+      const mark = testBackend.calls.length;
+
+      await expect(commitInboxResult(entry.id, { folder }), `folder=${JSON.stringify(folder)}`).rejects.toMatchObject({
+        code: "IMP-4008",
+        userMessage: "目标目录不合法：不能使用 ..、绝对路径或系统保留字符。",
+      });
+
+      // 一个字节都没写：文件、目录、state.json、接收端调用次数全部不变。
+      expect([...testBackend.files.keys()].sort(), folder).toEqual(filesBefore);
+      expect([...testBackend.dirs].sort(), folder).toEqual(dirsBefore);
+      expect(readState(dirName), folder).toEqual(stateBefore);
+      expect(testBackend.calls.slice(mark), folder).toEqual([]);
+      expect(receiverCalls, folder).toHaveLength(0);
+      const after = (await readInboxEntry(entry.id))!;
+      expect(after.status, folder).toBe("pending");
+      expect(after.attempts, folder).toBe(0);
+      // 越界串绝不进任何路径。
+      expect([...testBackend.files.keys()].some((path) => path.includes("逃逸") || path.includes("etc/passwd"))).toBe(false);
+      await discardInbox(entry.id);
+    }
+  });
+
+  it("④e 纵深防御：就算本层预校验被绕过，接收端的落点层也会拒（02 §7.3）", async () => {
+    const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    setInboxReceiver(null); // C1 的真实接收端
+    const filesBefore = [...testBackend.files.keys()].sort();
+    await expect(commitInboxResult(entry.id, { folder: "../逃逸" })).rejects.toMatchObject({ code: "IMP-4008" });
+    // 没有任何笔记落到工作区外（内存后端里连一条带 `..` 的路径都不该出现）。
+    expect([...testBackend.files.keys()].sort()).toEqual(filesBefore);
+    expect([...testBackend.files.keys()].some((path) => path.includes(".."))).toBe(false);
+    expect((await readInboxEntry(entry.id))!.status).toBe("pending");
+  });
+
+  it("④b resolveInboxFolder：合法值按信封同一套规则规范化，根目录统一成 \"\"", () => {
+    expect(resolveInboxFolder("剪藏//技术/")).toBe("剪藏/技术");
+    expect(resolveInboxFolder("./剪藏/./技术")).toBe("剪藏/技术");
+    expect(resolveInboxFolder(null)).toBe("");
+    expect(resolveInboxFolder(undefined)).toBe("");
+    expect(resolveInboxFolder("")).toBe("");
+    expect(resolveInboxFolder("   ")).toBe("");
+    for (const folder of ILLEGAL) {
+      expect(() => resolveInboxFolder(folder), folder).toThrow(InboxError);
+    }
+    // 层级上限 10（契约 §2.4）。
+    expect(() => resolveInboxFolder(Array.from({ length: 11 }, (_, index) => `d${index}`).join("/"))).toThrow(/不合法/);
+  });
+
+  it("④c 覆盖值与信封值走同一套规范化：两种写法的落点一致", async () => {
+    const byEnvelope = await enqueueInbox(
+      JSON.stringify({
+        ...ENVELOPE,
+        importId: "env-0001-aaaa",
+        title: "第一篇",
+        body: "第一篇的正文。",
+        source: { ...ENVELOPE.source, url: "https://example.com/first" },
+        target: { folder: "读书笔记//技术", notePath: null },
+      }),
+      { ...META, title: "第一篇", sourceUrl: "https://example.com/first", bodyHash: "sha256:env-0001" },
+    );
+    const byOption = await enqueueInbox(
+      JSON.stringify({
+        ...ENVELOPE,
+        importId: "opt-0002-bbbb",
+        title: "第二篇",
+        body: "第二篇的正文，和第一篇不同。",
+        source: { ...ENVELOPE.source, url: "https://example.com/second" },
+        target: { folder: null, notePath: null },
+      }),
+      { ...META, title: "第二篇", sourceUrl: "https://example.com/second", targetFolder: null, bodyHash: "sha256:opt-0002" },
+    );
+    setInboxReceiver(null);
+
+    await commitInbox(byEnvelope.id);
+    await commitInboxResult(byOption.id, { folder: "读书笔记/技术" });
+
+    const first = (await readInboxEntry(byEnvelope.id))!;
+    const second = (await readInboxEntry(byOption.id))!;
+    expect(first.notePath).toBe("读书笔记/技术/第一篇.md");
+    expect(second.notePath).toBe("读书笔记/技术/第二篇.md");
+    expect(parentPath(first.notePath!)).toBe(parentPath(second.notePath!));
+  });
+
+  it("④d 覆盖落点后 IP 转发层的返回形状不变（ImportResult.path = 实际落点）", async () => {
+    const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    const calls = installReceiver();
+    const result = await commitInboxResult(entry.id, { folder: "速记" });
+    expect(result).toMatchObject({ status: "created", importId: ENVELOPE.importId, path: "速记/中文排版指北.md" });
+    expect(calls).toHaveLength(1);
+  });
+});
+
 /* -------------------------------- 丢弃 --------------------------------- */
 
 describe("discardInbox：立即清理、不进回收站", () => {
@@ -937,9 +1111,53 @@ describe("InboxPanel 首屏（逐字文案冻结）", () => {
     expect(html).toContain("在浏览器中打开来源");
     expect(html).toContain("跳过这次");
     expect(html).toContain("入库");
+    // 「保存到」选择器（0.3.0）：根目录 + 既有文件夹树，最终落点说明句。
+    expect(html).toContain("保存到");
+    expect(html).toContain("笔记本根目录");
+    expect(html).toContain("入库到「读书笔记」。");
     // 丢弃是销毁动作：面板里不得出现任何「恢复」入口。
     expect(html).not.toContain("恢复");
     expect(html).not.toMatch(/30\s*天/);
+  });
+
+  it("保存到：候选来自既有文件夹树（folderPathLabel 写法）", async () => {
+    testBackend.seed("剪藏/技术/占位.md", "# 占位\n");
+    await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    const html = await renderPanel();
+    // 行由 `.inbox__save-to` 提供样式（app.css），组件里不再写行内样式。
+    expect(html).toContain('class="inbox__save-to"');
+    expect(html).toContain("<span>保存到</span>");
+    // 根目录选项 + 树上每个文件夹一个选项，值是工作区相对路径（标签用 folderPathLabel 的写法）。
+    expect(html).toContain('<option value="">笔记本根目录</option>');
+    expect(html).toContain('<option value="剪藏/技术">剪藏 / 技术</option>');
+    // 当前信封落点预选中。
+    expect(html).toMatch(/<option value="读书笔记"[^>]*>读书笔记<\/option>/);
+  });
+
+  it("保存到：信封落点是根目录时，说明句写「入库到笔记本根目录。」", async () => {
+    await enqueueInbox(JSON.stringify({ ...ENVELOPE, target: { folder: null, notePath: null } }), { ...META, targetFolder: null });
+    const html = await renderPanel();
+    expect(html).toContain("入库到笔记本根目录。");
+    expect(html).not.toContain("入库到「");
+  });
+
+  it("落点非法（手工写坏的 entry.json）如实提示，且面板不渲染崩", async () => {
+    await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    const dirName = await firstDirName();
+    const path = `${INBOX_DIR}/${dirName}/entry.json`;
+    const envelope = JSON.parse(testBackend.files.get(path) as string) as Record<string, unknown>;
+    envelope.target = { folder: "../逃逸", notePath: null };
+    testBackend.files.set(path, JSON.stringify(envelope));
+    await refreshInbox();
+
+    const html = await renderPanel();
+
+    expect(html).toContain("目标目录不合法：不能使用 ..、绝对路径或系统保留字符。");
+    // 用户可见文案里不得出现 Markdown 内联代码标记（字面反引号）。
+    expect(html).not.toContain("`");
+    // 非法值原样留在选择器里，不被悄悄吞掉；也不出现「会存到根目录」这种错误承诺。
+    expect(html).toContain("../逃逸");
+    expect(html).not.toContain("入库时会存到根目录");
   });
 
   it("落点目录不存在：逐字说明句 + 主按钮改成「入库到根目录」", async () => {
@@ -1051,5 +1269,80 @@ describe("变更检测消费端", () => {
     startInboxWatch();
     expect(inboxWatchMode()).toBe("poll");
     stopInboxWatch();
+  });
+});
+
+/* ------------------ 用户文案单一来源（C-6f 多产地护栏） ------------------ */
+
+/**
+ * 同一句 `userMessage` 在仓库里有 **N 个产地**：`electron/bridge.cjs` 的 `ERROR_TABLE`、
+ * `electron/main.cjs`、`src/lib/clip/envelope.ts` 的 `IMPORT_ERRORS`、本模块的 `MESSAGES`、
+ * 扩展的 `errors.js`。`C-6c` 只盖住桥那一张表，`pnpm test` 也盖不住 —— 谁改一份另外几份
+ * 不会跟着变。这里直接拿**源码文本**比两份表（`MESSAGES` 是模块私有常量，不导出）。
+ *
+ * 另有一条更隐蔽的坑（Verifier 的 `C-6f` 抓到）：文档表格单元格里的 `` `..` `` 是 Markdown
+ * 内联代码标记，**不是文案的一部分**；抄进 JS 字符串时把反引号一起带过来，用户就会看见
+ * 字面反引号。所以下面既比对**剥反引号后**是否一致，也单独断言**实现里一个反引号都不许有**。
+ */
+describe("MESSAGES 与桥 ERROR_TABLE 逐字一致（同一语义值多产地）", () => {
+  const read = (relative: string) =>
+    readFileSync(fileURLToPath(new URL(`../../${relative}`, import.meta.url)), "utf8");
+  /** 去掉注释，避免注释里的示例文案被当成真表项（与 `C-6f` 同口径）。 */
+  const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  /** `"IMP-4008": "…"`（本模块的纯字符串映射）。 */
+  const plainTable = (text: string) =>
+    new Map(
+      [...text.matchAll(/["']IMP-(\d{4})["']\s*:\s*(["'])((?:(?!\2)[\s\S])*?)\2/g)].map(
+        (match) => [`IMP-${match[1]}`, match[3]] as const,
+      ),
+    );
+  /** 桥的 `ERROR_TABLE`：**一行一条**（`'IMP-4008': { …, userMessage: '…' },`），逐行取。 */
+  const bridgeTable = (text: string) =>
+    new Map(
+      text
+        .split(/\r?\n/)
+        .flatMap((line) => {
+          const code = /["']IMP-(\d{4})["']\s*:\s*\{/.exec(line);
+          const copy = code ? /userMessage\s*:\s*(["'])((?:(?!\1)[\s\S])*?)\1/.exec(line) : null;
+          return code && copy ? [[`IMP-${code[1]}`, copy[2]] as const] : [];
+        }),
+    );
+
+  /**
+   * `IMP-4011` 一个码覆盖**两个分支**，两个产地的措辞本来就不同：
+   * 本模块是 `append` 分支（追加目标不存在）、桥是 `overwrite` 降级分支。
+   * 它不参与逐字比对（`C-6e` 同类：一个格子覆盖多种情形），其余码必须逐字一致。
+   */
+  const BRANCH_CODES = new Set(["IMP-4011"]);
+
+  it("IMP-4008：不含反引号，且与桥 ERROR_TABLE 逐字相等", () => {
+    const message = inboxFailureMessage("IMP-4008");
+    const bridge = bridgeTable(stripComments(read("electron/bridge.cjs"))).get("IMP-4008");
+
+    expect(message).toBe("目标目录不合法：不能使用 ..、绝对路径或系统保留字符。");
+    expect(message).not.toContain("`");
+    expect(bridge).toBe(message);
+  });
+
+  it("MESSAGES 全表：任何一句用户可见文案都不得含反引号", () => {
+    const mine = plainTable(stripComments(read("src/data/inbox.ts")));
+    expect(mine.size).toBeGreaterThanOrEqual(20); // 提取逻辑没失效
+    const offenders = [...mine].filter(([, copy]) => copy.includes("`")).map(([code, copy]) => `${code}「${copy}」`);
+    expect(offenders).toEqual([]);
+  });
+
+  it("MESSAGES 与桥共有的码：逐字相等（防止第 N+1 次改动只改一份）", () => {
+    const mine = plainTable(stripComments(read("src/data/inbox.ts")));
+    const bridge = bridgeTable(stripComments(read("electron/bridge.cjs")));
+    const shared = [...mine.keys()].filter((code) => bridge.has(code));
+    expect(shared.length).toBeGreaterThanOrEqual(20);
+
+    const drifted = shared
+      .filter((code) => !BRANCH_CODES.has(code) && mine.get(code) !== bridge.get(code))
+      .map((code) => `${code}: 本模块「${mine.get(code)}」≠ 桥「${bridge.get(code)}」`);
+    expect(drifted).toEqual([]);
+    // 分支专属文案仍然各自保留（不是漂移，是两种情形）。
+    expect(mine.get("IMP-4011")).toBe("「追加」的目标不存在，已改为新建一篇。");
+    expect(bridge.get("IMP-4011")).toBe("「覆盖」不可用，已改为新建一篇。");
   });
 });

@@ -17,6 +17,9 @@
  * `没有「{筛选名}」的条目。` / `正在读取收件箱…` / `丢弃这条导入？` /
  * `「{标题}」还没入库，丢弃后不会进入回收站。` / `丢弃` / `留下`。
  *
+ * 0.3.0（`00` §6.14㉜）新增「保存到」选择器：入库前可以改落点，改完仍按同一套优先级
+ * 显示最终落点说明句（非法 → 目录不存在 → 正在编辑 → 同网址剪藏过 → 同名另存 → 落点）。
+ *
  * 三条硬约束：**没有「恢复」入口**（`discarded` 不进回收站、不可恢复）；错误句与状态文字
  * 一律 `--fs-sm` + `--ink`（`--ink-3` 对比度不足）；成功 toast 由 C1 的 `announce()` 负责
  * （避免 UI-05 出现两份实现），面板只弹**失败** toast。
@@ -24,12 +27,14 @@
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icons";
 import { desktopBridge } from "../desktop/bridge";
-import { useLibrary } from "../data/library";
+import { folderPathLabel, useLibrary } from "../data/library";
 import {
   INBOX_FAILED_TTL_MS,
   INBOX_FULL_MESSAGE,
   INBOX_LIMIT,
-  commitInbox,
+  INBOX_ROOT_LABEL,
+  INBOX_ROOT_VALUE,
+  commitInboxResult,
   discardInbox,
   inboxFailureMessage,
   readInboxDetail,
@@ -99,8 +104,21 @@ function errorMessage(error: unknown): string {
   return "";
 }
 
-/** 一条外部剪藏笔记的前像：正文 front-matter 里的 `source` / `captured_at`。 */
-interface PreviousCapture {
+/**
+ * 落点文件名 + 合法性。`requestedNotePath()` 内部会跑 `normalizeFolder()`
+ * （`assertSafeRelative` + 逐段 `sanitizeName`），**手工写坏的 `entry.json`（比如
+ * `target.folder = "../逃逸"`）会让它抛错**——这里必须接住，否则整块面板会渲染崩掉。
+ * 非法时按根目录算一个只用于显示的文件名，并如实标记 `illegal`。
+ */
+function safeRequestedPath(folder: string | null, title: string): { path: string; illegal: boolean } {
+  try {
+    return { path: requestedNotePath(folder, title), illegal: false };
+  } catch {
+    return { path: requestedNotePath(null, title), illegal: true };
+  }
+}
+
+/** 一条外部剪藏笔记的前像：正文 front-matter 里的 `source` / `captured_at`。 */interface PreviousCapture {
   path: string;
   title: string;
   capturedAt: number | null;
@@ -140,6 +158,8 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ id: string; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 「保存到」的选择（`00` §6.14㉜）：只对当前条目生效，`folder: null` = 工作区根。 */
+  const [folderPick, setFolderPick] = useState<{ id: string; folder: string | null } | null>(null);
 
   // 有缓存条目就直接显示；否则等第一次读盘完成，避免闪一下「正在读取收件箱…」。
   const loading = !loaded && details.length === 0;
@@ -179,33 +199,52 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
 
   /* ---------------------------- 落点与说明句 ---------------------------- */
 
+  /**
+   * 最终落点目录：用户在这次会话里选过的以选中值为准，否则沿用信封的 `target.folder`。
+   * `null` = 工作区根目录（和信封 `target.folder: null` 同义）。
+   */
+  const effectiveFolder = useMemo(() => {
+    if (!entry) return null;
+    if (folderPick && folderPick.id === entry.id) return folderPick.folder;
+    return entry.targetFolder;
+  }, [entry?.id, entry?.targetFolder, folderPick]);
+
+  /** 「保存到」下拉的候选项：根目录 + 既有文件夹树（值 = 文件夹的工作区相对路径）。 */
+  const folderOptions = useMemo(() => {
+    return Object.values(library.folders)
+      .map((folder) => ({ path: folder.id, label: folderPathLabel(folder.id, library.folders) }))
+      .sort((left, right) => left.path.localeCompare(right.path, "zh-Hans-CN"));
+  }, [library.folders]);
+
   const landing = useMemo(() => {
     if (!entry) return null;
-    const path = requestedNotePath(entry.targetFolder, entry.title || "无标题");
-    const folderMissing = entry.targetFolder !== null && !(entry.targetFolder in library.folders);
-    const sameName = path in library.notes;
-    const editing = Object.values(library.notes).some((note) => note.id === path && library.dirty[note.id]);
-    return { path, folderMissing, sameName, editing };
-  }, [entry?.id, entry?.targetFolder, entry?.title, library.folders, library.notes, library.dirty]);
+    const requested = safeRequestedPath(effectiveFolder, entry.title || "无标题");
+    const folderMissing = !requested.illegal && effectiveFolder !== null && !(effectiveFolder in library.folders);
+    const sameName = requested.path in library.notes;
+    const editing = Object.values(library.notes).some((note) => note.id === requested.path && library.dirty[note.id]);
+    return { path: requested.path, illegal: requested.illegal, folderMissing, sameName, editing };
+  }, [entry?.id, effectiveFolder, entry?.title, library.folders, library.notes, library.dirty]);
 
   const previous = useMemo(() => {
     if (!entry || !entry.sourceUrl) return null;
     return findPreviousCapture(library.notes, entry.sourceUrl);
   }, [entry?.id, entry?.sourceUrl, library.notes]);
 
-  /** 落点唯一说明句（优先级：目录不存在 → 正在编辑 → 同网址剪藏过 → 同名另存）。 */
+  /** 落点说明句（优先级：非法 → 目录不存在 → 正在编辑 → 同网址剪藏过 → 同名另存 → 最终落点）。 */
   const hint = useMemo(() => {
     if (!entry || !landing) return null;
     if (entry.status === "failed") return null;
-    if (landing.folderMissing) return `目标目录「${entry.targetFolder}」不存在，入库时会存到根目录。`;
+    if (landing.illegal) return inboxFailureMessage("IMP-4008");
+    if (landing.folderMissing) return `目标目录「${effectiveFolder}」不存在，入库时会存到根目录。`;
     if (landing.editing) return "这篇笔记正在编辑，不能覆盖；可以追加或另存为新笔记。";
     if (previous) {
       const when = previous.capturedAt ? formatRelativeTime(previous.capturedAt, now) : "之前";
       return `这个网址之前剪藏过（${when}），入库时会追加到《${previous.title}》。`;
     }
     if (landing.sameName) return `同名文件已存在，入库时会另存为《${entry.title} 2》。`;
-    return null;
-  }, [entry?.id, entry?.status, entry?.targetFolder, entry?.title, landing, previous, now]);
+    // 最终落点说明句：入库前明确「会存到哪」。
+    return effectiveFolder ? `入库到「${effectiveFolder}」。` : `入库到${INBOX_ROOT_LABEL}。`;
+  }, [entry?.id, entry?.status, entry?.title, effectiveFolder, landing, previous, now]);
 
   /* -------------------------------- 副作用 ------------------------------- */
 
@@ -253,17 +292,23 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
 
   /* -------------------------------- 动作 --------------------------------- */
 
-  const runCommit = useCallback(async (target: InboxEntry) => {
-    setBusy(true);
-    try {
-      // 成功 toast 由接收端 `announce()` 弹（UI-05 只有一份实现），这里只处理失败。
-      await commitInbox(target.id);
-    } catch (error) {
-      notify(errorMessage(error) || "入库失败，请重试。", { kind: "danger" });
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+  const runCommit = useCallback(
+    async (target: InboxEntry) => {
+      setBusy(true);
+      try {
+        // 选了别的目录才传覆盖参数；没动过就走信封原值 —— 0.2.0 那条路径一字未改。
+        const chosen = folderPick && folderPick.id === target.id ? folderPick.folder : target.targetFolder;
+        const options = chosen === target.targetFolder ? undefined : { folder: chosen };
+        // 成功 toast 由接收端 `announce()` 弹（UI-05 只有一份实现），这里只处理失败。
+        await commitInboxResult(target.id, options);
+      } catch (error) {
+        notify(errorMessage(error) || "入库失败，请重试。", { kind: "danger" });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [folderPick],
+  );
 
   const runDiscard = useCallback(async (target: InboxEntry) => {
     const ok = await askConfirm({
@@ -504,10 +549,35 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
                 {isFailed && entry?.message ? <div className="inbox__field-err">{entry.message}</div> : null}
 
                 <div className="inbox__group">落点</div>
+                {isCommitted ? null : (
+                  <div className="inbox__save-to">
+                    <span>保存到</span>
+                    <select
+                      className="field"
+                      aria-label="保存到"
+                      value={effectiveFolder ?? INBOX_ROOT_VALUE}
+                      disabled={committing}
+                      onChange={(event) =>
+                        entry ? setFolderPick({ id: entry.id, folder: event.target.value || null }) : undefined
+                      }
+                    >
+                      <option value={INBOX_ROOT_VALUE}>{INBOX_ROOT_LABEL}</option>
+                      {folderOptions.map((option) => (
+                        <option key={option.path} value={option.path}>
+                          {option.label}
+                        </option>
+                      ))}
+                      {/* 信封里的目录可能已经不在树上了：原样留着，别把用户的选择悄悄吞掉。 */}
+                      {effectiveFolder && !folderOptions.some((option) => option.path === effectiveFolder) ? (
+                        <option value={effectiveFolder}>{effectiveFolder}</option>
+                      ) : null}
+                    </select>
+                  </div>
+                )}
                 <dl className="inbox__dl">
                   <div>
                     <dt>目录</dt>
-                    <dd>{entry?.targetFolder ?? "笔记本根目录"}</dd>
+                    <dd>{effectiveFolder ?? INBOX_ROOT_LABEL}</dd>
                   </div>
                   <div>
                     <dt>文件名</dt>
