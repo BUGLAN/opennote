@@ -21,12 +21,13 @@
  *   node tools/mock-bridge.mjs --mode folder-denied  # 落点被拒 → IMP-4009
  *   node tools/mock-bridge.mjs --mode rate-limit     # 第一次 429 IMP-4015
  *   node tools/mock-bridge.mjs --mode auth-required  # 所有请求 401 IMP-2001
+ *   node tools/mock-bridge.mjs --inbox               # 应用侧「先进入收件箱」开启 → 每次导入 202 pending（00 §6.14 ㉕）
  */
 
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 export const SPEC = "opennote.import/v1";
@@ -104,6 +105,7 @@ const TAG_RE = /^[\p{L}\p{N}_\-/]+$/u;
  * @param {string} [options.code] 6 位配对码（默认 482913）
  * @param {string} [options.defaultFolder]
  * @param {string} [options.outDir] 落盘目录（默认 os.tmpdir()/opennote-mock-notes）
+ * @param {boolean} [options.inbox] 应用侧「先进入收件箱」开启（UiSettings.importConflict === "inbox"，00 §6.14 ㉕）
  * @param {boolean} [options.log] 是否打印请求日志
  */
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -114,6 +116,7 @@ export function startMockBridge(options = {}) {
   const code = options.code || "482913";
   const defaultFolder = options.defaultFolder || "剪藏";
   const outDir = options.outDir || join(tmpdir(), "opennote-mock-notes");
+  const inboxEnabled = Boolean(options.inbox);
   const log = options.log !== false;
 
   const state = {
@@ -124,6 +127,8 @@ export function startMockBridge(options = {}) {
     started: Date.now(),
     // 「正在启动」模式的时间基准（MOCK_STARTING_MS 之后接口才就绪）
     startedAt: Date.now(),
+    // 应用侧「先进入收件箱」（㉕）：非 in-app 通道一律强制 pending
+    inboxEnabled,
     imports: [],
     pairs: [],
     rejections: [],
@@ -290,7 +295,8 @@ export function startMockBridge(options = {}) {
             app: "opennote-mock",
             port: state.port,
             workspace: mode === "no-workspace" ? { open: false, name: null } : { open: true, name: "模拟笔记本" },
-            inbox: { enabled: false, pending: 0 },
+            // 02 §5.2：`inbox` 是**布尔**（true = 先进收件箱，false = 直接入库）；popup 的 L6 说明句据此选文案
+            inbox: state.inboxEnabled,
             authRequired: true,
             time: new Date().toISOString(),
           },
@@ -396,9 +402,46 @@ export function startMockBridge(options = {}) {
         const { kept, violations } = classifyTags(envelope.tags);
         if (violations.length) state.tagsViolations.push(...violations);
 
-        // ── 判定链第 2/3/4 步（与 src/lib/clip/receive.ts 同口径）────────────────
         const bodyHash = createHash("sha256").update(String(envelope.body || "")).digest("hex");
         const sourceUrl = envelope.source && envelope.source.url ? envelope.source.url : null;
+
+        // ── 00 §6.14 ㉕：应用侧「先进入收件箱」开关（UiSettings.importConflict === "inbox"）──
+        // 非 in-app 通道 → 本次强制 pending（进收件箱），**跳过判定链第 2–6 步**；
+        // 第 1 步（同 importId → deduped）已在上面优先处理过。
+        // 这就是「内容直接发送到 Opennote 的收件箱」由**应用侧设置**决定的那条路径。
+        if (state.inboxEnabled) {
+          const inboxId = `inbox-${state.pending.length + 1}`;
+          state.pending.push({ inboxId, importId: envelope.importId, url: sourceUrl, title: envelope.title });
+          state.judgment.push({ step: "pending", inboxId, reason: "app-side-inbox" });
+          state.imports.push({
+            importId: envelope.importId,
+            url: sourceUrl,
+            title: envelope.title,
+            path: null,
+            bodyHash,
+            filePath: null,
+            tags: kept,
+          });
+          send(202, {
+            ok: true,
+            result: {
+              status: "pending",
+              importId: envelope.importId,
+              path: null,
+              inboxId,
+              deduped: false,
+              dedupedBy: null,
+              revertible: false,
+              preimage: null,
+              assets: [],
+              tags: kept,
+              warnings: [],
+            },
+          });
+          return;
+        }
+
+        // ── 判定链第 2/3/4 步（与 src/lib/clip/receive.ts 同口径）────────────────
         const sameUrl = sourceUrl ? state.imports.filter((item) => item.url === sourceUrl) : [];
         const byContent = sameUrl.find((item) => item.bodyHash === bodyHash);
         if (byContent) {
@@ -461,6 +504,58 @@ export function startMockBridge(options = {}) {
               deduped: false,
               dedupedBy: null,
               revertible: false,
+              preimage: null,
+              assets: [],
+              tags: kept,
+              warnings: [],
+            },
+          });
+          return;
+        }
+
+        // ── 02 §2.4：显式 conflict:"append" + target.notePath → 追加到那篇笔记 ─────────
+        // 真接收端在这里读工作区里的既有 `.md`；mock 以 outDir 为「工作区根」，
+        // 不存在就按同一路径创建（目录建不出来 → IMP-4009，与真接收端同码）。
+        if (explicitConflict === "append") {
+          const notePath = envelope.target && envelope.target.notePath ? String(envelope.target.notePath) : "";
+          if (!notePath || notePath.includes("..") || /^[/\\]/.test(notePath)) {
+            send(422, errorBody("IMP-4009", "append requires a workspace-relative notePath", "找不到要追加的那篇笔记。"));
+            return;
+          }
+          const filePath = join(outDir, ...notePath.split("/"));
+          try {
+            mkdirSync(dirname(filePath), { recursive: true });
+            appendFileSync(filePath, `\n${envelope.body}\n`, "utf8");
+          } catch {
+            send(
+              422,
+              errorBody("IMP-4009", "append failed", "找不到要追加的那篇笔记，或目标目录无法创建（可能没有写入权限）。"),
+            );
+            return;
+          }
+          state.wrotePaths.push(filePath);
+          state.imports.push({
+            importId: envelope.importId,
+            path: notePath,
+            filePath,
+            tags: kept,
+            url: sourceUrl,
+            bodyHash,
+            committedAt: new Date().toISOString(),
+            envelope,
+            status: "appended",
+          });
+          state.judgment.push({ step: "appended", path: notePath, reason: "explicit-conflict-append" });
+          send(200, {
+            ok: true,
+            result: {
+              status: "appended",
+              importId: envelope.importId,
+              path: notePath,
+              inboxId: null,
+              deduped: false,
+              dedupedBy: null,
+              revertible: true,
               preimage: null,
               assets: [],
               tags: kept,
@@ -552,12 +647,15 @@ if (isMain) {
     code: arg("code", "482913"),
     token: arg("token", undefined),
     outDir: arg("out", join(tmpdir(), "opennote-mock-notes")),
+    // --inbox：模拟应用侧设置里的「先进入收件箱」（㉕）→ 每次导入都回 202 pending
+    inbox: argv.includes("--inbox"),
   });
   process.stdout.write(
     [
       "本地桥 mock 已启动。复现步骤见 extension/README.md「6 态逐态复现」。",
       `  endpoint      http://127.0.0.1:${bridge.port}`,
       `  mode          ${bridge.mode}`,
+      `  收件箱开关    ${bridge.inboxEnabled ? "开（importConflict=inbox，导入一律 202 pending）" : "关"}`,
       `  配对码        ${bridge.code}`,
       `  令牌          ${bridge.token}`,
       `  落盘目录      ${bridge.outDir}`,

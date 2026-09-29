@@ -25,7 +25,7 @@ import {
   sanitizeTitle,
   toLocalIso,
 } from "../src/lib/envelope.js";
-import { SPEC, CLIENT_NAME, CLIENT_VERSION, KNOWN_CODES, isKnownCode, userMessage } from "../src/lib/errors.js";
+import { SPEC, CLIENT_NAME, CLIENT_VERSION, IMP_TABLE, KNOWN_CODES, isKnownCode, userMessage } from "../src/lib/errors.js";
 
 const base = () => ({
   importId: "3f9a1c02-7e41-4b90-8a35-1d2c4f6a8b90",
@@ -206,25 +206,38 @@ test("错误码总表覆盖契约 A.3 的全部 IMP 码（不存在「未知错�
     "IMP-4015", "IMP-4017", "IMP-4020", "IMP-5001",
   ];
   assert.equal(index.length, 33);
-  assert.deepEqual([...KNOWN_CODES].sort(), [...index].sort());
+  // 0.3.1（Lead 裁定）：IMP-2004 已作废，本表不再收录它的文案；码号仍在 02 §A.3 里，
+  // 所以这里按「表 = A.3 减去作废码」比对，并要求作废码**确实不在表里**。
+  const deprecated = ["IMP-2004"];
+  assert.deepEqual([...KNOWN_CODES].sort(), index.filter((code) => !deprecated.includes(code)).sort());
+  for (const code of deprecated) assert.ok(!isKnownCode(code), `${code} 已作废，不应再进表`);
   for (const code of index) {
+    if (deprecated.includes(code)) continue; // 作废码：不进表（上面已单独断言）
     assert.ok(isKnownCode(code), `缺少错误码 ${code}`);
-    // 契约明令「不进用户视野」的 4 条：IMP-1005（Host 校验）、IMP-3001（进设置面板拒绝日志）、
-    // IMP-3004/3005（客户端自身构造错误，正常路径不可达）→ 允许没有用户文案
+    // 契约明令「不进用户视野」的 4 条：IMP-1005 / IMP-3001 / IMP-3004 / IMP-3005
     const noMessage = ["IMP-1005", "IMP-3001", "IMP-3004", "IMP-3005"];
     assert.ok(userMessage(code) || noMessage.includes(code), `${code} 缺少用户文案`);
   }
+  assert.equal(userMessage("IMP-2004"), null, "作废码不收录文案（00 §6.15㉞）");
   // 逐字文案（02 §6.2 + 03 §UI-01 覆盖）
   assert.equal(
     userMessage("IMP-1001"),
     "本地接口未开启。打开桌面版 Opennote 的「设置 · 文件 · 导入与接口」，开启本地接口后重试。",
   );
-  assert.equal(userMessage("IMP-4006"), "Opennote 的窗口已关闭。请重新打开 Opennote，再试一次。");
-  assert.equal(userMessage("IMP-2001"), "这个客户端还没有配对。请在 Opennote 的「导入与接口」里点「配对新客户端」，输入显示的 6 位配对码。");
+  // 00 §6.14 ㉗ 冻结：区分「应用没运行」与「工作区没打开」，且不允许再用旧措辞
+  assert.equal(userMessage("IMP-4006"), "Opennote 没有在运行。请先打开 Opennote，再试一次。");
+  // 00 §6.15㉞ 冻结（0.3.1）：配对删除 → IMP-2001 改为「还没有配置访问令牌」
+  assert.equal(userMessage("IMP-2001"), "这个客户端还没有配置访问令牌。请在 Opennote 的「导入与接口」里复制令牌，粘贴到客户端。");
   assert.equal(userMessage("IMP-2002"), "访问令牌不正确或已失效。重新生成令牌后，请在客户端里更新。");
-  assert.equal(userMessage("IMP-2004"), "配对码不正确或已过期，请在 Opennote 里重新生成。");
-  assert.equal(userMessage("IMP-4007"), "Opennote 里还没有打开笔记本，请先打开一个文件夹（或新建浏览器笔记本）。");
-  assert.equal(userMessage("IMP-4008"), "目标目录不合法：不能使用 `..`、绝对路径或系统保留字符。");
+  // 00 §6.15㉞ + Lead 0.3.1 裁定：IMP-2004 作废——码号保留、不再产出，表里**不收录**文案（不产死数据）
+  assert.equal(userMessage("IMP-2004"), null);
+  assert.equal(isKnownCode("IMP-2004"), false);
+  // 00 §6.15㉞：IMP-3001 的文案改了（来源判据改成「是不是扩展/本机程序」），但插件侧仍**不展示**它
+  assert.equal(IMP_TABLE["IMP-3001"].userMessage, "来源未被允许。本地接口只接受浏览器扩展与本机程序发来的请求。");
+  assert.equal(userMessage("IMP-3001"), null, "03/02 RV-06：IMP-3001 只进设置面板日志，插件不展示原文");
+  assert.equal(userMessage("IMP-4007"), "Opennote 里还没有打开笔记本文件夹。请在 Opennote 左侧选一个文件夹，或新建一个，再试一次。");
+  // 03 §UI-01 C42：02:1701 表格格里的反引号是 **Markdown 内联代码标记**，不是文案（Lead 0.3.1 裁定 ①）
+  assert.equal(userMessage("IMP-4008"), "目标目录不合法：不能使用 ..、绝对路径或系统保留字符。");
   assert.equal(userMessage("IMP-4009"), "找不到要追加的那篇笔记，或目标目录无法创建（可能没有写入权限）。");
   // 服务端 userMessage 就近优先
   assert.equal(userMessage("IMP-4008", "服务端原句"), "服务端原句");

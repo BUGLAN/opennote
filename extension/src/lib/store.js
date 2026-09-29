@@ -25,6 +25,8 @@ export function defaultState() {
     workspace: null,
     /** 上次剪藏范围：selection | page。 */
     mode: "selection",
+    /** 追加落点历史（成功回执的 `path`）。API-07 不返回笔记清单，见 README「追加到指定笔记」。 */
+    notePaths: [],
   };
 }
 

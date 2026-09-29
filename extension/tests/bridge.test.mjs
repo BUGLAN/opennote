@@ -21,13 +21,13 @@ import {
   getImportStatus,
   getWorkspace,
   isValidToken,
+  PAIRING_REMOVED,
   postImport,
-  postPair,
   probeHealth,
   requestJson,
   submitEnvelope,
 } from "../src/lib/bridge.js";
-import { ISO_WITH_TZ_RE, buildEnvelope } from "../src/lib/envelope.js";
+import { ISO_WITH_TZ_RE, buildEnvelope, envelopeProblems } from "../src/lib/envelope.js";
 import { STATE, decideState } from "../src/lib/state.js";
 
 function envelopeFixture(importId = "3f9a1c02-7e41-4b90-8a35-1d2c4f6a8b90") {
@@ -195,21 +195,21 @@ test("令牌校验（background 的 API-03 只读探测）：有效 → IMP-4017
   assert.equal(bad.code, "IMP-2002");
 });
 
-test("配对：错误配对码 → IMP-2004；正确 → 47 字符令牌（并记录 origin）", async (t) => {
+test("㉞ 去配对：客户端不再有 /v1/pair 这条路径，令牌只能由用户粘贴（47 字符）", async (t) => {
   const bridge = await bootstrap({ code: "482913" });
   t.after(() => bridge.close());
 
-  const wrong = await postPair(bridge.port, "000000");
-  assert.equal(wrong.kind, "error");
-  assert.equal(wrong.code, "IMP-2004");
+  // 客户端侧：桥库不再导出 postPair（配对整体删除），只留一条显式的删除记录
+  assert.equal(typeof postPair, "undefined");
+  assert.equal(PAIRING_REMOVED.removedIn, "0.3.1");
+  // 桥仍可能实现 /v1/pair（服务端的事，由 c 线处理），但扩展**不再调用**它
+  assert.equal(bridge.pairs.length, 0, "启动过程里不应该出现任何配对请求");
 
-  const right = await postPair(bridge.port, "482913");
-  assert.equal(right.kind, "ok");
-  assert.equal(right.token.length, 47);
-  assert.ok(isValidToken(right.token));
-  assert.equal(right.result.spec, "opennote.import/v1");
-  assert.equal(bridge.pairs.length, 2);
-  assert.equal(bridge.pairs[1].client.name, "chrome-extension");
+  // 粘贴路径：47 字符令牌直接可用于导入（本地校验见 lib/bridge.js 的 isValidToken）
+  assert.equal(isValidToken(bridge.token), true);
+  assert.equal(bridge.token.length, 47);
+  const call = await submitEnvelope(bridge.port, bridge.token, envelopeFixture(), { attempts: 1 });
+  assert.equal(call.kind, "ok");
 });
 
 test("no-window：桥在跑但窗口不在场 → IMP-4006，状态为「Opennote 未运行」", async (t) => {
@@ -250,7 +250,7 @@ test("starting（端口已绑定但接口没就绪，答得比 300ms 慢）→ �
   assert.equal(stateId, STATE.INTERFACE_OFF);
 });
 
-test("origin-denied（403 IMP-3001 来源未被信任）→ 需要配对，绝不能显示已连接", async (t) => {
+test("origin-denied（403 IMP-3001 来源不是扩展/本机程序）→ 未配置令牌，绝不能显示已连接", async (t) => {
   const bridge = await bootstrap({ mode: "origin-denied" });
   t.after(() => bridge.close());
   const probe = await probeHealth(bridge.port);
@@ -291,7 +291,7 @@ test("folder-denied：落点被拒 → IMP-4009（芯片仍是已连接）", asy
   assert.equal(call.retryable, false);
 });
 
-test("auth-required：健康检查仍可读，导入一律 401 IMP-2001 → 状态切「需要配对」", async (t) => {
+test("auth-required：健康检查仍可读，导入一律 401 IMP-2001 → 状态切「未配置令牌」", async (t) => {
   const bridge = await bootstrap({ mode: "auth-required" });
   t.after(() => bridge.close());
   const health = await probeHealth(bridge.port);
@@ -362,6 +362,114 @@ test("判定链走 HTTP：选区二次剪藏 → appended；整页二次剪藏 �
     bridge.judgment.map((entry) => entry.step),
     ["created", "appended", "pending"],
   );
+});
+
+test("应用侧「先进入收件箱」（㉕）：通道非 in-app → 一律 202 pending，判定链第 2–6 步被跳过", async (t) => {
+  const bridge = await bootstrap({ inbox: true });
+  t.after(() => bridge.close());
+  const url = "https://example.com/inbox-mode";
+
+  // 第一次：没有 conflict 键、selection:true —— 平时会 created，开了收件箱开关就必须 pending
+  const first = buildEnvelope({
+    title: "收件箱模式一",
+    body: "第一版正文。\n",
+    url,
+    site: "example.com",
+    capturedAt: "2026-09-29T21:04:11+08:00",
+    selection: true,
+  });
+  const pending = await submitEnvelope(bridge.port, bridge.token, first);
+  assert.equal(pending.result.status, "pending");
+  assert.equal(pending.http, 202);
+  assert.ok(pending.result.inboxId, "进收件箱必须带非空 inboxId");
+  assert.equal(bridge.wrotePaths.length, 0, "进收件箱不得写任何笔记文件");
+  assert.equal(bridge.imports[0].path, null, "收件箱条目没有笔记路径");
+  assert.ok(!("conflict" in first), "插件仍然不下发 conflict 键（红线）");
+
+  // 第 1 步幂等优先：同一个 importId 重投 → deduped，不得产生第二条收件箱条目
+  const again = await submitEnvelope(bridge.port, bridge.token, first);
+  assert.equal(again.result.status, "deduped");
+  assert.equal(bridge.pending.length, 1, "同 importId 重投不得多出收件箱条目");
+
+  // 第 2 步（内容重复）也被跳过：新 importId、同 URL 同正文 → 仍 pending（这一步在平时会 duplicate）
+  const duplicateContent = buildEnvelope({
+    importId: "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
+    title: "收件箱模式一",
+    body: "第一版正文。\n",
+    url,
+    site: "example.com",
+    capturedAt: "2026-09-29T21:07:00+08:00",
+    selection: true,
+  });
+  const second = await submitEnvelope(bridge.port, bridge.token, duplicateContent);
+  assert.equal(second.result.status, "pending");
+  assert.equal(bridge.pending.length, 2);
+  assert.deepEqual(
+    bridge.judgment.map((entry) => entry.step),
+    ["pending", "deduped", "pending"],
+  );
+
+  // 对照：同样的内容，开关关掉后仍走判定链（证明上面 pending 是开关造成的，不是内容造成的）
+  const plain = await bootstrap();
+  t.after(() => plain.close());
+  const control = await submitEnvelope(plain.port, plain.token, first);
+  assert.equal(control.result.status, "created");
+  assert.equal(control.http, 201);
+});
+
+test("追加到指定笔记：conflict=append + target.notePath 落到那篇 .md（02 §2.4）", async (t) => {
+  const bridge = await bootstrap();
+  t.after(() => bridge.close());
+  const notePath = "笔记/读书笔记.md";
+
+  const payload = buildEnvelope({
+    title: "摘录追加",
+    body: "被追加的一段。\n",
+    url: "https://example.com/append-target",
+    site: "example.com",
+    capturedAt: "2026-09-29T21:08:00+08:00",
+    selection: true,
+    notePath,
+    conflict: "append",
+  });
+  assert.equal(payload.target.notePath, notePath);
+  assert.equal(payload.conflict, "append");
+
+  const appended = await submitEnvelope(bridge.port, bridge.token, payload);
+  assert.equal(appended.result.status, "appended");
+  assert.equal(appended.result.path, notePath);
+  assert.equal(readFileSync(join(bridge.outDir, "笔记", "读书笔记.md"), "utf8").includes("被追加的一段。"), true);
+  assert.deepEqual(
+    bridge.judgment.map((entry) => entry.step),
+    ["appended"],
+  );
+
+  // 落点带 `..`：客户端**先**拦住（envelopeProblems），手工绕过客户端时服务端回 IMP-4009，
+  // 两条路径都不得静默改成「新建一篇笔记」。
+  const evil = buildEnvelope({
+    importId: "1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d",
+    title: "越界追加",
+    body: "x",
+    url: "https://example.com/append-evil",
+    site: "example.com",
+    capturedAt: "2026-09-29T21:09:00+08:00",
+    selection: true,
+    notePath: "a/../b.md",
+    conflict: "append",
+  });
+  assert.ok(
+    envelopeProblems(evil).some((problem) => problem.includes("工作区相对")),
+    "客户端必须先拦住越界落点",
+  );
+  const bypass = await postImport(bridge.port, bridge.token, {
+    ...evil,
+    body: "越界追加的正文。\n",
+    source: { ...evil.source, url: "https://example.com/append-evil" },
+    target: { folder: null, notePath: "a/../b.md" },
+    conflict: "append",
+  });
+  assert.equal(bypass.kind, "error", "服务端也必须拒（不得当成新建笔记）");
+  assert.ok(["IMP-4009", "IMP-4001"].includes(bypass.code), `期望落点错误码，实际 ${bypass.code}`);
 });
 
 test("HTTP 状态码兜底映射：不留「未知错误」", () => {

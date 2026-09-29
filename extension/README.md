@@ -1,11 +1,12 @@
 # Opennote 剪藏扩展（Chrome / Edge · Manifest V3）
 
-> 选中就剪、整页也剪；**连不上时如实说清楚是哪一种连不上**；无论如何**不静默失败**。
+> **在页面上点一下要剪的那块**（元素选择）、整页正文、或当前选区；**连不上时如实说清楚是哪一种连不上**；无论如何**不静默失败**。
 
 - 版本：`0.1.4`（`src/manifest.json` 与 `lib/errors.js:15 CLIENT_VERSION` 同步）
 - 目标：`POST http://127.0.0.1:8787-8796/v1/import`，契约 `opennote.import/v1`（`docs/import/02-接口契约-导入信封与通道.md`）
 - 零依赖、零构建工具链：`package.json` 没有 `dependencies` / `devDependencies`，构建 = 复制 `src/` → `dist/` + 生成图标 + 内联设计令牌
 - 物理隔离：本目录与 `src/`（桌面/网页应用）互不 import，唯一被读取的外部文件是 `src/styles/tokens.css`（**逐字复制**，见 §10）
+- 0.3.1 两处大改（`00` §6.15㉝㉞/㊱）：**元素选择取代选区浮标**；**配对整体删除，改为粘贴长期令牌**
 
 ---
 
@@ -26,13 +27,17 @@
    ```
 
    > 选 `extension\dist`，**不要选** `E:\repo\opennote\extension`，也**不要选** `extension\src`。
-   > `src/` 是源目录：里面的 `content/float.js` 还带着 `__OPENNOTE_TOKENS_CSS__` 占位符、`styles/tokens.css` 是构建时才从 `src/styles/tokens.css` 复制进来的、`icons/` 是构建时生成的。直接加载它不会报错，但浮标没有样式、图标缺失。
+   > `src/` 是源目录：里面的 `content/picker.js` 还带着 `__OPENNOTE_TOKENS_CSS__` 占位符、`styles/tokens.css` 是构建时才从 `src/styles/tokens.css` 复制进来的、`icons/` 是构建时生成的。直接加载它不会报错，但**元素选择的覆盖层会没有样式**、图标缺失。
    > `manifest.json` 在 `extension/src/manifest.json`，构建时原样复制到 `extension/dist/manifest.json` —— Chrome 只认 `dist/` 这一层。
 
 4. 建议点扩展卡片上的「固定」，把图标放到工具栏。
 5. 打开桌面版 Opennote →「设置 · 文件 · 导入与接口」→ **开启本地接口**（默认端口 8787）。
-6. 首次使用：点插件图标 → 在 Opennote 里点「配对新客户端」→ 把弹出的 **6 位配对码**填进 popup 的输入框 → 「配对」。
-7. 之后：选中文字 → 浮标「剪藏」，或点图标 →「剪藏到 Opennote」，或右键菜单 / `Alt+Shift+S`。
+6. 首次使用（0.3.1 起**没有配对码**）：在 Opennote 里打开「设置 · 文件 · 导入与接口」→ 复制**访问令牌**（`opn_` 开头，47 个字符）→ 点插件图标 → 把令牌粘进「访问令牌」输入框 → 「连接」。令牌**长期有效**，除非你在 Opennote 里重新生成。
+7. 之后剪藏有三种正文来源（popup 正文区的三选一）：
+   - **元素选择**（默认推荐）：点 popup 里的「选择页面元素」→ popup 关闭、页面上出现跟随鼠标的轮廓 → 在要剪的那块上**点一下**（`Esc` 取消）→ popup 自动弹回，显示 `已选择 {标签名}`；
+   - **整页正文**：不做任何点选，直接剪整页；
+   - **当前选区**：页面上已经有选中的文字时用它（**只剪选区**，高亮不会写进正文）。
+   快捷键 `Alt+Shift+S` 现在是**「进入元素选择模式」**（原来的「剪藏选区」已删除）；整页剪藏走右键菜单「剪藏整页正文到 Opennote」。高亮入口在右键菜单「高亮这段文字」（浮标已删除）。
 
 卸载/更新：`chrome://extensions` 上点「重新加载」即可（改完源码先 `node build.mjs`）。
 
@@ -42,11 +47,12 @@
 
 | 命令 | 作用 | 本次结果 |
 | --- | --- | --- |
-| `node build.mjs` | 清空并重建 `dist/`：复制 `src/`（跳过 `styles/`）、逐字 vendor `tokens.css`、把设计令牌内联进 `content/float.js` 的 `:host`、生成 16/32/48/128 PNG 图标、写 `dist/BUILD-INFO.json`；**先做 manifest 自检**（`verifyManifest()`：`manifest_version` 必须为 3；`default_locale` 若存在必须是字符串；`background.service_worker` / `action.default_popup` 指向的文件必须真实存在） | `dist 就绪：20 个文件` |
-| `node verify.mjs` | 静态验收 V1–V9（清单/权限/引用完整性/零远程主机/零 eval+内联处理器/tokens 逐字同源/0 新令牌/逐字文案 48 条/契约硬约束/无 emoji） | `✓ 9 组验收全部通过（V1–V9）` |
-| `node --test "tests/**/*.test.mjs"` | 58 条单测 + 真 HTTP 集成（真 `node:http` mock 桥、真 vite 载入的**真接收端**） | `58 pass / 0 fail` |
+| `node build.mjs` | 清空并重建 `dist/`：复制 `src/`（跳过 `styles/`）、逐字 vendor `tokens.css`、把设计令牌内联进 `content/picker.js` 的 `:host`、生成 16/32/48/128 PNG 图标、写 `dist/BUILD-INFO.json`；**先做 manifest 自检**（`verifyManifest()`：`manifest_version` 必须为 3；`default_locale` 若存在必须是字符串；`background.service_worker` / `action.default_popup` / `options_ui.page` 指向的文件必须真实存在） | `dist 就绪：26 个文件` |
+| `node verify.mjs` | 静态验收 V1–V15（清单/权限/引用完整性/零远程主机/零 eval+内联处理器/tokens 逐字同源/0 新令牌/逐字文案/契约硬约束/无 emoji/模板白名单/两档高亮/三区+6 项菜单/反引号禁用/**元素选择纪律**/**去配对+令牌格式**） | `✓ 15 组验收全部通过（V1–V15）` |
+| `node --test "tests/**/*.test.mjs"` | 92 条单测 + 真 HTTP 集成（真 `node:http` mock 桥、真 vite 载入的**真接收端**） | `92 pass / 0 fail` |
 | `node build.mjs && node --test "tests/**/*.test.mjs" && node verify.mjs`（`npm run check`） | 三件套 | 全绿 |
-| `node tools/mock-bridge.mjs --mode healthy --port 8787 --code 482913 --token opn_KK…` | 无依赖 mock 桥：`/v1/health`、`/v1/pair`、`/v1/workspace`、`/v1/import(s)`、`/demo`（一张有噪声/og/发布时间的示例文章） | 配合 §4 逐态复现 |
+| `node tools/mock-bridge.mjs --mode healthy --port 8795 --token opn_KK… --inbox` | 无依赖 mock 桥：`/v1/health`、`/v1/workspace`、`/v1/import(s)`（`--inbox` 时导入返 **202 待确认**）、`/demo` | 配合 §4 逐态复现（8787 留给真 Opennote，避免抢端口） |
+| `pwsh -File tools/mutation-check.ps1` | **反向验证**：8 个变异逐个跑 verify+tests（应红）→ 恢复 → 复跑（应绿）+ 核对 `git status src/` 为空 | 8/8 命中，恢复后全绿 |
 
 **关于测试里用到的 `vite`**：`tests/judgment-chain.test.mjs` 通过 `createRequire(ROOT/package.json).resolve("vite")` 借用**仓库根目录**已安装的 vite，用 `ssrLoadModule("/src/lib/clip/index.ts")` 载入**真接收端代码**（只桩掉 Electron 的 `window.opennote.fs.*` IPC 边界，换成 Node `fs`）。它不进入扩展运行时，`extension/package.json` 里也没有加任何依赖。（`pnpm-workspace.yaml` 没有 `packages:` 键，所以 `extension/` 不在根 workspace 里。）
 
@@ -60,24 +66,26 @@ extension/
 │  ├─ manifest.json             # MV3 清单（构建时原样复制）
 │  ├─ background.js             # service worker（"type":"module"，用相对路径静态 import）
 │  ├─ lib/
-│  │  ├─ errors.js              # 33 个 IMP-xxxx 的码表 + 唯一文案源 userMessage()
+│  │  ├─ errors.js              # IMP 码表（33 条 A.3 减 IMP-2004 作废码）+ 唯一文案源 userMessage()
 │  │  ├─ envelope.js            # 信封构造/校验/标签过滤/时间戳归一
-│  │  ├─ bridge.js              # 纯 fetch 桥：端口探测、配对、导入、状态查询（可注入 fetchImpl）
+│  │  ├─ bridge.js              # 纯 fetch 桥：端口探测、导入、状态查询（可注入 fetchImpl；0.3.1 删除 postPair）
 │  │  ├─ state.js               # 六态判定 decideState() + 视图模型 planFor()
 │  │  ├─ queue.js               # 离线暂存队列（上限/预算/去重/补投批次）
 │  │  └─ store.js               # chrome.storage.local 单键状态
 │  ├─ content/
-│  │  ├─ float.js               # 选中浮标（Shadow DOM，构建时内联 tokens）
-│  │  ├─ extract-page.js        # 自包含的正文抽取器（被 executeScript 注入）
+│  │  ├─ picker.js              # **元素选择覆盖层**（closed Shadow DOM，构建时内联 tokens；点击三件套 + Esc）
+│  │  ├─ extract-page.js        # 自包含的正文抽取器（被 executeScript 注入；支持 rootSelector 只抽点中的子树）
 │  │  └─ clipboard.js           # 自包含的页内复制（execCommand 降级用）
+│  ├─ options/                  # 选项页：模板管理（增删改 / 导入导出 / 变量与字段说明）
 │  └─ popup/                    # popup.html / popup.css / popup.js
-├─ tests/                       # 58 条：信封、状态、队列、桥（真 HTTP）、自包含性、判定链（真接收端）
+├─ tests/                       # 92 条：信封、状态、队列、桥（真 HTTP）、自包含性、高亮、模板、判定链（真接收端）
 ├─ tools/mock-bridge.mjs        # 零依赖 mock 桥（9 种模式，见 §4）
 ├─ build.mjs  verify.mjs
+├─ tools/mutation-check.ps1      # 反向验证（变异 → 红 → 恢复 → 绿）
 └─ docs-verify/                 # 真机验证截图（§11）
 ```
 
-`dist/`（构建产物，20 个文件 ≈ 164 KiB）：`manifest.json`、`BUILD-INFO.json`、`background.js`、`lib/*.js`、`content/*.js`、`popup/*`、`icons/icon{16,32,48,128}.png`、`styles/tokens.css`。
+`dist/`（构建产物，**26 个文件**）：`manifest.json`、`BUILD-INFO.json`、`background.js`、`lib/*.js`、`content/*.js`（`picker.js`/`extract-page.js`/`clipboard.js`，**没有 `float.js`**）、`popup/*`、`options/*`、`icons/icon{16,32,48,128}.png`、`styles/tokens.css`。
 
 ---
 
@@ -87,10 +95,10 @@ extension/
 
 | 权限 | 为什么必须 | 没有它会怎样 |
 | --- | --- | --- |
-| `storage` | 存令牌/端口/落点/标签 + 离线暂存队列（单键 `opennote.clip.state.v1`） | 每次都要重新配对，「先暂存」无法实现 |
-| `contextMenus` | 右键「剪藏选中片段 / 剪藏整页正文」 | 右键入口消失 |
-| `activeTab` | 用户点图标/快捷键/右键时，临时获得**当前这一张**页面的读取权，用于注入抽取器与浮标 | 无法整页抽取（除非申请 `<all_urls>`，被明确否决） |
-| `scripting` | `chrome.scripting.executeScript` 注入 `extract-page.js` / `clipboard.js` / `float.js` | 同上 |
+| `storage` | 存令牌/端口/落点/标签 + 离线暂存队列 + 元素选择结果（单键 `opennote.clip.state.v1`） | 每次都要重新粘贴令牌，「先暂存」无法实现 |
+| `contextMenus` | 右键「高亮这段文字 / 剪藏整页正文到 Opennote」（0.3.1 恰好两项） | 右键入口消失 |
+| `activeTab` | 用户点图标/快捷键/右键时，临时获得**当前这一张**页面的读取权，用于注入抽取器与元素选择覆盖层 | 无法整页抽取（除非申请 `<all_urls>`，被明确否决） |
+| `scripting` | `chrome.scripting.executeScript` 注入 `extract-page.js` / `clipboard.js` / `picker.js`（**只在用户点「选择页面元素」或按 `Alt+Shift+S` 时注入**） | 同上 |
 
 `host_permissions` **恰好 10 条**，只有回环地址，没有域名通配、没有 `<all_urls>`：
 
@@ -134,15 +142,15 @@ cd E:\repo\opennote\extension
 node tools/mock-bridge.mjs --mode no-window --port 8787
 # ② Opennote 未运行：端口在监听，但明确回 409 IMP-4006（窗口不在场）
 #   → 芯片「Opennote 未运行」+「连接被拒说明本机没有在监听，不是令牌问题。」+ 重试 / 先暂存这页
-node tools/mock-bridge.mjs --mode healthy --port 8787 --code 482913 --token "opn_KKK…"
-# ③ 已连接（运行中）：先配对（popup 里填 482913），或用与本地令牌一致的 --token 起桥
+node tools/mock-bridge.mjs --mode healthy --port 8795 --token "opn_KKK…" --inbox
+# ③ 已连接（运行中）：popup 里粘贴与桥一致的令牌（--token 的值），桥健康检查回 inbox:true → 进收件箱
 #   → 芯片「本地接口已开启」+ 预览
 node tools/mock-bridge.mjs --mode healthy --port 8787 --token "opn_ZZZ…"     # 令牌与本地不一致
-# ④ 令牌不匹配：桥在跑，auth 探测 401 → 芯片「未连接」+ IMP-2002 + 配对 / 打开 Opennote 设置
+# ④ 令牌不匹配：桥在跑，auth 探测 401 → 芯片「未连接」+ IMP-2002 + 令牌输入块 / 打开 Opennote 设置
 node tools/mock-bridge.mjs --mode foreign --port 8787
 # ⑤ 端口被占用：有监听但不是我们的桥 → 芯片「端口被占用」+ IMP-1003
 node tools/mock-bridge.mjs --mode origin-denied --port 8787
-# ⑥ 需要配对（来源未被信任）：/v1/health 直接 403 IMP-3001 → 芯片「需要配对」，**绝不显示「已连接」**
+# ⑥ 来源不是扩展/本机程序：/v1/health 直接 403 IMP-3001 → 芯片「未配置令牌」，**绝不显示「已连接」**
 node tools/mock-bridge.mjs --mode starting --port 8787
 # ⑦ 正在启动：端口已绑定但答得比 300ms 慢 → 芯片「本地接口未开启」+ 重试
 node tools/mock-bridge.mjs --mode no-workspace --port 8787
@@ -156,18 +164,18 @@ node tools/mock-bridge.mjs --mode folder-denied --port 8787
 - 队列为空 → 芯片 `未连接`，正文块为「连不上本地桥」的 `IMP-1001` 文案 + 「先暂存这页」——**绝不显示「已连接」**（`decideState` 第 1 条硬规则）。
 - 队列非空 → 芯片 `离线，已暂存 {n} 条`（`03` §UI-01 S11 逐字），正文：`Opennote 未打开笔记本，内容已暂存在插件里，打开笔记本后会自动补投。`
 
-### 4.3 「需要配对」与「Opennote 未运行」为什么是两态
+### 4.3 「未配置令牌」与「Opennote 未运行」为什么是两态
 
 | 现象 | 芯片 | 依据 |
 | --- | --- | --- |
 | 十个端口都没人监听 | `本地接口未开启` | `IMP-1001`（`state.js:137`） |
 | 有人监听且**明确回 409 `IMP-4006`**（桥在跑、渲染窗口不在场） | `Opennote 未运行` | `probe.noWindow`（`state.js:117`）→ 契约 `IMP-4006` |
-| 有人监听但来源未被信任（**403 `IMP-3001`**）或没有令牌 | `需要配对` | `state.js:128` / `:123`，**永不进「已连接」分支** |
+| 有人监听但来源不是扩展/本机程序（**403 `IMP-3001`**）或没有令牌 | `未配置令牌` | `state.js:128` / `:123`，**永不进「已连接」分支** |
 | 有人监听但不是 Opennote（或桥自报端口全占） | `端口被占用` | `state.js:131`/`:134` |
 | 命中桥但令牌被拒（401 `IMP-2002`） | `未连接` | `state.js:122` |
 
-真机上 `本地接口未开启` / `Opennote 未运行` / `端口被占用` / `需要配对` / `未连接` 五个芯片互不相同，截图见 §11。
-`IMP-3001` 按 `02` §6.2 的展示口径 **不进 toast、不进插件气泡**：插件只显示用户可行动的「需要配对」（`IMP-2001` 文案 + 配对输入框），来源拒绝的细节留在应用侧设置面板的「被拒绝的来源」日志里。
+真机上 `本地接口未开启` / `Opennote 未运行` / `端口被占用` / `未配置令牌` / `未连接` 五个芯片互不相同，截图见 §11。
+`IMP-3001` 按 `02` §6.2 的展示口径 **不进 toast、不进插件气泡**：插件只显示用户可行动的「未配置令牌」（`IMP-2001` 文案 + 令牌输入块），来源拒绝的细节留在应用侧设置面板的「被拒绝的来源」日志里。
 
 ---
 
@@ -248,11 +256,12 @@ node tools/mock-bridge.mjs --mode folder-denied --port 8787
 
 ## 9. 视觉与文案合规
 
-- `src/styles/tokens.css` **逐字复制**进 `dist/styles/tokens.css`（`build.mjs` 打印 SHA-256；`verify.mjs` V6 做内容哈希比对）；浮标用 Shadow DOM，把同一份 CSS 做机械替换 `:root` → `:host`（3 处）内联进 `content/float.js`，因此**工具栏之外的页面样式不会被污染**，浮标也不会被页面 CSS 影响。
+- `src/styles/tokens.css` **逐字复制**进 `dist/styles/tokens.css`（`build.mjs` 打印 SHA-256；`verify.mjs` V6 做内容哈希比对）；**元素选择覆盖层**用 closed Shadow DOM，把同一份 CSS 做机械替换 `:root` → `:host`（3 处）内联进 `content/picker.js`，因此**工具栏之外的页面样式不会被污染**，覆盖层也不会被页面 CSS 影响（`contain: layout style` + `pointer-events:none`）。
 - **0 个新设计令牌**：`verify.mjs` V7 断言 `popup.css` 里没有任何自定义属性**声明**，且所有 `var(--…)` 引用都能在 tokens.css 里找到出处（真实令牌名是 `--font-mono`）。
-- 文案：48 条逐字清单（芯片、按钮、错误块、空态、成功态）来自 `03` 与 `mockups/01`，`verify.mjs` V7b 逐条断言命中；错误文案统一走 `errors.js:231 userMessage(code)` —— `02` §6.2 是唯一来源，另有 2 处按 `03` 指定的平台文案覆盖（`IMP-1001` 用 `03` S9、`IMP-1006` 用 `03` S5）；**没有任何「未知错误」兜底**：即便服务端只给了 HTTP 状态码，`bridge.js:148 codeFromHttp()` 也会兜到某个真实码（兜底是 `IMP-4014`）。
+- 文案：逐字清单（芯片、按钮、错误块、空态、成功态、元素选择、令牌块）来自 `03` 与 `mockups/01`，`verify.mjs` V7 逐条断言命中（0.3.1 删掉了配对块与浮标那几条，改挂元素选择/令牌的冻结句）；V13 另有一次**按类扫描**：359 条含中文的用户可见字符串里 0 个反引号；V15 扫描「配对码 / 6 位 / 120 秒 / 一次性 / 轮换」在 dist 里 0 命中（注释剥离后再扫）；错误文案统一走 `errors.js:231 userMessage(code)` —— `02` §6.2 是唯一来源，另有 2 处按 `03` 指定的平台文案覆盖（`IMP-1001` 用 `03` S9、`IMP-1006` 用 `03` S5）；**没有任何「未知错误」兜底**：即便服务端只给了 HTTP 状态码，`bridge.js:148 codeFromHttp()` 也会兜到某个真实码（兜底是 `IMP-4014`）。
 - 图标一律内联 SVG（⋯ 菜单、flask/spinner 等），**零 emoji**（`verify.mjs` V9 用 pictograph 区间 + 图标符号黑名单扫描，跳过注释行）。
-- 无障碍：芯片是 `role="status" aria-live="polite"`、分段控件是 `radiogroup`、⋯ 是 `role="menu"`、浮标按钮是 `<button>` + `tabindex="-1"` 不抢焦点、`prefers-reduced-motion` 下关闭过渡。
+- 无障碍：芯片是 `role="status" aria-live="polite"`、分段控件是 `radiogroup`、来源三选一是 `radiogroup` + `aria-checked`、⋯ 是 `role="menu"`、元素选择覆盖层不吃事件（`pointer-events:none`）、`prefers-reduced-motion` 下关闭过渡。
+- **两档高亮底色**（Lead 0.3.1 裁定 ②）：`color` 只允许 `yellow` / `accent`（`accent` 是强调档），旧的 `red/green/blue/purple` 只作为**读取兼容**存在，一律按 `yellow` 档渲染（`highlightTier()`），不新增任何设计令牌。
 
 ---
 

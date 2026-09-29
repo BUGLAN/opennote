@@ -10,8 +10,8 @@
  *   2. 有端口在监听但桥自己回 `IMP-4006` → `Opennote 未运行`（唯一「桥在跑、窗口不在场」的硬证据）；
  *   3. 没有任何端口在监听 → `本地接口未开启`（IMP-1001）；
  *   4. 有端口在监听但不是我们的桥 / 桥报 IMP-1003 → `端口被占用`；
- *   5. 403 `IMP-3001`（来源还没进信任列表）→ `需要配对`，**绝不显示为已连接**；
- *   6. 401 `IMP-2002` → `未连接`（令牌错/失效）；401 `IMP-2001` → `需要配对`。
+ *   5. 403 `IMP-3001`（来源不是扩展/本机程序，㉞ 的判据改为按类型）→ `未配置令牌`，**绝不显示为已连接**；
+ *   6. 401 `IMP-2002` → `未连接`（令牌错/失效）；401 `IMP-2001` → `未配置令牌`。
  *
  * 所有芯片文案逐字来自 03 §UI-01 的「中文文案（逐字）」表与
  * docs/import/mockups/01-extension-popup.html，不新增任何说法。
@@ -34,6 +34,8 @@ export const STATE = Object.freeze({
   NO_WORKSPACE: "no-workspace",
   FOLDER_DENIED: "folder-denied",
   SUCCESS: "success",
+  /** 交付回执 `status === "pending"`：应用侧「先进入收件箱」把它收进收件箱等人工确认（00 §6.14 ㉕）。 */
+  INBOX_PENDING: "inbox-pending",
 });
 
 /** 芯片文案（逐字）。`is-on` / `is-busy` / `is-error` 对应 mockup 的三个修饰类。 */
@@ -43,7 +45,8 @@ export const CHIP = Object.freeze({
   [STATE.INTERFACE_OFF]: { text: "本地接口未开启", cls: "" },
   [STATE.NOT_RUNNING]: { text: "Opennote 未运行", cls: "is-error" },
   [STATE.PORT_BUSY]: { text: "端口被占用", cls: "is-error" },
-  [STATE.NEEDS_PAIRING]: { text: "需要配对", cls: "" },
+  // ㉞ / 03 §UI-01 C07–C14：0.3.1 里「需要配对」改成「未配置令牌」（配对整体删除）
+  [STATE.NEEDS_PAIRING]: { text: "未配置令牌", cls: "" },
   [STATE.TOKEN_INVALID]: { text: "未连接", cls: "is-error" },
   [STATE.DEVICE_OFFLINE]: { text: "未连接", cls: "is-error" },
   [STATE.NO_WORKSPACE]: { text: "本地接口已开启", cls: "is-on" },
@@ -57,8 +60,8 @@ export function queuedChip(pendingCount) {
 
 export function chipFor(state, ctx = {}) {
   if (state === STATE.QUEUED_OFFLINE) return queuedChip(ctx.pendingCount);
-  // 成功态与「已连接 + 落点错误」都保持真实连接态芯片。
-  if (state === STATE.SUCCESS) return CHIP[STATE.CONNECTED];
+  // 成功态、进收件箱、以及「已连接 + 落点错误」都保持真实连接态芯片。
+  if (state === STATE.SUCCESS || state === STATE.INBOX_PENDING) return CHIP[STATE.CONNECTED];
   return CHIP[state] || CHIP[STATE.CHECKING];
 }
 
@@ -124,7 +127,7 @@ export function decideState(input) {
     return STATE.CONNECTED;
   }
 
-  // 4. 来源还没被信任（403 IMP-3001）：只能说「需要配对」，不能说已连接。
+  // 4. 来源不是扩展/本机程序（403 IMP-3001，㉞）：只能如实说「未配置令牌」，不能说已连接。
   if (probe.originRejected) return STATE.NEEDS_PAIRING;
 
   // 5. 桥自己报告端口全占。
@@ -210,32 +213,28 @@ export function planFor(state, ctx = {}) {
       break;
 
     case STATE.NEEDS_PAIRING:
+      // ㉞：配对这个概念没了。这个状态现在只表示「这台客户端还没有配置访问令牌」——
+      // 用户要做的动作是**把 Opennote 里的长期令牌粘进来**，不是去配一个 6 位码。
       plan.block = {
-        kind: "pair",
-        message: userMessage(code === "IMP-2004" ? "IMP-2004" : "IMP-2001", serverMessage),
+        kind: "token",
+        message: userMessage("IMP-2001", serverMessage),
         next: null,
-        code: code === "IMP-2004" ? "IMP-2004" : "IMP-2001",
+        code: "IMP-2001",
       };
-      plan.pairingInput = true;
-      plan.actions = [
-        { id: "pair", label: "配对", primary: true },
-        { id: "open-settings", label: "打开 Opennote 设置", primary: false },
-      ];
+      plan.tokenInput = true;
+      plan.actions = [{ id: "open-settings", label: "打开 Opennote 设置", primary: false }];
       plan.primary = { label: "剪藏到 Opennote", disabled: true, busy: false };
       break;
 
     case STATE.TOKEN_INVALID:
       plan.block = {
-        kind: "pair",
+        kind: "token",
         message: userMessage("IMP-2002", serverMessage),
         next: null,
         code: "IMP-2002",
       };
-      plan.pairingInput = true;
-      plan.actions = [
-        { id: "pair", label: "配对", primary: true },
-        { id: "open-settings", label: "打开 Opennote 设置", primary: false },
-      ];
+      plan.tokenInput = true;
+      plan.actions = [{ id: "open-settings", label: "打开 Opennote 设置", primary: false }];
       plan.primary = { label: "剪藏到 Opennote", disabled: true, busy: false };
       break;
 
@@ -256,7 +255,7 @@ export function planFor(state, ctx = {}) {
     case STATE.QUEUED_OFFLINE:
       plan.block = {
         kind: "queued",
-        message: "Opennote 未打开笔记本，内容已暂存在插件里，打开笔记本后会自动补投。",
+        message: "Opennote 没有在运行，内容已暂存在插件里，打开 Opennote 后会自动补投。",
         next: "打开 Opennote 后会自动补投。",
         code: null,
       };
@@ -326,6 +325,31 @@ export function planFor(state, ctx = {}) {
       { id: "again", label: "再剪一段", primary: false },
     ];
   }
+
+  // 进收件箱（00 §6.14 ㉘；逐字见 03 §UI-01 C60 / S23）：应用侧「先进入收件箱」命中时回执是 pending
+  // —— 这不是失败，也不是「已经写进笔记」；文案逐字冻结为 `已进入收件箱等待确认：{标题}。`
+  // 次行是 `在 Opennote 的「导入收件箱」里确认。`；**不提供**「打开收件箱」按钮（本轮没有深链）。
+  if (state === STATE.INBOX_PENDING) {
+    plan.ok = {
+      message: `已进入收件箱等待确认：${noteTitle || "未命名笔记"}。`,
+      detail: "在 Opennote 的「导入收件箱」里确认。",
+    };
+    plan.preview = false;
+    plan.rows = false;
+    plan.segments = false;
+    plan.primary = null;
+    plan.actions = [
+      { id: "open-opennote", label: "打开 Opennote", primary: false },
+      { id: "again", label: "再剪一段", primary: false },
+    ];
+  }
+
+  // C 三区（00 §6.14 ㉘：「正文 / 高亮 / 属性」）——哪些区可用由状态决定，
+  // 例如受限页面与成功态整块隐藏。
+  plan.templatePicker = plan.segments;
+  plan.highlightsAvailable = plan.segments;
+  plan.sourceSwitch = plan.segments;
+  plan.propertyPanel = plan.segments;
 
   return plan;
 }

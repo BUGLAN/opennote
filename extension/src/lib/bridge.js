@@ -218,33 +218,12 @@ export async function postImport(port, token, envelope, options = {}) {
   return normalizeCall(raw, codeFromHttp);
 }
 
-/** `POST /v1/pair`（API-06，6 位配对码换长期令牌）。 */
-export async function postPair(port, code, options = {}) {
-  const { timeoutMs = REQUEST_TIMEOUT_MS, fetchImpl, version = CLIENT_VERSION } = options;
-  const raw = await requestJson(endpointOf(port, "/v1/pair"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ code: String(code || "").trim(), client: { name: CLIENT_NAME, version } }),
-    timeoutMs,
-    fetchImpl,
-  });
-  const call = normalizeCall(raw, codeFromHttp);
-  if (call.kind === "ok") {
-    const token = call.result && call.result.token;
-    if (!isValidToken(token)) {
-      // 服务端返回了不合规的令牌——当成契约错误，不落盘。
-      return { ...call, kind: "error", code: "IMP-4014", result: null };
-    }
-    return {
-      ...call,
-      token,
-      endpoint: call.result.endpoint || endpointOf(port, ""),
-      origin: call.result.origin || null,
-      spec: call.result.spec || SPEC,
-    };
-  }
-  return call;
-}
+/**
+ * `POST /v1/pair` 的客户端封装在 0.3.1 **整体删除**（00 §6.15㉞：配对功能删除，改为粘贴长期令牌）。
+ * 令牌不再由客户端向服务端索取，用户从 Opennote 的「导入与接口」复制后粘进来（走 `setManualToken` 路径）。
+ * 保留一条显式记录，防止有人再从「少个函数」的角度把它加回来。
+ */
+export const PAIRING_REMOVED = Object.freeze({ removedIn: "0.3.1", reason: "00 §6.15㉞：配对整体删除，改为粘贴长期令牌" });
 
 /** `GET /v1/imports/{importId}`（API-03）：收件箱模式下的轮询。 */
 export async function getImportStatus(port, token, importId, options = {}) {

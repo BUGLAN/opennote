@@ -66,11 +66,11 @@ for (const file of ["src/content/extract-page.js", "src/content/clipboard.js"]) 
   });
 }
 
-test("浮标脚本：占位符在 src 里、已替换在 dist 里，且令牌以 :host 作用域注入", () => {
-  const source = readFileSync(join(ROOT, "src/content/float.js"), "utf8");
+test("元素选择脚本：占位符在 src 里、已替换在 dist 里，且令牌以 :host 作用域注入", () => {
+  const source = readFileSync(join(ROOT, "src/content/picker.js"), "utf8");
   assert.ok(source.includes('const TOKENS_CSS = "__OPENNOTE_TOKENS_CSS__";'), "src 里必须保留占位符字面量");
 
-  const distFile = join(ROOT, "dist/content/float.js");
+  const distFile = join(ROOT, "dist/content/picker.js");
   if (!existsSync(distFile)) {
     assert.fail("dist 还没构建：先跑 `node build.mjs`");
   }
@@ -78,21 +78,35 @@ test("浮标脚本：占位符在 src 里、已替换在 dist 里，且令牌以
   assert.ok(!built.includes('"__OPENNOTE_TOKENS_CSS__"'), "dist 里占位符未被替换");
   assert.ok(built.includes(":host{"), "dist 里应注入 :host 作用域的令牌");
   assert.ok(built.includes("--paper:"), "dist 里应包含令牌定义");
-  assert.ok(built.includes(".clip-float"), "dist 里应包含浮标样式");
-  assert.ok(!/https?:\/\//.test(built.replace(/http:\/\/www\.w3\.org/g, "")), "浮标脚本不能含远程地址");
+  assert.ok(built.includes(".op-box"), "dist 里应包含元素轮廓样式");
+  assert.ok(!/https?:\/\//.test(built.replace(/http:\/\/www\.w3\.org/g, "")), "元素选择脚本不能含远程地址");
 });
 
-test("浮标脚本走影子 DOM 且不进入宿主页面的 Tab 顺序", () => {
-  const source = readFileSync(join(ROOT, "src/content/float.js"), "utf8");
-  assert.ok(source.includes("attachShadow"), "必须用影子 DOM 隔离样式");
-  assert.ok(source.includes('tabindex="-1"'), "浮标按钮不得进入页面 Tab 顺序（03 §UI-02）");
-  assert.ok(source.includes("剪藏整页正文"), "图标按钮必须有 title/aria-label 文案");
-  assert.ok(source.includes('role", "toolbar"'), "浮标应为 toolbar 语义");
+test("㉝ 元素选择：只加一层 Shadow DOM 覆盖层，且点击三件套齐全（V14 的同口径单测）", () => {
+  const source = stripComments(readFileSync(join(ROOT, "src/content/picker.js"), "utf8"));
+  assert.ok(source.includes('attachShadow({ mode: "closed" })'), "覆盖层必须是 closed 的影子根");
+  assert.ok(source.includes('HOST_ID = "opennote-pick-host"'), "宿主元素必须是 opennote-pick-host");
+  assert.ok(source.includes("pointer-events:none"), "覆盖层必须 pointer-events:none（否则吃页面自己的 hover/click）");
+  assert.ok(source.includes("preventDefault()"), "点击必须 preventDefault");
+  assert.ok(source.includes("stopPropagation()"), "点击必须 stopPropagation");
+  assert.ok(source.includes("stopImmediatePropagation()"), "点击必须 stopImmediatePropagation");
+  assert.ok(source.includes('"Escape"'), "Esc 必须能取消");
+  // 只准加覆盖层：不许改页面已有节点/样式（这是 ㉝ 的硬约束）
+  for (const forbidden of ["innerHTML", "outerHTML", "document.body.style", "insertAdjacentHTML", "document.write", "classList.add"]) {
+    assert.ok(!source.includes(forbidden), `不得使用 ${forbidden}（会改动宿主页面）`);
+  }
+  assert.ok(source.includes("host.remove()"), "退出时必须移除覆盖层");
+  // 0.3.1 的删除：浮标与 selectionchange 不许回来
+  assert.ok(!existsSync(join(ROOT, "src/content/float.js")), "选区浮标已删除（00 §6.15㉝）");
+  assert.ok(!source.includes("selectionchange"), "元素选择不依赖文本选区");
 });
 
 test("popup 的 HTML 不引任何远程资源、不写内联脚本", () => {
   const html = readFileSync(join(ROOT, "src/popup/popup.html"), "utf8");
-  assert.ok(!/https?:\/\/(?!www\.w3\.org)/.test(html), "popup.html 不得引远程资源");
+  // `placeholder="https://example.com/posts/local-first"` 是 03 §UI-01 C36 冻结的**示例占位符**：
+  // 它只在输入框里显示灰字，浏览器不会去请求它。所以先剥掉 placeholder 属性再查远程地址。
+  const noPlaceholders = html.replace(/placeholder="[^"]*"/g, 'placeholder=""');
+  assert.ok(!/https?:\/\/(?!www\.w3\.org)/.test(noPlaceholders), "popup.html 不得引远程资源（placeholder 示例除外）");
   assert.ok(!/<script(?![^>]*\bsrc=)/.test(html), "popup.html 不得有内联脚本（MV3 CSP）");
   assert.ok(html.includes('role="radiogroup"'), "分段控件必须是 radiogroup");
   assert.ok(html.includes('role="status"'), "状态芯片必须是 role=status");

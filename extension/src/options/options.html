@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="paper" data-accent="seal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opennote 剪藏 · 模板管理</title>
+<!-- 设计令牌：构建期整份复制自 src/styles/tokens.css（不手抄色值） -->
+<link rel="stylesheet" href="../styles/tokens.css">
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<main class="opt">
+  <header class="opt__head">
+    <span class="seal" aria-hidden="true">記</span>
+    <h1>模板管理</h1>
+    <p class="opt__sub">按网址自动匹配模板：命中时用模板预填标题、落点、标签与属性。改过的字段不会被模板改写。</p>
+  </header>
+
+  <section class="opt__col">
+    <h2>已有模板</h2>
+    <ul class="opt__list" id="list"></ul>
+    <p class="opt__note" id="status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="opt__col">
+    <h2>编辑模板</h2>
+    <form class="opt__form" id="editor" autocomplete="off">
+      <label for="fName">名称</label>
+      <input id="fName" class="field" placeholder="我的模板">
+      <label for="fTriggers">触发条件（每行一条：domain: 或 url: 或 path:）</label>
+      <textarea id="fTriggers" class="field opt__area" placeholder="domain:example.com"></textarea>
+      <label for="fPriority">优先级（数字越大越先命中）</label>
+      <input id="fPriority" class="field" inputmode="numeric" placeholder="0">
+      <label for="fFolder">存到</label>
+      <input id="fFolder" class="field" placeholder="根目录">
+      <label for="fTags">标签（逗号分隔）</label>
+      <input id="fTags" class="field" placeholder="留空">
+      <label for="fNameFormat">标题格式</label>
+      <input id="fNameFormat" class="field" placeholder="{{title}}">
+      <label for="fProps">属性预填（每行一条，写成 字段=模板）</label>
+      <textarea id="fProps" class="field opt__area" placeholder="author={{author}}"></textarea>
+      <label for="fBehavior">交付意图</label>
+      <select id="fBehavior" class="field">
+        <option value="new">新建笔记（交付方式仍由 Opennote 设置决定）</option>
+        <option value="append">追加到指定笔记</option>
+        <option value="inbox">交给 Opennote 的收件箱设置</option>
+      </select>
+      <label for="fAppendTo">追加到（工作区相对路径，含 .md）</label>
+      <input id="fAppendTo" class="field" placeholder="笔记/读书.md">
+      <div class="opt__acts">
+        <button type="submit" class="btn btn--primary" id="fSave">保存模板</button>
+        <button type="button" class="btn" id="fReset">新建（清空表单）</button>
+      </div>
+    </form>
+    <p class="opt__note">可用变量：<span id="vars"></span></p>
+    <p class="opt__note">可用过滤器：<span id="filters"></span></p>
+    <p class="opt__note">可预填字段：<span id="props"></span></p>
+  </section>
+
+  <section class="opt__col">
+    <h2>导入 / 导出</h2>
+    <div class="opt__acts">
+      <button type="button" class="btn" id="export">导出 JSON（复制）</button>
+      <button type="button" class="btn" id="import">导入 JSON（粘贴）</button>
+    </div>
+    <textarea id="json" class="field opt__area opt__json" aria-label="模板 JSON" placeholder='{"templates":[{"id":"my-blog","name":"博客","triggers":[{"type":"domain","value":"example.com"}],"priority":5}]}'></textarea>
+  </section>
+</main>
+<script type="module" src="options.js"></script>
+</body>
+</html>

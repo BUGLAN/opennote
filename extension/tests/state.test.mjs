@@ -62,8 +62,8 @@ test("六态逐态判定：给定输入 → 状态 id + 芯片逐字文案", () 
     ["Opennote 未运行", { probe: noWindow(), online: true, token: "opn_x" }, STATE.NOT_RUNNING, "Opennote 未运行", "is-error"],
     ["端口或 token 不匹配（端口）", { probe: foreign(), online: true, token: "opn_x" }, STATE.PORT_BUSY, "端口被占用", "is-error"],
     ["端口或 token 不匹配（令牌）", { probe: hit(), online: true, token: "opn_x", authCode: "IMP-2002" }, STATE.TOKEN_INVALID, "未连接", "is-error"],
-    ["需要配对（来源未信任）", { probe: rejected(), online: true, token: null }, STATE.NEEDS_PAIRING, "需要配对", ""],
-    ["需要配对（桥通了但没令牌）", { probe: hit(), online: true, token: null }, STATE.NEEDS_PAIRING, "需要配对", ""],
+    ["未配置令牌（来源不是扩展/本机程序）", { probe: rejected(), online: true, token: null }, STATE.NEEDS_PAIRING, "未配置令牌", ""],
+    ["未配置令牌（桥通了但没令牌）", { probe: hit(), online: true, token: null }, STATE.NEEDS_PAIRING, "未配置令牌", ""],
     ["离线（有暂存）", { probe: nothing(), online: false, token: "opn_x", pendingCount: 3 }, STATE.QUEUED_OFFLINE, "离线，已暂存 3 条", "is-busy"],
     ["离线（无暂存）", { probe: hit(), online: false, token: "opn_x", pendingCount: 0 }, STATE.DEVICE_OFFLINE, "未连接", "is-error"],
   ];
@@ -104,7 +104,7 @@ test("芯片文案只允许出现契约/规范批准的那几条", () => {
     "端口被占用",
     "未连接",
     "Opennote 未运行",
-    "需要配对",
+    "未配置令牌",
     "离线，已暂存 3 条",
   ]);
   for (const state of Object.values(STATE)) {
@@ -126,27 +126,25 @@ test("S9/S12/S6/S10/S11 的错误块文案逐字核对", () => {
   assert.equal(interfaceOff.primary.disabled, true);
 
   const notRunning = planFor(STATE.NOT_RUNNING);
-  assert.equal(notRunning.block.message, "Opennote 的窗口已关闭。请重新打开 Opennote，再试一次。");
+  assert.equal(notRunning.block.message, "Opennote 没有在运行。请先打开 Opennote，再试一次。");
   assert.equal(notRunning.block.next, "连接被拒说明本机没有在监听，不是令牌问题。");
   assert.deepEqual(notRunning.actions.map((a) => a.label), ["重试", "先暂存这页"]);
 
-  const pairing = planFor(STATE.NEEDS_PAIRING);
+  const tokenMissing = planFor(STATE.NEEDS_PAIRING);
   assert.equal(
-    pairing.block.message,
-    "这个客户端还没有配对。请在 Opennote 的「导入与接口」里点「配对新客户端」，输入显示的 6 位配对码。",
+    tokenMissing.block.message,
+    // 00 §6.15㉞ 冻结（0.3.1：配对删除，改为「粘贴长期令牌」）
+    "这个客户端还没有配置访问令牌。请在 Opennote 的「导入与接口」里复制令牌，粘贴到客户端。",
   );
-  assert.equal(pairing.pairingInput, true);
-  assert.deepEqual(pairing.actions.map((a) => a.label), ["配对", "打开 Opennote 设置"]);
-
-  const badCode = planFor(STATE.NEEDS_PAIRING, { code: "IMP-2004" });
-  assert.equal(badCode.block.message, "配对码不正确或已过期，请在 Opennote 里重新生成。");
+  assert.equal(tokenMissing.tokenInput, true);
+  assert.deepEqual(tokenMissing.actions.map((a) => a.label), ["打开 Opennote 设置"]);
 
   const tokenBad = planFor(STATE.TOKEN_INVALID);
   assert.equal(tokenBad.block.message, "访问令牌不正确或已失效。重新生成令牌后，请在客户端里更新。");
-  assert.equal(tokenBad.pairingInput, true);
+  assert.equal(tokenBad.tokenInput, true);
 
   const queued = planFor(STATE.QUEUED_OFFLINE, { pendingCount: 3 });
-  assert.equal(queued.block.message, "Opennote 未打开笔记本，内容已暂存在插件里，打开笔记本后会自动补投。");
+  assert.equal(queued.block.message, "Opennote 没有在运行，内容已暂存在插件里，打开 Opennote 后会自动补投。");
   assert.equal(queued.block.next, "打开 Opennote 后会自动补投。");
   assert.equal(queued.primary.label, "暂存在插件里");
   assert.equal(queued.primary.disabled, false);
@@ -162,13 +160,13 @@ test("落点类错误不改变连接芯片（文件夹未授权 / 未打开笔�
   assert.equal(folder.chip.cls, "is-on");
   assert.equal(folder.block.message, "找不到要追加的那篇笔记，或目标目录无法创建（可能没有写入权限）。");
   const illegal = planFor(STATE.FOLDER_DENIED, { code: "IMP-4008" });
-  assert.equal(illegal.block.message, "目标目录不合法：不能使用 `..`、绝对路径或系统保留字符。");
+  assert.equal(illegal.block.message, "目标目录不合法：不能使用 ..、绝对路径或系统保留字符。");
   assert.equal(illegal.chip.text, "本地接口已开启");
 
   const noWorkspace = planFor(STATE.NO_WORKSPACE);
   assert.equal(noWorkspace.chip.text, "本地接口已开启");
   assert.equal(noWorkspace.block.code, "IMP-4007");
-  assert.equal(noWorkspace.block.message, "Opennote 里还没有打开笔记本，请先打开一个文件夹（或新建浏览器笔记本）。");
+  assert.equal(noWorkspace.block.message, "Opennote 里还没有打开笔记本文件夹。请在 Opennote 左侧选一个文件夹，或新建一个，再试一次。");
 });
 
 test("S5 受限页面与 S8 成功的文案逐字核对", () => {

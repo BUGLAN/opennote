@@ -83,6 +83,58 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__src{margin-top:8px;padding-top:7px;border-top:1px solid var(--rule);font-size:var(--fs-xs);color:var(--ink-3);display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
 .clip__src em{font-style:normal;color:var(--ink-2)}
 
+/* ── 模板选择器（00 §6.14 ㉘㉙） ─────────────────────────────────────── */
+.clip__tmpl{display:flex;align-items:center;gap:var(--s2);padding:8px var(--s3) 0}
+.clip__tmpl[hidden]{display:none}
+.clip__tmpl>label{flex:none;font-size:var(--fs-sm);color:var(--ink-3)}
+.clip__tmpl .field{height:26px;font-size:var(--fs-sm);max-width:150px}
+.clip__tmpl-note{font-size:var(--fs-xs);color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── 正文区的来源开关（「选中片段 / 整页正文」从分段控件降级到这里） ── */
+.clip__switch{display:inline-flex;gap:2px;margin:var(--s3) var(--s3) 0;padding:2px;border:1px solid var(--rule);border-radius:99px;background:var(--paper-2)}
+.clip__switch button{height:22px;padding:0 10px;border-radius:99px;color:var(--ink-2);font-size:var(--fs-xs)}
+.clip__switch button.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+
+/* ── 高亮区（00 §6.14 ㉚） ──────────────────────────────────────────── */
+.clip__hl{padding:0 var(--s3)}
+.clip__hl-head{display:flex;align-items:center;justify-content:space-between;gap:var(--s2);margin:var(--s3) 0 0}
+.clip__hl-count{font-size:var(--fs-sm);color:var(--ink-2)}
+.clip__hl-head .btn{height:24px;padding:0 8px;font-size:var(--fs-xs)}
+.clip__hl-list{margin:8px 0 var(--s3);padding:0;list-style:none}
+.clip__hl-item{display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-bottom:1px solid var(--rule)}
+.clip__hl-item:last-child{border-bottom:none}
+.clip__hl-body{min-width:0;flex:1}
+.clip__hl-text{margin:0;font-family:var(--font-serif);font-size:var(--fs-sm);color:var(--ink);line-height:1.7;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.clip__hl-note{margin:3px 0 0;font-size:var(--fs-xs);color:var(--ink-2)}
+.clip__hl-meta{margin:3px 0 0;font-size:var(--fs-xs);color:var(--ink-3)}
+.clip__hl-del{flex:none;height:22px;padding:0 6px;border-radius:var(--radius-sm);color:var(--ink-3);font-size:var(--fs-xs)}
+.clip__hl-del:hover{background:var(--paper-3);color:var(--ink)}
+.clip__hl-empty{font-size:var(--fs-sm);color:var(--ink-3);padding:8px 0}
+/* 两档底色（03 §UI-14/S10）：yellow = --mark；accent = --accent-soft + 1px --accent-line。
+   没有第三档，也没有新令牌——理由见 src/lib/highlights.js 顶部注释。 */
+.clip__hl-item[data-tier="accent"] .clip__hl-text{background:var(--accent-soft);border-bottom:1px solid var(--accent-line);border-radius:2px}
+.clip__hl-item[data-tier="yellow"] .clip__hl-text{background:var(--mark);border-radius:2px}
+.clip__hl-acts{display:flex;flex:none;flex-direction:column;gap:4px;align-items:flex-end}
+.clip__hl-act{height:22px;padding:0 6px;border-radius:var(--radius-sm);color:var(--ink-3);font-size:var(--fs-xs)}
+.clip__hl-act:hover{background:var(--paper-3);color:var(--ink)}
+.clip__hl-edit{flex:none;width:100%;margin-top:6px;display:flex;flex-direction:column;gap:6px}
+.clip__hl-edit .field{height:26px;font-size:var(--fs-sm)}
+.clip__hl-edit-acts{display:flex;gap:6px}
+.clip__hl-swatches{display:flex;gap:6px}
+.swatch{height:22px;padding:0 8px;border-radius:var(--radius-sm);font-size:var(--fs-xs);color:var(--ink-2);box-shadow:inset 0 0 0 1px var(--rule-strong)}
+.swatch--yellow{background:var(--mark)}
+.swatch--accent{background:var(--accent-soft);border-bottom:1px solid var(--accent-line)}
+.swatch.is-active{box-shadow:inset 0 0 0 1px var(--accent-line);color:var(--ink)}
+.clip__confirm{margin:0 0 var(--s3);padding:10px;border-radius:var(--radius);background:var(--paper-2)}
+.clip__confirm-title{margin:0;font-size:var(--fs-sm);color:var(--ink)}
+.clip__confirm-body{margin:4px 0 8px;font-size:var(--fs-xs);color:var(--ink-2);line-height:1.7}
+.clip__confirm-acts{display:flex;gap:6px}
+
+/* ── 属性区（㉘ 的 8 个字段 + 追加落点） ─────────────────────────────── */
+.clip__props{padding:4px var(--s3) var(--s3)}
+.clip__props .clip__row>label{width:60px}
+.clip__props .clip__hint{margin:8px 0 0}
+
 .clip__rows{padding:0 var(--s3)}
 .clip__row{display:flex;align-items:center;gap:var(--s2);padding:7px 0;border-bottom:1px solid var(--rule)}
 .clip__row:last-child{border-bottom:none}
@@ -113,6 +165,20 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__alert.is-quiet{border-left-color:var(--rule-strong)}
 .clip__code{margin-top:10px;font-family:var(--font-mono);font-size:18px;letter-spacing:.34em;text-align:center;height:34px}
 .clip__hint{margin-top:10px;font-size:var(--fs-xs);color:var(--ink-2);line-height:1.7}
+/* 属性区：行右侧的「按模板更新」（C38）与标题计数（C37） */
+.clip__reset{flex:none;height:22px;padding:0 6px;border-radius:var(--radius-sm);color:var(--accent);font-size:var(--fs-xs)}
+.clip__reset:hover{background:var(--paper-3)}
+.clip__err{margin-top:8px;font-size:var(--fs-sm);color:var(--ink)}
+.clip__row .field[aria-invalid="true"]{box-shadow:inset 0 0 0 1px var(--accent-line)}
+/* L5：底部落点行（与属性区第 7/8 行是同一个 state 的两个视图） */
+.clip__row--foot{padding:0 var(--s3);gap:6px;border-bottom:none;margin-top:2px}
+.clip__row--foot>label{width:auto}
+.clip__hint--delivery{padding:0 var(--s3);margin:0 0 var(--s3)}
+/* 正文区的只读标题行 + 「改标题」（C22）与高亮并入说明行（C23） */
+.clip__title-in{margin:0;flex:1;min-width:0;font-size:var(--fs-md);color:var(--ink);font-family:var(--font-serif);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.clip__title-edit{flex:none;height:22px;padding:0 6px;border-radius:var(--radius-sm);color:var(--ink-3);font-size:var(--fs-xs)}
+.clip__title-edit:hover{background:var(--paper-3);color:var(--ink)}
+.clip__merged{margin:6px 0 0;font-size:var(--fs-sm);color:var(--ink-2);line-height:1.7}
 .clip__manual{margin-top:10px;width:100%;height:110px;padding:8px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink);font-family:var(--font-mono);font-size:var(--fs-xs);resize:vertical}
 .clip__skeleton{margin:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2)}
 .clip__bar{height:9px;border-radius:99px;background:var(--paper-3)}

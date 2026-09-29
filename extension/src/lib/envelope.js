@@ -61,6 +61,12 @@ export const SOURCE_TITLE_MAX = 300;
 export const SOURCE_FIELD_MAX = 120;
 export const MAX_BODY_BYTES = 8 * 1024 * 1024; // 02 §2.7：body（UTF-8 字节）8 MiB
 export const IMPORT_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+/**
+ * 「追加到指定笔记」的落点格式（00 §6.14 ㉘）：工作区**相对**路径 + `.md`。
+ * 绝对路径 / 盘符 / `..` / 反斜杠一律拒绝——信封不能指定绝对路径这条红线不变。
+ */
+export const NOTE_PATH_MAX = 300;
+export const NOTE_PATH_RE = /^(?![/\\])(?!.*(?:^|[/\\])\.\.(?:[/\\]|$))(?!.*:)[^\\]+\.md$/;
 /** 02 §2.3：capturedAt 必须含时区（`Z` 或 `±HH:MM`）。 */
 export const ISO_WITH_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
 /** 02 §2.2 item ⑤：字符集收紧到 `[\p{L}\p{N}_\-/]`。 */
@@ -232,6 +238,7 @@ export function buildEnvelope(input) {
     selection = false,
     folder = null,
     tags = [],
+    notePath = null,
     version = CLIENT_VERSION,
   } = input || {};
 
@@ -252,7 +259,9 @@ export function buildEnvelope(input) {
     },
     target: {
       folder: typeof folder === "string" && folder.trim() ? folder.trim() : null,
-      notePath: null,
+      // `notePath` 只在 `conflict: "append"` / `"overwrite"` 时有效（02 §2.4）；
+      // 「追加到指定笔记」写到这里，其余情况保持 null（不得凭空指一个笔记）。
+      notePath: typeof notePath === "string" && notePath.trim() ? notePath.trim() : null,
     },
     tags: filterTags(tags),
     assets: [],
@@ -264,9 +273,10 @@ export function buildEnvelope(input) {
   //      第 4 步：同 `source.url`、正文哈希不同、`source.selection === false` → `pending`（进收件箱，等人工确认）。
   //    如果此处硬编码 `conflict: "new"`，接收端的 `conflictExplicit` 会变成 true，
   //    上面两步**永远不生效** ⇒ 插件侧再也进不了收件箱，选区二次剪藏也不追加。
-  //    只有调用方**显式**要求某个策略时才写这个键（例如 popup 将来的「直接入库」下拉：
-  //    「直接入库」= 不下发 conflict；「追加」= "append"；「跳过」= "skip"）。
-  //    `overwrite` 永不接受（02 §5.2：只有桌面版本地桥 + 用户显式开启进阶开关才允许）。
+  //    0.3.0（00 §6.14 ㉘）现实的三条出口：
+  //      「进收件箱」（默认）= 不下发 conflict，由**应用侧**设置 `UiSettings.importConflict` 决定（㉕）；
+  //      「追加到指定笔记」= 显式 `conflict: "append"` + `target.notePath`；
+  //      「跳过」= `"skip"`。`overwrite` 永不接受（02 §5.2：只有桌面版本地桥 + 用户显式开启进阶开关才允许）。
   if (input.conflict !== undefined && input.conflict !== null) {
     const requested = String(input.conflict);
     if (ALLOWED_CONFLICTS.includes(requested)) envelope.conflict = requested;
@@ -328,7 +338,21 @@ export function envelopeProblems(envelope) {
     if (target.folder !== null && typeof target.folder !== "string") {
       problems.push("target.folder 必须是字符串或 null");
     }
-    if (target.notePath !== null) problems.push("target.notePath 必须为 null（插件不追加既有笔记）");
+    if (target.notePath !== null) {
+      // 「追加到指定笔记」（00 §6.14 ㉘）：只在 `conflict: "append"` 时有效（02 §2.4）。
+      if (typeof target.notePath !== "string" || !target.notePath.trim()) {
+        problems.push("target.notePath 必须是非空字符串或 null");
+      } else {
+        const notePath = target.notePath.trim();
+        if (notePath.length > NOTE_PATH_MAX) problems.push(`target.notePath 超过 ${NOTE_PATH_MAX} 字符`);
+        if (!NOTE_PATH_RE.test(notePath)) {
+          problems.push(`target.notePath 必须是工作区相对 .md 路径（不得绝对路径 / .. / 反斜杠）：${notePath}`);
+        }
+        if (envelope.conflict !== "append") {
+          problems.push('target.notePath 只在 conflict: "append" 时有效（02 §2.4）：要追加请显式下发 conflict: "append"，否则置 null');
+        }
+      }
+    }
   }
   // 有则校验：缺省合法（交给接收端判定链），出现则必须是 new/append/skip。
   if ("conflict" in envelope && !ALLOWED_CONFLICTS.includes(envelope.conflict)) {

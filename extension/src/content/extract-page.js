@@ -413,20 +413,38 @@ export function extractPage(options) {
   const meta = pageMeta();
   const selection = selectionInfo();
 
+  // 元素选择（00 §6.15㉝ / 03 §UI-16）：给了 `rootSelector` 就**只抽那个元素及子树**，
+  // 不做「整页挑正文容器」的那一步——用户点中的那块**就是**根。
+  const pickedRoot = opts.rootSelector
+    ? (() => {
+        try {
+          return doc.querySelector(opts.rootSelector);
+        } catch {
+          return null;
+        }
+      })()
+    : null;
+
   let article = null;
   if (includeArticle) {
-    const clone = doc.documentElement
-      ? doc.documentElement.cloneNode(true)
-      : doc.body
-        ? doc.body.cloneNode(true)
-        : null;
     let markdown = "";
-    if (clone) {
-      stripNoise(clone);
-      const root = pickRoot(clone);
-      markdown = htmlToMarkdown(root);
+    if (pickedRoot) {
+      const scoped = pickedRoot.cloneNode(true);
+      stripNoise(scoped);
+      markdown = htmlToMarkdown(scoped);
+    } else {
+      const clone = doc.documentElement
+        ? doc.documentElement.cloneNode(true)
+        : doc.body
+          ? doc.body.cloneNode(true)
+          : null;
+      if (clone) {
+        stripNoise(clone);
+        const root = pickRoot(clone);
+        markdown = htmlToMarkdown(root);
+      }
+      if (!markdown.trim()) markdown = selection.present ? selection.markdown : "";
     }
-    if (!markdown.trim()) markdown = selection.present ? selection.markdown : "";
     const h1 = doc.querySelector("article h1, main h1, h1");
     article = {
       title: (h1 ? textOf(h1) : null) || meta.title,

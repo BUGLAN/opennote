@@ -6,7 +6,7 @@
  *  2. 从仓库根的 `src/styles/tokens.css` **整份复制**设计令牌到
  *     `extension/src/styles/tokens.css` 与 `extension/dist/styles/tokens.css`，
  *     并记录 SHA-256（任务硬要求：禁止手抄色值，必须内容哈希比对）；
- *  3. 把浮标脚本里的 `"__OPENNOTE_TOKENS_CSS__"` 占位符替换成令牌全文
+ *  3. 把元素选择脚本里的 `"__OPENNOTE_TOKENS_CSS__"` 占位符替换成令牌全文
  *     （只做 `:root` → `:host` 的机械替换，供影子 DOM 使用）；
  *  4. 用 `--accent` / `--accent-ink` 两个**从 tokens.css 解析出来**的值生成图标 PNG
  *     （不手抄颜色，也不引第三方图形库）。
@@ -224,10 +224,10 @@ function copyTree() {
     const dest = join(DIST, rel);
     mkdirSync(dirname(dest), { recursive: true });
     let content = readFileSync(file);
-    if (relPosix === "content/float.js") {
+    if (relPosix === "content/picker.js") {
       const source = content.toString("utf8");
       if (!source.includes(FLOAT_PLACEHOLDER)) {
-        throw new Error("content/float.js 缺少 __OPENNOTE_TOKENS_CSS__ 占位符");
+        throw new Error("content/picker.js 缺少 __OPENNOTE_TOKENS_CSS__ 占位符");
       }
       const scoped = scopeTokensForShadow(TOKENS_SNAPSHOT.css);
       content = Buffer.from(source.replace(FLOAT_PLACEHOLDER, JSON.stringify(scoped.css)), "utf8");
