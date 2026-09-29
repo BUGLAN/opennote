@@ -1,5 +1,5 @@
 import { EditorView, WidgetType } from "@codemirror/view";
-import { ensureAssetUrl, resolveImageSrc } from "../data/assets";
+import { resolveImageSrc } from "../data/assets";
 import type { ThemeId } from "../data/types";
 import { bridge } from "./bridge";
 import { mathHtmlSync, renderMath } from "./math";
@@ -12,12 +12,15 @@ export class ImageWidget extends WidgetType {
     readonly raw: string,
     readonly alt: string,
     readonly block: boolean,
+    readonly baseDir: string,
   ) {
     super();
   }
 
   eq(other: ImageWidget): boolean {
-    return other.raw === this.raw && other.alt === this.alt && other.block === this.block;
+    return (
+      other.raw === this.raw && other.alt === this.alt && other.block === this.block && other.baseDir === this.baseDir
+    );
   }
 
   toDOM(view: EditorView): HTMLElement {
@@ -30,7 +33,7 @@ export class ImageWidget extends WidgetType {
     img.draggable = false;
     wrap.appendChild(img);
 
-    void resolveImageSrc(this.raw).then((url) => {
+    void resolveImageSrc(this.raw, this.baseDir).then((url) => {
       if (!url) {
         wrap.classList.add("is-missing");
         wrap.textContent = this.alt ? `图片未找到：${this.alt}` : `图片未找到：${this.raw}`;
@@ -275,6 +278,6 @@ export class TableWidget extends WidgetType {
 
 /* -------------------------------------------------- asset preloading helper */
 
-export async function warmAsset(id: string): Promise<void> {
-  await ensureAssetUrl(id);
+export async function warmAsset(path: string): Promise<void> {
+  await resolveImageSrc(path);
 }

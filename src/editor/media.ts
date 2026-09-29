@@ -1,26 +1,22 @@
 import { EditorView } from "@codemirror/view";
 import type { Extension } from "@codemirror/state";
-import { putAsset } from "../data/assets";
-import { blobToDataUrl, uniqueName } from "../lib/utils";
-
-function stamp(): string {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-}
+import { imageNameForPaste } from "../data/assets";
+import { saveImage } from "../data/library";
+import { blobToDataUrl } from "../lib/utils";
+import { editorSettingsField } from "./settings";
 
 /**
- * Screenshots and dragged files become real library assets: pasted images are
- * stored as blobs in IndexedDB and referenced as `asset://<id>`, so a note never
- * carries a megabyte of base64 around. Users who prefer portability can switch
- * to inline data URLs in settings.
+ * Screenshots and dragged files become real files: pasted images are written
+ * next to the note (`<note dir>/assets/…`) and referenced with a relative
+ * markdown path, so the folder stays portable. Users who prefer a single
+ * self-contained file can switch to inline data URLs in settings.
  */
 export function mediaHandlers(options: {
   imageMode: () => "asset" | "inline";
   notify: (message: string) => void;
 }): Extension {
   const insertFiles = async (view: EditorView, files: File[], at: number) => {
-    const taken = new Set<string>();
+    const baseDir = view.state.field(editorSettingsField, false)?.baseDir ?? "";
     const snippets: string[] = [];
     for (const file of files) {
       const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(file.name);
@@ -30,10 +26,8 @@ export function mediaHandlers(options: {
           snippets.push(isImage ? `![${file.name}](${dataUrl})` : `[${file.name}](${dataUrl})`);
           continue;
         }
-        const name = uniqueName(file.name || `图片-${stamp()}.png`, taken);
-        taken.add(name);
-        const asset = await putAsset(file, name);
-        snippets.push(isImage ? `![${name}](asset://${asset.id})` : `[${name}](asset://${asset.id})`);
+        const saved = await saveImage(file, file.name || imageNameForPaste(file), baseDir);
+        snippets.push(isImage ? `![${file.name || "图片"}](${saved.markdown})` : `[${file.name}](${saved.markdown})`);
       } catch (error) {
         console.error("[opennote] 附件保存失败", error);
         options.notify(`附件保存失败：${file.name}`);

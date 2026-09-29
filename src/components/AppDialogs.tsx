@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ACCENTS, FONTS, THEMES, WIDTHS, type Id, type Snapshot, type UiSettings } from "../data/types";
+import { hasLegacyData } from "../data/legacy";
 import { listSnapshots, restoreSnapshot, takeManualSnapshot } from "../data/library";
+import type { WorkspaceRecord } from "../data/workspaces";
 import { patchUi, setTheme, toggleAppearance } from "../data/ui";
 import { askConfirm } from "../lib/dialogs";
 import { notify } from "../lib/toast";
@@ -12,28 +14,31 @@ import { Modal } from "./Overlays";
 
 export function SettingsDialog({
   settings,
-  storage,
+  workspace,
+  stats,
   onClose,
   onImport,
   onExport,
-  onWipe,
+  onOpenLocalFolder,
+  onCloseWorkspace,
+  onMigrateLegacy,
   onShortcuts,
 }: {
   settings: UiSettings;
-  storage: { usage: number; quota: number } | null;
+  workspace: WorkspaceRecord | null;
+  stats: { files: number; bytes: number };
   onClose(): void;
-  onImport(directory: boolean): void;
-  onExport(kind: "zip" | "json"): void;
-  onWipe(): void;
+  onImport(): void;
+  onExport(): void;
+  onOpenLocalFolder(): void;
+  onCloseWorkspace(): void;
+  onMigrateLegacy(): void;
   onShortcuts(): void;
 }): ReactNode {
-  const [persisted, setPersisted] = useState<boolean | null>(null);
+  const [legacy, setLegacy] = useState(false);
   useEffect(() => {
-    if (typeof navigator === "undefined" || !navigator.storage?.persisted) return;
-    void navigator.storage.persisted().then(setPersisted);
+    void hasLegacyData().then(setLegacy);
   }, []);
-
-  const percent = storage && storage.quota ? Math.min(100, (storage.usage / storage.quota) * 100) : 0;
 
   return (
     <Modal
@@ -244,64 +249,72 @@ export function SettingsDialog({
 
       <div className="setting">
         <div className="setting__label">
-          数据
-          <small>{persisted === null ? "本地 IndexedDB" : persisted ? "已申请持久化存储" : "浏览器可能回收长期未访问的数据"}</small>
+          笔记本
+          <small>{workspace ? workspaceHint(workspace) : "还没有打开任何文件夹"}</small>
         </div>
         <div className="setting__control">
-          {storage ? (
+          {workspace ? (
             <>
-              <div style={{ fontSize: 12.5, color: "var(--ink-2)" }}>
-                已用 {formatBytes(storage.usage)} / 可用约 {formatBytes(storage.quota)}
+              <div style={{ fontSize: 13, color: "var(--ink)" }}>
+                <strong>{workspace.name}</strong>
               </div>
-              <div className="storage-bar">
-                <span style={{ width: `${Math.max(2, percent)}%` }} />
+              <div style={{ fontSize: 12.5, color: "var(--ink-3)", wordBreak: "break-all", marginTop: 2 }}>
+                {workspace.kind === "node" ? workspace.location : `opfs:/${workspace.location}`}
+              </div>
+              <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginTop: 8 }}>
+                已索引 {stats.files} 个 Markdown 文件 · {formatBytes(stats.bytes)}
               </div>
             </>
           ) : (
-            <p className="dialog__note">浏览器没有提供存储用量信息。</p>
+            <p className="dialog__note">打开一个文件夹作为笔记本，Opennote 会直接读写里面的 .md 文件。</p>
           )}
           <div className="swatches" style={{ marginTop: 12 }}>
-            <button type="button" className="btn" onClick={() => onExport("zip")}>
+            <button type="button" className="btn" onClick={onOpenLocalFolder}>
+              <Icon name="folder" size={14} />
+              打开文件夹
+            </button>
+            <button type="button" className="btn" onClick={onExport} disabled={!workspace}>
               <Icon name="layers" size={14} />
               导出整库 zip
             </button>
-            <button type="button" className="btn" onClick={() => onExport("json")}>
-              <Icon name="download" size={14} />
-              导出 json
-            </button>
-            <button type="button" className="btn" onClick={() => onImport(false)}>
+            <button type="button" className="btn" onClick={onImport} disabled={!workspace}>
               <Icon name="upload" size={14} />
               导入文件
             </button>
-            <button type="button" className="btn" onClick={() => onImport(true)}>
-              <Icon name="folder" size={14} />
-              导入文件夹
-            </button>
+            {workspace ? (
+              <button type="button" className="btn btn--danger" onClick={onCloseWorkspace}>
+                <Icon name="close" size={14} />
+                关闭笔记本
+              </button>
+            ) : null}
           </div>
           <p className="dialog__note">
-            所有内容只保存在这台设备的浏览器里。换电脑、清缓存前记得先导出一份 zip 备份。
+            笔记就是磁盘上的文件，Opennote 不做任何格式封装；`.opennote/` 里只放星标、历史快照这些附加信息，删掉也不影响正文。
           </p>
         </div>
       </div>
 
-      <div className="setting">
-        <div className="setting__label">
-          危险操作
-          <small>不可撤销</small>
+      {legacy ? (
+        <div className="setting">
+          <div className="setting__label">
+            旧数据
+            <small>0.1 版保存在浏览器 IndexedDB 里的笔记</small>
+          </div>
+          <div className="setting__control">
+            <button type="button" className="btn" onClick={onMigrateLegacy}>
+              <Icon name="download" size={14} />
+              导入到当前笔记本
+            </button>
+            <p className="dialog__note">导入会把旧笔记和图片写成真实的 .md 与 assets/ 文件，不会删除原数据。</p>
+          </div>
         </div>
-        <div className="setting__control">
-          <button type="button" className="btn btn--danger" onClick={onWipe}>
-            <Icon name="trash" size={14} />
-            清空全部本地数据
-          </button>
-        </div>
-      </div>
+      ) : null}
 
       <div className="setting">
         <div className="setting__label">关于</div>
         <div className="setting__control" style={{ color: "var(--ink-2)", lineHeight: 1.8, fontSize: 13 }}>
           <p>
-            <strong>Opennote</strong> · 开源笔记 · v0.1.0 · MIT License
+            <strong>Opennote</strong> · 开源笔记 · v0.2.0 · MIT License
           </p>
           <p className="dialog__note" style={{ marginTop: 4 }}>
             纯前端、无后端、无账号、无遥测。Markdown 存原文，界面只是把它排版好给你看。
@@ -320,6 +333,12 @@ export function SettingsDialog({
       </div>
     </Modal>
   );
+}
+
+function workspaceHint(workspace: WorkspaceRecord): string {
+  if (workspace.kind === "node") return "直接读写本机磁盘上的文件夹";
+  if (workspace.kind === "fsa") return "浏览器已授权的磁盘文件夹（刷新后可能需要重新授权）";
+  return "浏览器自己的文件系统（OPFS），重开浏览器依然在";
 }
 
 /* ================================= history ============================== */

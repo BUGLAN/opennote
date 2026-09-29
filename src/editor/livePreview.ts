@@ -150,7 +150,7 @@ function buildDecorations(state: EditorState): DecorationSet {
           if (!isActive(from, to) && raw) {
             const line = doc.lineAt(from);
             const alone = line.from === from && doc.lineAt(to).to === to;
-            replaceWith(from, to, new ImageWidget(raw, alt, alone));
+            replaceWith(from, to, new ImageWidget(raw, alt, alone, settings.baseDir));
             if (alone) lineDeco(from, "md-media-line");
             return false;
           }

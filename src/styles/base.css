@@ -298,14 +298,18 @@ kbd {
   }
 }
 
+/* Uses the independent `translate`/`scale` properties on purpose: animating
+   `transform` here would override the centring transform of dialogs. */
 @keyframes pop {
   from {
     opacity: 0;
-    transform: translateY(-6px) scale(0.985);
+    translate: 0 -6px;
+    scale: 0.985;
   }
   to {
     opacity: 1;
-    transform: none;
+    translate: 0 0;
+    scale: 1;
   }
 }
 

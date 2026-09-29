@@ -1,0 +1,6 @@
+# pnpm settings (pnpm ≥ 10 reads these from the workspace file).
+# Electron and electron-builder ship install scripts that must be allowed to run,
+# otherwise `pnpm install` exits non-zero and blocks the build/package scripts.
+allowBuilds:
+  electron: true
+  electron-winstaller: true

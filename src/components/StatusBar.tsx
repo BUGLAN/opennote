@@ -12,6 +12,8 @@ interface StatusBarProps {
   settings: UiSettings;
   locationLabel: string;
   snapshotCount: number;
+  storageLabel: string;
+  stats: { files: number; bytes: number };
   onToggle(key: "outlineOpen" | "typewriter" | "focus" | "showWordCount"): void;
   onToggleAppearance(): void;
   onOpenHistory(): void;
@@ -22,7 +24,14 @@ export function StatusBar(props: StatusBarProps): ReactNode {
   const { settings } = props;
   return (
     <footer className="statusbar">
-      <span className="statusbar__item" title="笔记所在文件夹">
+      <span className="statusbar__item" title="笔记存放位置">
+        <Icon name="layers" size={12} />
+        {props.storageLabel}
+      </span>
+      <span className="statusbar__item" title={`${props.stats.files} 个文件`}>
+        {props.stats.files} 个文件
+      </span>
+      <span className="statusbar__item" title="当前笔记所在文件夹">
         <Icon name="folder" size={12} />
         {props.locationLabel}
       </span>

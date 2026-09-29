@@ -21,9 +21,10 @@ import {
   type LibraryState,
 } from "../data/library";
 import type { Folder, Id, Note, UiSettings } from "../data/types";
+import type { WorkspaceRecord } from "../data/workspaces";
 import { askConfirm, askText } from "../lib/dialogs";
 import { notify } from "../lib/toast";
-import { cn, excerpt, formatBytes, formatRelativeTime } from "../lib/utils";
+import { cn, excerpt, formatRelativeTime } from "../lib/utils";
 import { Icon, type IconName } from "./Icons";
 import { openMenu, type MenuItem } from "./Overlays";
 
@@ -42,6 +43,17 @@ export interface SidebarProps {
   scope: Scope;
   tab: SidebarTab;
   activeId: Id | null;
+  workspace: WorkspaceRecord | null;
+  workspaces: WorkspaceRecord[];
+  switcherOpen: boolean;
+  supportsLocalFolder: boolean;
+  supportsBrowserWorkspace: boolean;
+  onSwitcherOpen(open: boolean): void;
+  onOpenWorkspace(record: WorkspaceRecord): void;
+  onAddLocalFolder(): void;
+  onNewBrowserWorkspace(): void;
+  onUploadFolder(): void;
+  onCloseWorkspace(): void;
   onScope(scope: Scope): void;
   onTab(tab: SidebarTab): void;
   onOpenNote(id: Id): void;
@@ -49,7 +61,6 @@ export interface SidebarProps {
   onNewFolder(parentId?: Id | null): void;
   onOpenSettings(): void;
   onCollapse(): void;
-  storage: { usage: number; quota: number } | null;
 }
 
 /** Drag state lives outside React: it only matters between two native events. */
@@ -69,11 +80,11 @@ export function Sidebar(props: SidebarProps): ReactNode {
   const counts = useMemo(() => {
     const notes = Object.values(library.notes);
     return {
-      all: notes.filter((note) => !note.trashed).length,
-      starred: notes.filter((note) => note.starred && !note.trashed).length,
-      trash: notes.filter((note) => note.trashed).length,
+      all: notes.length,
+      starred: notes.filter((note) => note.starred).length,
+      trash: Object.keys(library.trash).length,
     };
-  }, [library.notes]);
+  }, [library.notes, library.trash]);
 
   const tags = useMemo(() => allTags(library), [library]);
 
@@ -121,6 +132,60 @@ export function Sidebar(props: SidebarProps): ReactNode {
             <Icon name="sidebar" />
           </button>
         </div>
+      </div>
+
+      <div className="sidebar__workspace">
+        <button
+          type="button"
+          className="workspace__button"
+          onClick={() => props.onSwitcherOpen(!props.switcherOpen)}
+          title={props.workspace ? workspaceLocation(props.workspace) : "还没有打开笔记本"}
+        >
+          <Icon name={props.workspace?.kind === "node" ? "folder" : props.workspace ? "layers" : "info"} size={13} />
+          <span className="truncate">{props.workspace?.name ?? "未打开笔记本"}</span>
+          <Icon name="chevronDown" size={12} className="workspace__caret" />
+        </button>
+        {props.switcherOpen ? (
+          <div className="workspace__menu">
+            {props.workspaces.length ? <div className="tree__group">笔记本</div> : null}
+            {props.workspaces.map((record) => (
+              <button
+                key={record.id}
+                type="button"
+                className={cn("menu__item", record.id === props.workspace?.id && "is-active")}
+                onClick={() => {
+                  props.onSwitcherOpen(false);
+                  props.onOpenWorkspace(record);
+                }}
+              >
+                <Icon name={record.kind === "node" ? "folder" : "layers"} size={14} />
+                <span className="truncate">{record.name}</span>
+              </button>
+            ))}
+            {props.workspaces.length ? <div className="menu__sep" /> : null}
+            <button type="button" className="menu__item" disabled={!props.supportsLocalFolder} onClick={props.onAddLocalFolder}>
+              <Icon name="folder" size={14} />
+              <span>{props.supportsLocalFolder ? "打开本机文件夹…" : "本机文件夹（需 Chrome/Edge 或桌面版）"}</span>
+            </button>
+            <button type="button" className="menu__item" disabled={!props.supportsBrowserWorkspace} onClick={props.onNewBrowserWorkspace}>
+              <Icon name="plus" size={14} />
+              <span>新建浏览器笔记本…</span>
+            </button>
+            <button type="button" className="menu__item" onClick={props.onUploadFolder}>
+              <Icon name="upload" size={14} />
+              <span>导入文件夹到浏览器…</span>
+            </button>
+            {props.workspace ? (
+              <>
+                <div className="menu__sep" />
+                <button type="button" className="menu__item is-danger" onClick={props.onCloseWorkspace}>
+                  <Icon name="close" size={14} />
+                  <span>关闭「{props.workspace.name}」</span>
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <nav className="sidebar__tabs">
@@ -185,9 +250,8 @@ export function Sidebar(props: SidebarProps): ReactNode {
 
       <footer className="sidebar__foot">
         <Icon name="shield" size={13} />
-        <span>
-          {counts.all} 条笔记
-          {props.storage ? ` · ${formatBytes(props.storage.usage)}` : ""}
+        <span title={props.workspace ? workspaceLocation(props.workspace) : undefined}>
+          {counts.all} 篇笔记
         </span>
         <span style={{ marginLeft: "auto" }}>
           <button className="icon-btn" title="设置" onClick={props.onOpenSettings} style={{ width: 22, height: 22 }}>
@@ -197,6 +261,12 @@ export function Sidebar(props: SidebarProps): ReactNode {
       </footer>
     </aside>
   );
+}
+
+function workspaceLocation(record: WorkspaceRecord): string {
+  if (record.kind === "node") return `本机磁盘 · ${record.location}`;
+  if (record.kind === "fsa") return `浏览器文件夹 · ${record.name}`;
+  return `浏览器本地存储 · ${record.name}`;
 }
 
 /* =============================== tree body ============================== */
@@ -263,9 +333,9 @@ function TreeBody(props: TreeProps): ReactNode {
 
       {!roots.length && !loose.length ? (
         <p className="tree__empty">
-          这里还是空的。
+          这个文件夹里还没有 Markdown 文件。
           <br />
-          按 Ctrl/⌘ + N 写下第一条笔记。
+          按 Ctrl/⌘ + N 写下第一篇。
         </p>
       ) : null}
 
@@ -588,9 +658,7 @@ function NoteList({
 }
 
 function TrashList({ library }: { library: LibraryState }): ReactNode {
-  const notes = Object.values(library.notes)
-    .filter((note) => note.trashed)
-    .sort((a, b) => (b.trashedAt ?? 0) - (a.trashedAt ?? 0));
+  const notes = Object.values(library.trash).sort((a, b) => (b.trashedAt ?? 0) - (a.trashedAt ?? 0));
   if (!notes.length) return <p className="tree__empty">回收站是空的。</p>;
   return (
     <div className="tree" style={{ marginTop: 6 }}>
@@ -631,7 +699,7 @@ function TrashList({ library }: { library: LibraryState }): ReactNode {
         </div>
       ))}
       <div className="tree__hint">
-        <span>回收站里的笔记不会被搜索到</span>
+        <span>回收站里的文件在 .opennote/trash 里</span>
         <button
           type="button"
           className="btn btn--ghost"

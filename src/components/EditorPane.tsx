@@ -2,7 +2,7 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { EditorState, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
-import { assetUrlStore } from "../data/assets";
+import { imageUrlStore } from "../data/assets";
 import type { Id, UiSettings } from "../data/types";
 import { editorSettingsField, refreshDecorations, setEditorSettings, type EditorSettings } from "../editor/settings";
 import { buildEditorExtensions, spellcheckCompartment } from "../editor/setup";
@@ -19,6 +19,7 @@ interface EditorPaneProps {
   noteId: Id | null;
   content: string;
   hidden: boolean;
+  baseDir: string;
   settings: UiSettings;
   onDocChange(doc: string): void;
   onCursor(info: CursorInfo): void;
@@ -145,6 +146,7 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
         focus: props.settings.focus,
         typewriter: props.settings.typewriter,
         imageMode: props.settings.imageMode,
+        baseDir: props.baseDir,
       }),
     });
   }, [
@@ -153,6 +155,7 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
     props.settings.focus,
     props.settings.typewriter,
     props.settings.imageMode,
+    props.baseDir,
   ]);
 
   useEffect(() => {
@@ -169,9 +172,9 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
     });
   }, [props.settings.spellcheck]);
 
-  /* images and diagrams resolve lazily — redraw the document when they do */
+  /* images resolve lazily from disk — redraw the document when they arrive */
   useEffect(() => {
-    return assetUrlStore.subscribe(() => {
+    return imageUrlStore.subscribe(() => {
       const view = viewRef.current;
       if (view) view.dispatch({ effects: refreshDecorations.of(null) });
     });

@@ -9,7 +9,9 @@ export interface EditorSettings {
   typewriter: boolean;
   imageMode: "asset" | "inline";
   spellcheck: boolean;
-  /** Bumped whenever an asset finishes loading so image widgets re-render. */
+  /** Folder of the note being edited — relative image paths resolve against it. */
+  baseDir: string;
+  /** Bumped whenever an image finishes loading so image widgets re-render. */
   assetTick: number;
 }
 
@@ -20,6 +22,7 @@ export const defaultEditorSettings: EditorSettings = {
   typewriter: false,
   imageMode: "asset",
   spellcheck: true,
+  baseDir: "",
   assetTick: 0,
 };
 

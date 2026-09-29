@@ -5,12 +5,17 @@ import { VitePWA } from "vite-plugin-pwa";
 /**
  * `VITE_BASE` lets the same build be served from a domain root or from a
  * project sub-path (GitHub Pages：`VITE_BASE=/opennote/ pnpm build`).
+ * The desktop build (`pnpm build:desktop`) loads through `file://`, where only
+ * relative paths work — and the service worker is meaningless there.
  */
+const isDesktop = process.env.OPENNOTE_DESKTOP === "1";
+
 export default defineConfig({
-  base: process.env.VITE_BASE ?? "/",
+  base: isDesktop ? "./" : (process.env.VITE_BASE ?? "/"),
   plugins: [
     react(),
     VitePWA({
+      disable: isDesktop,
       registerType: "autoUpdate",
       includeAssets: ["favicon.svg", "icon-192.png", "icon-512.png"],
       manifest: {

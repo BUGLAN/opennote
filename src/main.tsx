@@ -18,7 +18,6 @@ import "./styles/editor.css";
 import "./styles/app.css";
 
 import App from "./App";
-import { loadAssetIndex } from "./data/assets";
 import { applyUi, getUi, systemPrefersDark } from "./data/ui";
 
 const ui = getUi();
@@ -36,7 +35,3 @@ createRoot(container).render(
     <App />
   </StrictMode>,
 );
-
-void loadAssetIndex().then((count) => {
-  if (count > 0) console.info(`[opennote] ${count} 个图片资源已就绪`);
-});

@@ -1,123 +1,105 @@
 import { createStore } from "../lib/store";
-import { uid } from "../lib/utils";
-import { readAsset, readAllAssets, writeAsset } from "./db";
-import type { Asset, Id } from "./types";
+import { joinPath, normalizePath } from "../fs";
+import { currentBackend } from "./library";
+import { getLegacyAsset } from "./legacy";
 
-/** Object URLs for note images, keyed by asset id. Widgets re-render when this changes. */
-export const assetUrlStore = createStore<Record<Id, string>>({});
-const inflight = new Map<Id, Promise<string | undefined>>();
-const meta = new Map<Id, Asset>();
+/**
+ * Images live next to the notes (`<note dir>/assets/…`) and are referenced with
+ * plain relative markdown paths, so a note stays readable in any other editor.
+ * Because a relative path only makes sense together with the note's folder, the
+ * editor passes its own directory in as `baseDir`.
+ */
+export const imageUrlStore = createStore<Record<string, string>>({});
+const inflight = new Map<string, Promise<string | null>>();
 
-export const ASSET_SCHEME = "asset://";
-const ASSET_RE = /asset:\/\/([A-Za-z0-9-]+)/g;
-
-export function assetUrl(id: Id): string | undefined {
-  return assetUrlStore.get()[id];
+export function imageUrl(path: string): string | undefined {
+  return imageUrlStore.get()[path];
 }
 
-export function assetMeta(id: Id): Asset | undefined {
-  return meta.get(id);
+/** Markdown image references that point at local files (skips remote/data URLs). */
+export function collectImagePaths(markdown: string): string[] {
+  const out = new Set<string>();
+  const pattern = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  for (const match of markdown.matchAll(pattern)) {
+    const src = match[1];
+    if (/^(https?:|data:|blob:)/i.test(src)) continue;
+    out.add(src);
+  }
+  return [...out];
 }
 
-export function ensureAssetUrl(id: Id): Promise<string | undefined> {
-  const cached = assetUrlStore.get()[id];
-  if (cached) return Promise.resolve(cached);
-  const existing = inflight.get(id);
-  if (existing) return existing;
+export function resolveWorkspacePath(src: string, baseDir: string): string | null {
+  const value = src.trim().replace(/^<|>$/g, "").split(/[?#]/)[0];
+  if (!value) return null;
+  if (value.startsWith("asset://")) return null;
+  const clean = normalizePath(value);
+  if (!clean) return null;
+  if (value.startsWith("/")) return clean;
+  return joinPath(baseDir, clean);
+}
+
+export async function ensureImageUrl(path: string, candidates: string[] = []): Promise<string | null> {
+  const cached = imageUrlStore.get()[path];
+  if (cached) return cached;
+  const running = inflight.get(path);
+  if (running) return running;
   const task = (async () => {
-    try {
-      const asset = meta.get(id) ?? (await readAsset(id));
-      if (!asset) return undefined;
-      meta.set(id, asset);
-      const url = URL.createObjectURL(asset.blob);
-      assetUrlStore.set((prev) => ({ ...prev, [id]: url }));
-      return url;
-    } catch (error) {
-      console.warn("[opennote] 读取图片失败", id, error);
-      return undefined;
-    } finally {
-      inflight.delete(id);
+    const backend = currentBackend();
+    if (!backend) return null;
+    for (const candidate of [path, ...candidates]) {
+      try {
+        const bytes = await backend.readBytes(candidate);
+        const url = URL.createObjectURL(new Blob([bytes as BlobPart]));
+        imageUrlStore.set((prev) => ({ ...prev, [path]: url }));
+        return url;
+      } catch {
+        /* try the next candidate */
+      }
     }
-  })();
-  inflight.set(id, task);
+    return null;
+  })().finally(() => inflight.delete(path));
+  inflight.set(path, task);
   return task;
 }
 
-export function collectAssetIds(markdown: string): Id[] {
-  const ids = new Set<Id>();
-  for (const match of markdown.matchAll(ASSET_RE)) ids.add(match[1]);
-  return [...ids];
-}
-
-export async function preloadAssets(markdown: string): Promise<void> {
-  await Promise.all(collectAssetIds(markdown).map((id) => ensureAssetUrl(id)));
-}
-
-export async function putAsset(blob: Blob, name: string): Promise<Asset> {
-  const asset: Asset = {
-    id: uid(),
-    name,
-    mime: blob.type || "application/octet-stream",
-    size: blob.size,
-    createdAt: Date.now(),
-    blob,
-  };
-  await writeAsset(asset);
-  meta.set(asset.id, asset);
-  const url = URL.createObjectURL(asset.blob);
-  assetUrlStore.set((prev) => ({ ...prev, [asset.id]: url }));
-  return asset;
-}
-
-export async function loadAssetIndex(): Promise<number> {
-  try {
-    const assets = await readAllAssets();
-    for (const asset of assets) meta.set(asset.id, asset);
-    return assets.length;
-  } catch (error) {
-    console.warn("[opennote] 图片索引读取失败", error);
-    return 0;
-  }
-}
-
-export function assetBlobSync(id: Id): Blob | undefined {
-  return meta.get(id)?.blob;
-}
-
-export function findAssetByName(name: string): Asset | undefined {
-  const target = name.toLowerCase();
-  for (const asset of meta.values()) {
-    if (asset.name.toLowerCase() === target) return asset;
-  }
-  return undefined;
-}
-
-/**
- * Turn whatever sits inside `![]()` into something an `<img>` can load:
- * absolute URLs pass through, `asset://id` and relative paths are resolved
- * against the local asset store (that is how imported notes keep their images).
- */
-export async function resolveImageSrc(src: string): Promise<string | null> {
+/** Turn whatever sits inside `![]()` into something an `<img>` can display. */
+export async function resolveImageSrc(src: string, baseDir = ""): Promise<string | null> {
   const value = src.trim().replace(/^<|>$/g, "");
   if (!value) return null;
   if (/^(https?:|data:|blob:)/i.test(value)) return value;
-  if (value.startsWith(ASSET_SCHEME)) {
-    return (await ensureAssetUrl(value.slice(ASSET_SCHEME.length))) ?? null;
+
+  if (value.startsWith("asset://")) {
+    // notes written by the older IndexedDB version — best-effort recovery
+    const legacy = await getLegacyAsset(value.slice("asset://".length));
+    if (!legacy) return null;
+    const url = URL.createObjectURL(legacy);
+    imageUrlStore.set((prev) => ({ ...prev, [value]: url }));
+    return url;
   }
-  const clean = value.replace(/[?#].*$/, "");
-  const base = decodeURIComponent(clean.split("/").pop() ?? clean);
-  const asset = findAssetByName(base) ?? findAssetByName(clean) ?? findAssetByName(value);
-  if (asset) return (await ensureAssetUrl(asset.id)) ?? null;
-  return null;
+
+  const path = resolveWorkspacePath(value, baseDir);
+  if (!path) return null;
+  const fallback = baseDir ? resolveWorkspacePath(value, "") : null;
+  return ensureImageUrl(path, fallback && fallback !== path ? [fallback] : []);
 }
 
-/** Everything the user can attach: images, pdfs, anything a `<img src>` cannot show. */
-export function isImage(mime: string, name = ""): boolean {
+export async function preloadImages(markdown: string, baseDir: string): Promise<void> {
+  await Promise.all(collectImagePaths(markdown).map((src) => resolveImageSrc(src, baseDir)));
+}
+
+export function releaseImageUrls(): void {
+  for (const url of Object.values(imageUrlStore.get())) URL.revokeObjectURL(url);
+  imageUrlStore.set({});
+}
+
+export function isImageName(name: string, mime = ""): boolean {
   if (mime.startsWith("image/")) return true;
   return /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(name);
 }
 
-export function releaseAssetUrls(): void {
-  for (const url of Object.values(assetUrlStore.get())) URL.revokeObjectURL(url);
-  assetUrlStore.set({});
+export function imageNameForPaste(blob: Blob): string {
+  const ext = blob.type.split("/")[1]?.replace("jpeg", "jpg") ?? "png";
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `image-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.${ext}`;
 }

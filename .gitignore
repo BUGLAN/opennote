@@ -2,6 +2,7 @@ node_modules
 dist
 dist-ssr
 dev-dist
+release
 *.local
 .DS_Store
 .vite

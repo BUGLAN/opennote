@@ -1,0 +1,66 @@
+# Opennote 桌面端打包配置（electron-builder 26.x）
+#
+# 关于 win.target = zip（这是刻意的，不要改成默认的 nsis）：
+#   本轮交付只产出免安装的绿色压缩包：解压即用、不写注册表、不需要管理员权限，
+#   也避免打包机上的签名/安装器依赖。将来需要安装包时，把下面的 win 段改成：
+#
+#     win:
+#       target:
+#         - target: nsis
+#           arch:
+#             - x64
+#       # 可选：nsis:
+#       #   oneClick: false
+#       #   perMachine: false
+#       #   allowToChangeInstallationDirectory: true
+#
+#   换成 nsis 后若要有自定义图标，再把图标放进 buildResources 目录（默认 build/），
+#   并补上 win.icon: build/icon.ico。
+#
+# 注意：当前仓库还没有 build/ 目录，所以本文件刻意不写任何 icon 字段，
+#       electron-builder 会使用 Electron 默认图标。
+
+appId: com.opennote.app
+productName: Opennote
+
+# 直接使用 node_modules 里已经装好的 Electron 发行版，而不是让 electron-builder
+# 再下载一份：同一台机器上 `pnpm install` 已经装过，且这样能避开它在部分
+# Windows + Node 24 环境下的缓存模式报错（Cannot read properties of undefined）。
+electronDist: node_modules/electron/dist
+
+# Windows 上如果打包卡在 "building target=zip" 并报
+#   TypeError: Cannot read properties of undefined (reading 'ReadWrite')
+# 那是 electron-builder 26.x 下载 7zip 工具链时的已知问题。它支持用环境变量
+# 指定本地 7z，跳过下载：
+#   PowerShell:  $env:ELECTRON_BUILDER_7ZIP_PATH="C:\Program Files\7-Zip\7z.exe"
+#   bash:        export ELECTRON_BUILDER_7ZIP_PATH=/usr/bin/7z
+# 或者改用 `electron-builder --dir` 只产出 release/win-unpacked/，自己压缩这个目录。
+
+directories:
+  output: release
+  buildResources: build
+
+# 渲染层已经是 dist/ 里的静态站点，打包只需要带上它、主进程代码和 package.json。
+files:
+  - dist/**/*
+  - electron/**/*
+  - package.json
+
+asar: true
+compression: normal
+artifactName: '${productName}-${version}-${os}-${arch}.${ext}'
+npmRebuild: false
+
+win:
+  target:
+    - target: zip
+      arch:
+        - x64
+
+mac:
+  target: dmg
+  category: public.app-category.productivity
+
+linux:
+  target: AppImage
+  category: Office

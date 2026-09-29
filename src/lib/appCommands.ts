@@ -6,6 +6,7 @@ import { isApple } from "./utils";
 
 export interface CommandContext {
   view(): EditorView | null;
+  hasWorkspace(): boolean;
   newNote(folderId?: Id | null): void;
   newFolder(): void;
   openPalette(mode: "all" | "commands"): void;
@@ -23,8 +24,13 @@ export interface CommandContext {
   openHistory(): void;
   openShortcuts(): void;
   exportNote(kind: "md" | "md-inline" | "html"): void;
-  exportLibrary(kind: "zip" | "json"): void;
-  importFiles(directory?: boolean): void;
+  exportLibrary(): void;
+  importFiles(): void;
+  openWorkspace(): void;
+  openLocalFolder(): void;
+  newBrowserWorkspace(): void;
+  uploadFolder(): void;
+  closeWorkspace(): void;
   toggleStar(): void;
   duplicateNote(): void;
   trashNote(): void;
@@ -34,7 +40,7 @@ export interface CommandContext {
   notify(message: string): void;
 }
 
-export type CommandGroup = "笔记" | "导航" | "视图" | "格式" | "数据" | "外观" | "帮助";
+export type CommandGroup = "笔记" | "笔记本" | "导航" | "视图" | "格式" | "数据" | "外观" | "帮助";
 
 export interface AppCommand {
   id: string;
@@ -71,7 +77,52 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
   });
 
   return [
-    { id: "new-note", label: "新建笔记", group: "笔记", icon: "plus", shortcut: accel("N"), keys: ["mod+n"], run: () => ctx.newNote() },
+    {
+      id: "open-workspace",
+      label: "切换 / 打开笔记本…",
+      group: "笔记本",
+      icon: "layers",
+      run: () => ctx.openWorkspace(),
+    },
+    {
+      id: "open-local-folder",
+      label: "打开本机文件夹…",
+      group: "笔记本",
+      icon: "folder",
+      run: () => ctx.openLocalFolder(),
+    },
+    {
+      id: "new-browser-workspace",
+      label: "新建浏览器笔记本…",
+      group: "笔记本",
+      icon: "plus",
+      run: () => ctx.newBrowserWorkspace(),
+    },
+    {
+      id: "upload-folder",
+      label: "导入本地文件夹到浏览器…",
+      group: "笔记本",
+      icon: "upload",
+      run: () => ctx.uploadFolder(),
+    },
+    {
+      id: "close-workspace",
+      label: "关闭当前笔记本",
+      group: "笔记本",
+      icon: "close",
+      enabled: () => ctx.hasWorkspace(),
+      run: () => ctx.closeWorkspace(),
+    },
+    {
+      id: "new-note",
+      label: "新建笔记",
+      group: "笔记",
+      icon: "plus",
+      shortcut: accel("N"),
+      keys: ["mod+n"],
+      enabled: () => ctx.hasWorkspace(),
+      run: () => ctx.newNote(),
+    },
     {
       id: "new-folder",
       label: "新建文件夹",
@@ -245,10 +296,22 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
     },
     { id: "export-html", label: "导出当前笔记为独立 HTML", group: "数据", icon: "external", run: () => ctx.exportNote("html") },
     { id: "print", label: "打印 / 导出 PDF", group: "数据", icon: "print", shortcut: accel("P"), run: () => ctx.printNote() },
-    { id: "export-zip", label: "导出整库备份（zip）", group: "数据", icon: "layers", run: () => ctx.exportLibrary("zip") },
-    { id: "export-json", label: "导出整库数据（json）", group: "数据", icon: "layers", run: () => ctx.exportLibrary("json") },
-    { id: "import", label: "导入文件…", group: "数据", icon: "upload", run: () => ctx.importFiles(false) },
-    { id: "import-dir", label: "导入文件夹…", group: "数据", icon: "folder", run: () => ctx.importFiles(true) },
+    {
+      id: "export-zip",
+      label: "导出整库备份（zip）",
+      group: "数据",
+      icon: "layers",
+      enabled: () => ctx.hasWorkspace(),
+      run: () => ctx.exportLibrary(),
+    },
+    {
+      id: "import",
+      label: "导入文件到当前文件夹…",
+      group: "数据",
+      icon: "upload",
+      enabled: () => ctx.hasWorkspace(),
+      run: () => ctx.importFiles(),
+    },
     { id: "history", label: "查看历史版本", group: "数据", icon: "clock", run: () => ctx.openHistory() },
 
     {
