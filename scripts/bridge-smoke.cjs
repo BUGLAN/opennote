@@ -464,6 +464,91 @@ async function main() {
     return `4 个选项名与 03 号逐字一致（收件箱=推荐）`
   })
 
+  await check('㊸ 文档咬合：03 的活规格不得再把 R4b 当活规格（漏句 / 改句 / 造按钮三种漂移）', async () => {
+    // 起因：task-22 把面板的 R4b 并入 R4，而 03 里还躺着 41 行把它当活规格，甚至写着一个
+    // **从来没实现过的按钮**（生成并复制新令牌）。当时 verify-contract / verify-e2e / 单测全绿 ——
+    // 说明「文档 ↔ 实现」的漂移此前**没有任何自动检查**（只有下面 ㉕ 那一处）。
+    //
+    // 存档区**按行内容匹配**，不按行号（行号会漂）：划掉的作废行、§11.2 变更记录、mock 作废说明。
+    const ARCHIVE = [
+      (t) => t.includes('~~R4b 配对新客户端~~'),
+      (t) => t.includes('~~R4b 复制令牌（两块并存时）~~'),
+      (t) => /^\|\s*`R4b 配对新客户端` 整块/.test(t),
+      (t) => /^\|\s*配对流程的一切用户可见文案\s*\|/.test(t),
+      (t) => /^\|\s*`03-settings-import-api\.html`\s*\|/.test(t),
+    ]
+    // 活规格里提到 R4b 时必须带「并入 / 作废 / 留痕」这类语境，否则就是在拿它当活规格。
+    // 另有一类是**回顾性**文字（写明「教训 / 写给后来者 / 不得再…」），同样不是活规格。
+    const MERGED_CONTEXT = ['并入', '合并', '作废', '删除', '留痕', '不存在', '取代', '教训', '不得再']
+    let doc
+    try {
+      doc = fs.readFileSync(UI_SPEC_PATH, 'utf8')
+    } catch {
+      // 03 号是这些文案的产地：读不到就是红的，不许 SKIP（一个会告诉人怎么修的 FAIL，比
+      // 一个安静的 SKIP 有价值）。
+      assert.equal(false, true, '读不到 03 号规范：它是活规格的产地，缺失必须红')
+      return ''
+    }
+    // 反「静默通过」：文件被清空/截断时，后面的 includes 断言会全部落空却显得「没问题」。
+    // （这不是假想：我自己做红证明时用错 PowerShell 重载，真的把 03 写成过空文件 ——
+    //   当时的「存档区只匹配到 0 行」安全阀把它抓成了 FAIL。）
+    assert.equal(
+      doc.length > 20000,
+      true,
+      `03 号只有 ${doc.length} 字符，疑似被清空或截断 —— 文档咬合绝不能靠「什么都不剩」通过`,
+    )
+    const lines = doc.split(/\r?\n/)
+    const archiveHits = lines.filter((line) => ARCHIVE.some((match) => match(line.trim())))
+    // 安全阀：切档必须真的切到了东西，否则「切完什么都不剩」会让下面的断言静默通过。
+    assert.equal(archiveHits.length >= 5, true, `存档区只匹配到 ${archiveHits.length} 行，过滤器可能已失效`)
+    const live = lines.filter((line) => !ARCHIVE.some((match) => match(line.trim())))
+
+    // ① 布局树里不得再有一个 R4b 节点（最具体的一种「当活规格」形态，先查它，报错更准）。
+    assert.equal(doc.includes('├ R4b 复制令牌'), false, '03 布局树里还有 `├ R4b 复制令牌`')
+    const treeR4b = lines.find((line) => /^\s*[├└│]+ *`?R4b/.test(line))
+    assert.equal(treeR4b === undefined, true, `03 布局树里还有一个 R4b 节点：${String(treeR4b).trim().slice(0, 80)}`)
+    // ② 全文不得出现那个**从来没实现过**的按钮（含存档区）。
+    assert.equal(
+      doc.includes('生成并复制新令牌'),
+      false,
+      '03 里出现了 `生成并复制新令牌` —— 这个按钮在实现里从来不存在（实现只有「重新生成」）',
+    )
+    // ③ 活规格区：`R4b` 只能出现在「已并入 / 已作废」语境里。
+    const liveR4b = live.filter((line) => line.includes('R4b'))
+    for (const line of liveR4b) {
+      assert.equal(
+        MERGED_CONTEXT.some((word) => line.includes(word)),
+        true,
+        `03 活规格里有一行在拿 R4b 当活规格（缺「并入/作废」语境）：${line.trim().slice(0, 90)}——这是 d-ui 的文件，我这边不改`,
+      )
+    }
+
+    // ④⑤ 逐字比对：文案只有实现一个产地，文档必须与它**逐字**一致。
+    const panel = fs.readFileSync(PANEL_PATH, 'utf8')
+    const constString = (name) => {
+      const at = panel.indexOf(`const ${name} =`)
+      assert.notEqual(at, -1, `面板里找不到 ${name}（咬合断言的产地没了，必须先修断言）`)
+      const literal = panel.slice(at).match(/"(?:[^"\\]|\\.)*"/)
+      assert.notEqual(literal, null, `${name} 不是字符串字面量`)
+      return JSON.parse(literal[0])
+    }
+    const cost = constString('TOKEN_COST_HINT')
+    assert.equal(cost.includes('任何能读到剪贴板或扩展存储的程序都能拿到这串令牌并获得导入能力'), true, '代价披露句被改过了')
+    assert.equal(doc.includes(cost), true, `03 缺少代价披露的**完整实现句**：${cost}`)
+    for (const name of ['R4_VISIBLE', 'R4_INVISIBLE', 'R4_RELOADED', 'R4_HINT']) {
+      const text = constString(name)
+      assert.equal(doc.includes(text), true, `03 缺少/改动了 ${name} 的逐字文案：${text}`)
+    }
+    // 三态必须互斥（同一个事实只有一个产地）：任何两句都不允许同时是另一句的子串。
+    const three = ['R4_VISIBLE', 'R4_INVISIBLE', 'R4_RELOADED'].map(constString)
+    for (const a of three) {
+      for (const b of three) {
+        if (a !== b) assert.equal(a.includes(b), false, `状态句不是互斥的：${b} ⊂ ${a}`)
+      }
+    }
+    return `存档 ${archiveHits.length} 行；活规格 R4b ${liveR4b.length} 处都带「已并入」语境；无「生成并复制新令牌」；披露句 + 四句状态文案逐字一致`
+  })
+
   await check('㉗ 逐字：IMP-4006「应用没运行」与 IMP-4007「工作区没打开」必须区分且逐字', async () => {
     assert.equal(ERROR_TABLE['IMP-4006'].userMessage, 'Opennote 没有在运行。请先打开 Opennote，再试一次。')
     assert.equal(
