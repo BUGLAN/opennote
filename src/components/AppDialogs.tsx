@@ -416,7 +416,15 @@ export function SettingsDialog({
 
               <SettingRow label="关于">
                 <div className="setting__value">
-                  <strong>Opennote</strong> · 开源笔记 · v0.2.0 · MIT License
+                  {/* 版本号只有**一个产地**：preload 的 `window.opennote.version`（→ `app.getVersion()` → package.json）。
+    这里曾经硬编码 `v0.2.0`，从 0.3.0 起一直在对用户撒谎；而 preload 的兜底曾拿 **Electron 版本**冒充，
+    会让用户看到 `v38.x` 并以为那是 Opennote 的版本。读不到就如实说「版本未知」——宁可知未知，不可冒充。 */}
+    <strong>Opennote</strong> · 开源笔记 ·{" "}
+    {(() => {
+      const desktop = (window as unknown as { opennote?: { version?: string } }).opennote
+      return desktop?.version ? `v${desktop.version}` : "版本未知"
+    })()}{" "}
+    · MIT License
                 </div>
                 <p className="dialog__note" style={{ marginTop: 4 }}>
                   纯前端、无后端、无账号、无遥测。笔记就是你磁盘上的 Markdown 文件，界面只是把它排版好给你看。

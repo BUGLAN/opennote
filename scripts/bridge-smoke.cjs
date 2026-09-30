@@ -19,7 +19,29 @@ const os = require('node:os')
 const path = require('node:path')
 const crypto = require('node:crypto')
 
-const { createBridge, ERROR_TABLE, PORT_RANGE_START, PORT_RANGE_END, TOKEN_LENGTH, sha256Hex } = require('../electron/bridge.cjs')
+const {
+  createBridge,
+  ERROR_TABLE,
+  PORT_RANGE_START,
+  PORT_RANGE_END,
+  TOKEN_LENGTH,
+  APP_VERSION,
+  APP_VERSION_FALLBACK,
+  sha256Hex,
+} = require('../electron/bridge.cjs')
+
+/**
+ * 应用版本的**唯一产地**：`package.json`。
+ *
+ * 事故背景（0.3.2 排查）：`/v1/health` 一直回 `"app":"0.2.0"`，Lead 与 b 因此判断「用户跑的是
+ * 旧版应用」，其实跑的是仓库版，**一条真 bug 差点被判成「本机无法复现」**。
+ * 更糟的是**这个自测脚本自己就抄了一份 0.2.0**（旧 L324 的 `getAppVersion: () => '0.2.0'` +
+ * 旧 L1624 的 `assert.equal(result.app, '0.2.0')`）—— 两个产地一起错，所以它一直绿。
+ * 教训：**断言里不许再抄一份事实**，必须去读那个唯一的产地（否则自测只是自我确认）。
+ */
+const PKG_VERSION = JSON.parse(
+  fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'),
+).version
 
 const VERBOSE = process.argv.includes('--verbose')
 const KEEP = process.argv.includes('--keep')
@@ -321,7 +343,8 @@ function makeBridge(options = {}) {
     getTokenHash: () => holder.tokenHash,
     getAdvancedOverwrite: () => options.advancedOverwrite === true,
     getWorkspaceInfo: options.workspace ? () => ({ open: true, name: options.workspaceName || '我的笔记' }) : undefined,
-    getAppVersion: () => '0.2.0',
+    // 版本号**不抄一份**：主进程真实接线传的就是 `package.json` 的版本（`app.getVersion()`）。
+    getAppVersion: () => (options.appVersion === undefined ? PKG_VERSION : options.appVersion),
     getInboxEnabled: () => false,
     // ㉕ 交付模式挂钩：只有显式传了 `inboxMode` 才接线，用来验证「没接线 = null」。
     getInboxMode: 'inboxMode' in options ? options.inboxMode : undefined,
@@ -1621,7 +1644,7 @@ async function main() {
     const result = res.json.result
     assert.equal(result.bridge, 'running')
     assert.equal(result.spec, 'opennote.import/v1')
-    assert.equal(result.app, '0.2.0')
+    assert.equal(result.app, PKG_VERSION, 'health 回的应用版本必须与 package.json 逐字一致（挂钩优先）')
     assert.equal(result.port, port)
     assert.equal(result.authRequired, true)
     assert.equal(result.inbox, false)
@@ -2122,6 +2145,48 @@ async function main() {
       assert.equal(restarted.bridge.status().state, 'stopped', '重启后仍应尝试恢复（stopped）')
     } finally {
       for (const release of releases) await release()
+      await inst.bridge.stop()
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // ⑬ 版本号咬合：同一个事实（应用版本）不许有两个产地
+  // -------------------------------------------------------------------------
+  section('⑬ 版本号咬合：APP_VERSION ↔ package.json')
+
+  await check('⑬ 咬合：bridge.cjs 的 APP_VERSION/FALLBACK 与 package.json 的 version 逐字一致', () => {
+    // 这条断言看着「废话」，但 0.3.2 的排查事故就是它缺位造成的：
+    // 桥的常量停在 0.2.0，而**断言里也抄了一份 0.2.0**，于是两边一起错、全绿。
+    assert.equal(APP_VERSION, PKG_VERSION, 'APP_VERSION（生效值）必须等于 package.json 的 version')
+    assert.equal(APP_VERSION_FALLBACK, PKG_VERSION, 'APP_VERSION_FALLBACK（兜底常量）必须等于 package.json 的 version')
+    assert.equal(
+      /const APP_VERSION_FALLBACK = '[^']+'/.test(fs.readFileSync(BRIDGE_PATH, 'utf8')),
+      true,
+      '兜底常量必须仍然是**显式字面量**（不然这条断言就没东西可盯了）',
+    )
+    return `package.json=${PKG_VERSION} · APP_VERSION=${APP_VERSION} · FALLBACK=${APP_VERSION_FALLBACK}`
+  })
+
+  await check('⑬ main.cjs 必须把真实版本挂钩传进桥（挂钩没了会静默退回兜底常量）', () => {
+    const main = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8')
+    assert.equal(
+      main.includes('getAppVersion: () => app.getVersion()'),
+      true,
+      'main.cjs 必须传 `getAppVersion: () => app.getVersion()`（应用版本的唯一产地 = package.json）',
+    )
+    return 'main.cjs: getAppVersion: () => app.getVersion()'
+  })
+
+  await check('⑬ 挂钩优先：getAppVersion 返回什么，/v1/health 就回什么（哨兵值，不写死真版本）', async () => {
+    const sentinel = '9.9.9-sentinel'
+    const inst = makeBridge({ appVersion: sentinel })
+    inst.bridge.regenerateToken()
+    const up = await inst.bridge.startWithPort(privatePortCounter++)
+    try {
+      const res = await request({ port: up.port, path: '/v1/health', headers: withHost(up.port) })
+      assert.equal(res.status, 200)
+      assert.equal(res.json.result.app, sentinel, 'health 必须如实转述挂钩给的版本（挂钩优先于兜底常量）')
+    } finally {
       await inst.bridge.stop()
     }
   })

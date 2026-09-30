@@ -66,7 +66,36 @@ const TOKEN_LENGTH = TOKEN_PREFIX.length + TOKEN_SECRET_LENGTH
 const TOKEN_PATTERN = /^opn_[A-Za-z0-9_-]{43}$/
 
 const SPEC_VERSION = 'opennote.import/v1'
-const APP_VERSION = '0.2.0'
+
+/**
+ * 应用版本的**唯一产地是 `package.json`**。
+ *
+ * 真实运行路径上版本由主进程传进来（`main.cjs`: `getAppVersion: () => app.getVersion()`，
+ * 同样源自 `package.json`）；下面这个只是**拿不到挂钩时的兜底**。
+ *
+ * 兜底绝不能变成「同一个事实的第二个产地」—— 0.3.2 就是这么踩的：`/v1/health` 一直回
+ * `"app":"0.2.0"`（常量从 0.2.0 起没人升过），于是 Lead 和 b 都判断「用户跑的是旧版应用」，
+ * 而用户跑的就是仓库版，**一条真 bug 差点被判成「本机无法复现」**。
+ * **版本号是兼容性判断的唯一输入，它有两个产地就必须有咬合。**
+ *
+ * 两道保险：
+ *   ① 这里**先直接读 `package.json`**（能读到就不再是第二个产地）；
+ *   ② 读不到才用下面的常量，而 `scripts/bridge-smoke.cjs` 有一条断言盯着它
+ *      「必须与 `package.json` 的 `version` 逐字一致」—— 改任何一边都会红。
+ */
+function readPackageVersion() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'))
+    return typeof pkg.version === 'string' && pkg.version.length > 0 ? pkg.version : null
+  } catch {
+    /* 打包布局不同 / 文件读不到 → 退回兜底常量（咬合断言保证它不落后） */
+    return null
+  }
+}
+
+/** 读不到 `package.json` 时的兜底；**必须**与 `package.json` 的 `version` 逐字一致。 */
+const APP_VERSION_FALLBACK = '0.3.2'
+const APP_VERSION = readPackageVersion() || APP_VERSION_FALLBACK
 
 /** 请求体 16 MiB（解析前按 Content-Length 拒绝）。 */
 const MAX_REQUEST_BYTES = 16 * 1024 * 1024
@@ -1543,6 +1572,9 @@ module.exports = {
   PORT_RANGE_END,
   TOKEN_LENGTH,
   SPEC_VERSION,
+  /** 咬合断言要盯的两个值：生效版本（优先读 package.json）与兜底常量（必须与 package.json 一致）。 */
+  APP_VERSION,
+  APP_VERSION_FALLBACK,
   TOKEN_PATTERN,
   ERROR_TABLE,
   STATE_NAMES,

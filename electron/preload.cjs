@@ -80,9 +80,13 @@ function readAppVersion() {
     const version = ipcRenderer.sendSync(VERSION_CHANNEL)
     if (typeof version === 'string' && version !== '') return version
   } catch {
-    /* 忽略：回退到 Electron 版本号 */
+    /* 忽略：下面如实返回空串 */
   }
-  return (process.versions && process.versions.electron) || ''
+  // 读不到应用版本时**返回空串**，由界面显示「版本未知」。
+  // 以前这里回退到 `process.versions.electron` —— 那是拿另一个数字冒充应用版本：
+  // 用户会看到 "v38.4.5" 并以为那是 Opennote 的版本。**宁可显示未知，也不要拿别的数字冒充。**
+  // 这与 `bridge.cjs` 的 APP_VERSION 是同一个原则：一个字段的含义不能被兜底改掉。
+  return ''
 }
 
 const bridge = {
