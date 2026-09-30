@@ -9,6 +9,8 @@ Set-Location E:\repo\opennote\extension
 
 # 机器可见的信号（Lead 0.3.1 追加规则）：「有变异在跑 → 此刻的 verify 结果不可信」必须与
 # 「结果可信但失败」区分开。verify.mjs 发现这个标记会**以退出码 2 中止**，不打印任何红绿。
+# 变异脚本自己的 verify 要看到真实红 → 用环境变量声明身份（别人的 verify 没有它，仍会被标记挡住并 exit 2）
+$env:OPENNOTE_MUTATION_SELF = "1"
 $marker = Join-Path (Get-Location) ".mutation-running"
 New-Item -ItemType File -Path $marker -Force | Out-Null
 $report = @()
@@ -82,8 +84,8 @@ $results += Mutate "src/popup/popup.html" `
   '<button type="button" role="menuitem" data-action="forget">清除本地令牌</button>' `
   '<button type="button" role="menuitem" data-action="forget">清除本地令牌</button>
     <button type="button" role="menuitem" data-action="inbox">剪藏到收件箱</button>' `
-  "④ V12 ⋯ 菜单回到 7 项（加回 disabled 的「剪藏到收件箱」）" `
-  "⋯ 菜单应恰好是 C63 的 6 项"
+  "④ V12 ⋯ 菜单多出一项（加回 disabled 的「剪藏到收件箱」）" `
+  "⋯ 菜单应恰好是 M1 的 5 项"
 
 # ⑤ V14：元素选择器退回「改宿主页面 DOM」的写法（去掉影子根 + 加回 selectionchange）
 $results += Mutate "src/content/picker.js" `
@@ -131,4 +133,5 @@ $report -join "`n"
 } finally {
   # 无论中途怎么退出（包括 Ctrl+C / 抛错），标记都必须被摘掉
   Remove-Item $marker -Force -ErrorAction SilentlyContinue
+  Remove-Item Env:\OPENNOTE_MUTATION_SELF -ErrorAction SilentlyContinue
 }

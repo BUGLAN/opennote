@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-<div class="clip" id="clip" data-state="checking" data-region="body">
+<div class="clip" id="clip" data-state="checking">
   <div class="clip__head">
     <span class="seal" aria-hidden="true">記</span>
     <span class="clip__name">Opennote<small>剪藏</small></span>
@@ -19,25 +19,14 @@
   </div>
 
   <div class="clip__body" id="body">
-    <!-- 三区（00 §6.14 ㉘）：正文 / 高亮 / 属性 -->
-    <div class="clip__seg" id="seg">
-      <div class="segmented" role="radiogroup" aria-label="剪藏视图" id="segmented">
-        <button type="button" role="radio" aria-checked="true" data-region="body" class="is-active">正文</button>
-        <button type="button" role="radio" aria-checked="false" data-region="highlight">高亮</button>
-        <button type="button" role="radio" aria-checked="false" data-region="property">属性</button>
-      </div>
-    </div>
-
-    <!-- 模板选择器（㉘）：按当前 URL 自动匹配，可手动切换 -->
-    <div class="clip__tmpl" id="tmplRow" hidden>
-      <label for="template">模板</label>
-      <select id="template" class="field clip__sel" aria-label="模板"></select>
-      <span class="clip__tmpl-note" id="tmplNote"></span>
-    </div>
-
-    <!-- L2 元素入口行（00 §6.15㉝ 的主路径；03 §UI-01 C65–C69 / C71） -->
+    <!--
+      M1 极简（00 §6.15 ㊵㊶ / task-24）：这里**只有两个按钮**——`选择当前元素` 与 `整页提取`。
+      三区分段（正文/高亮/属性）、模板选择器、来源三选一、`存到`、`标签` 全部退场：
+      界面上不留任何死元素（模板/高亮的后台模块要到 M2 才删，但用户看不到它们）。
+    -->
     <div class="clip__pick" id="pickRow">
-      <button type="button" class="btn" id="pick">选择页面元素</button>
+      <button type="button" class="btn" id="pick">选择当前元素</button>
+      <button type="button" class="btn" id="extractPage">整页提取</button>
       <span class="clip__pick-note" id="pickNote"></span>
       <code class="clip__pick-detail" id="pickDetail" hidden></code>
     </div>
@@ -60,58 +49,11 @@
       <p class="clip__hint clip__hint--cost">令牌长期有效。能读到剪贴板或插件存储的程序都能拿到它，从而往 Opennote 里导入内容；不过本地接口只提供导入，不提供读取和删除。</p>
     </div>
 
-    <!-- ① 正文区：来源三选一（00 §6.15㉝；03 §UI-01 C64） -->
+    <!-- 预览（单正文一条链）：来源信息由页面自动填写，提取不到的字段整行省略 -->
     <div class="clip__region" id="regionBody">
-      <div class="clip__switch" id="sourceSwitch" role="radiogroup" aria-label="正文来源">
-        <button type="button" role="radio" data-mode="element" aria-checked="false">元素选择</button>
-        <button type="button" role="radio" data-mode="page" aria-checked="false">整页正文</button>
-        <button type="button" role="radio" data-mode="selection" aria-checked="true" class="is-active">当前选区</button>
-      </div>
       <div id="region"></div>
     </div>
 
-    <!-- ② 高亮区（00 §6.14 ㉚；文案逐字见 03 §UI-01 C24–C30） -->
-    <div class="clip__region clip__hl" id="regionHighlight" hidden>
-      <div class="clip__hl-head">
-        <span class="clip__hl-count" id="hlCount">已高亮 0 处</span>
-        <button type="button" class="btn btn--ghost" id="hlClear" hidden>清除本页全部高亮</button>
-      </div>
-      <p class="clip__hint" id="hlStoreError" hidden>高亮没能存进插件本地存储，这一条不算记下。</p>
-      <ul class="clip__hl-list" id="hlList"></ul>
-      <p class="clip__hint" id="hlScopeNote" hidden>这次只用选区，高亮不会写进正文。想连高亮一起剪，把来源换成「元素选择」或「整页正文」。</p>
-      <div class="clip__confirm" id="hlConfirm" hidden>
-        <p class="clip__confirm-title">清除这一页的全部高亮？</p>
-        <p class="clip__confirm-body" id="hlConfirmBody"></p>
-        <div class="clip__confirm-acts">
-          <button type="button" class="btn btn--danger" id="hlConfirmYes">清除</button>
-          <button type="button" class="btn" id="hlConfirmNo">留下</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- ③ 属性区（㉘ 的 8 个可视化字段 + 追加到指定笔记；标签/存到与底部 L5 是**同一个 state 的两个视图**） -->
-    <div class="clip__region clip__props" id="regionProps" hidden>
-      <p class="clip__hint">这些值会写进笔记的来源信息里。改过之后不会被模板再改回去。</p>
-      <div class="clip__row"><label for="propTitle">标题</label><input id="propTitle" data-prop="title" class="field" maxlength="200" autocomplete="off" spellcheck="false"><span class="clip__count" id="propTitleCount">0/200</span></div>
-      <div class="clip__row"><label for="propSourceTitle">网页标题</label><input id="propSourceTitle" data-prop="source.title" class="field" placeholder="网页标题" maxlength="300" autocomplete="off" spellcheck="false"></div>
-      <div class="clip__row"><label for="propUrl">网址</label><input id="propUrl" data-prop="source.url" class="field" placeholder="https://example.com/posts/local-first" autocomplete="off" spellcheck="false"></div>
-      <div class="clip__row"><label for="propSite">站点</label><input id="propSite" data-prop="source.site" class="field" placeholder="example.com" maxlength="120" autocomplete="off" spellcheck="false"></div>
-      <div class="clip__row"><label for="propAuthor">作者</label><input id="propAuthor" data-prop="author" class="field" placeholder="作者" maxlength="120" autocomplete="off" spellcheck="false"></div>
-      <div class="clip__row"><label for="propPublished">发布时间</label><input id="propPublished" data-prop="publishedAt" class="field" placeholder="2026-09-21T15:04:05+08:00" autocomplete="off" spellcheck="false"></div>
-      <div class="clip__row"><label for="tags">标签</label><input id="tags" data-prop="tags" class="field" placeholder="用逗号分隔，可留空" autocomplete="off" spellcheck="false"></div>
-      <div class="clip__row"><label for="folder">存到</label><input id="folder" data-prop="target.folder" class="field clip__sel" list="folderOptions" placeholder="根目录" autocomplete="off" spellcheck="false"><datalist id="folderOptions"></datalist></div>
-      <div class="clip__row"><label for="notePath">追加到笔记</label><input id="notePath" data-prop="notePath" class="field" list="noteOptions" placeholder="笔记的相对路径，例如 剪藏/技术/中文排版指北.md" autocomplete="off" spellcheck="false"><datalist id="noteOptions"></datalist></div>
-      <p class="clip__hint">填了目标笔记，这次剪藏会以「追加」的方式提交；没填就交给 Opennote 自己判断。</p>
-      <p class="clip__err" id="propsError" hidden></p>
-    </div>
-
-    <!-- L5：底部落点行（与属性区第 7/8 行是同一个 state 的两个视图，不是两份草稿） -->
-    <div class="clip__row clip__row--foot" id="footRow">
-      <label for="footFolder">存到</label>
-      <input id="footFolder" class="field clip__sel" list="folderOptions" placeholder="根目录" autocomplete="off" spellcheck="false">
-      <label for="footTags">标签</label>
-      <input id="footTags" class="field" placeholder="用逗号分隔，可留空" autocomplete="off" spellcheck="false">
-    </div>
     <p class="clip__hint clip__hint--delivery" id="deliveryHint"></p>
   </div>
 
@@ -123,12 +65,11 @@
 
   <div class="clip__menu" id="menu" role="menu" aria-label="更多" hidden>
     <!--
-      判定链纪律（BLOCK-1 回归点）：这个菜单里任何「落点策略」类选项都**不得**下发 `conflict: "new"`。
-      0.3.0（00 §6.14 ㉕㉘）：进不进收件箱由**应用侧设置**决定，插件不代发指令，
-      所以这里**没有**「剪藏到收件箱」项（它以前是个置灰的死按钮）；追加意图走属性区的「追加到笔记」。
-      菜单项**就是 6 项**（03 §UI-01 C63 冻结）——模板管理在模板选择器列表底部的「管理模板…」，不在这里。
+      判定链纪律（BLOCK-1 回归点）：这个菜单里任何「落点策略」类选项都**不得**下发 `conflict: "new"`；
+      进不进收件箱由**应用侧设置**决定，插件不代发指令，所以这里没有「剪藏到收件箱」项。
+      M1（task-24）：`标签` 输入已退场，所以原先「用当前选区新建标签…」这个唯一标签入口也一并退场
+      —— 留着它就是一个点了没反应的死元素。菜单因此从 6 项变 5 项（需要 d-ui 同步 03 C63）。
     -->
-    <button type="button" role="menuitem" data-action="tag-from-selection">用当前选区新建标签…</button>
     <button type="button" role="menuitem" data-action="copy">复制 Markdown</button>
     <button type="button" role="menuitem" data-action="stage">暂存在插件里</button>
     <hr>

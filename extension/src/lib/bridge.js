@@ -225,6 +225,15 @@ export async function postImport(port, token, envelope, options = {}) {
  */
 export const PAIRING_REMOVED = Object.freeze({ removedIn: "0.3.1", reason: "00 §6.15㉞：配对整体删除，改为粘贴长期令牌" });
 
+/**
+ * 只读回显的写法（03 §UI-01 C58 / UI-04 S6）：`opn_` + 12 个掩码点 + **真实尾 4 位**。
+ * **单一来源**：popup 不再自己拼模板，也不许用 `????` 之类的占位值顶替 —— 那是用户可见的错值
+ * （「界面说的不是真的」那一族）。尾号缺失时只是不显示尾号，**绝不显示假尾号**。
+ */
+export function maskTokenTail(tail) {
+  return `opn_${"•".repeat(12)}${String(tail || "")}`;
+}
+
 /** `GET /v1/imports/{importId}`（API-03）：收件箱模式下的轮询。 */
 export async function getImportStatus(port, token, importId, options = {}) {
   const { timeoutMs = REQUEST_TIMEOUT_MS, fetchImpl } = options;

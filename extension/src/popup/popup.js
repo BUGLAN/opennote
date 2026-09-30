@@ -7,6 +7,7 @@
  * 清单见 extension/README.md「新增文案清单」。
  */
 
+import { maskTokenTail } from "../lib/bridge.js";
 import { filterTags } from "../lib/envelope.js";
 import { userMessage } from "../lib/errors.js";
 // task-21：四因文案与后台**同一份来源**（不再各写一套、也不再统一伪装成「页面类型不支持」）
@@ -17,46 +18,16 @@ const $ = (id) => document.getElementById(id);
 const clip = $("clip");
 const chip = $("chip");
 const chipText = $("chipText");
-const segWrap = $("seg");
-const segmented = $("segmented");
 const regionBody = $("regionBody");
 const region = $("region");
-const regionHighlight = $("regionHighlight");
-const regionProps = $("regionProps");
-const sourceSwitch = $("sourceSwitch");
-const tmplRow = $("tmplRow");
-const templateSelect = $("template");
-const tmplNote = $("tmplNote");
-const hlList = $("hlList");
-const hlCount = $("hlCount");
-const hlClear = $("hlClear");
-const hlConfirm = $("hlConfirm");
-const hlConfirmBody = $("hlConfirmBody");
-const hlConfirmYes = $("hlConfirmYes");
-const hlConfirmNo = $("hlConfirmNo");
-const hlStoreError = $("hlStoreError");
 const footActs = $("footActs");
 const primary = $("primary");
 const more = $("more");
 const menu = $("menu");
-const propTitle = $("propTitle");
-const propTitleCount = $("propTitleCount");
-const propUrl = $("propUrl");
-const propSourceTitle = $("propSourceTitle");
-const propSite = $("propSite");
-const propAuthor = $("propAuthor");
-const propPublished = $("propPublished");
-const folderInput = $("folder");
-const tagsInput = $("tags");
-const notePathInput = $("notePath");
-const folderOptions = $("folderOptions");
-const noteOptions = $("noteOptions");
-const propsError = $("propsError");
-const footFolder = $("footFolder");
-const footTags = $("footTags");
 const deliveryHint = $("deliveryHint");
 // 0.3.1（00 §6.15㉝㉞）：L2 元素入口 + 令牌块 + 高亮来源说明 + 清令牌确认
 const pickButton = $("pick");
+const extractPageButton = $("extractPage");
 const pickNote = $("pickNote");
 const pickDetail = $("pickDetail");
 const tokenRow = $("tokenRow");
@@ -70,13 +41,14 @@ const tokenError = $("tokenError");
 const tokenHint = $("tokenHint");
 const tokenMain = $("tokenMain");
 const tokenRepaste = $("tokenRepaste");
-const hlScopeNote = $("hlScopeNote");
 const tokenConfirm = $("tokenConfirm");
 const tokenConfirmYes = $("tokenConfirmYes");
 const tokenConfirmNo = $("tokenConfirmNo");
 
 let snapshot = null;
-let mode = "selection";
+// M1（task-24）：只剩两个按钮 —— `选择当前元素`（element）与 `整页提取`（page）。
+// 默认整页提取；页面上已选过元素时（snapshot.pickedElement）切到 element。
+let mode = "page";
 let regionMode = "body";
 let titleValue = "";
 let titleTouched = false;
@@ -89,18 +61,10 @@ let closeTimer = null;
 let currentImportId = null;
 let lastSignature = null;
 let pendingNotePath = null;
-/** 模板（㉙）：null = 按 URL 自动匹配；模板 id = 用户显式选择；"none" = 不使用模板。 */
-let templateId = null;
-/** 高亮（㉚）：当前页已记录的高亮。 */
-let highlights = [];
-/** 属性面板里被用户手改过的字段（手改优先于模板与抽取结果）。 */
-const dirtyProps = new Set();
-let dirtyNotePath = false;
+
 let previewTimer = null;
 /** 预览里读到的「实际会发出去的值」，用于标签自动补全等展示。 */
 let lastPreview = null;
-/** 高亮存储写入失败（UI-14/S8）：在 popup 顶部如实说出来，不假装成功。 */
-let highlightStoreFailed = false;
 
 /* ─────────────────────────── 基础设施 ─────────────────────────── */
 
@@ -155,7 +119,8 @@ function formatDate(value) {
 }
 
 function folderLabel() {
-  const value = folderInput.value.trim();
+  // M1：`存到` 输入已退场；落点由 Opennote 侧设置决定（默认收件箱），这里只用于回执里的展示名。
+  const value = String((snapshot && snapshot.settings && snapshot.settings.folder) || "").trim();
   return value || "根目录";
 }
 
@@ -207,14 +172,6 @@ function previewNode() {
   title.id = "inlineTitle";
   title.textContent = titleValue || defaultTitle();
   row.appendChild(title);
-  const edit = el("button", "clip__title-edit", "改标题");
-  edit.type = "button";
-  edit.addEventListener("click", () => {
-    setRegion("property");
-    propTitle.focus();
-    propTitle.select();
-  });
-  row.appendChild(edit);
   if (mode === "page") {
     const chars = (ex && ex.article && ex.article.chars) || 0;
     row.appendChild(el("span", "clip__count", `约 ${chars.toLocaleString("en-US")} 字 · 预计 1 篇笔记`));
@@ -243,7 +200,7 @@ function previewNode() {
   }
   box.appendChild(src);
   // C65：来源 = 元素选择且已选过时，标题行右侧一行 `已选择 {标签名}`
-  if (pickSummary()) box.appendChild(el("p", "clip__count", pickSummary()));
+  // M1：只有两个按钮，这里如实显示当前来源（元素选择 / 整页提取）
   // 选中的是 iframe：如实说明只剪到外框，不假装读到了里面的内容
   if (mode === "element" && snapshot && snapshot.pickedElement && snapshot.pickedElement.isIframe) {
     box.appendChild(el("p", "clip__hint", "这块是嵌入的内容，只能剪到它的外框，里面的内容读不到。"));
@@ -278,8 +235,9 @@ function tokenInputBlock() {
   tokenMain.hidden = hasToken;
   tokenError.hidden = true;
   if (hasToken) {
-    // C58 / UI-04 S6 的只读写法：`opn_••••••••••••1234`（明文不留在界面上）
-    tokenCode.textContent = `opn_${"•".repeat(12)}${String(state.tokenTail || "????")}`;
+    // C58 / UI-04 S6 的只读写法：`opn_••••••••••••1234`（明文不留在界面上）。
+    // M2：尾 4 位由后台从**已保存的令牌**推导（settings.tokenTail），这里不再有 `????` 假尾号。
+    tokenCode.textContent = maskTokenTail(state.tokenTail);
     tokenNext.textContent = "换一个令牌：在 Opennote 里重新生成，然后回来粘贴。";
     return el("div");
   }
@@ -354,7 +312,7 @@ function currentPlan() {
     plan.rows = false;
     plan.empty = {
       title: "还没选元素。",
-      text: "点上面的「选择页面元素」，在页面上点一下要剪的那块。",
+      text: "点上面的「选择当前元素」，在页面上点一下要剪的那块。",
     };
     plan.primary = { label: "剪藏到 Opennote", disabled: true, busy: false };
     plan.actions = [];
@@ -385,31 +343,39 @@ function settingsPlan() {
   return plan;
 }
 
+/**
+ * L2 那一行（M1 / task-24）：只有两个按钮，但原来说的话一句不少 ——
+ * - 没选过元素 → `选择当前元素`；已选过 → `重新选择`（C66）
+ * - 选择模式正在页面上等待点选（`snapshot.pickArmed`）→ `正在页面上等待你点选…` + `在页面上点一下要剪的部分；按 Esc 取消。`（C68/C69）
+ */
+function syncPickRow() {
+  const picked = snapshot && snapshot.pickedElement;
+  const armed = Boolean(snapshot && snapshot.pickArmed);
+  pickButton.textContent = picked && picked.tagName ? "重新选择" : "选择当前元素";
+  if (armed) {
+    pickNote.textContent = "正在页面上等待你点选…在页面上点一下要剪的部分；按 Esc 取消。";
+    pickNote.hidden = false;
+  } else if (pickNote.dataset.keep !== "1") {
+    pickNote.hidden = true;
+  }
+}
+
 function render(planInput) {
   const plan = planInput || currentPlan();
   clip.dataset.state = plan.state;
+  // 当前来源（element / page）：写在 data-mode 上，便于人眼与真机检查「现在是哪一种来源」
+  clip.dataset.mode = mode;
   clip.dataset.busy = busy ? "true" : "false";
 
   chip.className = `status-chip${plan.chip.cls ? ` ${plan.chip.cls}` : ""}`;
   chipText.textContent = plan.chip.text;
   chip.tabIndex = -1;
 
-  segWrap.hidden = !plan.segments;
-  syncSegmented();
-  syncSourceSwitch();
-  syncPickRow();
+  // M1（task-24）：没有三区分段了 —— 正文/预览是一条链，状态流（加载/空态/成功/报错）始终占正文区。
   updateDeliveryHint();
-  if (hlScopeNote) hlScopeNote.hidden = mode !== "selection";
-
-  // 三区（00 §6.14 ㉘）：状态流（加载 / 空态 / 成功 / 报错块）始终占用正文区，
-  // 这样「进收件箱」「配对」这类一次性回执不会跑到高亮或属性区里去。
+  syncPickRow();
   const flowLike = Boolean(notice || plan.skeleton || plan.empty || plan.ok || plan.block);
-  const showBody = !plan.segments || flowLike || regionMode === "body";
-  const showHighlight = !flowLike && Boolean(plan.segments && plan.highlightsAvailable) && regionMode === "highlight";
-  const showProps = !flowLike && Boolean(plan.segments && plan.propertyPanel) && regionMode === "property";
-  regionBody.hidden = !showBody;
-  regionHighlight.hidden = !showHighlight;
-  regionProps.hidden = !showProps;
+  regionBody.hidden = false;
 
   region.replaceChildren();
   if (notice) region.appendChild(noticeNode());
@@ -419,14 +385,6 @@ function render(planInput) {
   else if (plan.block) region.appendChild(blockNode(plan.block, plan));
   else region.appendChild(previewNode());
 
-  sourceSwitch.hidden = flowLike || !plan.segments || plan.sourceSwitch === false;
-  tmplRow.hidden = flowLike || !plan.templatePicker;
-  if (!tmplRow.hidden) syncTemplateSelect();
-
-  const propsAvailable = showProps || (!flowLike && Boolean(plan.segments && plan.propertyPanel));
-  for (const input of [propTitle, propUrl, propSourceTitle, propSite, propAuthor, propPublished, folderInput, tagsInput, notePathInput]) {
-    input.disabled = !propsAvailable;
-  }
 
   const actionsInFoot = Boolean(plan.empty || plan.ok || !plan.primary);
   footActs.replaceChildren();
@@ -449,16 +407,6 @@ function render(planInput) {
 }
 
 /** 三区切换（保留用户在各区里已经填/选的内容，切区不丢数据）。 */
-function syncSegmented() {
-  clip.dataset.region = regionMode;
-  for (const button of segmented.querySelectorAll("button")) {
-    const active = button.dataset.region === regionMode;
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-checked", active ? "true" : "false");
-    button.tabIndex = active ? 0 : -1;
-  }
-}
-
 /** 正文区的来源开关（原来的分段控件降级而来）。 */
 /**
  * 来源三选一（00 §6.15㉝；03 §UI-01 C64）：
@@ -466,257 +414,16 @@ function syncSegmented() {
  * - `整页正文`：http(s) 可用
  * - `当前选区`：**只有页面上真有非空选区时**才可用，否则禁用 + C75 的 title（便捷项，不再是主路径）
  */
-function syncSourceSwitch() {
-  const restricted = Boolean(snapshot && snapshot.restricted);
-  const selectionAvailable = !restricted && hasSelection();
-  for (const button of sourceSwitch.querySelectorAll("button")) {
-    const value = button.dataset.mode;
-    const unavailable = restricted ? true : value === "selection" ? !selectionAvailable : false;
-    button.disabled = unavailable;
-    if (value === "selection") {
-      button.title = unavailable && !restricted ? "现在页面上没有选中的文字。先在页面上选一段再来。" : "";
-    }
-    const active = value === mode;
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-checked", active ? "true" : "false");
-    button.tabIndex = active ? 0 : -1;
-  }
-}
-
 /** L2 元素入口的四种文案（03 §UI-01 C66/C68/C71、UI-16 C02–C05）。 */
-function syncPickRow() {
-  if (!pickButton) return;
-  const restricted = Boolean(snapshot && snapshot.restricted);
-  const armed = Boolean(snapshot && snapshot.pickArmed);
-  const picked = Boolean(snapshot && snapshot.pickedElement);
-  pickButton.disabled = restricted || armed;
-  pickButton.textContent = armed ? "正在页面上等待你点选…" : picked ? "重新选择" : "选择页面元素";
-  pickButton.title = restricted ? "这个页面不能选择元素：只有普通网页（http 或 https）支持。换个普通网页再试。" : "";
-  pickNote.hidden = !armed;
-  pickNote.textContent = armed ? "在页面上点一下要剪的部分；按 Esc 取消。" : "";
-}
-
 /** 已选元素后的次行（C65）；来源不是元素选择时隐藏。 */
-function pickSummary() {
-  if (mode !== "element") return "";
-  const picked = snapshot && snapshot.pickedElement;
-  if (!picked || !picked.tagName) return "";
-  return `已选择 ${picked.tagName}`;
-}
-
 /** 模板选择器（㉘㉙）：自动匹配 + 手动切换 + 「不使用模板」。 */
-function syncTemplateSelect() {
-  const list = (snapshot && snapshot.templates) || [];
-  const wanted = templateId === null ? (snapshot && snapshot.templateMatchedId) || "" : templateId;
-  // C04：自动命中的那一项在列表里叫「按网址自动匹配」；C05：手动选择后说明行写「已手动选择」
-  const options = [{ id: "", name: "按网址自动匹配", hint: snapshot && snapshot.templateMatchedBy ? `命中 ${snapshot.templateMatchedBy}` : "无命中，用默认模板" }];
-  for (const template of list) {
-    options.push({ id: template.id, name: template.builtin ? `${template.name}（内置）` : template.name, hint: template.summary });
-  }
-  options.push({ id: "none", name: "不使用模板", hint: "正文与属性全部用页面抽取结果" });
-  // C06：模板列表最后一行是「管理模板…」，打开选项页（不在 ⋯ 菜单里）
-  options.push({ id: "__manage", name: "管理模板…", hint: "打开插件选项页管理模板" });
-  const signature = options.map((option) => option.id).join("|");
-  if (templateSelect.dataset.signature !== signature) {
-    templateSelect.dataset.signature = signature;
-    templateSelect.replaceChildren();
-    for (const option of options) {
-      const node = el("option");
-      node.value = option.id;
-      node.textContent = option.name;
-      node.title = option.hint || "";
-      templateSelect.appendChild(node);
-    }
-  }
-  templateSelect.value = options.some((option) => option.id === wanted) ? wanted : "";
-  const current = options.find((option) => option.id === templateSelect.value);
-  const chosen = list.find((template) => template.id === templateSelect.value);
-  tmplNote.textContent =
-    templateId === null ? `按网址自动匹配${current && current.hint ? `（${current.hint}）` : ""}` : "已手动选择";
-  tmplNote.title = chosen ? chosen.summary : (current ? current.hint : "");
-}
-
-function renderFolderOptions() {
-  folderOptions.replaceChildren();
-  const values = ["", folderInput.value.trim()];
-  if (snapshot && snapshot.settings && snapshot.settings.folder) values.push(snapshot.settings.folder);
-  if (snapshot && snapshot.defaultFolder) values.push(snapshot.defaultFolder);
-  values.push("剪藏");
-  const seen = new Set();
-  for (const value of values) {
-    if (seen.has(value)) continue;
-    seen.add(value);
-    const option = el("option");
-    option.value = value;
-    option.label = value || "根目录";
-    folderOptions.appendChild(option);
-  }
-}
-
-function renderNoteOptions() {
-  noteOptions.replaceChildren();
-  const values = [notePathInput.value.trim()];
-  const history = (snapshot && snapshot.settings && snapshot.settings.notePaths) || [];
-  for (const value of history) values.push(value);
-  const seen = new Set();
-  for (const value of values) {
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    const option = el("option");
-    option.value = value;
-    noteOptions.appendChild(option);
-  }
-}
-
 /**
  * 高亮区（00 §6.14 ㉚；文案逐字 03 §UI-01 C24–C30 / §UI-14 S14–S17）。
  * 每条：`> 摘录`（2 行截断）+ 批注（`— ` 前缀）+ 时间 + `清除`；
  * 批注编辑态：`.field`（占位 `写一句批注（可不填）`）+ 两个底色 swatch + `保存`/`取消`。
  */
-function renderHighlightList() {
-  const items = highlights || [];
-  hlCount.textContent = `已高亮 ${items.length} 处`;
-  hlClear.hidden = !items.length;
-  if (hlStoreError) hlStoreError.hidden = !highlightStoreFailed;
-  hlList.replaceChildren();
-  if (!items.length) {
-    hlList.appendChild(el("li", "clip__hl-empty", "这个页面上还没有高亮。在页面上选中文字，点右键菜单里的「高亮这段文字」。"));
-    return;
-  }
-  for (const item of items) {
-    hlList.appendChild(highlightItemNode(item));
-  }
-}
-
-function highlightItemNode(item) {
-  const li = el("li", "clip__hl-item");
-  li.dataset.tier = item.tier || "yellow";
-  li.dataset.id = item.id;
-  const body = el("div", "clip__hl-body");
-  body.appendChild(el("p", "clip__hl-text", item.text));
-  if (item.note) body.appendChild(el("p", "clip__hl-note", `— ${item.note}`));
-  const time = item.createdAt ? String(item.createdAt).slice(0, 16).replace("T", " ") : "";
-  body.appendChild(el("p", "clip__hl-meta", time));
-  li.appendChild(body);
-
-  const acts = el("div", "clip__hl-acts");
-  const annotate = el("button", "clip__hl-act", item.note ? "编辑批注" : "加批注");
-  annotate.type = "button";
-  annotate.addEventListener("click", () => openAnnotation(li, item));
-  acts.appendChild(annotate);
-  const del = el("button", "clip__hl-del", "清除");
-  del.type = "button";
-  del.setAttribute("aria-label", "清除这条高亮");
-  del.title = "清除这条高亮";
-  del.addEventListener("click", () => void removeHighlightItem(item.id));
-  acts.appendChild(del);
-  li.appendChild(acts);
-  return li;
-}
-
 /** 批注编辑态（S16）：真控件、Tab 可达；保存后写回 `note`/`color`。 */
-function openAnnotation(li, item) {
-  const box = el("div", "clip__hl-edit");
-  const input = el("input", "field");
-  input.type = "text";
-  input.maxLength = 500;
-  input.placeholder = "写一句批注（可不填）";
-  input.value = item.note || "";
-  input.setAttribute("aria-label", "批注");
-  box.appendChild(input);
-
-  let tier = item.tier || "yellow";
-  const swatches = el("div", "clip__hl-swatches");
-  for (const swatch of [
-    { value: "yellow", label: "默认底色" },
-    { value: "accent", label: "强调底色" },
-  ]) {
-    const button = el("button", `swatch swatch--${swatch.value}`, swatch.label);
-    button.type = "button";
-    button.setAttribute("role", "radio");
-    button.setAttribute("aria-checked", String(tier === swatch.value));
-    if (tier === swatch.value) button.classList.add("is-active");
-    button.addEventListener("click", () => {
-      tier = swatch.value;
-      for (const node of swatches.children) {
-        const active = node.dataset.value === tier;
-        node.classList.toggle("is-active", active);
-        node.setAttribute("aria-checked", String(active));
-      }
-    });
-    button.dataset.value = swatch.value;
-    swatches.appendChild(button);
-  }
-  box.appendChild(swatches);
-
-  const acts = el("div", "clip__hl-edit-acts");
-  const save = el("button", "btn btn--primary", "保存");
-  save.type = "button";
-  save.addEventListener("click", () => void saveAnnotation(item, input.value, tier));
-  acts.appendChild(save);
-  const cancel = el("button", "btn", "取消");
-  cancel.type = "button";
-  cancel.addEventListener("click", () => render());
-  acts.appendChild(cancel);
-  if (item.note) {
-    const drop = el("button", "btn", "删除批注");
-    drop.type = "button";
-    drop.addEventListener("click", () => void saveAnnotation(item, "", tier));
-    acts.appendChild(drop);
-  }
-  box.appendChild(acts);
-  li.appendChild(box);
-  setTimeout(() => input.focus(), 0);
-}
-
-async function saveAnnotation(item, note, color) {
-  const response = await send({ type: "opennote:highlight-update", id: item.id, note: String(note || "").trim(), color });
-  if (response && response.ok) {
-    highlights = response.items || [];
-    render();
-    schedulePreview();
-    notify("批注已保存。");
-    return;
-  }
-  notify((response && response.label) || "批注保存失败。");
-}
-
-async function removeHighlightItem(id) {
-  const response = await send({ type: "opennote:highlight-remove", id });
-  if (response && response.ok) {
-    highlights = response.items || [];
-    if (snapshot) snapshot.highlightCount = highlights.length;
-    render();
-    schedulePreview();
-    notify("已清除这条高亮。");
-  } else {
-    notify("清除高亮失败。");
-  }
-}
-
 /** 批量清除（03 §UI-01 C30 / S17）：先确认，确认后才真的清。 */
-function askClearHighlights() {
-  if (!highlights.length) return;
-  hlConfirmBody.textContent = `这一页有 ${highlights.length} 处高亮，清除后不会写进正文，也不会再出现在高亮列表里。`;
-  hlConfirm.hidden = false;
-  hlConfirmYes.focus();
-}
-
-async function clearHighlightItems() {
-  hlConfirm.hidden = true;
-  if (!highlights.length) return;
-  const response = await send({ type: "opennote:highlight-clear" });
-  if (response && response.ok) {
-    highlights = [];
-    if (snapshot) snapshot.highlightCount = 0;
-    render();
-    schedulePreview();
-    notify(`已清除本页 ${response.cleared || 0} 处高亮。`);
-  } else {
-    notify("清除高亮失败。");
-  }
-}
-
 /** 预览（模板 + 手改 + 高亮）——与真正提交共用 background 的同一条合成路径。 */
 function schedulePreview() {
   if (previewTimer) clearTimeout(previewTimer);
@@ -725,108 +432,22 @@ function schedulePreview() {
 
 async function refreshPreview() {
   if (!snapshot || snapshot.restricted) return;
-  const response = await send({
-    type: "opennote:preview",
-    mode,
-    templateId: templateId === null ? undefined : templateId,
-    props: collectProps(),
-    dirty: dirtyMap(),
-  });
+  // M1：popup 不再发 templateId / props / dirty（模板与属性区已退场）；
+  // 来源信息（标题/网址/站点/作者/发布时间）由页面自动提取，后台按「null 则省略整行」生成 front-matter。
+  const response = await send({ type: "opennote:preview", mode });
   if (!response || !response.ok || !response.preview) return;
   const preview = response.preview;
   lastPreview = preview;
   const props = preview.props || {};
-
-  // 没被手改过的字段跟随模板/抽取结果；手改过的字段保持用户输入（显式意愿优先）。
-  const assign = (input, key, value) => {
-    if (!input || dirtyProps.has(key)) return;
-    const next = value === undefined || value === null ? "" : String(value);
-    if (input.value !== next) input.value = next;
-  };
-  assign(propTitle, "title", props.title);
-  assign(propUrl, "source.url", props["source.url"]);
-  assign(propSourceTitle, "source.title", props["source.title"]);
-  assign(propSite, "source.site", props["source.site"]);
-  assign(propAuthor, "author", props.author);
-  assign(propPublished, "publishedAt", props.publishedAt);
-  assign(tagsInput, "tags", props.tags);
-  assign(folderInput, "target.folder", props["target.folder"]);
-  if (!dirtyNotePath && notePathInput.value !== (preview.notePath || "")) notePathInput.value = preview.notePath || "";
-
-  if (!dirtyProps.has("title")) titleValue = props.title || "";
-  if (snapshot) {
-    snapshot.templateMatchedBy = preview.templateMatchedBy || null;
-    snapshot.templateMatchedId = preview.templateId || null;
-    snapshot.templateFallback = Boolean(preview.templateFallback);
-    snapshot.templateNotes = preview.notes || [];
-  }
-  syncTwins();
-  updateTitleCount();
-  updateTouchedButtons();
-  renderNoteOptions();
-  renderFolderOptions();
-  syncTemplateSelect();
+  titleValue = props.title || titleValue || "";
   // 正文区里的标题行是只读视图（唯一输入源是属性区，03 §UI-01 ②）
   const inlineTitle = document.getElementById("inlineTitle");
   if (inlineTitle) inlineTitle.textContent = titleValue || "未命名笔记";
 }
 
 /** C38：被改动过的字段右侧出现「按模板更新」；点了就交回模板（清掉 touched）。 */
-function updateTouchedButtons() {
-  for (const row of regionProps.querySelectorAll(".clip__row")) {
-    const input = row.querySelector("input");
-    if (!input) continue;
-    const key = input.dataset.prop || (input === notePathInput ? "notePath" : "");
-    const touched = key === "notePath" ? dirtyNotePath : dirtyProps.has(key);
-    let button = row.querySelector(".clip__reset");
-    if (!touched) {
-      if (button) button.remove();
-      continue;
-    }
-    if (!button) {
-      button = el("button", "clip__reset", "按模板更新");
-      button.type = "button";
-      button.dataset.prop = key;
-      button.addEventListener("click", () => {
-        if (key === "notePath") {
-          dirtyNotePath = false;
-          notePathInput.value = "";
-        } else {
-          dirtyProps.delete(key);
-          input.value = "";
-        }
-        updateTouchedButtons();
-        void refreshPreview();
-      });
-      row.appendChild(button);
-    }
-  }
-}
-
 /** C37：标题计数 `{n}/200`。 */
-function updateTitleCount() {
-  if (propTitleCount) propTitleCount.textContent = `${propTitle.value.length}/200`;
-}
-
 /** L5 与属性区是**同一个 state 的两个视图**：任一处输入立即同步另一处，touched 一起置 1。 */
-function syncTwins(from) {
-  const pairs = [
-    [folderInput, footFolder, "target.folder"],
-    [tagsInput, footTags, "tags"],
-  ];
-  for (const [a, b, key] of pairs) {
-    if (!dirtyProps.has(key)) {
-      b.value = a.value; // 未改动：两处都显示模板/抽取结果
-      continue;
-    }
-    // 已改动：以用户最后输入的那一处为准同步另一处（同一 state，不是两份草稿）
-    const source = from === "foot" ? b : a;
-    const target = from === "foot" ? a : b;
-    target.value = source.value;
-  }
-  updateTitleCount();
-}
-
 function notify(text) {
   notice = text;
   if (noticeTimer) clearTimeout(noticeTimer);
@@ -916,19 +537,6 @@ function showManualCopy(text, okText) {
 /** 模板的导入/导出搬到插件选项页（03 §UI-01 C06「管理模板…」），popup 里不再重复一份。 */
 
 /** 属性面板的 8 个字段（㉘）+ 追加落点，一起发给 background 合成。 */
-function collectProps() {
-  return {
-    title: propTitle.value,
-    "source.url": propUrl.value,
-    "source.title": propSourceTitle.value,
-    "source.site": propSite.value,
-    author: propAuthor.value,
-    publishedAt: propPublished.value,
-    tags: tagsInput.value,
-    "target.folder": folderInput.value,
-  };
-}
-
 /**
  * 本地预检（03 §UI-01 S21 / C39–C43）：不通过就**停在这里、不发请求**。
  * 文案逐字用 03 的清单；服务端仍会独立校验（同一句 `IMP-4008` 的 userMessage）。
@@ -936,39 +544,16 @@ function collectProps() {
 const PUBLISHED_RE = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})?)?$/;
 const NOTE_PATH_RE_LOCAL = /^(?![/\\])(?!.*(?:^|[/\\])\.\.(?:[/\\]|$))(?!.*:)[^\\]+\.md$/;
 
+/**
+ * M1（task-24）：`标题 / 网址 / 站点 / 作者 / 发布时间` 全部由页面自动填写，用户无可填字段，
+ * 所以本地预检退化为空 —— 但**服务端仍独立校验**（同一句 IMP-4008 的 userMessage）。
+ * 留下这个函数是为了让调用点与「不通过就不发请求」的纪律保持原样。
+ */
 function precheck() {
-  const problems = [];
-  const focus = (input, message) => {
-    problems.push({ input, message });
-    input.setAttribute("aria-invalid", "true");
-  };
-  for (const input of [propTitle, propUrl, propSourceTitle, propSite, propAuthor, propPublished, folderInput, notePathInput]) {
-    input.removeAttribute("aria-invalid");
-  }
-  if (!propTitle.value.trim()) focus(propTitle, "标题不能为空。");
-  const url = propUrl.value.trim();
-  if (url && !/^https?:\/\//i.test(url)) focus(propUrl, "网址要以 http:// 或 https:// 开头。");
-  const published = propPublished.value.trim();
-  if (published && !PUBLISHED_RE.test(published)) focus(propPublished, "发布时间要写成 2026-09-21 或 2026-09-21T15:04:05+08:00 这样的格式。");
-  const folder = folderInput.value.trim();
-  if (folder && (/^[/\\]/.test(folder) || /^[A-Za-z]:/.test(folder) || folder.includes("\\") || /(^|\/)\.\.(\/|$)/.test(folder) || folder.includes(":") || folder.split("/").length > 10 || folder.split("/").some((segment) => segment.length > 80))) {
-    focus(folderInput, "目标目录不合法：不能使用 ..、绝对路径或系统保留字符。");
-  }
-  const notePath = notePathInput.value.trim();
-  if (notePath && !NOTE_PATH_RE_LOCAL.test(notePath)) {
-    focus(notePathInput, "追加目标要写成工作区里的相对路径，并以 .md 结尾。");
-  }
-  return problems;
+  return [];
 }
 
 /** C44：标签被本地过滤时如实提示（不静默丢）。 */
-function tagFilterNotice() {
-  const raw = String(tagsInput.value || "");
-  const kept = filterTags(raw);
-  const asked = raw.split(/[,，\n]/).map((part) => part.trim()).filter(Boolean);
-  return asked.length > kept.length ? "部分标签不符合规则，已忽略。" : "";
-}
-
 /** L6（C46/C47/C48）：交付方式**如实显示**，不替用户承诺，也不做假开关。 */
 function updateDeliveryHint() {
   if (!deliveryHint) return;
@@ -978,24 +563,14 @@ function updateDeliveryHint() {
   else deliveryHint.textContent = "交付方式由 Opennote 的设置决定，剪藏完成后会如实显示结果。";
 }
 
-function dirtyMap() {
-  const props = {};
-  for (const key of dirtyProps) props[key] = true;
-  return { props, notePath: dirtyNotePath };
-}
-
 function collectPayload() {
   const body = currentMarkdown();
-  const props = collectProps();
-  const title = String(props.title || "").trim() || defaultTitle();
-  const folder = String(props["target.folder"] || "").trim();
-  const tags = filterTags(props.tags);
-  const notePath = notePathInput.value.trim();
-  const sig = signature(`${mode}|${title}|${folder}|${tags.join(",")}|${notePath}|${templateId || "auto"}|${body.length}`);
+  const title = titleValue.trim() || defaultTitle();
+  const sig = signature(`${mode}|${title}|${body.length}`);
   const importId = sig === lastSignature && currentImportId ? currentImportId : newId();
   currentImportId = importId;
   lastSignature = sig;
-  return { mode, title, folder, tags, notePath, props, body, importId };
+  return { mode, title, body, importId };
 }
 
 async function submit() {
@@ -1003,16 +578,7 @@ async function submit() {
   const stateId = snapshot.stateId;
   if (stateId !== STATE.CONNECTED && stateId !== STATE.NO_WORKSPACE) return;
   const problems = precheck();
-  if (problems.length) {
-    setRegion("property");
-    if (propsError) {
-      propsError.textContent = problems[0].message;
-      propsError.hidden = false;
-    }
-    problems[0].input.focus();
-    return; // S21：不发请求
-  }
-  if (propsError) propsError.hidden = true;
+  if (problems.length) return; // S21：本地预检不通过就不发请求
   const payload = collectPayload();
   busy = true;
   busyLabel = "正在剪藏…";
@@ -1021,9 +587,6 @@ async function submit() {
     type: "opennote:submit",
     mode: payload.mode,
     title: payload.title,
-    props: payload.props,
-    templateId: templateId === null ? undefined : templateId,
-    dirty: dirtyMap(),
     importId: payload.importId,
   });
   busy = false;
@@ -1044,9 +607,6 @@ async function stage() {
     type: "opennote:stage",
     mode: payload.mode,
     title: payload.title,
-    props: payload.props,
-    templateId: templateId === null ? undefined : templateId,
-    dirty: dirtyMap(),
     importId: payload.importId,
   });
   busy = false;
@@ -1244,22 +804,7 @@ async function runAction(id, action) {
     case "open-note":
       await send({ type: "opennote:open-note", path: (action && action.path) || pendingNotePath });
       break;
-    case "tag-from-selection": {
-      const ex = extraction();
-      const raw = (ex && ex.selection && ex.selection.text) || "";
-      const tag = filterTags(raw).slice(0, 1)[0];
-      if (!tag) {
-        notify("没有选中任何文字。在页面上选一段，或把来源切到「整页正文」。");
-        break;
-      }
-      const existing = filterTags(tagsInput.value);
-      if (!existing.includes(tag)) tagsInput.value = [...existing, tag].join(", ");
-      tagsInput.dataset.touched = "1";
-      dirtyProps.add("tags");
-      render();
-      schedulePreview();
-      break;
-    }
+
     case "copy":
       await copyMarkdown();
       break;
@@ -1283,10 +828,11 @@ async function runAction(id, action) {
 /* ─────────────────────────── 事件 ─────────────────────────── */
 
 function setMode(next) {
-  if (next !== "element" && next !== "selection" && next !== "page") return;
+  // M1：只有两个按钮 —— element（选择当前元素）/ page（整页提取）
+  if (next !== "element" && next !== "page") return;
   // 03 §UI-16「与其它界面的关系」：手动切走再切回来**不重放**上一次的选择（要重新点入口）。
   if (next === "element" && !(snapshot && snapshot.pickedElement && snapshot.pickedElement.tagName)) {
-    notify("还没选元素。点上面的「选择页面元素」，在页面上点一下要剪的那块。");
+    notify("还没选元素。点上面的「选择当前元素」，在页面上点一下要剪的那块。");
   }
   mode = next;
   if (snapshot && snapshot.settings) snapshot.settings.mode = next;
@@ -1294,111 +840,12 @@ function setMode(next) {
   schedulePreview();
 }
 
-function setRegion(next) {
-  if (next !== "body" && next !== "highlight" && next !== "property") return;
-  regionMode = next;
-  render();
-  if (next === "highlight") void refreshHighlights();
-}
-
-async function refreshHighlights() {
-  const response = await send({ type: "opennote:highlights" });
-  if (response && response.ok) {
-    highlights = response.items || [];
-    if (snapshot) snapshot.highlightCount = highlights.length;
-    renderHighlightList();
-  }
-}
 
 function bindEvents() {
-  segmented.addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-region]");
-    if (button) setRegion(button.dataset.region);
-  });
-  segmented.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    const order = ["body", "highlight", "property"];
-    const index = order.indexOf(regionMode);
-    const next = order[(index + (event.key === "ArrowRight" ? 1 : order.length - 1)) % order.length];
-    setRegion(next);
-    const active = segmented.querySelector("button.is-active");
-    if (active) active.focus();
-  });
 
-  sourceSwitch.addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-mode]");
-    if (button) setMode(button.dataset.mode);
-  });
-  sourceSwitch.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    setMode(mode === "selection" ? "page" : "selection");
-    const active = sourceSwitch.querySelector("button.is-active");
-    if (active) active.focus();
-  });
-
-  templateSelect.addEventListener("change", () => {
-    // 03 §UI-01 S20/C38：切模板**只重填没被改过的字段**（touched = 0）；
-    // 用户手改过的字段一律不动（不得用「值等于模板值」反推，那是另一个真源）。
-    templateId = templateSelect.value === "" ? null : templateSelect.value;
-    render();
-    void refreshPreview();
-  });
-
-  const propInputs = [
-    [propTitle, "title"],
-    [propUrl, "source.url"],
-    [propSourceTitle, "source.title"],
-    [propSite, "source.site"],
-    [propAuthor, "author"],
-    [propPublished, "publishedAt"],
-    [tagsInput, "tags"],
-    [folderInput, "target.folder"],
-  ];
-  for (const [input, key] of propInputs) {
-    input.dataset.prop = key;
-    input.addEventListener("input", () => {
-      dirtyProps.add(key);
-      if (key === "target.folder") renderFolderOptions();
-      if (key === "title") {
-        titleTouched = true;
-        titleValue = input.value;
-        const inlineTitle = document.getElementById("inlineTitle");
-        if (inlineTitle) inlineTitle.textContent = input.value || "未命名笔记";
-      }
-      if (key === "tags" || key === "target.folder") syncTwins("props");
-      updateTitleCount();
-      updateTouchedButtons();
-      schedulePreview();
-    });
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        void submit();
-      }
-    });
-  }
-  notePathInput.dataset.prop = "notePath";
-  notePathInput.addEventListener("input", () => {
-    dirtyNotePath = true;
-    updateTouchedButtons();
-    renderNoteOptions();
-    schedulePreview();
-  });
-  notePathInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      void submit();
-    }
-  });
-  hlClear.addEventListener("click", () => askClearHighlights());
-  hlConfirmYes.addEventListener("click", () => void clearHighlightItems());
-  hlConfirmNo.addEventListener("click", () => {
-    hlConfirm.hidden = true;
-  });
-  // L2 元素入口（㉝）
+  // L2 两个按钮（M1 / task-24）：`选择当前元素` 走 ㉝ 那套（一字未改），`整页提取` 切回整页正文
   pickButton.addEventListener("click", () => void startPick());
+  extractPageButton.addEventListener("click", () => setMode("page"));
   // 令牌块（㉞）：粘贴 → 本地校验 → 保存；清除前先确认（C77）
   tokenSave.addEventListener("click", () => void connectToken(tokenInput.value, false));
   // C58：已保存状态下给「重新粘贴令牌」，点了就把输入框放回来（旧令牌在新令牌写入前保持有效）
@@ -1431,37 +878,6 @@ function bindEvents() {
     void submit();
   });
 
-  for (const input of [folderInput, tagsInput, footFolder, footTags]) {
-    input.addEventListener("input", () => {
-      input.dataset.touched = "1";
-      const key = input === folderInput || input === footFolder ? "target.folder" : "tags";
-      dirtyProps.add(key);
-      const from = input === footFolder || input === footTags ? "foot" : "props";
-      if (input === folderInput || input === footFolder) renderFolderOptions();
-      syncTwins(from);
-      updateTouchedButtons();
-      schedulePreview();
-    });
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        void submit();
-      }
-    });
-  }
-
-  // 模板选择器最后一行「管理模板…」→ 选项页（C06；⋯ 菜单里不再有模板项）
-  templateSelect.addEventListener("change", () => {
-    if (templateSelect.value === "__manage") {
-      templateSelect.value = templateId === null ? (snapshot && snapshot.templateMatchedId) || "" : templateId || "";
-      void send({ type: "opennote:open-options" });
-      return;
-    }
-    templateId = templateSelect.value === "" ? null : templateSelect.value;
-    // 切模板只重填**没被改过**的字段（touched = 0 的那些），手改过的一律不动（C38/S20）
-    render();
-    void refreshPreview();
-  });
 
   more.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1500,22 +916,10 @@ async function load(force = false) {
     return;
   }
   snapshot = response;
-  highlights = Array.isArray(response.highlights) ? response.highlights : [];
-  templateId = null; // 每次打开都从「自动匹配」开始（㉘：按当前 URL 自动匹配、可手动切换）
-  // 来源默认项（03 §UI-01 C64 的「默认选中条件」）：
-  //   ① 本次已经选过元素 → `元素选择`；② 页面上已有文字选区 → `当前选区`（便捷项）；③ 否则 → `整页正文`（兜底）
+  // M1 默认来源（只有两个按钮）：本页已经选过元素 → `选择当前元素`；否则 → `整页提取`。
   const picked = response.pickedElement;
-  if (picked && picked.tagName) mode = "element";
-  else if (hasSelection()) mode = "selection";
-  else mode = "page";
+  mode = picked && picked.tagName ? "element" : "page";
   if (!titleTouched) titleValue = "";
-  if (response.settings) {
-    if (!folderInput.dataset.touched) folderInput.value = response.settings.folder || "";
-    if (!tagsInput.dataset.touched) tagsInput.value = (response.settings.tags || []).join(", ");
-  }
-  renderFolderOptions();
-  renderNoteOptions();
-  renderHighlightList();
   if (response.stateId === STATE.NEEDS_PAIRING || response.stateId === STATE.TOKEN_INVALID || !(response.settings && response.settings.hasToken)) {
     tokenRow.hidden = false;
   }

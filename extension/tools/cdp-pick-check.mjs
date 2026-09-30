@@ -31,6 +31,8 @@ const DEMO_PORT = 8799;
 const STATE_KEY = "opennote.clip.state.v1";
 // 想验真实站点就传 `OPENNOTE_PICK_URL`（例如知乎那篇）；不传则用本地 demo 页
 const EXTERNAL_URL = process.env.OPENNOTE_PICK_URL || "";
+// 想验「有令牌 + 有预览」的完整形态就传 `OPENNOTE_PICK_TOKEN`（配合 tools/mock-bridge.mjs 起在 8795）
+const PASTE_TOKEN = process.env.OPENNOTE_PICK_TOKEN || "";
 const TARGET_URL = EXTERNAL_URL || `http://127.0.0.1:${DEMO_PORT}/demo`;
 
 const CHROME_CANDIDATES = [
@@ -241,8 +243,41 @@ async function main() {
       () => evaluate(popup, `(() => { const b = document.getElementById("pick"); return b && b.textContent; })()`),
       15000,
     );
-    observe(pickLabel === "选择页面元素", "popup 的 L2 入口逐字 = 选择页面元素", pickLabel);
-    if (pickLabel !== "选择页面元素") return;
+    observe(pickLabel === "选择当前元素", "popup 的 L2 入口逐字 = 选择当前元素（M1）", pickLabel);
+    if (pickLabel !== "选择当前元素") return;
+
+    if (PASTE_TOKEN) {
+      // 顺带把「粘贴令牌」这条真机链路也走一遍（此前是 UNVERIFIED）：填 → 连接 → 等落盘
+      await evaluate(popup, `(() => { const input = document.getElementById("tokenInput"); input.value = ${JSON.stringify(PASTE_TOKEN)}; input.dispatchEvent(new Event("input")); return true; })()`);
+      await evaluate(popup, `document.getElementById("tokenSave").click()`);
+      const saved = await waitFor(async () => {
+        const state = await evaluate(popup, `(() => { const code = document.getElementById("tokenCode"); return code && code.textContent.includes("•") ? code.textContent : null; })()`);
+        return state;
+      }, 15000);
+      observe(Boolean(saved), "粘贴令牌 → 连接 → 只读回显", saved);
+      await evaluate(popup, `document.getElementById("tokenConfirmNo").click()`).catch(() => {});
+    }
+
+    // M1（task-24）按钮①：`整页提取` 必须真的能拿到正文（不是死按钮）
+    const pagePhrase = await evaluate(page, `(() => { const el = document.querySelector("h1, h2, article p, p"); return el ? el.textContent.trim().slice(0, 8) : ""; })()`).catch(() => "");
+    await evaluate(popup, `document.getElementById("extractPage").click()`);
+    // 判据①（不依赖令牌）：点一下必须把来源切到整页正文 —— 读 popup 自己的 `data-mode`
+    const modeAfter = await waitFor(() => evaluate(popup, `(() => { const el = document.getElementById("clip"); return el && el.dataset.mode === "page" ? "page" : el && el.dataset.mode; })()`), 10000);
+    observe(modeAfter === "page", "「整页提取」把来源切到整页正文（popup data-mode=page）", modeAfter);
+
+    // 判据②（需要可用令牌）：预览区必须渲染出页面上的正文，而不是令牌块/空态
+    const previewText = await waitFor(() => evaluate(popup, `(() => { const r = document.getElementById("region"); const text = r && r.textContent.trim(); return text && text.length > 10 ? text : null; })()`), 20000).catch(() => null);
+    if (previewText && previewText.includes("令牌")) {
+      console.log(`     （预览区当前显示的是令牌块：${previewText.slice(0, 24)}… —— 本机 8787 是真 Opennote，没有它的令牌，所以「整页提取的预览」这一条按 UNVERIFIED 记）`);
+    } else {
+      observe(Boolean(previewText), "「整页提取」得到正文预览（不是死按钮）", previewText && previewText.slice(0, 30).replace(/\s+/g, " "));
+      if (previewText) {
+        observe(!previewText.includes("还没选元素"), "整页提取走的是整页正文，不是元素空态");
+        observe(Boolean(pagePhrase) && previewText.includes(pagePhrase), "预览里出现的就是页面上的正文", `页面短语=${pagePhrase}`);
+      }
+    }
+
+    // M1 按钮②：`选择当前元素` 仍走 ㉝ 那套（一字未改）
     await evaluate(popup, `document.getElementById("pick").click()`);
 
     const host = await waitFor(

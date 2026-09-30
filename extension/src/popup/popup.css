@@ -111,7 +111,7 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__hl-del:hover{background:var(--paper-3);color:var(--ink)}
 .clip__hl-empty{font-size:var(--fs-sm);color:var(--ink-3);padding:8px 0}
 /* 两档底色（03 §UI-14/S10）：yellow = --mark；accent = --accent-soft + 1px --accent-line。
-   没有第三档，也没有新令牌——理由见 src/lib/highlights.js 顶部注释。 */
+   没有第三档，也没有新令牌——高亮配色在 M2（task-28）随高亮整套退场。 */
 .clip__hl-item[data-tier="accent"] .clip__hl-text{background:var(--accent-soft);border-bottom:1px solid var(--accent-line);border-radius:2px}
 .clip__hl-item[data-tier="yellow"] .clip__hl-text{background:var(--mark);border-radius:2px}
 .clip__hl-acts{display:flex;flex:none;flex-direction:column;gap:4px;align-items:flex-end}

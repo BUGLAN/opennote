@@ -12,9 +12,10 @@
  *  V7 逐字文案清单（03 §UI-01 + mockup + 00 §6.14㉗㉘）全部出现在交付物里
  *  V8 契约硬约束：不发 overwrite、探测走 API-03、端口范围 8787–8796、401 不泄漏令牌
  *  V9 中文文案里没有 emoji
- *  V10 模板白名单（00 §6.14 ㉙）：变量/过滤器/触发器/behavior 白名单、priority 降序、内置 3 个、
+ *  V10/V11 已在 M2（task-28）随模板/高亮模块一起删除（理由见下文 V10/V11 段）——
+ *  原 V10 模板白名单（00 §6.14 ㉙）：变量/过滤器/触发器/behavior 白名单、priority 降序、内置 3 个、
  *      条件只认一层 {{#if}}（`{{#each}}`/`{{else}}`/嵌套一律**原样输出**并在这里报错）
- *  V11 高亮形态（00 §6.14 ㉚）：键名、`## 高亮` 小节形态、空高亮不生成、按 URL 分组
+ *  原 V11 高亮形态（00 §6.14 ㉚）：键名、`## 高亮` 小节形态、空高亮不生成、按 URL 分组
  *  V12 三区（00 §6.14 ㉘）：正文/高亮/属性都在交付物里，且 ⋯ 菜单里没有「剪藏到收件箱」
  */
 
@@ -32,7 +33,9 @@ const ROOT_TOKENS = join(HERE, "..", "src", "styles", "tokens.css");
 // `tools/mutation-check.ps1` 运行期间会把 src/dist 改成故意坏的状态，此刻跑 verify 得到的红是**假红**。
 // 发现标记就**以退出码 2 中止**，不打印任何红绿 —— 这种中止不是 PASS，也不是 FAIL。
 const MUTATION_MARKER = join(HERE, ".mutation-running");
-if (existsSync(MUTATION_MARKER)) {
+// 变异脚本**自己**的 verify 需要看到真实红（它用 `OPENNOTE_MUTATION_SELF=1` 声明身份）；
+// 其它任何进程（没有这个环境变量）在变异期间跑 verify 都会被下面的标记挡成退出码 2。
+if (existsSync(MUTATION_MARKER) && process.env.OPENNOTE_MUTATION_SELF !== "1") {
   console.error("有变异正在运行（extension/.mutation-running 存在）：本次 verify 结果不可信，已中止（退出码 2）。");
   console.error("等 tools/mutation-check.ps1 跑完（它会自己摘掉标记）再跑 verify。");
   process.exit(2);
@@ -147,21 +150,12 @@ for (const match of popupHtml.matchAll(/(?:href|src)="([^"]+)"/g)) {
 }
 pass("popup.html 的 link/script 引用全部存在");
 
-// 选项页（C06「管理模板…」的落点）内部的引用
-if (manifest.options_ui && manifest.options_ui.page) {
-  const optionsHtml = readDist(`dist/${manifest.options_ui.page}`);
-  const optionsDir = dirname(join(DIST, manifest.options_ui.page));
-  let optionsRefs = 0;
-  for (const match of optionsHtml.matchAll(/(?:href|src)="([^"]+)"/g)) {
-    const target = match[1];
-    if (target.startsWith("data:") || target.startsWith("#")) continue;
-    optionsRefs += 1;
-    if (!existsSync(join(optionsDir, target))) fail(GROUP_V2, `options.html 引用的 ${target} 不存在`);
-  }
-  if (optionsRefs === 0) fail(GROUP_V2, "options.html 没有引用任何样式/脚本，像是空壳");
-  pass(`options.html 的 ${optionsRefs} 个 link/script 引用全部存在`);
+// M2（task-28）：options 页**只为模板管理存在**，已随模板整套删除（文件 + manifest 条目）。
+// 所以断言方向反过来：manifest 里**不该再有** `options_ui` —— 指向一个不存在的页面才是缺陷。
+if (manifest.options_ui) {
+  fail(GROUP_V2, "options_ui 已在 M2 退场（options 页只为模板存在），manifest 里不该再有它");
 } else {
-  fail(GROUP_V2, "manifest 缺少 options_ui（模板管理页是 C06「管理模板…」的落点）");
+  pass("manifest 没有 options_ui（模板管理页随模板整套退场）");
 }
 
 // service worker 的静态导入图
@@ -286,6 +280,20 @@ if (referencedUnknown.size > 0) {
 
 /* ── V7 逐字文案清单 ─────────────────────────────────────────────── */
 
+/*
+ * M1（task-24）删条目说明 —— 以下逐字文案随**界面**一起退场，不是「跑不过就删」：
+ * - 高亮整套（00 §6.15 ㊵ 作废㉚）：`已高亮 {n} 处` / `清除本页全部高亮` / `清除这条高亮` /
+ *   `加批注` / `编辑批注` / `删除批注` / `清除这一页的全部高亮？` / `这个页面上还没有高亮…`
+ *   —— 高亮入口（右键菜单项）与高亮区都不再存在，界面上不会出现这些句子。
+ * - 属性区与 `存到` / `标签`（task-24 第 5 条）：`这些值会写进笔记的来源信息里…` /
+ *   `标题不能为空。` / `网址要以 http:// 或 https:// 开头。` / `发布时间要写成…` /
+ *   `追加目标要写成…` / `填了目标笔记…` / `用逗号分隔，可留空` / `追加到笔记` / `已手动选择`
+ *   —— 这些控件的输入校验与说明不复存在（来源信息改为页面自动填写、允许空值）。
+ * - 来源三选一（task-24 第 4 条）：`没有选中任何文字…把来源切到「整页正文」` —— 没有来源开关了。
+ * - M2（task-28）再删三条：`按网址自动匹配`（模板选择器）、`默认底色`/`强调底色`（高亮两档配色）
+ *   —— 模板与高亮**连模块一起删除**，这三句在任何界面上都不会再出现。
+ * 仍然适用的条目**全部保留**；按钮改名只改这一条（`选择页面元素` → `选择当前元素`，已同步 d-ui）。
+ */
 const GROUP_V7 = "V7 逐字文案";
 const bundle = textFiles.map((file) => readDist(file)).join("\n");
 const requiredCopy = [
@@ -301,8 +309,7 @@ const requiredCopy = [
   // S2–S12 主文案
   "已剪藏到「",
   "已在笔记中（未重复入库）。",
-  "没有选中任何文字。在页面上选一段，或把来源切到「整页正文」。",
-  "这个页面不允许插件读取内容。",
+    "这个页面不允许插件读取内容。",
   "换个普通网页再试。",
   "已选中 ",
   "字 · ",
@@ -310,8 +317,7 @@ const requiredCopy = [
   "字 · 预计 1 篇笔记",
   "发布于 ",
   "剪藏于 ",
-  "用逗号分隔，可留空",
-  "已保留你填的标题与标签。",
+    "已保留你填的标题与标签。",
   "连接被拒说明本机没有在监听，不是令牌问题。",
   "Opennote 没有在运行，内容已暂存在插件里，打开 Opennote 后会自动补投。",
   "打开 Opennote 后会自动补投。",
@@ -339,42 +345,22 @@ const requiredCopy = [
   "高亮",
   "属性",
   "模板",
-  "按网址自动匹配",
-  "已手动选择",
-  "管理模板…",
+      "管理模板…",
   "不使用模板",
-  "追加到笔记",
-  "已高亮 ",
-  " 处",
-  "清除本页全部高亮",
-  "清除这条高亮",
-  "默认底色",
-  "强调底色",
-  "写一句批注（可不填）",
-  "加批注",
-  "编辑批注",
-  "删除批注",
-  "保存",
+                "写一句批注（可不填）",
+        "保存",
   "取消",
-  "清除这一页的全部高亮？",
-  "留下",
-  "这些值会写进笔记的来源信息里。改过之后不会被模板再改回去。",
-  "按模板更新",
-  "标题不能为空。",
-  "网址要以 http:// 或 https:// 开头。",
-  "发布时间要写成 2026-09-21 或 2026-09-21T15:04:05+08:00 这样的格式。",
-  "追加目标要写成工作区里的相对路径，并以 .md 结尾。",
-  "部分标签不符合规则，已忽略。",
-  "填了目标笔记，这次剪藏会以「追加」的方式提交；没填就交给 Opennote 自己判断。",
-  "高亮会一起写进正文，出处在「高亮」区里可以再看。",
-  "这个页面上还没有高亮。在页面上选中文字，点右键菜单里的「高亮这段文字」。",
-  "改标题",
+    "留下",
+    "按模板更新",
+          "部分标签不符合规则，已忽略。",
+    "高亮会一起写进正文，出处在「高亮」区里可以再看。",
+    "改标题",
   // 元素选择（UI-16，0.3.1 取代 UI-02 的浮标；00 §6.15㉝ 逐字）
   "选择页面元素",
   "重新选择",
   "正在页面上等待你点选…",
   "在页面上点一下要剪的部分；按 Esc 取消。",
-  "还没选元素。点上面的「选择页面元素」，在页面上点一下要剪的那块。",
+  "还没选元素。点上面的「选择当前元素」，在页面上点一下要剪的那块。",
   "已选择 ",
   "这个页面不能选择元素：只有普通网页（http 或 https）支持。换个普通网页再试。",
   "已选好这一块。点扩展图标看预览。",
@@ -463,240 +449,40 @@ for (const file of textFiles) {
 if (!/<svg/.test(popupHtml)) fail(GROUP_V9, "popup.html 里找不到内联 SVG 图标");
 else pass("图标为内联 SVG，文案里无 emoji");
 
-/* ── V10 模板白名单（00 §6.14 ㉙） ─────────────────────────────────── */
+/* ── V10 / V11：已在 M2（task-28）随模块一起删除 ──────────────────────
+ * **为什么不再适用**（不是「跑不过就删」）：
+ * - V10「模板白名单」测的是 `lib/templates.js` 的变量/过滤器/条件白名单。模板整套（㉙）已在
+ *   M2 连模块带选择器一起删除：`src/lib/templates.js` 文件不存在了，`chrome.storage.local` 的
+ *   `opennote.templates.v1` 也不再读写 —— 断言一个不存在的模块只会变成永假/永真的空转。
+ * - V11「高亮形态」测的是 `lib/highlights.js` 的「`> 摘录` + 批注空行」写法。高亮整套（㊵ 作废㉚）
+ *   同样在 M2 删除：`lib/highlights.js` / `content/highlight.js`、右键入口、正文里的
+ *   `## 高亮` 小节、模板变量 `{{highlights}}` 全部不复存在。
+ * 取代它们的正向断言在 V17（极简形态）+ V18（令牌回显）里：只剩两个按钮、没有死元素、
+ * 来源信息允许空值、以及**这两个模块与它们的存储键在 dist 里一个字节都不许出现**。
+ */
 
-const GROUP_V10 = "V10 模板";
-const templatesSource = existsSync(join(DIST, "lib/templates.js")) ? readDist("dist/lib/templates.js") : "";
-if (!templatesSource) {
-  fail(GROUP_V10, "缺少 dist/lib/templates.js");
-} else {
-  const T = await import(pathToFileURL(join(DIST, "lib", "templates.js")).href);
+/* ── V12 极简形态（M1 / task-24：三区退场后的留存项） ───────────────
+ * 不再适用的断言与理由（逐条，Lead 硬要求）：
+ * - `data-region="body|highlight|property"` 三区按钮、`#regionHighlight`/`#regionProps` 容器、
+ *   `#sourceSwitch` 来源三选一、`#template` 模板选择器、`#notePath` 追加落点、属性面板 8 个字段，
+ *   以及「提交时必须带 templateId/props/dirty」—— **全部随界面一起退场**：00 §6.15 ㊵㊶ 把
+ *   三区/模板/高亮/来源三选一/存到/标签整套删掉，控件不存在了，再断言它们存在就是断言一个
+ *   用户看不到的假界面。这些位点改由 V17（极简形态）正向断言「只剩两个按钮且无死元素」。
+ * 仍然适用、因此保留的断言（判据一字未放宽）：
+ * - 「剪藏到收件箱」这个死按钮必须不存在（进收件箱由应用侧设置决定）
+ * - `receipt.status === "pending"` 的冻结文案，以及预览与提交共用 `opennote:preview` 一条合成路径
+ * - ⋯ 菜单必须**恰好**是清单里的项、文案逐字，且没有收件箱项
+ */
 
-  const expectVariables = ["title", "url", "site", "author", "publishedAt", "capturedAt", "selection", "highlights", "content", "wordCount"];
-  if (JSON.stringify([...T.TEMPLATE_VARIABLES]) !== JSON.stringify(expectVariables)) {
-    fail(GROUP_V10, `变量白名单与 ㉙ 不一致：${[...T.TEMPLATE_VARIABLES].join("/")}`);
-  } else pass(`模板变量白名单 10 个与 ㉙ 逐字一致`);
-
-  const expectFilters = ["date", "upper", "lower", "trim", "truncate"];
-  if (JSON.stringify([...T.TEMPLATE_FILTERS]) !== JSON.stringify(expectFilters)) {
-    fail(GROUP_V10, `过滤器白名单与 ㉙ 不一致：${[...T.TEMPLATE_FILTERS].join("/")}`);
-  } else pass("过滤器白名单 date/upper/lower/trim/truncate");
-
-  if (JSON.stringify([...T.TRIGGER_TYPES]) !== JSON.stringify(["url", "domain", "path"])) {
-    fail(GROUP_V10, "触发器类型白名单必须是 url/domain/path");
-  }
-  if (JSON.stringify([...T.TEMPLATE_BEHAVIORS]) !== JSON.stringify(["new", "append", "inbox"])) {
-    fail(GROUP_V10, "behavior 白名单必须是 new/append/inbox");
-  }
-  if (JSON.stringify([...T.PROPERTY_KEYS]) !== JSON.stringify(["title", "source.url", "source.title", "source.site", "author", "publishedAt", "tags", "target.folder"])) {
-    fail(GROUP_V10, `属性面板白名单与 ㉘ 的 8 个字段不一致：${[...T.PROPERTY_KEYS].join("/")}`);
-  } else pass("触发器/behavior/属性面板白名单与 ㉘㉙ 一致");
-
-  // 内置 3 个开箱模板
-  const builtins = T.BUILTIN_TEMPLATES;
-  if (!Array.isArray(builtins) || builtins.length !== 3) {
-    fail(GROUP_V10, `内置模板必须是 3 个，实际 ${Array.isArray(builtins) ? builtins.length : "不是数组"}`);
-  } else {
-    const names = builtins.map((template) => template.name).join("/");
-    const domains = builtins.flatMap((template) => template.triggers.map((trigger) => trigger.value)).join(" ");
-    for (const wanted of ["默认", "论文", "视频"]) {
-      if (!names.includes(wanted)) fail(GROUP_V10, `内置模板缺少「${wanted}」`);
-    }
-    for (const wanted of ["arxiv.org", "doi.org", "youtube.com", "bilibili.com"]) {
-      if (!domains.includes(wanted)) fail(GROUP_V10, `内置模板缺少触发域名 ${wanted}`);
-    }
-    if (!/默认\/论文\/视频/.test(names)) fail(GROUP_V10, `内置模板名不是 默认/论文/视频：${names}`);
-    else pass("内置 3 个模板：默认 / 论文(arxiv.org,doi.org) / 视频(youtube.com,bilibili.com)");
-
-    // 内置模板自身必须过校验（含模板文本的越界语法检查）
-    for (const template of builtins) {
-      const problems = T.validateTemplate(template);
-      if (problems.length) fail(GROUP_V10, `内置模板「${template.name}」不合法：${problems.join("；")}`);
-    }
-    if (builtins.length === 3) pass("3 个内置模板均通过 validateTemplate（含越界语法扫描）");
-  }
-
-  // priority 降序 + triggers 命中
-  const sample = [
-    { id: "low", name: "低", triggers: [{ type: "domain", value: "example.com" }], priority: 1 },
-    { id: "high", name: "高", triggers: [{ type: "domain", value: "example.com" }], priority: 9 },
-  ];
-  const picked = T.matchTemplate(sample, "https://example.com/a");
-  if (!picked.template || picked.template.id !== "high") fail(GROUP_V10, "priority 降序没有生效（应选 priority 9）");
-  else pass("priority 降序：同触发器时高优先级模板生效");
-
-  if (T.matchTemplate(sample, "https://other.test/x").fallback !== true) fail(GROUP_V10, "无命中时必须回退到内置默认模板");
-  else pass("无命中回退内置默认模板（fallback=true）");
-
-  const byPath = T.matchTemplate([{ id: "p", name: "路径", triggers: [{ type: "path", value: "/docs/" }], priority: 3 }], "https://x.test/docs/a");
-  if (!byPath.template || byPath.template.id !== "p") fail(GROUP_V10, "path 触发器未命中");
-  const byUrl = T.matchTemplate([{ id: "u", name: "网址", triggers: [{ type: "url", value: "https://x.test/*/b" }], priority: 3 }], "https://x.test/docs/b");
-  if (!byUrl.template || byUrl.template.id !== "u") fail(GROUP_V10, "url 通配触发器未命中");
-  if (byPath.template && byUrl.template) pass("url / domain / path 三种触发器都能命中");
-
-  // 变量与过滤器
-  const rendered = T.renderTemplate("{{title|upper|truncate:5}}", { title: "abcdefg" });
-  if (rendered !== "ABCDE…") fail(GROUP_V10, `过滤器链渲染不对：${rendered}`);
-  const dated = T.renderTemplate("{{capturedAt|date:YYYY-MM-DD}}", { capturedAt: "2026-03-04T05:06:07+08:00" });
-  if (dated !== "2026-03-04") fail(GROUP_V10, `|date:YYYY-MM-DD 渲染不对：${dated}`);
-  const trimmed = T.renderTemplate("{{author|trim}}", { author: "  张 三  " });
-  if (trimmed !== "张 三") fail(GROUP_V10, `|trim 渲染不对：${trimmed}`);
-  const lowered = T.renderTemplate("{{site|lower}}", { site: "Example.COM" });
-  if (lowered !== "example.com") fail(GROUP_V10, `|lower 渲染不对：${lowered}`);
-  if (rendered === "ABCDE…" && dated === "2026-03-04" && trimmed === "张 三" && lowered === "example.com") {
-    pass("变量渲染 + 过滤器链（upper/truncate/date/trim/lower）逐条正确");
-  }
-
-  // 极简 {{#if}}：只认一层，truthy 才输出；越界语法原样输出且被 scanTemplate 报出来
-  const ifTrue = T.renderTemplate("{{#if author}}作者：{{author}}{{/if}}", { author: "张三" });
-  const ifFalse = T.renderTemplate("{{#if author}}作者：{{author}}{{/if}}", { author: "   " });
-  if (ifTrue !== "作者：张三") fail(GROUP_V10, `{{#if}} 真值分支不对：${ifTrue}`);
-  if (ifFalse !== "") fail(GROUP_V10, `{{#if}} 空值应整段消失：${ifFalse}`);
-  const eachSource = "{{#each tags}}{{name}}{{/each}}";
-  if (T.renderTemplate(eachSource, { tags: "x" }) !== eachSource) fail(GROUP_V10, "{{#each}} 必须原样输出（不做循环）");
-  if (T.scanTemplate(eachSource).issues.length === 0) fail(GROUP_V10, "{{#each}} 没有被 scanTemplate 报为越界语法");
-  const nestedSource = "{{#if author}}{{#if title}}x{{/if}}{{/if}}";
-  if (T.scanTemplate("{{#if author}}a{{/if}}{{else}}b").issues.length === 0) fail(GROUP_V10, "{{else}} 没有被报为越界");
-  if (T.scanTemplate(nestedSource).issues.length === 0) fail(GROUP_V10, "嵌套 {{#if}} 没有被报为越界");
-  const unknownVar = T.scanTemplate("{{nope}}");
-  if (!unknownVar.issues.some((issue) => issue.includes("未知变量"))) fail(GROUP_V10, "未知变量没有被报出来");
-  if (!T.scanTemplate("{{title|weird}}").issues.some((issue) => issue.includes("未知过滤器"))) fail(GROUP_V10, "未知过滤器没有被报出来");
-  if (T.renderTemplate("{{nope}}", {}) !== "{{nope}}") fail(GROUP_V10, "未知变量必须原样输出，不得静默清空");
-  if (T.scanTemplate(eachSource).issues.length && T.scanTemplate(nestedSource).issues.length) {
-    pass("极简 {{#if}} 一层生效；{{#each}}/{{else}}/嵌套/未知变量/未知过滤器一律原样输出并被报出");
-  }
-
-  // 模板绝不变出 conflict: "new"（00 §6.13⑳ 红线），inbox 由应用侧决定
-  const ctx = T.templateContext({ title: "T", url: "https://arxiv.org/abs/1", site: "arxiv.org", content: "正文" });
-  const newTpl = T.applyTemplate({ id: "a", name: "a", behavior: "new", noteNameFormat: "{{title}}" }, ctx);
-  const inboxTpl = T.applyTemplate({ id: "b", name: "b", behavior: "inbox" }, ctx);
-  const appendTpl = T.applyTemplate({ id: "c", name: "c", behavior: "append", appendTo: "笔记/x.md" }, ctx);
-  if (newTpl.conflict !== null) fail(GROUP_V10, `behavior=new 不得下发 conflict，实际 ${newTpl.conflict}`);
-  if (inboxTpl.conflict !== null) fail(GROUP_V10, "behavior=inbox 由应用侧设置决定，插件不得代发 conflict");
-  if (appendTpl.conflict !== "append") fail(GROUP_V10, "behavior=append 且有落点时应下发 conflict=append");
-  if (appendTpl.notePath !== "笔记/x.md") fail(GROUP_V10, "behavior=append 的 appendTo 应写进 target.notePath");
-  if (newTpl.conflict === null && inboxTpl.conflict === null && appendTpl.conflict === "append") {
-    pass("模板 behavior 不产生 conflict:new；只有 append+落点才下发 conflict:append");
-  }
-
-  // 导入/导出 JSON 往返
-  const exported = T.exportTemplates([{ id: "rt", name: "往返", triggers: [{ type: "domain", value: "rt.test" }], priority: 2 }], { includeBuiltins: false });
-  const roundTrip = T.importTemplates(exported);
-  if (roundTrip.templates.length !== 1 || roundTrip.problems.length) fail(GROUP_V10, `导出再导入不往返：${roundTrip.problems.join("；")}`);
-  if (T.importTemplates('{"templates":[{"id":"bad","name":"bad","properties":{"nope":"{{title}}"}}]}').templates.length !== 0) {
-    fail(GROUP_V10, "properties 白名单外的键必须被拒绝");
-  } else pass("模板导入/导出 JSON 往返一致，白名单外的键被拒绝");
-}
-
-/* ── V11 高亮形态（00 §6.14 ㉚） ───────────────────────────────────── */
-
-const GROUP_V11 = "V11 高亮";
-if (!existsSync(join(DIST, "lib/highlights.js")) || !existsSync(join(DIST, "content/highlight.js"))) {
-  fail(GROUP_V11, "缺少 dist/lib/highlights.js 或 dist/content/highlight.js");
-} else {
-  const H = await import(pathToFileURL(join(DIST, "lib", "highlights.js")).href);
-  if (H.HIGHLIGHTS_KEY !== "opennote.highlights.v1") fail(GROUP_V11, `存储键必须是 opennote.highlights.v1，实际 ${H.HIGHLIGHTS_KEY}`);
-  if (H.HIGHLIGHT_SECTION_TITLE !== "## 高亮") fail(GROUP_V11, `小节标题必须是「## 高亮」，实际 ${H.HIGHLIGHT_SECTION_TITLE}`);
-// 两档底色（Lead 0.3.1 裁定 ②）：新增设计令牌 0，所以颜色只能落在这两档上
-if (JSON.stringify(H.HIGHLIGHT_COLORS) !== JSON.stringify(["yellow", "accent"])) {
-  fail(GROUP_V11, `高亮底色必须恰好两档 ["yellow","accent"]，实际 ${JSON.stringify(H.HIGHLIGHT_COLORS)}`);
-} else if (H.HIGHLIGHT_LEGACY_COLORS.some((color) => H.HIGHLIGHT_COLORS.includes(color))) {
-  fail(GROUP_V11, "历史四色不得回来当第三档");
-} else if (H.HIGHLIGHT_LEGACY_COLORS.map((color) => H.highlightTier(color)).join() !== "yellow,yellow,yellow,yellow") {
-  fail(GROUP_V11, "历史四色必须一律按 yellow 渲染");
-} else if (H.highlightTier("accent") !== "accent") {
-  fail(GROUP_V11, "accent 必须渲染成 accent");
-} else pass("高亮两档：yellow → --mark，accent → --accent-soft（历史四色保留原值、按 yellow 渲染）");
-
-  // 空高亮不生成小节
-  const untouched = H.withHighlightSection("正文内容\n", []);
-  if (untouched !== "正文内容\n") fail(GROUP_V11, `空高亮必须原样返回正文，实际：${JSON.stringify(untouched)}`);
-  if (H.highlightSection([]) !== "") fail(GROUP_V11, "空高亮的 highlightSection 必须是空串");
-  else pass("空高亮：不生成「## 高亮」小节，正文一字不改");
-
-  // 形态（03 §UI-14「写入正文的形态」逐字节）：`> 摘录`、换行折叠成空格、有批注时空一行再 `— 批注`
-  const section = H.highlightSection([
-    { text: "第一条摘录", note: "我的批注" },
-    { text: "第二条摘录" },
-    { text: "多行\n摘录" },
-  ]);
-  if (!section.startsWith("## 高亮\n\n")) fail(GROUP_V11, `小节必须以「## 高亮」开头：${JSON.stringify(section.slice(0, 20))}`);
-  if (!section.includes("> 第一条摘录\n\n— 我的批注")) fail(GROUP_V11, "有批注时必须写成 `> 摘录` + 空行 + `— 批注`");
-  if (!section.includes("> 第二条摘录")) fail(GROUP_V11, "无批注时只写 `> 摘录`");
-  if (!section.includes("> 多行 摘录")) fail(GROUP_V11, "摘录内部的换行必须折叠成单个空格（03 §UI-14）");
-  if (/> 多行\n/.test(section)) fail(GROUP_V11, "不得逐行加 `> `（那是另一种形态，03 冻结的是折叠成空格）");
-  if (section.split("\n").filter((line) => line.startsWith("— ")).length !== 1) {
-    fail(GROUP_V11, "批注行只能出现在有批注的那一条下面");
-  } else {
-    pass("高亮小节形态：`> 摘录`（换行折叠成空格）+ 空行 + `— 批注`");
-  }
-
-  // 追加到正文末尾
-  const merged = H.withHighlightSection("正文内容", [{ text: "摘录" }]);
-  if (!merged.startsWith("正文内容\n\n## 高亮")) fail(GROUP_V11, `高亮必须追加在正文末尾：${JSON.stringify(merged.slice(0, 30))}`);
-  else pass("高亮追加在正文末尾（正文内容保留在前）");
-
-  // 按 URL 分组 + 空文本不算高亮
-  const first = H.addHighlight(H.defaultHighlights(), { url: "https://a.test/x#frag", text: "A 的摘录" });
-  const second = H.addHighlight(first.store, { url: "https://a.test/x", text: "A 的第二条" });
-  const third = H.addHighlight(second.store, { url: "https://b.test/y", text: "B 的摘录" });
-  const empty = H.addHighlight(third.store, { url: "https://a.test/x", text: "   " });
-  if (empty.added !== false) fail(GROUP_V11, "空白文本不得记成高亮");
-  if (H.listHighlights(third.store, "https://a.test/x#frag").length !== 2) fail(GROUP_V11, "同 URL（忽略 hash）必须归到同一组");
-  if (H.listHighlights(third.store, "https://b.test/y").length !== 1) fail(GROUP_V11, "不同 URL 必须分开分组");
-  if (H.countHighlights(third.store) !== 3) fail(GROUP_V11, `总计应为 3 条，实际 ${H.countHighlights(third.store)}`);
-  const removed = H.removeHighlight(third.store, "https://a.test/x", H.listHighlights(third.store, "https://a.test/x")[0].id);
-  if (!removed.removed || H.listHighlights(removed.store, "https://a.test/x").length !== 1) fail(GROUP_V11, "删除单条高亮失败");
-  const { store: clearedStore } = H.clearHighlights(removed.store, "https://a.test/x");
-  if (H.listHighlights(clearedStore, "https://a.test/x").length !== 0) fail(GROUP_V11, "清空本页高亮失败");
-  if (empty.added === false && H.countHighlights(third.store) === 3 && H.listHighlights(removed.store, "https://a.test/x").length === 1) {
-    pass("按 URL 分组（hash 归一）、空文本不计、单条删除与整页清空都正确");
-  }
-
-  // 页内脚本必须是非破坏性的、且不回显远程地址
-  const highlightSource = readDist("dist/content/highlight.js");
-  for (const forbidden of ["innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"]) {
-    if (highlightSource.includes(forbidden)) fail(GROUP_V11, `content/highlight.js 用 ${forbidden} 改页面 DOM（高亮必须非破坏性）`);
-  }
-  if (!highlightSource.includes("CSS.highlights") && !/CSS\s*&&\s*[^\n]*highlights/.test(highlightSource)) {
-    fail(GROUP_V11, "content/highlight.js 未使用 CSS Highlight API 做视觉标记");
-  } else pass("页内高亮不改 DOM（CSS Highlight API），无 innerHTML/document.write");
-
-  // 高亮不得改变 source.selection（判定链第 3/4 步的输入）
-  if (!/selection:\s*mode === "selection"/.test(background)) {
-    fail(GROUP_V11, "background 的 source.selection 必须只由剪藏范围决定，不得掺入高亮");
-  } else pass("source.selection 只由剪藏范围决定（高亮不参与判定链输入）");
-}
-
-/* ── V12 三区 + ⋯ 菜单无收件箱项（00 §6.14 ㉘） ────────────────────── */
-
-const GROUP_V12 = "V12 三区";
+const GROUP_V12 = "V12 极简形态";
 const popupJs = readDist("dist/popup/popup.js");
-for (const region of ["body", "highlight", "property"]) {
-  if (!popupHtml.includes(`data-region="${region}"`)) fail(GROUP_V12, `popup.html 缺少三区按钮 data-region="${region}"`);
-}
-if (!popupHtml.includes('id="regionHighlight"') || !popupHtml.includes('id="regionProps"')) {
-  fail(GROUP_V12, "popup.html 缺少高亮区 / 属性区容器");
-}
-if (!popupHtml.includes('id="sourceSwitch"') || !popupHtml.includes('data-mode="selection"') || !popupHtml.includes('data-mode="page"')) {
-  fail(GROUP_V12, "popup.html 缺少正文区的来源开关（选中片段 / 整页正文）");
-}
-if (!popupHtml.includes('id="template"')) fail(GROUP_V12, "popup.html 缺少模板选择器");
-if (!popupHtml.includes('id="notePath"')) fail(GROUP_V12, "popup.html 缺少「追加到指定笔记」选择器");
-const propertyFields = ["propTitle", "propUrl", "propSourceTitle", "propSite", "propAuthor", "propPublished", "tags", "folder"];
-const missingFields = propertyFields.filter((id) => !popupHtml.includes(`id="${id}"`));
-if (missingFields.length) fail(GROUP_V12, `属性面板缺少字段：${missingFields.join(", ")}`);
-if (!missingFields.length) pass("三区 + 来源开关 + 模板选择器 + 属性面板 8 个字段 + 追加落点都在 popup.html 里");
 
-// 「剪藏到收件箱」这个置灰死按钮必须彻底消失（应用侧设置成为唯一真源）。
-// 注释里可以解释「为什么删掉它」，所以先剥掉 HTML 注释再匹配——只看真正会渲染的节点。
 const popupHtmlNoComments = popupHtml.replace(/<!--[\s\S]*?-->/g, "");
 if (/data-action="inbox"/.test(popupHtmlNoComments)) fail(GROUP_V12, "⋯ 菜单里还留着 data-action=\"inbox\"（剪藏到收件箱）");
 if (popupHtmlNoComments.includes("剪藏到收件箱") || popupJs.includes("剪藏到收件箱")) {
   fail(GROUP_V12, "交付物里还出现「剪藏到收件箱」字样（00 §6.14 ㉘：删掉那个 disabled 项）");
 } else pass("⋯ 菜单里没有「剪藏到收件箱」（进收件箱由应用侧设置决定）");
 
-// pending 回执的冻结文案
 if (!popupJs.includes("INBOX_PENDING")) fail(GROUP_V12, "popup 没有处理 receipt.status === \"pending\" 的进收件箱分支");
 if (!readDist("dist/lib/state.js").includes("已进入收件箱等待确认：")) {
   fail(GROUP_V12, "缺少冻结文案「已进入收件箱等待确认：{标题}。」");
@@ -704,26 +490,115 @@ if (!readDist("dist/lib/state.js").includes("已进入收件箱等待确认：")
 if (popupJs.includes("INBOX_PENDING") && readDist("dist/lib/state.js").includes("已进入收件箱等待确认：")) {
   pass("pending 回执走 INBOX_PENDING 状态，文案逐字为「已进入收件箱等待确认：{标题}。」");
 }
-
-// 提交时必须把三区的数据都送出去（模板 / 属性 / 追加落点）
-for (const key of ["templateId", "props", "dirty"]) {
-  if (!popupJs.includes(`${key}:`)) fail(GROUP_V12, `popup 提交时没有带上 ${key}`);
-}
 if (!background.includes("opennote:preview")) fail(GROUP_V12, "background 缺少 opennote:preview（预览与提交必须共用同一条合成路径）");
-else pass("popup 提交带上 templateId/props/dirty；预览与提交共用 background 的同一合成路径");
+else pass("预览与提交共用 background 的同一合成路径（opennote:preview）");
 
-// ⋯ 菜单必须**恰好**是 03 §UI-01 C63 的 6 项（少一项多做一项都算偏；0.3.1 起第 6 项是「清除本地令牌」）
+// ⋯ 菜单（M1）：`标签` 输入退场后，「用当前选区新建标签…」这个唯一标签入口也退场 ——
+// 留着它就是一个点了没反应的死元素。所以菜单从 C63 的 6 项变 5 项，需要 d-ui 同步 03。
 const menuButtons = Array.from(popupHtmlNoComments.matchAll(/<button[^>]*role="menuitem"[^>]*data-action="([^"]+)"[^>]*>([^<]*)</g));
 const menuItems = menuButtons.map((match) => match[1]);
 const menuLabels = menuButtons.map((match) => match[2]);
-const MENU_EXPECTED = ["tag-from-selection", "copy", "stage", "open-settings", "settings", "forget"];
-const MENU_LABELS = ["用当前选区新建标签…", "复制 Markdown", "暂存在插件里", "打开 Opennote", "插件设置", "清除本地令牌"];
+const MENU_EXPECTED = ["copy", "stage", "open-settings", "settings", "forget"];
+const MENU_LABELS = ["复制 Markdown", "暂存在插件里", "打开 Opennote", "插件设置", "清除本地令牌"];
 if (JSON.stringify(menuItems) !== JSON.stringify(MENU_EXPECTED)) {
-  fail(GROUP_V12, `⋯ 菜单应恰好是 C63 的 6 项 ${JSON.stringify(MENU_EXPECTED)}，实际 ${JSON.stringify(menuItems)}`);
+  fail(GROUP_V12, `⋯ 菜单应恰好是 M1 的 5 项 ${JSON.stringify(MENU_EXPECTED)}，实际 ${JSON.stringify(menuItems)}`);
 } else if (JSON.stringify(menuLabels) !== JSON.stringify(MENU_LABELS)) {
-  fail(GROUP_V12, `⋯ 菜单文案必须逐字照 C63：${JSON.stringify(MENU_LABELS)}，实际 ${JSON.stringify(menuLabels)}`);
-} else pass(`⋯ 菜单恰好 6 项且文案逐字照 C63：${menuLabels.join(" / ")}`);
+  fail(GROUP_V12, `⋯ 菜单文案必须逐字：${JSON.stringify(MENU_LABELS)}，实际 ${JSON.stringify(menuLabels)}`);
+} else pass(`⋯ 菜单恰好 5 项且文案逐字：${menuLabels.join(" / ")}`);
 
+/* ── V17 极简形态：只剩两个按钮、无死元素、来源信息允许空值（M1 / task-24） ───────── */
+
+const GROUP_V17 = "V17 极简形态";
+const popupHtmlBare = popupHtml.replace(/<!--[\s\S]*?-->/g, "");
+
+// ① 只有两个按钮，且文案逐字
+const pickLabel = (popupHtmlBare.match(/<button[^>]*id="pick"[^>]*>([^<]*)</) || [])[1];
+const extractLabel = (popupHtmlBare.match(/<button[^>]*id="extractPage"[^>]*>([^<]*)</) || [])[1];
+if (pickLabel !== "选择当前元素") fail(GROUP_V17, `「选择当前元素」按钮文案必须逐字，实际 ${JSON.stringify(pickLabel)}`);
+if (extractLabel !== "整页提取") fail(GROUP_V17, `「整页提取」按钮文案必须逐字，实际 ${JSON.stringify(extractLabel)}`);
+
+// ② 退场的控件必须真的不在 DOM 里（否则就是用户可见的死元素）
+const GONE_IDS = ["seg", "segmented", "regionHighlight", "regionProps", "sourceSwitch", "tmplRow", "template", "notePath", "tags", "folder", "footRow", "hlList"];
+const stillThere = GONE_IDS.filter((id) => popupHtmlBare.includes(`id="${id}"`));
+if (stillThere.length) fail(GROUP_V17, `popup.html 里还留着已退场控件（死元素）：${stillThere.join(", ")}`);
+const GONE_TOKENS = ["data-region=", "data-mode=", "已高亮", "清除本页全部高亮"];
+const stillTokens = GONE_TOKENS.filter((token) => popupHtmlBare.includes(token));
+if (stillTokens.length) fail(GROUP_V17, `popup.html 里还留着已退场界面的痕迹：${stillTokens.join(", ")}`);
+if (!stillThere.length && !stillTokens.length) pass(`只剩两个按钮：${pickLabel} / ${extractLabel}，三区/模板/来源开关/存到/标签的 DOM 一个都不在`);
+
+// ③ popup 不再发已退场字段（契约只在「两个按钮 + 正文」这一处）
+for (const key of ["templateId", "props", "dirty"]) {
+  if (new RegExp(`\\b${key}:`).test(popupJs)) fail(GROUP_V17, `popup 仍然发送已退场字段 ${key}（契约漂移）`);
+}
+if (!popupJs.includes("opennote:submit") || !popupJs.includes("opennote:stage")) fail(GROUP_V17, "popup 缺少剪藏/暂存消息");
+if (!popupJs.includes('type: "opennote:preview", mode')) fail(GROUP_V17, "popup 的预览必须只带 mode（来源只剩两种）");
+// M2（task-28）：模板与高亮**连模块一起删除** —— 判据从 M1 的「空高亮」升级为
+// 「死代码与死存储键在产物里一个都不许出现」+「产物确实变小了」。判据没有放宽，只是跟着实现往前走。
+if (background.includes("opennote-highlight")) fail(GROUP_V17, "background 里还留着右键高亮菜单项");
+// M2 引入过、真机抓到过的回归：URL 归一化原在已删的高亮模块里，删掉后元素选择的结果会静默落不了盘。
+// 成对断言：调用了就必须本地定义（静态检查抓不到 ReferenceError，这条能）。
+if (background.includes("normalizeUrl(") && !background.includes("function normalizeUrl(")) {
+  fail(GROUP_V17, "background 调用了 normalizeUrl 却没有本地定义（元素选择结果会静默落不了盘）");
+}
+const DEAD_ARTIFACTS = ["lib/templates.js", "lib/highlights.js", "content/highlight.js", "options/options.html"];
+const stillShipped = DEAD_ARTIFACTS.filter((path) => distFiles.some((file) => file.endsWith(path)));
+if (stillShipped.length) fail(GROUP_V17, `已退场的模块仍在产物里：${stillShipped.join(", ")}`);
+const DEAD_TOKENS = [
+  "opennote.templates.v1",
+  "opennote.highlights.v1",
+  "withHighlightSection",
+  "highlightInPage",
+  "TEMPLATES_KEY",
+  "HIGHLIGHTS_KEY",
+];
+const distText = distFiles
+  .filter((file) => /\.(js|html|css|json)$/.test(file))
+  .map((file) => readDist(file))
+  .join("\n");
+const stillReferenced = DEAD_TOKENS.filter((token) => distText.includes(token));
+if (stillReferenced.length) fail(GROUP_V17, `已退场的存储键/符号仍在产物里：${stillReferenced.join(", ")}`);
+if (distFiles.length > 23) fail(GROUP_V17, `产物文件数应随 M2 明显下降，实际 ${distFiles.length}（M1 时是 27）`);
+if (!stillShipped.length && !stillReferenced.length && distFiles.length <= 23) {
+  pass(`模板/高亮的模块与存储键都不在产物里，产物 ${distFiles.length} 个文件（M1 时 27）`);
+}
+
+// ④ 来源信息自动填写、**允许空值**：缺失字段必须是 null（不是空串、不是占位值）
+const envelopeModule = await import(pathToFileURL(join(DIST, "lib", "envelope.js")).href);
+const baseClip = {
+  importId: "verify-m1",
+  title: "示例标题",
+  body: "# 正文",
+  url: "https://example.com/posts/hello",
+  capturedAt: "2026-01-01T00:00:00+08:00",
+  selection: false,
+};
+const noAuthor = envelopeModule.buildEnvelope({ ...baseClip });
+const withAuthor = envelopeModule.buildEnvelope({ ...baseClip, pageTitle: "网页标题", author: "张三", publishedAt: "2026-01-01T08:00:00+08:00" });
+if (noAuthor.source.author !== null) fail(GROUP_V17, `提取不到作者时必须下发 null（02 的「null 则省略整行」），实际 ${JSON.stringify(noAuthor.source.author)}`);
+if (noAuthor.source.publishedAt !== null) fail(GROUP_V17, `提取不到发布时间时必须下发 null，实际 ${JSON.stringify(noAuthor.source.publishedAt)}`);
+if (withAuthor.source.author !== "张三") fail(GROUP_V17, "提取到作者时要如实带上");
+if (withAuthor.source.publishedAt !== "2026-01-01T08:00:00+08:00") fail(GROUP_V17, "提取到发布时间时要如实带上");
+// 任何来源字段都不许是空串/占位值（那会让「没作者」和「作者是空字符串」无法区分）
+const emptyish = Object.entries(noAuthor.source).filter(([, value]) => value === "" || value === "null" || value === "undefined");
+if (emptyish.length) fail(GROUP_V17, `来源信息不得用空串/占位值凑满 8 键：${JSON.stringify(emptyish)}`);
+// ⑤ 来源字段必须**透传 null**：`buildClipEnvelope` 里给来源字段加 `|| ""`（或 String() 强转）
+//    就会把「没作者」变成「作者是空字符串」，而 02 的「null 则省略整行」再也救不回来。
+//    这条断言直接卡在**真实调用点**上（只测 lib/envelope.js 是测不到这个回归的 —— 这就是
+//    「看起来能红其实不会红」的形状，所以必须卡在这里）。
+const buildCall = (background.match(/return buildEnvelope\(\{[\s\S]*?\n  \}\);/m) || [])[0] || "";
+if (!buildCall) fail(GROUP_V17, "background 里找不到 buildEnvelope 的调用点");
+else {
+  for (const key of ["url:", "pageTitle:", "site:", "author:", "publishedAt:"]) {
+    const line = buildCall.split("\n").find((item) => item.trim().startsWith(key)) || "";
+    if (!line) { fail(GROUP_V17, `buildEnvelope 调用里缺少来源字段 ${key}`); continue; }
+    if (/\|\|\s*""/.test(line) || /String\(/.test(line)) {
+      fail(GROUP_V17, `来源字段 ${key} 不得用空串/强转兜底（会把「缺失」变成「空值」）：${line.trim()}`);
+    }
+  }
+}
+if (!failures.some((item) => item.includes(GROUP_V17))) {
+  pass("来源信息自动填写且允许空值：缺失字段为 null（不是空串），提取到的字段如实带上");
+}
 /* ── V14 元素选择（00 §6.15㉝ / 03 §UI-16） ──────────────────────── */
 
 /** V14/V15 用：剥掉行注释与块注释后再扫，避免「注释里提到某个 API」被当成真的用了它。 */
@@ -866,6 +741,37 @@ if (failures.filter((item) => item.includes(GROUP_V16)).length === 0) {
 function pickupHardcoded() {
   return popupForPick.match(/pickNote\.textContent = "这个页面不能选择元素[^"]*"/g) || [];
 }
+/* ── V18 令牌回显（M2 / task-28：界面说的必须是真的） ─────────────────
+ * 起因是一个用户可见的错值：刚粘贴完令牌，popup 的只读回显显示 `opn_••••••••••••????` ——
+ * `state.tokenTail` 缺失时被兜底成了 `????`。修法是「尾 4 位从唯一真源推导 + 掩码写成纯函数」，
+ * 这里把三层都钉住：后台推导、popup 用纯函数渲染、全仓不许再有假尾号。
+ */
+
+const GROUP_V18 = "V18 令牌回显";
+const popupJsV18 = readDist("dist/popup/popup.js");
+const bridgeJsV18 = readDist("dist/lib/bridge.js");
+
+if (!/export function maskTokenTail\(tail\)/.test(bridgeJsV18)) {
+  fail(GROUP_V18, "lib/bridge.js 必须导出 maskTokenTail（掩码的单一来源）");
+}
+if (!/tokenTail: probed\.stored\.token \? String\(probed\.stored\.token\)\.slice\(-4\) : null,/.test(background)) {
+  fail(GROUP_V18, "background 必须从已保存的令牌推导 tokenTail（粘贴后第一次快照就是真值）");
+}
+if (!popupJsV18.includes("maskTokenTail(state.tokenTail)")) {
+  fail(GROUP_V18, "popup 的只读回显必须用 maskTokenTail(state.tokenTail) 渲染");
+}
+// 只卡**字符串字面量**：注释里可以解释「以前这里会显示 ????」，但代码里不许再有这个占位值。
+if (/["']\?\?\?\?/.test(popupJsV18) || /["']\?\?\?\?/.test(background)) {
+  fail(GROUP_V18, "交付物里还留着 ???? 假尾号（界面说的不是真的）");
+}
+// 行为断言（比文本匹配强）：掩码本身在任何输入下都不许编造 `?` 占位。
+const { maskTokenTail: maskV18 } = await import(pathToFileURL(join(DIST, "lib", "bridge.js")).href);
+if (maskV18("pvr4") !== `opn_${"•".repeat(12)}pvr4`) fail(GROUP_V18, "掩码形状必须是 opn_ + 12 个点 + 真实尾 4 位");
+if (String(maskV18("")).includes("?")) fail(GROUP_V18, "尾号未知时不得编造 ? 占位");
+if (!failures.some((item) => item.includes(GROUP_V18))) {
+  pass("令牌只读回显的尾 4 位来自唯一真源，且没有 ???? 假尾号");
+}
+
 /* ── V13 用户可见文案不得含反引号 ────────────────────────────────── */
 
 // Lead 0.3.1 裁定 ①：02 号契约表格里的 `` `..` `` 是 **Markdown 内联代码标记**，不是文案本身。
@@ -918,4 +824,4 @@ if (failures.length > 0) {
   for (const item of failures) console.error(`  ${item}`);
   process.exit(1);
 }
-console.log("\n✓ 16 组验收全部通过（V1–V16）");
+console.log("\n✓ 18 组验收全部通过（V1–V18）");

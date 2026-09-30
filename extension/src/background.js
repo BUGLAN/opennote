@@ -10,7 +10,6 @@
 
 import { extractPage } from "./content/extract-page.js";
 import { copyInPage } from "./content/clipboard.js";
-import { highlightInPage } from "./content/highlight.js";
 import {
   buildEnvelope,
   envelopeProblems,
@@ -35,33 +34,8 @@ import { pickFailCopy } from "./lib/pick.js";
 import { makeQueueItem, enqueue, removeItem, markAttempt, takeBatch } from "./lib/queue.js";
 import { STATE, decideState, planFor, busyPlan, stateForCode } from "./lib/state.js";
 import { userMessage } from "./lib/errors.js";
-import {
-  applyTemplate,
-  exportTemplates,
-  importTemplates,
-  matchTemplate,
-  normalizeTemplate,
-  PROPERTY_KEYS,
-  renderTemplate,
-  templateContext,
-  templateOption,
-  validateTemplate,
-  withBuiltins,
-} from "./lib/templates.js";
-import {
-  addHighlight,
-  clearHighlights,
-  countHighlights,
-  defaultHighlights,
-  highlightSection,
-  HIGHLIGHTS_KEY,
-  HIGHLIGHT_NOTE_MAX,
-  listHighlights,
-  normalizeUrl,
-  removeHighlight,
-  withHighlightSection,
-} from "./lib/highlights.js";
-import { TEMPLATES_KEY } from "./lib/templates.js";
+// M2（task-28）：模板（㉙）与高亮（㉚）整套退场 —— 模板模块、高亮模块、页面采集脚本与选项页
+// 都已删除（连文件一起），这里不再有任何引用，产物里也不该再出现它们的痕迹（见 verify V17）。
 
 /** API-03 只读探测：有效令牌 → 404 IMP-4017（令牌被接受），无效 → 401 IMP-2002。 */
 const AUTH_PROBE_ID = "auth-probe-0000";
@@ -86,19 +60,15 @@ chrome.tabs.onActivated.addListener(() => {
 });
 
 /**
- * 右键菜单的最终形态（0.3.1，03 §UI-03 逐字冻结）：**只剩两项**。
- * - `高亮这段文字`：把选区记进本页高亮列表 —— 0.3.1 里浮标已删，高亮的入口改到右键菜单（UI-14「换入口」）；
- * - `剪藏整页正文到 Opennote`：整页剪藏保留。
- * **已删除**：`剪藏选中片段`（㉝：主路径改为元素选择）、浮标 UI-02 及其 `selectionchange`。
+ * 右键菜单（M1 / task-24，00 §6.15 ㊵㊶）：**只剩一项** `剪藏整页正文到 Opennote`。
+ * - 已删除：`剪藏选中片段`（㉝ 主路径改为元素选择）、**`高亮这段文字`**（㊵ 高亮整套作废）、
+ *   浮标 UI-02 及其 `selectionchange`。
+ * - 高亮整套（㊵ 作废㉚）已在 M2（task-28）连模块一起删除：高亮模块、页面采集脚本、
+ *   正文里的 `## 高亮` 小节、模板变量 `{{highlights}}` 都不复存在。
  */
 function installMenus() {
   if (!chrome.contextMenus) return;
   chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: "opennote-highlight",
-      title: "高亮这段文字",
-      contexts: ["selection"],
-    });
     chrome.contextMenus.create({
       id: "opennote-clip-page",
       title: "剪藏整页正文到 Opennote",
@@ -108,11 +78,7 @@ function installMenus() {
 }
 
 chrome.contextMenus?.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "opennote-highlight") {
-    void captureHighlight();
-    return;
-  }
-  void clipFromChromeEntry("page", tab);
+  if (info.menuItemId === "opennote-clip-page") void clipFromChromeEntry("page", tab);
 });
 
 chrome.commands?.onCommand.addListener((command) => {
@@ -136,7 +102,6 @@ async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab || null;
 }
-
 
 /** 把注入错误整理成能给人看的原文（`name: message`，并保留 stack 供 console 自查）。 */
 function describeError(error) {
@@ -177,6 +142,21 @@ async function startPick() {
   }
   await mutate(() => ({ pickUnsupported: false, pickFailReason: null, pickFailDetail: null, pickArmedAt: new Date().toISOString() }));
   return { ok: true };
+}
+
+/**
+ * URL 归一化：元素选择的结果按 URL 落盘、换页即失效，所以比较前必须归一（去掉 hash）。
+ * M2（task-28）：原实现在 `lib/highlights.js`（已随高亮整套删除），这里留一份**最小实现**，
+ * 它是这个键唯一需要的 URL 处理 —— 真机回归证明它一旦缺失，元素选择的结果会静默落不了盘。
+ */
+function normalizeUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return String(url || "").trim();
+  }
 }
 
 /** 元素选择的结果落盘（`opennote.pendingSelection.v1`，03 §UI-16/S4 的回退路径也读它）。 */
@@ -280,165 +260,47 @@ function resolveBody(extraction, mode, picked) {
   return (extraction.article && extraction.article.markdown) || "";
 }
 
-/* ───────────────── 模板 / 高亮（00 §6.14 ㉙㉚）：各占 chrome.storage.local 一个键 ───────────────── */
-
-async function readTemplates() {
-  try {
-    const bag = await chrome.storage.local.get(TEMPLATES_KEY);
-    const stored = bag && bag[TEMPLATES_KEY];
-    const list = Array.isArray(stored) ? stored : [];
-    return withBuiltins(list.map(normalizeTemplate));
-  } catch {
-    return withBuiltins([]);
-  }
-}
-
-async function writeTemplates(templates) {
-  const list = (Array.isArray(templates) ? templates : [])
-    .filter((template) => !template.builtin && !String(template.id).startsWith("builtin-"))
-    .map(normalizeTemplate);
-  await chrome.storage.local.set({ [TEMPLATES_KEY]: list });
-  return withBuiltins(list);
-}
-
-async function readHighlightStore() {
-  try {
-    const bag = await chrome.storage.local.get(HIGHLIGHTS_KEY);
-    return (bag && bag[HIGHLIGHTS_KEY]) || defaultHighlights();
-  } catch {
-    return defaultHighlights();
-  }
-}
-
-async function writeHighlightStore(store) {
-  await chrome.storage.local.set({ [HIGHLIGHTS_KEY]: store });
-  return store;
-}
-
-/** 模板变量上下文：只看抽取结果 + 高亮 + 元素选择结果，不发请求。 */
-function templateCtxOf({ extraction, mode, items, picked }) {
-  const selectionText = extraction.selection && extraction.selection.present ? extraction.selection.markdown : "";
-  const articleText = (extraction.article && extraction.article.markdown) || "";
-  const pickedText = (picked && picked.markdown) || "";
-  return templateContext({
-    title: resolveTitle(extraction, mode, "", picked),
-    url: extraction.url,
-    site: extraction.site,
-    author: extraction.author,
-    publishedAt: extraction.publishedAt,
-    capturedAt: toLocalIso(new Date()),
-    selection: selectionText,
-    highlights: highlightSection(items),
-    content:
-      mode === "element" ? pickedText || articleText : mode === "page" ? articleText || selectionText : selectionText || articleText,
-  });
-}
+/* M2（task-28）：模板与高亮的读写在 M2 随模块一起删除 —— 不再有 chrome.storage.local 的模板/高亮键。 */
 
 /**
- * 挑选模板：显式 `templateId` 优先（`"none"` = 用户显式不使用模板）；
- * 否则按当前 URL 自动匹配（priority 降序，无命中用内置默认模板）。
+ * 把一次剪藏合成「交付意图」。popup 的预览与真正提交**共用**这一条路径，
+ * 所以界面上看到的就是会发出去的（不会出现「显示一套、发另一套」）。
+ * M2（task-28）：没有模板、没有属性面板、没有高亮 —— 值只来自页面抽取结果。
+ * 缺什么就如实缺着（信封里下发 `null`），由应用侧 02 的「null 则省略整行」处理，**绝不填占位值**。
  */
-function pickTemplate(templates, url, templateId) {
-  if (templateId === "none") return { template: null, matchedBy: null, tried: [], fallback: false };
-  if (templateId) {
-    const found = templates.find((template) => template.id === templateId);
-    if (found) return { template: found, matchedBy: `explicit:${templateId}`, tried: [], fallback: false };
-  }
-  return matchTemplate(templates, url);
-}
-
-/** 属性面板 8 个字段的「没有模板、没有手改」时的兜底值（来自抽取结果）。 */
-function basePropValue(key, extraction) {
-  switch (key) {
-    case "source.url":
-      return extraction.url || "";
-    case "source.title":
-      return extraction.pageTitle || "";
-    case "source.site":
-      return extraction.site || "";
-    case "author":
-      return extraction.author || "";
-    case "publishedAt":
-      return extraction.publishedAt || "";
-    default:
-      return "";
-  }
-}
-
-function emptyApplied(extraction, mode) {
+function composeDelivery({ extraction, mode, pickedElement = null }) {
+  const title = resolveTitle(extraction, mode, "", pickedElement);
   return {
-    templateId: null,
-    templateName: null,
-    behavior: "new",
-    title: "",
+    props: {
+      title,
+      "source.url": extraction.url || "",
+      "source.title": extraction.pageTitle || "",
+      "source.site": extraction.site || "",
+      author: extraction.author || "",
+      publishedAt: extraction.publishedAt || "",
+    },
+    title,
     folder: "",
     tags: [],
     notePath: "",
     conflict: null,
-    properties: {},
-    bodyFormat: "",
-    notes: [],
   };
 }
 
-/**
- * 把「模板 + 用户手改 + 高亮」合成一次交付意图。popup 的预览与真正提交**共用**这一条路径，
- * 所以界面上看到的就是会发出去的（不会出现「显示一套、发另一套」）。
- * `overrides.props` / `overrides.dirty.props` = 属性面板的 8 个字段（㉘）。
- */
-function composeDelivery({ extraction, mode, items, templates, overrides = {}, pickedElement = null }) {
-  const picked = pickTemplate(templates, extraction.url, overrides.templateId);
-  const ctx = templateCtxOf({ extraction, mode, items, picked: pickedElement });
-  const dirty = overrides.dirty || {};
-  const propDirty = dirty.props && typeof dirty.props === "object" ? dirty.props : {};
-  const propInput = overrides.props && typeof overrides.props === "object" ? overrides.props : {};
-  const applied = picked.template ? applyTemplate(picked.template, ctx) : emptyApplied(extraction, mode);
-
-  const props = {};
-  for (const key of PROPERTY_KEYS) {
-    if (propDirty[key]) {
-      props[key] = key === "tags" ? String(propInput[key] || "") : String(propInput[key] === undefined || propInput[key] === null ? "" : propInput[key]);
-      continue;
-    }
-    if (applied.properties && applied.properties[key] !== undefined) {
-      props[key] = applied.properties[key];
-      continue;
-    }
-    if (key === "title") props[key] = applied.title || resolveTitle(extraction, mode, "", pickedElement);
-    else if (key === "tags") props[key] = (applied.tags || []).join(", ");
-    else if (key === "target.folder") props[key] = applied.folder || "";
-    else props[key] = basePropValue(key, extraction);
-  }
-
-  const title = String(props.title || "").trim() || resolveTitle(extraction, mode, "", pickedElement);
-  const folder = String(props["target.folder"] || "");
-  const tags = filterTags(props.tags);
-  const notePath = (dirty.notePath ? overrides.notePath : applied.notePath) || "";
-  // `notePath` 只在 `conflict: "append"` 时有效（02 §2.4）；空 → 不下发 conflict（交给判定链／应用侧收件箱设置）。
-  const conflict = notePath ? "append" : applied.conflict || null;
-
-  return { picked, ctx, applied, props, title, folder, tags, notePath, conflict };
-}
-
-function buildClipEnvelope({ extraction, mode, title, props = {}, folder, tags, importId, version, notePath, conflict, items, bodyFormat, pickedElement = null }) {
-  const base = resolveBody(extraction, mode, pickedElement);
-  const ctx = templateCtxOf({ extraction, mode, items: items || [], picked: pickedElement });
-  // 模板 `bodyFormat` 是可选附加字段（㉙ 的模型里没有它，见 lib/templates.js 顶部说明）：
-  // 给了就由模板组装正文骨架，没给就沿用抽取结果本身。
-  const body = bodyFormat ? renderTemplate(bodyFormat, { ...ctx, content: ctx.content || base }) || base : base;
+function buildClipEnvelope({ extraction, mode, title, folder, tags, importId, version, notePath, conflict, pickedElement = null }) {
+  // 正文就是抽取结果本身（M2 起没有模板 `bodyFormat`、没有「## 高亮」小节）。
+  const body = resolveBody(extraction, mode, pickedElement);
   return buildEnvelope({
     importId: importId || newImportId(),
     title,
-    // 高亮作为 body 的一部分一起提交（㉚）；没有高亮时不生成小节。
-    body: withHighlightSection(body, items || []),
-    url: props["source.url"] || extraction.url,
-    pageTitle: props["source.title"] || extraction.pageTitle,
-    site: props["source.site"] || extraction.site,
-    author: props.author || extraction.author,
-    publishedAt: props.publishedAt || extraction.publishedAt,
+    body,
+    url: extraction.url,
+    pageTitle: extraction.pageTitle,
+    site: extraction.site,
+    author: extraction.author,
+    publishedAt: extraction.publishedAt,
     capturedAt: toLocalIso(new Date()),
     // `source.selection` 是判定输入（02 §4.1 第 3/4 步），必须如实反映剪藏范围。
-    // 高亮**不**参与这里：它只是正文的一部分（00 §6.14 ㉚）。
     selection: mode === "selection",
     folder,
     tags,
@@ -600,7 +462,7 @@ function rememberNotePath(list, path) {
   return [clean, ...current.filter((item) => item !== clean)].slice(0, 20);
 }
 
-async function deliver({ envelope, folderLabel, noteTitle, mode, templateName = null, templateNotes = [], conflict = null, notePath = "", highlightCount = 0 }) {
+async function deliver({ envelope, folderLabel, noteTitle, mode, conflict = null, notePath = "" }) {
   const state = await readState();
   const probe = await discover({ preferredPort: state.port, ports: BRIDGE_PORTS });
 
@@ -645,11 +507,8 @@ async function deliver({ envelope, folderLabel, noteTitle, mode, templateName = 
         serverStatus: status,
         folderLabel,
         noteTitle,
-        templateName,
-        templateNotes,
         conflict,
         notePath: notePath || null,
-        highlightCount,
       };
     }
     return {
@@ -664,11 +523,8 @@ async function deliver({ envelope, folderLabel, noteTitle, mode, templateName = 
       warnings: Array.isArray(result.warnings) ? result.warnings : [],
       folderLabel,
       noteTitle,
-      templateName,
-      templateNotes,
       conflict,
       notePath: notePath || null,
-      highlightCount,
     };
   }
 
@@ -753,34 +609,21 @@ export async function clipActiveTab(input) {
   }
 
   const state = await readState();
-  const templates = await readTemplates();
-  const items = listHighlights(await readHighlightStore(), extraction.url);
-  const composed = composeDelivery({ extraction, mode, items, templates, overrides });
-
-  // 属性面板里手改的「网址」必须是真的 http(s)：@link buildEnvelope 会把非法 URL 静默归一成 null，
-  // 这里提前拦住并如实报 IMP-4003，不让它变成「看起来剪藏成功、实际没有来源」。
-  const typedUrl = composed.props ? String(composed.props["source.url"] || "").trim() : "";
-  if (overrides.dirty && overrides.dirty.props && overrides.dirty.props["source.url"] && typedUrl && !/^https?:\/\//i.test(typedUrl)) {
-    return {
-      status: "error",
-      code: "IMP-4003",
-      label: userMessage("IMP-4003"),
-      detail: "属性面板里的「网址」必须是 http(s):// 开头",
-      state: STATE.CONNECTED,
-    };
-  }
+  // 元素选择（㉝）：正文必须是**被点中的那块**。之前 `clipActiveTab` 没把已选元素交给
+  // `buildClipEnvelope` → 元素模式剪藏会提交空正文（信封校验直接挡下，用户看到的是假失败）。
+  // M2 修掉：与预览走同一条取法（`currentPicked`），预览里看到的就是会发出去的。
+  const pickedElement = mode === "element" ? await currentPicked(extraction.url) : null;
+  const composed = composeDelivery({ extraction, mode, pickedElement });
 
   const envelope = buildClipEnvelope({
     extraction,
     mode,
-    title: composed.title || resolveTitle(extraction, mode, ""),
-    props: composed.props,
+    title: composed.title,
     folder: composed.folder,
     tags: composed.tags,
     notePath: composed.notePath,
     conflict: composed.conflict,
-    items,
-    bodyFormat: composed.applied.bodyFormat,
+    pickedElement,
     importId: overrides.importId,
     version: chrome.runtime.getManifest().version,
   });
@@ -812,11 +655,8 @@ export async function clipActiveTab(input) {
     folderLabel: folderLabelOf(composed.folder),
     noteTitle: envelope.title,
     mode,
-    templateName: composed.applied.templateName,
-    templateNotes: composed.applied.notes || [],
     conflict: composed.conflict,
     notePath: composed.notePath,
-    highlightCount: items.length,
   });
 }
 
@@ -885,10 +725,6 @@ async function loadSnapshot() {
   }
 
   // 三区需要的数据：模板清单 + 当前页高亮 + 追加落点历史（都是扩展侧本地数据）
-  const templates = await readTemplates();
-  const matched = matchTemplate(templates, snapshot.tab ? snapshot.tab.url : "");
-  const highlightStore = await readHighlightStore();
-  const highlightItems = listHighlights(highlightStore, snapshot.tab ? snapshot.tab.url : "");
   const pickedForTab = await currentPicked(snapshot.tab ? snapshot.tab.url : "");
 
   return {
@@ -899,10 +735,6 @@ async function loadSnapshot() {
     defaultFolder: probed.defaultFolder,
     // 交付方式（API-01 的 `inbox`）：true / false / undefined（判断不出来）——popup 如实显示
     inbox: probed.inbox,
-    templates: templates.map((template) => templateOption(template, { builtin: Boolean(template.builtin) })),
-    templateMatchedId: matched.template ? matched.template.id : null,
-    templateMatchedBy: matched.matchedBy,
-    templateFallback: Boolean(matched.fallback),
     // 元素选择（㉝）：本页是否已选过、以及选择模式是否正在页面上等待点选（S26/S29）
     pickedElement: pickedForTab
       ? {
@@ -914,67 +746,19 @@ async function loadSnapshot() {
       : null,
     pickArmed: Boolean(probed.stored.pickArmedAt),
     pickUnsupported: Boolean(probed.stored.pickUnsupported),
-    highlights: highlightItems,
-    highlightCount: highlightItems.length,
-    highlightTotal: countHighlights(highlightStore),
     settings: {
       folder: probed.stored.folder || "",
       tags: probed.stored.tags || [],
-      mode: probed.stored.mode || "selection",
+      mode: probed.stored.mode || "page",
       hasToken: Boolean(probed.stored.token),
+      // M2：只读回显的尾 4 位从**唯一真源**（已保存的令牌）推导 —— 粘贴后立刻 load() 就是真值，
+      // 不再出现「刚粘贴完显示 ????」这种界面说假话的错值。
+      tokenTail: probed.stored.token ? String(probed.stored.token).slice(-4) : null,
       port: probed.stored.port || null,
       endpoint: probed.stored.endpoint || null,
       pendingCount: probed.pendingCount,
       notePaths: Array.isArray(probed.stored.notePaths) ? probed.stored.notePaths : [],
     },
-  };
-}
-
-/**
- * 浮标「高亮」路径（00 §6.14 ㉚）：注入 `content/highlight.js` 采集选区 →
- * 按 URL 分组存 `chrome.storage.local`。不改变任何既有笔记，也不影响 `source.selection`。
- */
-async function captureHighlight() {
-  const tab = await activeTab();
-  if (!tab || tab.id === undefined || isRestrictedUrl(tab.url)) {
-    return { ok: false, label: "这个页面不允许插件读取内容。", code: "IMP-1006", state: STATE.RESTRICTED_PAGE };
-  }
-  let result = null;
-  try {
-    const injection = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: highlightInPage,
-      args: [{ color: "" }],
-    });
-    result = injection && injection[0] && injection[0].result;
-  } catch {
-    result = null;
-  }
-  if (!result || !result.ok) {
-    const label = !result
-      ? "这个页面不允许插件读取内容。"
-      : result.reason === "empty-text"
-        ? "选中的内容为空，没有可高亮的文字。"
-        : "没有选中任何文字。在页面上选一段，再点「高亮」。";
-    return { ok: false, label, code: result ? null : "IMP-1006" };
-  }
-  const url = result.url || tab.url;
-  const added = addHighlight(await readHighlightStore(), {
-    url,
-    title: result.title || tab.title,
-    text: result.text,
-    selector: result.selector,
-    color: result.color,
-    createdAt: result.capturedAt,
-  });
-  await writeHighlightStore(added.store);
-  return {
-    ok: true,
-    added: added.added,
-    reason: added.reason,
-    item: added.item,
-    count: listHighlights(added.store, url).length,
-    total: countHighlights(added.store),
   };
 }
 
@@ -1000,18 +784,10 @@ async function handle(message) {
     case "opennote:retry":
       return { ok: true, ...(await loadSnapshot()) };
     case "opennote:submit": {
+      // M2：popup 只发 mode / title / importId（模板与属性面板已退场）。
       const reply = await clipActiveTab({
         mode: message.mode,
-        overrides: {
-          title: message.title,
-          folder: message.folder,
-          tags: message.tags,
-          notePath: message.notePath,
-          templateId: message.templateId,
-          dirty: message.dirty,
-          props: message.props,
-          importId: message.importId,
-        },
+        overrides: { title: message.title, importId: message.importId },
       });
       return { ok: true, reply };
     }
@@ -1024,26 +800,10 @@ async function handle(message) {
       const extraction = await getExtraction(tab.id, { force: Boolean(message.force) });
       if (!extraction) return { ok: true, preview: null, restricted: true };
       const mode = normalizeMode(message.mode);
-      const templates = await readTemplates();
-      const store = await readHighlightStore();
-      const items = listHighlights(store, extraction.url);
+      // M1：高亮退场，预览里也不会再出现「## 高亮」小节。
       const pickedElement = await currentPicked(extraction.url);
-      const composed = composeDelivery({
-        extraction,
-        mode,
-        items,
-        templates,
-        pickedElement,
-        overrides: {
-          title: message.title,
-          folder: message.folder,
-          tags: message.tags,
-          notePath: message.notePath,
-          templateId: message.templateId,
-          dirty: message.dirty,
-          props: message.props,
-        },
-      });
+      // M2：preview 只带 mode；来源信息全部来自页面抽取结果（用户无可填字段）。
+      const composed = composeDelivery({ extraction, mode, pickedElement });
       return {
         ok: true,
         preview: {
@@ -1053,15 +813,6 @@ async function handle(message) {
           tags: composed.tags,
           notePath: composed.notePath,
           conflict: composed.conflict,
-          props: composed.props,
-          templateId: composed.applied.templateId,
-          templateName: composed.applied.templateName,
-          templateMatchedBy: composed.picked.matchedBy,
-          templateFallback: Boolean(composed.picked.fallback),
-          properties: composed.applied.properties,
-          notes: composed.applied.notes,
-          highlightCount: items.length,
-          body: highlightSection(items),
           source: {
             url: extraction.url,
             pageTitle: extraction.pageTitle,
@@ -1085,150 +836,22 @@ async function handle(message) {
         },
       };
     }
-    case "opennote:highlight-now": {
-      return { ok: true, reply: await captureHighlight() };
-    }
-    case "opennote:highlights": {
-      const tab = await activeTab();
-      const url = message.url || (tab && tab.url) || "";
-      const store = await readHighlightStore();
-      return {
-        ok: true,
-        url: normalizeUrl(url),
-        items: listHighlights(store, url),
-        total: countHighlights(store),
-      };
-    }
-    case "opennote:highlight-update": {
-      // 批注 / 底色两档（03 §UI-14 S10/S16）：只改这一条的 note/color，其余字段不动。
-      const tab = await activeTab();
-      const url = message.url || (tab && tab.url) || "";
-      const store = await readHighlightStore();
-      const key = normalizeUrl(url);
-      const group = store.groups[key];
-      if (!group) return { ok: false, code: "IMP-4003", label: "找不到这条高亮。" };
-      const items = group.items.map((item) => {
-        if (item.id !== message.id) return item;
-        const next = { ...item, note: String(message.note || "").slice(0, HIGHLIGHT_NOTE_MAX) };
-        // 历史值（red/green/blue/purple）原样保留；只有明确点两档时才改写
-        if (message.color === "yellow" || message.color === "accent") next.color = message.color;
-        return next;
-      });
-      const nextStore = { spec: store.spec, groups: { ...store.groups, [key]: { ...group, items, updatedAt: new Date().toISOString() } } };
-      await writeHighlightStore(nextStore);
-      return { ok: true, items: listHighlights(nextStore, url) };
-    }
-    case "opennote:highlight-remove": {
-      const tab = await activeTab();
-      const url = message.url || (tab && tab.url) || "";
-      const result = removeHighlight(await readHighlightStore(), url, message.id);
-      await writeHighlightStore(result.store);
-      return { ok: true, removed: result.removed, items: listHighlights(result.store, url) };
-    }
-    case "opennote:highlight-clear": {
-      const tab = await activeTab();
-      const url = message.url || (tab && tab.url) || "";
-      const result = clearHighlights(await readHighlightStore(), url);
-      await writeHighlightStore(result.store);
-      return { ok: true, cleared: result.cleared, items: [] };
-    }
-    case "opennote:templates": {
-      const templates = await readTemplates();
-      const url = message.url || (await activeTab())?.url || "";
-      const picked = matchTemplate(templates, url);
-      return {
-        ok: true,
-        templates: templates.map((template) => templateOption(template, { builtin: Boolean(template.builtin) })),
-        matchedId: picked.template ? picked.template.id : null,
-        matchedBy: picked.matchedBy,
-        fallback: Boolean(picked.fallback),
-        tried: picked.tried,
-      };
-    }
-    case "opennote:template-save": {
-      const problems = validateTemplate(message.template);
-      if (problems.length) return { ok: false, code: "IMP-4003", detail: problems, label: problems[0] };
-      const templates = await readTemplates();
-      const next = templates
-        .filter((template) => !template.builtin)
-        .filter((template) => template.id !== message.template.id)
-        .concat([normalizeTemplate(message.template)]);
-      await writeTemplates(next);
-      return { ok: true, templates: (await readTemplates()).map((template) => templateOption(template, { builtin: Boolean(template.builtin) })) };
-    }
-    case "opennote:template-delete": {
-      const templates = await readTemplates();
-      await writeTemplates(templates.filter((template) => template.id !== message.id && !template.builtin));
-      return { ok: true, templates: (await readTemplates()).map((template) => templateOption(template, { builtin: Boolean(template.builtin) })) };
-    }
-    case "opennote:template-export": {
-      const templates = await readTemplates();
-      return { ok: true, json: exportTemplates(templates.filter((template) => !template.builtin), { includeBuiltins: false }) };
-    }
-    case "opennote:template-import": {
-      const result = importTemplates(message.json);
-      if (!result.templates.length) {
-        return { ok: false, code: "IMP-4003", detail: result.problems, label: result.problems[0] || "导入内容里没有可用模板" };
-      }
-      const templates = await readTemplates();
-      const merged = templates
-        .filter((template) => !template.builtin && !result.templates.some((item) => item.id === template.id))
-        .concat(result.templates);
-      await writeTemplates(merged);
-      return {
-        ok: true,
-        imported: result.templates.length,
-        problems: result.problems,
-        templates: (await readTemplates()).map((template) => templateOption(template, { builtin: Boolean(template.builtin) })),
-      };
-    }
     case "opennote:stage": {
-      const reply = await clipActiveTab({
-        mode: message.mode,
-        overrides: {
-          title: message.title,
-          folder: message.folder,
-          tags: message.tags,
-          notePath: message.notePath,
-          templateId: message.templateId,
-          dirty: message.dirty,
-          props: message.props,
-          importId: message.importId,
-        },
-      });
+      const reply = await clipActiveTab({ mode: message.mode, overrides: { importId: message.importId } });
       if (reply.status === "queued") return { ok: true, reply };
       // 已经在线：显式暂存也要落到队列里（用户点的是「暂存在插件里」）。
       const tab = await activeTab();
       const extraction = tab && tab.id !== undefined ? await getExtraction(tab.id) : null;
       if (!extraction) return { ok: true, reply };
-      const templates = await readTemplates();
-      const items = listHighlights(await readHighlightStore(), extraction.url);
-      const composed = composeDelivery({
-        extraction,
-        mode: message.mode,
-        items,
-        templates,
-        overrides: {
-          title: message.title,
-          folder: message.folder,
-          tags: message.tags,
-          notePath: message.notePath,
-          templateId: message.templateId,
-          dirty: message.dirty,
-          props: message.props,
-        },
-      });
+      const composed = composeDelivery({ extraction, mode: message.mode });
       const envelope = buildClipEnvelope({
         extraction,
         mode: message.mode,
-        title: composed.title || resolveTitle(extraction, message.mode, ""),
-        props: composed.props,
+        title: composed.title,
         folder: composed.folder,
         tags: composed.tags,
         notePath: composed.notePath,
         conflict: composed.conflict,
-        items,
-        bodyFormat: composed.applied.bodyFormat,
         importId: message.importId,
         version: chrome.runtime.getManifest().version,
       });

@@ -15,7 +15,7 @@ export const PICK_FAIL_COPY = Object.freeze({
   no_url: "读不到这个标签页的地址。请点一下扩展图标（或刷新页面）后再试。",
   restricted_scheme: "这个页面不能选择元素：只有普通网页（http 或 https）支持。换个普通网页再试。",
   injection_failed: "没能在这个页面里装上选择器（注入失败）。这不是页面类型的问题。",
-  extraction_failed: "没能从这个页面读到正文。请刷新后重试，或改用「选择页面元素」直接点选。",
+  extraction_failed: "没能从这个页面读到正文。请刷新后重试，或改用「选择当前元素」直接点选。",
 });
 
 /** 四种原因必须产生**四种不同**的文案（`verify.mjs` V16 与单测都按这条断言）。 */

@@ -106,9 +106,15 @@ test("popup 的 HTML 不引任何远程资源、不写内联脚本", () => {
   // `placeholder="https://example.com/posts/local-first"` 是 03 §UI-01 C36 冻结的**示例占位符**：
   // 它只在输入框里显示灰字，浏览器不会去请求它。所以先剥掉 placeholder 属性再查远程地址。
   const noPlaceholders = html.replace(/placeholder="[^"]*"/g, 'placeholder=""');
+  const bareHtml = html.replace(/<!--[\s\S]*?-->/g, "");
   assert.ok(!/https?:\/\/(?!www\.w3\.org)/.test(noPlaceholders), "popup.html 不得引远程资源（placeholder 示例除外）");
   assert.ok(!/<script(?![^>]*\bsrc=)/.test(html), "popup.html 不得有内联脚本（MV3 CSP）");
-  assert.ok(html.includes('role="radiogroup"'), "分段控件必须是 radiogroup");
+  // M1（task-24）：三区分段控件（radiogroup）随极简化退场。判据**不放宽**，换成等价的形态断言：
+  // 取而代之的是「只有两个按钮」，且两个按钮都必须是真的 <button type="button">、文案逐字；
+  // 同时反向断言 radiogroup **不再存在**（留着就是用户可见的死元素）。
+  assert.ok(!html.includes('role="radiogroup"'), "三区分段控件已退场，不应再出现 radiogroup（死元素）");
+  assert.match(bareHtml, /<button[^>]*type="button"[^>]*id="pick"[^>]*>选择当前元素</, "必须有「选择当前元素」按钮");
+  assert.match(bareHtml, /<button[^>]*type="button"[^>]*id="extractPage"[^>]*>整页提取</, "必须有「整页提取」按钮");
   assert.ok(html.includes('role="status"'), "状态芯片必须是 role=status");
   assert.ok(html.includes('aria-live="polite"'), "状态芯片必须 aria-live=polite");
   assert.ok(html.includes('tabindex="-1"'), "芯片必须只读（tabindex=-1）");
