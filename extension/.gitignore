@@ -5,3 +5,4 @@
 .building
 .mutation-running
 .shots/
+.test-failure.log
