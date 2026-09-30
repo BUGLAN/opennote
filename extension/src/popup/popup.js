@@ -29,6 +29,7 @@ const deliveryHint = $("deliveryHint");
 // 0.3.1（00 §6.15㉝㉞）：L2 元素入口 + 令牌块 + 高亮来源说明 + 清令牌确认
 const pickButton = $("pick");
 const extractPageButton = $("extractPage");
+const pickRow = $("pickRow");
 const pickNote = $("pickNote");
 const pickDetail = $("pickDetail");
 const tokenRow = $("tokenRow");
@@ -393,11 +394,21 @@ function renderDoc(markdown) {
   return box;
 }
 
-/** ③ 图片开关（默认关）：只在卡片上，不占工具条（M1 冻结：工具条恰好两个按钮）。 */
-function imageRow() {
-  const info = (lastPreview && lastPreview.images) || (extraction() && extraction().images) || null;
-  const count = info && Array.isArray(info.items) ? info.items.length : 0;
-  const row = el("div", "clip__assets");
+/**
+ * ③ 图片开关（默认关）：**与「选择当前元素 / 整页提取」同一行**（用户明确要求）。
+ *
+ * 位置这件事踩过一次：它原来在卡片里（`previewNode()` 的尾部），理由是「工具条恰好两个按钮」
+ * （M1 冻结，`00` §6.14 ㊶）。用户看过真机截图后要求把它挪到工具条那一行。
+ * **这没有破 ㊶**：㊶ 冻结的是「工具条**不许加第三个按钮**」（工具条上的**动作**只有两个），
+ * 而这是一个**复选框**（一个选项），不是动作按钮；㊶ 要防的是「又来一个能点出结果的入口」。
+ * 判据（`tests/popup-card.test.mjs`）已按新位置重写，并保留「它必须是 JS 渲染的、
+ * 不许写死在 popup.html 里」那一条 —— 说明句与计数依赖状态，写死就必然漂移。
+ *
+ * 返回**两个节点**（开关 + 说明句），由 `mountImageSwitch()` 分别挂进 `#pickRow`：
+ * 说明句要当工具条那一行的整行子项（`flex-basis:100%`，与 `#pickNote` 同款），
+ * 嵌在一个 shrink-to-fit 的 wrapper 里会让 `flex-basis:100%` 失去意义。
+ */
+function imageSwitch() {
   const label = el("label", "clip__assets-sw");
   label.setAttribute("for", "imgDownload");
   const input = el("input");
@@ -412,14 +423,32 @@ function imageRow() {
   });
   label.appendChild(input);
   label.appendChild(el("span", null, "图片一起保存"));
-  row.appendChild(label);
+  return label;
+}
+
+function imageNote() {
+  const info = (lastPreview && lastPreview.images) || (extraction() && extraction().images) || null;
+  const count = info && Array.isArray(info.items) ? info.items.length : 0;
   const note = el("p", "clip__assets-note", "");
   note.id = "imgDownloadNote";
   if (!imageDownload) note.textContent = "关：正文里保留图片的原始网址。";
   else if (count === 0) note.textContent = "这一页没找到可以下载的图片，正文里保留原始网址。";
   else note.textContent = `开：会尝试下载这 ${count} 张图片随笔记一起保存；下载失败的，正文里保留原始网址。`;
-  row.appendChild(note);
-  return row;
+  return note;
+}
+
+/**
+ * 把开关挂进工具条那一行；每次 `render()` 重建（计数与说明句都依赖状态）。
+ *
+ * `visible=false` 时**一个节点都不挂**（并把上一轮挂的摘掉）：受限页面（`chrome://` 等）
+ * 连正文都读不到，那里放一个改不了任何结果的复选框就是**死元素** ——
+ * `popup.html` 顶部写着「界面上不留任何死元素」，这条对它同样成立。
+ */
+function mountImageSwitch(visible) {
+  for (const node of pickRow.querySelectorAll(".clip__assets-sw, .clip__assets-note")) node.remove();
+  if (!visible) return;
+  pickRow.appendChild(imageSwitch());
+  pickRow.appendChild(imageNote());
 }
 
 function previewNode() {
@@ -459,7 +488,6 @@ function previewNode() {
   // 预览正文的**唯一**来源：`currentMarkdown()`（它内部再按 mode 分流：元素选择 → 被点中的那块）。
   // 任何兜底都不得用另一份正文顶替「被选中的那一块」——冒充比空白更糟：用户无从发现。
   box.appendChild(renderDoc(currentMarkdown()));
-  box.appendChild(imageRow());
 
   const src = el("p", "clip__src");
   if (mode === "selection") {
@@ -711,6 +739,9 @@ function render(planInput) {
   // M1（task-24）：没有三区分段了 —— 正文/预览是一条链，状态流（加载/空态/成功/报错）始终占正文区。
   updateDeliveryHint();
   syncPickRow();
+  // ③ 图片开关挂在工具条那一行（用户要求），与 `syncPickRow()` 同一批「每次 render 都要刷新」的东西。
+  // 受限页面不挂：那里连正文都读不到，放一个改不了结果的复选框就是死元素。
+  mountImageSwitch(plan.state !== STATE.RESTRICTED_PAGE);
   const flowLike = Boolean(notice || plan.skeleton || plan.empty || plan.ok || plan.block);
   regionBody.hidden = false;
 

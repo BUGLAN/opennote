@@ -137,6 +137,40 @@ test("③ 图片开关是卡片上的复选框、默认关、且说明随状态�
   assert.doesNotMatch(BARE, /id="imgDownload"/, "开关是渲染出来的，不写死在 popup.html 的工具条里");
 });
 
+test("③ 图片开关与两个按钮**同一行**（用户要求）：挂进 #pickRow，不再挂在卡片里", () => {
+  /*
+   * 位置这件事踩过一次：它原来在卡片里（`previewNode()` 尾部），理由是「工具条恰好两个按钮」。
+   * 用户看过真机截图后要求挪到工具条那一行。**这没有破 ㊶**：㊶ 冻结的是「工具条上的**动作**
+   * 只有两个」（不许再加一个能点出结果的按钮），而这是一个复选框（一个选项）。
+   * 判据必须盯**位置本身**，不能只盯「元素存在」—— 元素一直在，位置错了用户照样不满意。
+   */
+  assert.match(code, /const pickRow = \$\("pickRow"\);/, "必须真的拿到工具条那一行");
+  assert.match(code, /pickRow\.appendChild\(imageSwitch\(\)\);/, "开关必须挂进工具条那一行");
+  assert.match(code, /pickRow\.appendChild\(imageNote\(\)\);/, "说明句也要挂进工具条（整行子项 flex-basis:100%）");
+  /*
+   * **必须断言调用点，不能只断言函数体。**
+   *
+   * 第一版只断言了 `pickRow.appendChild(imageSwitch())` 存在 —— 那条断言在**函数体**里就满足了，
+   * 于是把 `render()` 里的 `mountImageSwitch();` 换成「挂回卡片」时，断言照样全绿（变异 Q1 抓到的）。
+   * 「函数写好了但没人调用」和「挂错地方」是同一种缺陷，判据必须盯**谁在什么时机调用它**。
+   */
+  const renderBody = code.slice(code.indexOf("function render("), code.indexOf("function schedulePreview("));
+  assert.ok(renderBody.length > 0, "找不到 render() 函数体 —— 判据的被判对象消失了，必须红");
+  assert.match(renderBody, /mountImageSwitch\(/, "render() 必须真的调用 mountImageSwitch()（否则开关根本不出现）");
+  // 「界面上不留任何死元素」：受限页面（chrome:// 等）连正文都读不到，开关在那儿改不了任何结果。
+  assert.match(
+    renderBody,
+    /mountImageSwitch\([^;]*RESTRICTED_PAGE[^;]*\)/,
+    "受限页面必须把开关摘掉（否则就是一个死元素）",
+  );
+  assert.doesNotMatch(code, /imageRow\(/, "旧的「卡片里的开关行」必须退场");
+  assert.doesNotMatch(code, /box\.appendChild\(imageSwitch\(\)\)/, "不许同时留在卡片里（两处渲染 = 两个产地）");
+  assert.ok(!CSS.includes(".clip__assets{"), "旧的 .clip__assets wrapper 规则必须删掉（写了不生效 = 缺陷）");
+  // 工具条仍是「两个按钮」：开关不是按钮（㊶ 冻结的是动作数量，不是选项数量）
+  assert.equal((BARE.match(/<button[^>]*id="(pick|extractPage)"/g) || []).length, 2, "工具条恰好两个按钮");
+  assert.match(CSS, /\.clip__assets-sw\{margin-left:auto;/, "开关靠右，与按钮同一行");
+});
+
 /* ── ④ popup 外壳三项（task-7，用户真机截图提的） ─────────────────────── */
 
 /** `.clip{…}` 这条外壳规则（`\.clip\{` 不会误匹配 `.clip__head{`）。 */

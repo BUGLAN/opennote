@@ -147,10 +147,13 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__doc .doc-hr{border:none;border-top:1px solid var(--rule);margin:.9em 0}
 .clip__doc .doc-note{margin:.7em 0 0;font-family:var(--font-ui);font-size:var(--fs-xs);color:var(--ink-3)}
 
-/* ③ 图片下载开关（默认关）：卡片上的一行，不占工具条（工具条恰好两个按钮） */
-.clip__assets{margin-top:8px;padding-top:7px;border-top:1px solid var(--rule);display:flex;align-items:baseline;gap:var(--s2);flex-wrap:wrap}
-.clip__assets-sw{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-sm);color:var(--ink);cursor:pointer}
-.clip__assets-sw input{width:13px;height:13px;accent-color:var(--accent)}
+/* ③ 图片下载开关（默认关）：**与两个按钮同一行**（用户明确要求），靠右对齐。
+   它不占第三个按钮位：`00` §6.14 ㊶ 冻结的是「工具条上的**动作**只有两个」，而这是一个选项（复选框）。
+   说明句是工具条那一行的整行子项（`flex-basis:100%`，与 `#pickNote` 同款）——
+   嵌在一个 shrink-to-fit 的 wrapper 里，`flex-basis:100%` 会失去意义。 */
+.clip__assets-sw{margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-xs);color:var(--ink-2);cursor:pointer;white-space:nowrap}
+.clip__assets-sw:hover{color:var(--ink)}
+.clip__assets-sw input{width:13px;height:13px;margin:0;accent-color:var(--accent)}
 .clip__assets-note{flex-basis:100%;margin:0;font-size:var(--fs-xs);color:var(--ink-3);line-height:1.7}
 
 /* ── 模板选择器（00 §6.14 ㉘㉙） ─────────────────────────────────────── */
