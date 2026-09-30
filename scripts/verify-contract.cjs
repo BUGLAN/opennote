@@ -1299,10 +1299,19 @@ group("§7 UI：设计令牌 / 文案逐字 / 撤销窗口 / 无 emoji");
 // 「会不会出现在界面上」，否则每加一篇开发文档都会被自己绊倒（误报）：
 //   · 严格扫：`.ts/.tsx/.js/.cjs/.mjs/.html/.css`（剥注释后 —— 注释是给开发者看的，
 //     与 BR-4 / IN-3 同理）+ `extension/dist/**`（**产物**，装进浏览器的东西，必须零 emoji）
-//   · 不扫：`*.md` / `*.txt`（开发文档）、`tests/`、自测脚本
-//   · 被排除的命中记 U-8c INFO，**仍然打印出来**（不隐藏事实）
+//   · 不扫：`*.md` / `*.txt`（开发文档）、`tests/`、自测脚本、
+//     **`extension/tools/**`（开发/自测工具：CLI 打点、cdp 探针、变异脚本 —— 不是界面文案）**
+//   · 被排除的命中记 U-8c / U-8d INFO，**仍然打印出来**（不隐藏事实）
+//
+// 为什么把 `extension/tools/**` 划出去（2026-09-30 实测触发）：队友在做 M2 时新建了
+// `extension/tools/_m2-detach*.mjs`，里面的 `console.log("  ✗ " + miss)` 让 U-8 变红。
+// 那是**开发工具的 CLI 反馈**，不是界面文案 —— U-8 的标题声称的是「界面文案无 emoji」，
+// 判据范围必须与标题一致，否则就是我自己在制造假红。
+// 真正的严格面仍然是 `extension/dist/**`（`U-8e`，**不做任何排除**）：任何可能到达用户的
+// emoji 都必须经过产物，所以在 tools 上放松不会漏掉用户可见面。
 const UI_COPY_EXT_RE = /\.(ts|tsx|js|cjs|mjs|html|css)$/;
 const DOC_EXT_RE = /\.(md|markdown|txt)$/;
+const TOOLING_RE = /^extension\/tools\//;
 const UI_COPY_FILES = (files) => files.filter((rel) => UI_COPY_EXT_RE.test(rel));
 {
   const EMOJI = /[\u{1F300}-\u{1FAFF}\u{1F000}-\u{1F2FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{1F1E6}-\u{1F1FF}]/gu;
@@ -1319,12 +1328,15 @@ const UI_COPY_FILES = (files) => files.filter((rel) => UI_COPY_EXT_RE.test(rel))
     }
     return hits;
   };
-  const offenders = scan(UI_COPY_FILES(productFiles), { strip: true });
+  const toolingFiles = productFiles.filter((rel) => TOOLING_RE.test(rel));
+  const uiCopyFiles = UI_COPY_FILES(productFiles.filter((rel) => !TOOLING_RE.test(rel)));
+  const offenders = scan(uiCopyFiles, { strip: true });
+  const toolingHits = scan(UI_COPY_FILES(toolingFiles));
   const inTests = scan(testFiles);
   const docsAndComments = [
     ...scan(productFiles.filter((rel) => DOC_EXT_RE.test(rel))).map((hit) => `[文档] ${hit}`),
     // 注释扫描只看代码文件，否则 `*.md` 会被同时算进「文档」和「注释」两桶（重复计数）
-    ...scan(UI_COPY_FILES(productFiles), { strip: false })
+    ...scan(uiCopyFiles, { strip: false })
       .filter((hit) => !offenders.some((o) => o.split(" ")[0] === hit.split(" ")[0]))
       .map((hit) => `[注释] ${hit}`),
   ];
@@ -1332,9 +1344,15 @@ const UI_COPY_FILES = (files) => files.filter((rel) => UI_COPY_EXT_RE.test(rel))
     info("U-8b", "测试/自测脚本里的 emoji（契约不约束）",
       `${inTests.length} 处：${inTests.slice(0, 4).join(" | ")}`);
   }
-  check("U-8", "界面文案无 emoji（扫产品源码的 .ts/.tsx/.js/.html/.css，剥注释；不含 tests/ 与 *.md）",
+  if (toolingHits.length) {
+    info("U-8d", `开发工具脚本（extension/tools/**，${toolingFiles.length} 个文件）里的 emoji：不是界面文案，计 INFO 但**照实打印**`,
+      `${toolingHits.length} 处：${toolingHits.slice(0, 4).join(" | ")}`
+      + `（这些是 CLI/探针/变异脚本的打点；用户可见面的严格判据是 U-8e 的 extension/dist/**，那里不做任何排除）`);
+  }
+  check("U-8", "界面文案无 emoji（扫产品源码的 .ts/.tsx/.js/.html/.css，剥注释；不含 tests/、*.md、extension/tools/**）",
     offenders.length === 0,
-    `0 处（剥注释后扫描 ${UI_COPY_FILES(productFiles).length} 个源码文件）`, offenders.slice(0, 8).join(" | "));
+    `0 处（剥注释后扫描 ${uiCopyFiles.length} 个源码文件；另排除 ${toolingFiles.length} 个开发工具文件）`,
+    offenders.slice(0, 8).join(" | "));
   if (docsAndComments.length) {
     info("U-8c", "开发文档（*.md）与代码注释里的 emoji（非用户可见，不计失败）",
       `${docsAndComments.length} 处：${docsAndComments.slice(0, 3).join(" | ")}`);
@@ -1866,25 +1884,187 @@ if (sidebarTsx === null || sidebarCss === null) {
     + "若 Lead 想把它们一并改名，应另立一条裁定，本条不替它做主。");
 }
 
-/* ── C-11 契约文档缺口登记（INFO，不改判）───────────────────────────────────
+/* ═══════════════════════════════════════════════════════════════════════════
+ * §12 C-11 · 桥状态字段：把「静默截断」这一**真缺陷**变成永久护栏
+ *
+ * 历史（本项目抓到过的真缺陷）：`bridgeStatusPayload()` 曾经**逐字段重建**状态对象，
+ * 于是 `address` / `error` / `lastRejectedOrigin` / `startPort` / `portRange` 被静默丢掉 ——
+ * 渲染层拿不到 `lastRejectedOrigin`，R8 的「已拒绝一个来源不明的请求」就**永远显示不出来**，
+ * 三条 UI 要求因此成了死代码。现在实现改成 `...raw` 先行，但**没有任何东西拦着它退回去**。
+ *
+ * 判据（三条 + 变异自检）：
+ *   C-11a 正常路径必须**展开 `...raw`**，或逐字段列出 `BridgeStatus` 声明的**全部**字段 → 防静默截断回归
+ *   C-11b 两条路径**显式重建**的键必须都在 `BridgeStatus` 里 → 不向渲染层泄漏未声明字段
+ *   C-11c 失败路径必须包含正常路径的**全部显式键** → 渲染层不必为「字段不存在」写第二套分支
+ *         （`main.cjs` 的注释自己就是这么承诺的：「其余可选字段一律给 `null` 而不是省略」）
+ *   C-11d **文档消费侧**：`02` 里一旦有清单，就双向咬合「文档 ↔ `BridgeStatus`」；
+ *         现在还没有 → INFO（等 d-contract 补完自动升级为真咬合，不用改代码）
+ */
+group("§12 桥状态字段咬合（C-11）");
+
+const BRIDGE_STATUS_TS = "src/desktop/bridge.ts";
+const MAIN_CJS = "electron/main.cjs";
+
+/** 判据函数：两份源码文本进、结论出（纯函数才能在同一份真源上重跑变异）。 */
+function bridgeStatusChecks(tsText, mainText) {
+  const ifaceMatch = /export interface BridgeStatus \{([\s\S]*?)\n\}/.exec(tsText);
+  const ifaceFields = ifaceMatch
+    ? [...ifaceMatch[1].matchAll(/^\s{2}([A-Za-z_$][\w$]*)\??:/gm)].map((m) => m[1])
+    : [];
+  const fnStart = mainText.indexOf("function bridgeStatusPayload()");
+  const fnEnd = fnStart < 0 ? -1 : mainText.indexOf("\n}\n", fnStart);
+  const fnBody = fnStart >= 0 && fnEnd > fnStart ? mainText.slice(fnStart, fnEnd) : "";
+  const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  // 取 `return {` 之后那个对象字面量（花括号配平）
+  const returnObjects = (body) => {
+    const out = [];
+    const re = /return \{/g;
+    let m;
+    while ((m = re.exec(body))) {
+      const from = m.index + "return ".length;
+      let depth = 0;
+      let i = from;
+      for (; i < body.length; i += 1) {
+        if (body[i] === "{") depth += 1;
+        else if (body[i] === "}") {
+          depth -= 1;
+          if (depth === 0) { i += 1; break; }
+        }
+      }
+      out.push(body.slice(from, i));
+    }
+    return out;
+  };
+  // 对象**顶层**键（只认 depth===1 的属性名，跳过嵌套对象/三元里的同名 token）
+  const topLevelKeys = (objText) => {
+    const text = stripComments(objText);
+    const start = text.indexOf("{");
+    if (start < 0) return [];
+    const keys = [];
+    let depth = 0;
+    for (let i = start; i < text.length; i += 1) {
+      const c = text[i];
+      if (c === "{") { depth += 1; continue; }
+      if (c === "}") { depth -= 1; if (depth === 0) break; continue; }
+      if (depth !== 1 || !/[A-Za-z_$]/.test(c)) continue;
+      const m = /^([A-Za-z_$][\w$]*)\s*:/.exec(text.slice(i));
+      if (!m) continue;
+      const before = text.slice(Math.max(0, i - 24), i);
+      if (!/[{\s,]$/.test(before) || /[\w$.)\]]$/.test(before)) continue;
+      keys.push(m[1]);
+      i += m[0].length - 1;
+    }
+    return keys;
+  };
+  const objects = returnObjects(fnBody);
+  // 失败路径 = 第一个 return（!controller），正常路径 = 第二个（有 ...raw）
+  const failObj = objects.length >= 2 ? objects[0] : "";
+  const normalObj = objects.length >= 2 ? objects[1] : objects[0] || "";
+  const normalKeys = topLevelKeys(normalObj);
+  const failKeys = topLevelKeys(failObj);
+  const hasSpread = /\.\.\.\s*raw\b/.test(stripComments(normalObj));
+  const coveredByExplicit = ifaceFields.every((f) => normalKeys.includes(f));
+  const leakNormal = normalKeys.filter((k) => !ifaceFields.includes(k));
+  const leakFail = failKeys.filter((k) => !ifaceFields.includes(k));
+  const missingInFail = normalKeys.filter((k) => !failKeys.includes(k));
+
+  return {
+    "C-11a": {
+      title: "`bridgeStatusPayload()` 正常路径不丢字段：`...raw` 展开，或逐字段覆盖 `BridgeStatus` 全部字段（防「静默截断」回归）",
+      ok: ifaceFields.length > 0 && fnBody !== "" && (hasSpread || (coveredByExplicit && normalKeys.length > 0)),
+      detail: `BridgeStatus 字段数=${ifaceFields.length} 展开 ...raw=${hasSpread} 显式键=${normalKeys.length}`
+        + ` 显式覆盖全部=${coveredByExplicit}${ifaceFields.length ? "" : "（未解析到 BridgeStatus，判据不成立）"}`
+        + `；与 scripts/bridge-hooks-check.cjs L292–297 的「...raw 存在性」检查**部分重叠**：那条只看全文件有没有 \`...raw,\``
+        + `（连注释里出现都算），本条要求它落在 bridgeStatusPayload() **正常路径的返回对象**里，或逐字段覆盖全部字段`,
+    },
+    "C-11b": {
+      title: "两条路径**显式重建**的键都在 `BridgeStatus` 里（不向渲染层泄漏未声明字段）",
+      ok: ifaceFields.length > 0 && leakNormal.length === 0 && leakFail.length === 0,
+      detail: `正常路径多出的键=${leakNormal.join(",") || "无"} 失败路径多出的键=${leakFail.join(",") || "无"}`,
+    },
+    "C-11c": {
+      title: "失败路径包含正常路径的全部显式键（渲染层不必为「字段不存在」写第二套分支）",
+      ok: fnBody !== "" && missingInFail.length === 0,
+      detail: `失败路径缺=${missingInFail.join(",") || "无"}（正常路径显式键 ${normalKeys.length} 个：${normalKeys.join("/")}）`,
+    },
+  };
+}
+
+{
+  const tsText = readIfExists(BRIDGE_STATUS_TS);
+  const mainText = readIfExists(MAIN_CJS);
+  const C11_IDS = ["C-11a", "C-11b", "C-11c"];
+  if (tsText === null || mainText === null) {
+    for (const id of C11_IDS) skip(id, "桥状态字段咬合", `${BRIDGE_STATUS_TS} 或 ${MAIN_CJS} 读不到`);
+  } else {
+    const real = bridgeStatusChecks(tsText, mainText);
+    for (const id of C11_IDS) check(id, real[id].title, real[id].ok, real[id].detail, real[id].detail);
+
+    const C11_MUTATIONS = [
+      { name: "drop-spread", target: "C-11a", expect: [], apply: (s) => s.replace(/^\s*\.\.\.raw,\s*$/m, "") },
+      // 正常路径塞一个未声明字段：既违反 C-11b（泄漏），也必然违反 C-11c（失败路径没有它）——
+      // 第二条牵连是**可推导**的，所以显式声明，而不是放松「牵连必须为空」。
+      { name: "invent-key", target: "C-11b", expect: ["C-11c"], apply: (s) => s.replace(/^(\s*)\.\.\.raw,/m, "$1...raw,\n$1fooBar: 1,") },
+      // ⚠️ 我第一版这里删的是失败路径的 `lastRejectedOrigin` —— 它**不在**正常路径的显式键里，
+      // 所以 C-11c 本来就不该对它敏感（变异无效，自检如实报「目标仍绿」）。
+      // 真正能证明 C-11c 有效的是删掉一个**两边都有**的显式键。
+      { name: "shrink-failure", target: "C-11c", expect: [], apply: (s) => s.replace(/^\s*tokenSet: false,\s*$/m, "") },
+    ];
+    const log = [];
+    let ok = true;
+    for (const m of C11_MUTATIONS) {
+      const mutated = m.apply(mainText);
+      const changed = mutated !== mainText;
+      const verdict = bridgeStatusChecks(tsText, mutated);
+      const targetRed = verdict[m.target].ok === false;
+      const collateral = C11_IDS.filter((id) => id !== m.target && verdict[id].ok === false).sort();
+      const collateralOk = collateral.join(",") === [...m.expect].sort().join(",");
+      const fine = changed && targetRed && collateralOk;
+      if (!fine) ok = false;
+      const why = [
+        changed ? "" : "**变异没改到文本**",
+        targetRed ? "" : "目标仍绿",
+        collateralOk ? "" : `牵连与声明不符（实际 ${collateral.join(",") || "无"} / 声明 ${m.expect.join(",") || "无"}）`,
+      ].filter(Boolean).join("；");
+      log.push(`${m.name}→${m.target} ${fine ? "红✓" : `未红✗（${why}）`}`
+        + `${collateral.length ? `（+牵连 ${collateral.join(",")}）` : ""}`);
+    }
+    check("C-11·变异", `C-11 断言自检：${C11_MUTATIONS.length} 个内存变异各自让对应检查翻红（证明这 3 条不是恒绿）`,
+      ok, log.join("；"), log.join("；"));
+  }
+}
+
+/* ── C-11d 文档消费侧：02 里一旦有清单就双向咬合；现在没有 → INFO（可复算）──────
  * 起因：给 `S7B.1` 的清单找「出处」时我差点写下一个**假引用**（`02 §3.2` 其实是
- * 「H1 与 front-matter 的拼装顺序」）。核完才发现：这 5 个桥状态字段在 `02` 里根本没有清单。
- * 我把它登记成一条**可复算的 INFO**（不假装它是通过），因为「断言引用了不存在的出处」
- * 和「标签撒谎」是同一类问题 —— 只是这次还没撒出去就被抓住了。 */
+ * 「H1 与 front-matter 的拼装顺序」）。Lead 已派 d-contract 在 02 补清单；
+ * 补完之后本段**自动**从 INFO 升级为真咬合，我不需要再改代码。
+ * 识别法：找同时提到 ≥2 个**有辨识度**字段名的行块（`lastRejectedOrigin` / `startPort` /
+ * `portRange` / `tokenPersisted` / `inboxWatch`），那种行块不可能是散文巧合。 */
 {
   const doc02 = readIfExists("docs/import/02-接口契约-导入信封与通道.md");
-  const statusKeys = ["address", "error", "lastRejectedOrigin", "startPort", "portRange"];
-  if (doc02 === null) info("C-11", "桥状态字段清单的文档出处", "读不到 02 契约文件，无法统计");
+  const tsText = readIfExists(BRIDGE_STATUS_TS) || "";
+  const ifaceMatch = /export interface BridgeStatus \{([\s\S]*?)\n\}/.exec(tsText);
+  const ifaceFields = ifaceMatch
+    ? [...ifaceMatch[1].matchAll(/^\s{2}([A-Za-z_$][\w$]*)\??:/gm)].map((m) => m[1])
+    : [];
+  const DISTINCTIVE = ["lastRejectedOrigin", "startPort", "portRange", "tokenPersisted", "inboxWatch", "endpoint"];
+  if (doc02 === null) info("C-11d", "桥状态字段清单的文档出处", "读不到 02 契约文件，无法统计");
   else {
-    const counts = statusKeys.map((k) => `${k}=${doc02.split(k).length - 1}`);
-    // 只对**有辨识度**的字段下结论：`address` / `error` 是通用词，会命中 `server.address()` 这类无关文本。
-    const distinctive = ["lastRejectedOrigin", "startPort", "portRange"];
-    const distinctiveHits = distinctive.filter((k) => doc02.includes(k));
-    info("C-11", "`BridgeStatus` 字段清单在 02 号契约里没有出处（文档缺口，登记不改判）",
-      `02 内出现次数：${counts.join(", ")}；其中**有辨识度的** 3 个（${distinctive.join(" / ")}）命中 ${distinctiveHits.length}/3`
-      + `（address/error 是通用词，可能只是 `+ "`server.address()`" + ` 这类无关文本）`
-      + `。权威出处目前只有 src/desktop/bridge.ts 的 BridgeStatus。`
-      + (distinctiveHits.length === 0 ? "→ S7B.1 的清单只能引代码，不能引文档；若契约应当列这些字段，请派 d-contract 补一段。" : ""));
+    const counts = DISTINCTIVE.map((k) => `${k}=${doc02.split(k).length - 1}`);
+    const hitLines = doc02.split(/\r?\n/).filter((line) => DISTINCTIVE.filter((k) => line.includes(k)).length >= 2);
+    const docFields = ifaceFields.filter((f) => doc02.includes(f));
+    if (!hitLines.length) {
+      info("C-11d", "`BridgeStatus` 字段清单在 02 号契约里**还没有**出处（文档缺口，登记不改判；d-contract 补完后本条自动变真咬合）",
+        `02 内出现次数：${counts.join(", ")}；没有任何一行同时提到 ≥2 个有辨识度字段`
+        + `。权威出处目前只有 ${BRIDGE_STATUS_TS} 的 BridgeStatus（${ifaceFields.length} 个字段）。`
+        + `→ S7B.1 的清单暂时只能引代码，不能引文档。`);
+    } else {
+      const missingInDoc = ifaceFields.filter((f) => !doc02.includes(f));
+      check("C-11d", "`02` 契约的桥状态字段清单与 `BridgeStatus` **双向一致**（文档漏字段 / 代码多字段都要红）",
+        missingInDoc.length === 0,
+        `02 命中的字段 ${docFields.length}/${ifaceFields.length} 个；清单行（${hitLines.length} 行）：${hitLines.slice(0, 3).map((l) => l.trim().slice(0, 100)).join(" | ")}`,
+        `02 里缺的字段：${missingInDoc.join(", ") || "无"}（清单行 ${hitLines.length} 行）`);
+    }
   }
 }
 

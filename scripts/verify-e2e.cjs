@@ -379,6 +379,38 @@ async function main() {
     }
   }
 
+  /* ── 覆盖守卫自检：证明「没报」真的会红 ─────────────────────────────────────
+   * 一条**恒绿**的守卫比没有守卫更糟：它会让人以为「都报过了」。
+   * 所以这里故意跑一次「什么都不报告」的守卫，看它是否如期产出 FAIL；
+   * 自检期间的**控制台输出先收进变量**（否则日志里会冒出一条孤零零的 `FAIL [GUARD-SELFTEST]`，
+   * 让人以为整轮失败了 —— 一条只该出现在「证词」里的红，不该混进结论区），
+   * 再把这次自检写进 `results` 的记录**撤回**（它测的是守卫本身，不是产品）。 */
+  {
+    const before = results.length;
+    const captured = [];
+    const realLog = console.log;
+    console.log = (...args) => { captured.push(args.join(" ")); };
+    let threw = null;
+    try {
+      await withCoverageGuard("GUARD-SELFTEST", ["GUARD-SELFTEST.1"], async () => { /* 故意一条都不报告 */ });
+    } catch (error) {
+      threw = error;
+    } finally {
+      console.log = realLog;
+    }
+    const added = results.slice(before);
+    results.length = before; // 撤回自检记录
+    const fired = !threw && added.length === 1 && added[0].status === "FAIL" && added[0].id === "GUARD-SELFTEST-coverage";
+    if (fired) {
+      pass("COVERAGE-SELFTEST", "覆盖守卫自检：故意漏报一条登记的检查 → 守卫如期报红（证明守卫不是恒绿）",
+        `产出 ${added[0].id} / ${added[0].status}，原样证词=「${captured.join(" / ").trim().replace(/\s+/g, " ").slice(0, 160)}」`
+        + `，该记录已从摘要撤回（不计入本次统计）`);
+    } else {
+      fail("COVERAGE-SELFTEST", "覆盖守卫自检失败：漏报没有变红，说明守卫是恒绿的（比没有守卫更糟）",
+        threw ? `抛异常：${threw.message}` : `产出 ${added.length} 条：${added.map((r) => `${r.id}/${r.status}`).join(", ") || "(无)"}`);
+    }
+  }
+
   return finish();
 }
 
@@ -1458,6 +1490,14 @@ const EXPECTED_S5 = ["S5.1", "S5.2", "S5.3", "S5.4", "S5.5", "S5.6", "S5.7", "S5
 const EXPECTED_S6 = ["S6.1", "S6.2", "S6.3", "S6.4", "S6.5", "S6.6", "S6.7", "S6.8"];
 const EXPECTED_S7B = ["S7B.1", "S7B.1b", "S7B.2", "S7B.3", "S7B.4", "S7B.5", "S7B.6"];
 const EXPECTED_S8 = ["S8.1", "S8.2", "S8.3", "S8.4", "S8.5", "S8.6"];
+// 这三族原本把清单写在各自的场景函数里（局部 const）。全局对账需要它们，于是**提升到这里做唯一来源**：
+// 两份副本 = 两个产地 = 迟早会分叉（V6 §9 记的「同一个值的六个产地」就是这么长出来的）。
+const EXPECTED_S7 = ["S7.0", "S7.1", "S7.2", "S7.3", "S7.4", "S7.5", "S7.6", "S7.7", "S7.8", "S7.9", "S7.9b", "S7.10", "S7.11"];
+const EXPECTED_S9 = ["S9.0", "S9.1", "S9.2", "S9.3"];
+const EXPECTED_S10 = [
+  "S10.0", "S10.1", "S10.2", "S10.3", "S10.4", "S10.5",
+  "S10.6", "S10.7", "S10.8", "S10.9", "S10.10", "S10.11",
+];
 
 /**
  * 接线侧真源断言（V5 新增）：**读真实文件** `src/App.tsx`，而不是在探针里复刻它。
@@ -1543,7 +1583,7 @@ function loadMainWithStub(stub, options = {}) {
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function scenario7(env) {
-  const EXPECTED_S7 = ["S7.0", "S7.1", "S7.2", "S7.3", "S7.4", "S7.5", "S7.6", "S7.7", "S7.8", "S7.9", "S7.9b", "S7.10", "S7.11"];
+  // 清单是模块级唯一来源（见 EXPECTED_S7 处的注释）。
   return withCoverageGuard("S7", EXPECTED_S7, () => scenario7Body(env));
 }
 
@@ -2218,7 +2258,6 @@ async function scenario8(env) {
  * 这不是产品缺陷，是**驱动侧的通道保真缺口**；本场景把它补上并单独钉住。
  */
 async function scenario9(env) {
-  const EXPECTED_S9 = ["S9.0", "S9.1", "S9.2", "S9.3"];
   return withCoverageGuard("S9", EXPECTED_S9, () => scenario9Body(env));
 }
 
@@ -2401,20 +2440,6 @@ function bootBridgeWith(mod, options = {}) {
 }
 
 async function scenario10(env) {
-  const EXPECTED_S10 = [
-    "S10.0",
-    "S10.1",
-    "S10.2",
-    "S10.3",
-    "S10.4",
-    "S10.5",
-    "S10.6",
-    "S10.7",
-    "S10.8",
-    "S10.9",
-    "S10.10",
-    "S10.11",
-  ];
   return withCoverageGuard("S10", EXPECTED_S10, () => scenario10Body(env));
 }
 

@@ -1233,7 +1233,7 @@ function bridgeStatusPayload() {
       logPath: null,
       inboxWatch: inboxWatchMode(),
       tokenPersisted: false,
-      // ㊲：没有 controller 时如实回「本会话不持有明文」，而不是省略字段——
+      // ㊴（原 ㊲）：没有 controller 时如实回「没有可用的令牌明文（㊴ 后明文落盘，此处是桥模块加载失败的兜底）」，而不是省略字段——
       // 省略会让渲染层的 undefined 与 false 混在一起，面板就得写第二套分支。
       tokenVisible: false,
       address: null,
@@ -1472,7 +1472,7 @@ async function registerImportHandlers() {
   )
 
   /**
-   * ㊲：只读取回当前令牌明文，**绝不轮换**。加它的理由是一个真实缺口：
+   * ㊴（原 ㊲，存储位置由 ㊴ 改为落盘）：只读取回当前令牌明文，**绝不轮换**。加它的理由是一个真实缺口：
    * **整窗重载（Ctrl+R）不是应用重启** —— 主进程仍持有明文，而渲染层的模块缓存
    * 没了，于是「复制令牌」会变成一个点不动的死按钮，而用户此刻往往正想配 agent。
    * 本会话不再持有（应用重启过）时返回 null，绝不假装可用。

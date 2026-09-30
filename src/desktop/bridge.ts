@@ -157,7 +157,8 @@ export interface BridgeStatus {
   /** 实现细节：没有 dataDir 时令牌不落盘，重启后需重新生成。 */
   tokenPersisted?: boolean;
   /**
-   * ㊲：本会话是否仍持有令牌明文（只报「还在不在」，**绝不回显明文**）。
+   * ㊴：是否**握有可用的明文**（即「复制」能不能用）—— 只报在不在，**绝不回显明文**。
+   * 与 `tokenSet` 唯一不等的场景：升级用户的旧 `bridge.json` 只有哈希（`C29`）。
    * 桥与主进程都可能不提供这个字段；渲染层必须按 false 降级，绝不假装可复制。
    */
   tokenVisible?: boolean;
@@ -293,7 +294,7 @@ export interface OpennoteBridge {
     /** 唯一一次返回令牌明文；服务端只存 sha256。 */
     newToken(options?: { origin?: string }): Promise<{ token: string; last4: string }>;
     /**
-     * ㊲：取回**当前**令牌明文（用于整窗重载后仍可复制）。**绝不轮换令牌** ——
+     * ㊴（原 ㊲，存储位置由 ㊴ 改为落盘）：取回**当前**令牌明文（整窗重载后仍可复制）。**绝不轮换令牌** ——
      * 那是 `newToken()` 的职责。本会话不再持有时返回 `null`，绝不假装可用。
      */
     token(): Promise<{ token: string | null }>;
