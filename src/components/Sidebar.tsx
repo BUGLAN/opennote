@@ -284,6 +284,9 @@ interface TreeProps extends SidebarProps {
 
 function TreeBody(props: TreeProps): ReactNode {
   const { library, ui, scope, activeId, counts } = props;
+  // ㊷：「其他」是可折叠组，条目缩进为子项（与文件夹树同一套语言）。
+  // 默认展开：收件箱的待确认条数是**要看的**，折叠起来等于把它藏了。
+  const [othersOpen, setOthersOpen] = useState(true);
   const roots = childFolders(library, null);
   const loose = notesInFolder(library, null, { sort: ui.sort });
 
@@ -343,29 +346,47 @@ function TreeBody(props: TreeProps): ReactNode {
         </p>
       ) : null}
 
-      <div className="tree__group">其他</div>
-      <ScopeRow
-        icon="star"
-        label="星标笔记"
-        count={counts.starred}
-        active={scope.kind === "starred"}
-        onClick={() => props.onScope({ kind: "starred" })}
-      />
-      <ScopeRow
-        icon="trash"
-        label="回收站"
-        count={counts.trash}
-        active={scope.kind === "trash"}
-        onClick={() => props.onScope({ kind: "trash" })}
-      />
-      {/* 外部导入的待确认内容在这里，不属于文件树，所以不参与 scope 高亮。 */}
-      <ScopeRow
-        icon="download"
-        label="导入收件箱"
-        count={props.inboxPending}
-        active={false}
-        onClick={() => props.onOpenInbox()}
-      />
+      {/* ㊷：「其他」像文件夹那样可展开/收起，条目缩进一级，父子关系看得见。 */}
+      <button
+        type="button"
+        className="tree__group tree__group--toggle"
+        aria-expanded={othersOpen}
+        onClick={() => setOthersOpen((open) => !open)}
+      >
+        <span className={cn("tree__caret", othersOpen && "is-open")}>
+          <Icon name="chevronRight" size={12} />
+        </span>
+        其他
+      </button>
+      {othersOpen ? (
+        <>
+          <ScopeRow
+            depth={1}
+            icon="star"
+            label="星标笔记"
+            count={counts.starred}
+            active={scope.kind === "starred"}
+            onClick={() => props.onScope({ kind: "starred" })}
+          />
+          <ScopeRow
+            depth={1}
+            icon="trash"
+            label="回收站"
+            count={counts.trash}
+            active={scope.kind === "trash"}
+            onClick={() => props.onScope({ kind: "trash" })}
+          />
+          {/* 外部导入的待确认内容在这里，不属于文件树，所以不参与 scope 高亮。 */}
+          <ScopeRow
+            depth={1}
+            icon="download"
+            label="收件箱"
+            count={props.inboxPending}
+            active={false}
+            onClick={() => props.onOpenInbox()}
+          />
+        </>
+      ) : null}
 
       {scope.kind === "trash" ? <TrashList library={library} /> : null}
     </div>
@@ -378,15 +399,23 @@ function ScopeRow({
   count,
   active,
   onClick,
+  depth = 0,
 }: {
   icon: IconName;
   label: string;
   count: number;
   active: boolean;
   onClick: () => void;
+  /** 缩进层级；与 FolderBranch 用同一公式，保证「其他」的子项和文件夹子项对齐。 */
+  depth?: number;
 }): ReactNode {
   return (
-    <button type="button" className={cn("tree__row", active && "is-active")} onClick={onClick}>
+    <button
+      type="button"
+      className={cn("tree__row", active && "is-active")}
+      style={{ paddingLeft: 6 + depth * 13 }}
+      onClick={onClick}
+    >
       <span className="tree__icon">
         <Icon name={icon} size={14} />
       </span>

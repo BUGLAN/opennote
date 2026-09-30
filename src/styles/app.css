@@ -1868,3 +1868,22 @@ mark.hit {
     display: block;
   }
 }
+
+/* ㊷：「其他」是可折叠组头（用既有令牌，新增令牌 0）。 */
+.tree__group--toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tree__group--toggle:hover {
+  color: var(--ink);
+}
