@@ -42,7 +42,11 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .segmented button.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
 .spinner{width:12px;height:12px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:spin .8s linear infinite;flex:none}
 @keyframes spin{to{transform:rotate(360deg)}}
-@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+/* task-29 ④：入场**只做位移、不做透明度**。原来 `from{opacity:0}` + `animation-fill-mode:both`
+   让「内容已经存在」的提醒块/结果块在首帧几乎不可读（用户实测：「第一次打开时样式有问题，应该是 border」
+   —— 其实边框一直在，是被自己的入场动画压到看不见）。骨架态是「还没有内容」，这两者不是一回事：
+   **已经有内容却把它藏起来**对「一打开就能读」是有害的。仍复用同一套既有令牌，无新增令牌。 */
+@keyframes rise{from{transform:translateY(6px)}to{transform:none}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
 
@@ -211,3 +215,6 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
   user-select: text;
   word-break: break-all;
 }
+/* task-29 入口：卡片标题行上的图标按钮（工具条仍是两个按钮，M1 冻结决定不破）。只用既有令牌。 */
+.clip__open{margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:1px solid var(--rule);border-radius:var(--radius-sm);background:var(--paper-2);color:var(--ink-3);cursor:pointer}
+.clip__open:hover{color:var(--ink);border-color:var(--rule-strong)}

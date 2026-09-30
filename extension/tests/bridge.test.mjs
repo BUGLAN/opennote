@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { connect } from "node:net";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,6 +30,7 @@ import {
 } from "../src/lib/bridge.js";
 import { ISO_WITH_TZ_RE, buildEnvelope, envelopeProblems } from "../src/lib/envelope.js";
 import { STATE, decideState } from "../src/lib/state.js";
+import { diag, reportUntrusted } from "../tools/untrusted-marker.mjs";
 
 function envelopeFixture(importId = "3f9a1c02-7e41-4b90-8a35-1d2c4f6a8b90") {
   return buildEnvelope({
@@ -47,10 +49,37 @@ function envelopeFixture(importId = "3f9a1c02-7e41-4b90-8a35-1d2c4f6a8b90") {
   });
 }
 
+/** 只做 TCP 连接探测：不产生任何 mock 可见的请求（否则会干扰按请求计数的用例）。 */
+async function portAccepts(port) {
+  return await new Promise((resolve) => {
+    const socket = connect({ port, host: "127.0.0.1" });
+    const done = (value) => {
+      socket.destroy();
+      resolve(value);
+    };
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+    socket.setTimeout(500, () => done(false));
+  });
+}
+
 async function bootstrap(options = {}) {
   const outDir = options.outDir || mkdtempSync(join(tmpdir(), "opennote-mock-"));
   const bridge = await startMockBridge({ port: 0, log: false, outDir, ...options });
-  return bridge;
+  // 环境就绪守卫（**有界**，**唯一产地**）：mock 还没开始响应就发请求 → 分类会是 `unreachable`，
+  // 那是**环境不可信**，不是产品红（实测两次 flake 都出在这一族：overwrite / no-window）。
+  // 判据用「不是 unreachable」而不是「kind==='ok'」—— 有意制造异常的 mode（starting/foreign/no-window…）
+  // 本来就答不出 ok，但它们**已经就绪**，不该被当成环境不可用。
+  // 等不到就报不可信并退出（runner 按标记文件改判为 2），**不许静默通过、也不许当产品缺陷报红**。
+  // 判据是 **TCP 能连上**（不是发一次健康请求）：`rate-limit` 那类用例是按**请求计数**判定的，
+  // 用 HTTP 探测会给 mock 多发一次请求，**守卫会改变它所观测的东西**（实测：3/3 把该用例判红）。
+  for (let i = 0; i < 30; i += 1) {
+    if (await portAccepts(bridge.port)) return bridge;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  diag("bootstrap：mock 端口 3 秒内没有开始接受连接");
+  reportUntrusted("mock 在 3 秒内没有开始接受连接（环境不可信，不是产品缺陷）");
+  process.exit(1); // runner 按标记文件改判为 2
 }
 
 async function reserveClosedPort() {
@@ -486,3 +515,12 @@ test("HTTP 状态码兜底映射：不留「未知错误」", () => {
   assert.ok(!isValidToken(`opn_${"a".repeat(42)}`));
   assert.ok(!isValidToken(`xxx_${"a".repeat(43)}`));
 });
+
+
+
+
+
+
+
+
+

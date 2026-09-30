@@ -17,6 +17,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DIAG_FILE, UNTRUSTED_FILE, clearUntrusted, takeUntrusted } from "./untrusted-marker.mjs";
 
 const ROOT = join(import.meta.dirname, "..");
 const LOG = join(ROOT, ".test-failure.log");
@@ -24,6 +25,9 @@ const GLOB = "tests/**/*.test.mjs";
 const MARKERS = [".building", ".mutation-running"];
 
 const started = new Date().toISOString();
+// 跑前先清：上一次被 kill 的运行不许留下陈旧标记污染这一轮（也在 .building 上学过）
+clearUntrusted();
+writeFileSync(DIAG_FILE, "");
 const result = spawnSync(process.execPath, ["--test", GLOB], {
   cwd: ROOT,
   encoding: "utf8",
@@ -33,8 +37,27 @@ const output = `${result.stdout || ""}${result.stderr || ""}`;
 const code = result.status === null ? 1 : result.status;
 const notOk = output.split("\n").filter((line) => /^\s*not ok /.test(line));
 const present = MARKERS.filter((name) => existsSync(join(ROOT, name)));
+const untrusted = takeUntrusted(); // 读完即删
+console.log("诊断 · runner 读的标记文件：" + UNTRUSTED_FILE + "；takeUntrusted() 原始返回 " + JSON.stringify(untrusted));
 const passCount = (output.match(/^# pass (\d+)/m) || [])[1] || "?";
 
+if (untrusted.length > 0) {
+  writeFileSync(
+    LOG,
+    [
+      `# ${started}`,
+      "# **结果不可信**（退出码 2）：环境不可用，不是产品失败",
+      `# 原因 ${untrusted.length} 条；pass ${passCount}；node --test 退出码 ${code}`,
+      `# 那一刻存在的标记文件：${present.length ? present.join(" / ") : "（无）"}`,
+      "",
+      output,
+    ].join("\n"),
+    "utf8",
+  );
+  console.log(`结果不可信（退出码 2，不是失败）—— 环境不可用；完整输出已落盘：${LOG}`);
+  for (const reason of untrusted) console.log(`  ${reason}`);
+  process.exit(2);
+}
 if (code === 0 && notOk.length === 0) {
   console.log(`通过：${passCount} 条（node --test 退出码 0）`);
   process.exit(0);

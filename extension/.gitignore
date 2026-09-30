@@ -6,3 +6,5 @@
 .mutation-running
 .shots/
 .test-failure.log
+.untrusted
+.test-diag.log

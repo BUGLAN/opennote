@@ -180,6 +180,23 @@ function okNode(spec) {
   return box;
 }
 
+/** 图标（内联 SVG，非 emoji）：右上箭头 + 方框 = 「在独立页面里打开」。 */
+function iconExternal() {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "14");
+  svg.setAttribute("height", "14");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", "M6 3h7v7M13 3 6.5 9.5M11 11v2H3V5h2");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.4");
+  svg.appendChild(path);
+  return svg;
+}
+
 function previewNode() {
   const ex = extraction();
   const box = el("div", "clip__preview");
@@ -190,6 +207,21 @@ function previewNode() {
   title.id = "inlineTitle";
   title.textContent = titleValue || defaultTitle();
   row.appendChild(title);
+  // task-29 入口：**卡片标题行上的图标按钮** → 打开可编辑页（clip/clip.html）。
+  // 工具条仍是两个按钮（M1 冻结决定不破）；**无网址时不渲染**（不画死按钮）。
+  const openTarget = (ex && ex.url) || (snapshot && snapshot.tab && snapshot.tab.url) || "";
+  if (openTarget) {
+    const open = el("button", "clip__open");
+    open.type = "button";
+    open.id = "openEditable";
+    open.title = "在可编辑页里剪藏";
+    open.setAttribute("aria-label", "在可编辑页里剪藏");
+    open.appendChild(iconExternal());
+    open.addEventListener("click", () => {
+      void chrome.tabs.create({ url: chrome.runtime.getURL("clip/clip.html") });
+    });
+    row.appendChild(open);
+  }
   if (mode === "page") {
     const chars = (ex && ex.article && ex.article.chars) || 0;
     row.appendChild(el("span", "clip__count", `约 ${chars.toLocaleString("en-US")} 字 · 预计 1 篇笔记`));
@@ -974,3 +1006,5 @@ document.documentElement.setAttribute(
 );
 bindEvents();
 void load();
+
+

@@ -607,8 +607,11 @@ const distText = distFiles
   .join("\n");
 const stillReferenced = DEAD_TOKENS.filter((token) => distText.includes(token));
 if (stillReferenced.length) fail(GROUP_V17, `已退场的存储键/符号仍在产物里：${stillReferenced.join(", ")}`);
-if (distFiles.length > 23) fail(GROUP_V17, `产物文件数应随 M2 明显下降，实际 ${distFiles.length}（M1 时是 27）`);
-if (!stillShipped.length && !stillReferenced.length && distFiles.length <= 23) {
+  // task-29: the user-chosen editable clip page adds 2 artifacts (clip/clip.html + clip/clip.js).
+  // The bound moves 23 -> 25 because the decision changed, not to turn a red green: the M2-removed
+  // template/highlight modules are still absent, and the total (24) is still far below the M1 count of 27.
+if (distFiles.length > 25) fail(GROUP_V17, `产物文件数应随 M2 明显下降，实际 ${distFiles.length}（M1 时是 27）`);
+if (!stillShipped.length && !stillReferenced.length && distFiles.length <= 25) {
   pass(`模板/高亮的模块与存储键都不在产物里，产物 ${distFiles.length} 个文件（M1 时 27）`);
 }
 
