@@ -24,6 +24,7 @@ import {
   updateNoteContent,
 } from "../data/library";
 import type { Id } from "../data/types";
+import { assetsDirFor } from "../lib/clip/landing";
 import { normalizeEol, readFileAsText, uid } from "./utils";
 
 export interface ImportResult {
@@ -87,6 +88,22 @@ export async function importIntoWorkspace(
     result.notes += 1;
   };
 
+  /**
+   * 附件落盘到**公共** `<目标目录>/assets/`。
+   *
+   * 为什么这里不是新约定的 `<笔记名>.assets/`：本函数只有两个调用方，两边都**没有**
+   * 「能派生的笔记名」这个事实 ——
+   * 1. **独立导入一张图片**（没有配套的 `.md`）：没有笔记就没有笔记名。凭空按图片名造一个
+   *    `<图片名>.assets/` 会造出「暗示存在同名笔记」的目录，而那个笔记根本不存在：
+   *    一个目录名两种含义。所以这里如实落公共目录，这是**裸附件（无归属笔记）唯一的例外**；
+   *    将来真需要它跟某篇笔记走，由用户自己移动（或另立「裸附件」的正式约定），
+   *    本函数不承诺那个未来。
+   * 2. **zip 导入里的图片**：见 `handleZip()` 里的裁定注释 —— 那些正文写着旧写法 `./assets/`，
+   *    属于「旧数据不迁移」，原样落地。
+   *
+   * 新图（编辑器粘贴/拖拽 → `saveImage`；剪藏 → `receive.ts` 的 `writeAssets`）一律走
+   * `assetsDirFor(笔记路径)`，**不许**再从这条路径写。
+   */
   const writeAttachment = async (blob: Blob, name: string, folderId: Id | null): Promise<Id> => {
     const dir = joinPath(folderId ?? "", ASSETS_DIR);
     const existing = await listOptionalDirectory(backend, dir);
@@ -117,9 +134,17 @@ export async function importIntoWorkspace(
 
     // Write images first so a renamed attachment can be reflected in the
     // markdown that refers to it. Keep each assets/ folder next to its notes.
+    //
+    // 裁定（Lead，本轮）：**zip 导入保持旧布局不动**。zip 里的正文是**外部给的**，写的
+    // 就是旧写法 `./assets/x.png` —— 那些图片属于「旧数据」，按 `assets/` 原样落地，
+    // 正文**不做** `<笔记名>.assets/` 改写（`不迁移旧数据` 的直接推论）。
+    // 将来若真要按新约定改写，必须**整篇正文一起按类改写**（像 `landing.ts` 的
+    // `rewriteAssetRefs()` 那样），不许只改 `:145/:146` 那处字符串替换的「一半」——
+    // 「一半改写」会比不改更坏：正文与磁盘会各说一套。
     for (const entry of images) {
       const parts = entry.name.split("/").filter(Boolean);
       const name = parts.pop() ?? "image.png";
+      // 这里只剥公共 `assets/` 段（旧导出布局的写法）。
       if (parts.at(-1) === ASSETS_DIR) parts.pop();
       const folderId = await ensureFolder(parts);
       const blob = await entry.async("blob");
@@ -211,9 +236,19 @@ export async function migrateLegacyData(): Promise<ImportResult> {
   }
 
   const taken = new Set<string>(Object.keys(libraryStore.get().notes));
-  const assetNames = new Map<string, string>();
   for (const note of notes) {
     const folderId = note.folderId ? (folderMap.get(note.folderId) ?? null) : null;
+    // 落点与附件目录**先**定下来：附件目录按**最终笔记路径**派生（`assetsDirFor`），
+    // 正文改写的引用前缀和图片落盘目录都由它决定，所以不能等写完图再算路径。
+    const title = sanitizeName(note.title || stripExtension(baseName(`legacy-${uid()}.md`)), "旧笔记");
+    const path = await resolveAvailablePath(backend, joinPath(folderId ?? "", `${title}.md`), taken);
+    taken.add(path);
+    const dir = assetsDirFor(path);
+    const refPrefix = `./${baseName(dir)}/`;
+    // `asset://` 的 id 是**全局**的，但附件目录按笔记名派生 ⇒ 同一个 id 被两篇笔记引用时
+    // 必须**各写一份**：跨笔记共用一张缓存表会让第二篇的引用指向第一篇的目录（图看起来"在"，
+    // 但换目录/删笔记之后就断）。所以缓存按**这一篇**笔记的作用域建。
+    const assetNames = new Map<string, string>();
     let content = note.content ?? "";
     for (const match of content.matchAll(/asset:\/\/([A-Za-z0-9-]+)/g)) {
       const assetId = match[1];
@@ -221,7 +256,6 @@ export async function migrateLegacyData(): Promise<ImportResult> {
       if (!name) {
         const blob = await getLegacyAsset(assetId);
         if (!blob) continue;
-        const dir = joinPath(folderId ?? "", ASSETS_DIR);
         const existing = await listOptionalDirectory(backend, dir);
         const used = new Set(existing.map((entry) => joinPath(dir, entry.name)));
         const suggested = sanitizeName(`legacy-${assetId.slice(0, 8)}.png`);
@@ -230,11 +264,8 @@ export async function migrateLegacyData(): Promise<ImportResult> {
         assetNames.set(assetId, name);
         result.attachments += 1;
       }
-      content = content.split(`asset://${assetId}`).join(`./${ASSETS_DIR}/${name}`);
+      content = content.split(`asset://${assetId}`).join(`${refPrefix}${name}`);
     }
-    const title = sanitizeName(note.title || stripExtension(baseName(`legacy-${uid()}.md`)), "旧笔记");
-    const path = await resolveAvailablePath(backend, joinPath(folderId ?? "", `${title}.md`), taken);
-    taken.add(path);
     await backend.writeText(path, normalizeEol(content));
     result.notes += 1;
     result.migrated = (result.migrated ?? 0) + 1;

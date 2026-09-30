@@ -236,6 +236,24 @@ export function maskTokenTail(tail) {
   return `opn_${"•".repeat(12)}${String(tail || "")}`;
 }
 
+/**
+ * `POST /v1/clip/stage`（A · 网页版剪藏页）：把这次剪藏暂存到本地接口，换回**由接口生成**的
+ * `openUrl`。请求体形状**冻结**（交接文档 §四-A）：`{ spec, url, title, body, selection, tags[],
+ * source{site,author,publishedAt}, assets[] }`；`openUrl` 由接口返回，扩展**绝不自己拼**
+ * （端口是 8787–8796 里选出来的、`stageId` 是接口的不透明 id）。
+ */
+export async function postClipStage(port, token, payload, options = {}) {
+  const { timeoutMs = REQUEST_TIMEOUT_MS, fetchImpl } = options;
+  const raw = await requestJson(endpointOf(port, "/v1/clip/stage"), {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(payload),
+    timeoutMs,
+    fetchImpl,
+  });
+  return normalizeCall(raw, codeFromHttp);
+}
+
 /** `GET /v1/imports/{importId}`（API-03）：收件箱模式下的轮询。 */
 export async function getImportStatus(port, token, importId, options = {}) {
   const { timeoutMs = REQUEST_TIMEOUT_MS, fetchImpl } = options;

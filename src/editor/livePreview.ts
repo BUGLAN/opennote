@@ -240,7 +240,7 @@ function decorate(
             if (!isActive(from, to) && raw) {
               const line = doc.lineAt(from);
               const alone = line.from === from && doc.lineAt(to).to === to;
-              replaceWith(from, to, new ImageWidget(raw, alt, alone, settings.baseDir));
+              replaceWith(from, to, new ImageWidget(raw, alt, alone, settings.notePath));
               if (alone) lineDeco(from, "md-media-line");
               return false;
             }

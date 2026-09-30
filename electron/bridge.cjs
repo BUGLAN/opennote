@@ -32,7 +32,23 @@
  *     // 可选扩展（不传即退化，不影响冻结面）：
  *     dataDir, getWorkspaceInfo, getAppVersion, getInboxEnabled, getRecentImports,
  *     getImportRecord, getTags, getInboxMode,
+ *     // 网页版剪藏页（0.3.2）：**必须**装配，否则 /v1/clip/folders 与
+ *     // /v1/clip/commit 的落点校验一律明确失败（503 / 422），绝不假装「工作区里没有目录」。
+ *     //   getFolders: () => string[] | null | Promise<string[] | null>
+ *     //     同步或异步均可；**已存在**的工作区相对目录（POSIX 风格、不含 ""）；
+ *     //     `[]` = 工作区里没有目录（合法）；`null` / 抛错 / 不是数组 = 拿不到（失败）。
+ *     //     桥负责补 `""`（收件箱，恒为第 0 项）、去重与排序。
+ *     //   clip: { distRoot?, ttlMs?, maxStages? } —— **只给自测用的覆盖**（形态同 `limits`）：
+ *     //     把静态页指向临时夹具、把 TTL 调短。产品路径不传，用模块常量。
  *   }) -> BridgeController
+ *
+ * 网页版剪藏页（0.3.2，契约 §5.9）。三条红线决定了这个面长什么样：
+ *   1. **页面永不持有长期令牌**：页面是 `chrome.tabs.create()` 打开的普通网页，
+ *      所以它只拿 `stageId + k`（一次剪藏一份、15 分钟过期），三个页面端点都不用 Bearer。
+ *   2. **一个事实一个产地**：`stageId` 只由本文件生成（绝不用扩展的 importId），
+ *      `openUrl` 只由本文件拼（端口是 8787–8796 里选出来的，客户端不许自己拼）。
+ *   3. **不另造写路径**：`POST /v1/clip/commit` 复用 `/v1/import` 的入库通路
+ *      （`runEnvelopePipeline`：信封 → onEnvelope 转交渲染层 → respondWithReceipt）。
  *
  * 只读交付模式（㉕）：`GET /v1/health` 与 `GET /v1/workspace` 的响应都带 `inboxMode` 字段：
  *   - `"inbox"`：非应用内通道的导入会**先进入收件箱**等待用户确认（0.3.0 起应用侧默认值）；
@@ -46,6 +62,10 @@ const http = require('node:http')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
+
+// 剪藏暂存区（stageId / k 生成、TTL、单次提交记录）。拆出去只为一件事：
+// 「一个事实一个产地」—— stageId 与 k 的生成、过期判定、已提交指纹只在一个文件里。
+const { createClipStageStore, CLIP_STAGE_TTL_MS } = require('./clip-stage.cjs')
 
 // ---------------------------------------------------------------------------
 // 常量（契约 §5.2 数字逐字）
@@ -66,6 +86,50 @@ const TOKEN_LENGTH = TOKEN_PREFIX.length + TOKEN_SECRET_LENGTH
 const TOKEN_PATTERN = /^opn_[A-Za-z0-9_-]{43}$/
 
 const SPEC_VERSION = 'opennote.import/v1'
+
+// ---------------------------------------------------------------------------
+// 网页版剪藏页（0.3.2）常量
+// ---------------------------------------------------------------------------
+
+/** 剪藏暂存的 spec（**与导入信封的 spec 不是同一个值**，混用就是两个产地打架）。 */
+const CLIP_SPEC = 'opennote.clip/v1'
+/** 剪藏页客户端的名字；L2 不认识的值按 02 §2.2 归一到 `other`（不报错）。 */
+const CLIP_CLIENT_NAME = 'opennote.clip-web'
+/**
+ * 剪藏页构建产物根目录 = `pnpm build:clip` 的 outDir 根部。
+ *
+ * 这里只按约定推导（`dist-clip/clip/index.html` 与 `dist-clip/clip/assets/**`）；
+ * 自测要指到临时夹具时用 `clip.distRoot`，**产品路径不读环境变量**——
+ * 否则「产物在哪」就有了第二个产地。
+ */
+const CLIP_DIST_RELATIVE = 'dist-clip'
+const CLIP_DIST_ROOT = path.join(__dirname, '..', CLIP_DIST_RELATIVE)
+const CLIP_INDEX_RELATIVE = 'clip/index.html'
+const CLIP_ASSETS_RELATIVE = 'clip/assets'
+/** 注入的引导数据块 id：页面用 `JSON.parse(document.getElementById('clip-boot').textContent)` 读。 */
+const CLIP_BOOT_ID = 'clip-boot'
+/**
+ * 剪藏页 CSP（逐字冻结）。`script-src 'self'` **不带** unsafe-inline ——
+ * 所以引导数据走 `<script type="application/json">` 数据块（浏览器不执行它），
+ * 而不是可执行内联脚本。`connect-src 'self'` 让页面能读 `/v1/clip/*`（同源）。
+ */
+const CLIP_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+/** 静态资源扩展名白名单（只有这些出网，其余一律 404）。 */
+const CLIP_ASSET_TYPES = {
+  js: 'text/javascript; charset=utf-8',
+  css: 'text/css; charset=utf-8',
+  woff2: 'font/woff2',
+  png: 'image/png',
+  svg: 'image/svg+xml',
+  map: 'application/json; charset=utf-8',
+}
+/** stageId / k 的形态：43 字符 base64url，且长度不得小于契约要求的 32。 */
+const CLIP_SECRET_PATTERN = /^[A-Za-z0-9_-]{32,128}$/
+/** 单条暂存的正文上限（与导入信封的 `body` 上限同量级：8 MiB，超出 → IMP-4004）。 */
+const MAX_CLIP_BODY_BYTES = 8 * 1024 * 1024
+/** 单条暂存的附件数量上限（与 02 §2.7 一致：32，超出 → IMP-4013）。 */
+const MAX_CLIP_ASSETS = 32
 
 /**
  * 应用版本的**唯一产地是 `package.json`**。
@@ -167,9 +231,40 @@ const ERROR_TABLE = {
   'IMP-4014': { http: 500, retryable: true, message: '内部一致性错误', userMessage: '导入时出现了内部错误，已记录日志。请重试一次。' },
   'IMP-4015': { http: 429, retryable: true, message: '超过限流', userMessage: '导入太频繁了，请稍等几秒再试。' },
   'IMP-4017': { http: 404, retryable: false, message: '查询的 importId 不存在', userMessage: '没有找到这条导入记录。' },
+  /**
+   * 0.3.2（网页版剪藏页 §5.9.5）：暂存的单次性 —— 同一个 `stageId` **内容不同**必须明确失败。
+   * **不借用 `IMP-4011`**：那个码的登记含义是「覆盖不可用，已改为新建」，借它就是把
+   * 一个码号掰成两个含义（与本简报一路在抓的 `tokenSet` / 明文可见性同族）。
+   * 内容**相同**时不报错：原样重放同一份已存回执（幂等）。
+   */
+  'IMP-4018': { http: 409, retryable: false, message: '暂存条目已入库且内容与当时不同', userMessage: '这个暂存条目已经入库过一次，而且当时的正文与现在不同。请回到浏览器重新剪藏一次。' },
+  /**
+   * 0.3.2（§5.9.2）剪藏页的 `k` 不匹配 / 缺失。**不借用 `IMP-2002`**：那是「长期令牌无效」，
+   * 它的文案指的下一步是「重新生成令牌」—— 页面根本没有令牌，那句话是误导。
+   */
+  'IMP-4019': { http: 401, retryable: false, message: '剪藏链接的密钥不匹配', userMessage: '这个剪藏链接不完整或已被改过，无法确认它的身份。请回到浏览器重新剪藏一次。' },
   'IMP-4020': { http: 409, retryable: true, message: '同一 importId 的在途提交超过 10 s', userMessage: '上一次导入还在进行中，请稍候重试。' },
+  /**
+   * 0.3.2（§5.9.2）剪藏暂存不存在 / 已过期（TTL 15 分钟，或进程重启后内存清空）。
+   * **不借用 `IMP-4017`**：那是「查询的 importId 不存在」，与「一次性暂存过期」不是一件事。
+   */
+  'IMP-4021': { http: 404, retryable: false, message: '剪藏暂存不存在或已过期', userMessage: '这条剪藏暂存已经失效（暂存只保留 15 分钟），请回到浏览器重新剪藏一次。' },
+  /**
+   * 0.3.2（§5.9.5）剪藏落点目录不存在。**不借用 `IMP-4008`**：那个码的登记触发条件是
+   * 「绝对路径 / `..` / `\0` / `:` / 超深 / 超长」这类**字面非法**，文案也在说「不能使用 ..、
+   * 绝对路径或系统保留字符」；而这里的目录名字面完全合法、只是**不存在**。
+   * 更关键的是 02 §2.4 规定「目录不存在时默认创建」——「不存在」在信封契约里本来就不是错，
+   * 它是剪藏页自己收窄的规定（**绝不自动创建**），所以必须自己有一个码。
+   * （字面非法那一支**照旧**走 `IMP-4008`，两者不混。）
+   */
+  'IMP-4022': { http: 422, retryable: false, message: '剪藏落点目录不存在', userMessage: '这个目录在笔记本里不存在。请回到剪藏页重新选择落点。' },
   'IMP-5001': { http: 500, retryable: true, message: '写盘失败', userMessage: '写入笔记失败，磁盘可能已满或没有权限。原内容没有丢失。' },
   'IMP-5002': { http: 503, retryable: true, message: '本地接口未开启', userMessage: '本地接口当前不在运行状态。请先在 Opennote 的「设置 · 文件 · 导入与接口」里开启接口，再重试。' },
+  /**
+   * 0.3.2（§5.9.3）：剪藏页产物缺失。**不借用 `IMP-5001`**（那个码的登记含义是写盘失败），
+   * 也不把 503 当成「随便挑一个 5xx」—— 缺构建产物是可修的部署问题，`retryable: true`。
+   */
+  'IMP-5003': { http: 503, retryable: true, message: '剪藏页产物缺失（dist-clip 未构建）', userMessage: '网页版剪藏页还没有构建（找不到 dist-clip）。请先跑一次 pnpm build:clip，再重试打开。' },
 }
 
 const WARNING_TEXT = {
@@ -307,6 +402,18 @@ function windowRetryAfter(window, now = Date.now()) {
   return Math.max(1, Math.ceil((oldest + window.windowMs - now) / 1000))
 }
 
+/**
+ * 把引导数据块插进 Vite 产物：优先 `</body>` 之前，其次 `</html>` 之前，都没有就追加到末尾。
+ * 纯函数（只做字符串拼接），所以「注入位置」这条规则可以被单独断言。
+ */
+function injectClipBoot(html, snippet) {
+  const bodyEnd = html.search(/<\/body\s*>/i)
+  if (bodyEnd >= 0) return `${html.slice(0, bodyEnd)}${snippet}\n${html.slice(bodyEnd)}`
+  const htmlEnd = html.search(/<\/html\s*>/i)
+  if (htmlEnd >= 0) return `${html.slice(0, htmlEnd)}${snippet}\n${html.slice(htmlEnd)}`
+  return `${html}\n${snippet}\n`
+}
+
 // ---------------------------------------------------------------------------
 // createBridge
 // ---------------------------------------------------------------------------
@@ -328,10 +435,24 @@ function createBridge(options = {}) {
   const getAdvancedOverwrite = typeof options.getAdvancedOverwrite === 'function' ? options.getAdvancedOverwrite : null
   const isLogEnabled = typeof options.isLogEnabled === 'function' ? options.isLogEnabled : null
   const userLog = typeof options.log === 'function' ? options.log : () => {}
+  /**
+   * 剪藏页的落点列表来源（0.3.2）。同步或异步均可：主进程眼下是同步实现，
+   * 但 relay 形态（渲染层应答）必然是异步的，所以这里一律 await，不把实现绑死。
+   * 拿不到（缺失 / 抛错 / 不是数组）**与空数组是两件事**：前者明确失败，后者如实报「只有收件箱」。
+   */
+  const getFoldersHook = typeof options.getFolders === 'function' ? options.getFolders : null
 
   const dataDir = typeof options.dataDir === 'string' && options.dataDir !== '' ? options.dataDir : null
   const bridgeFile = dataDir ? path.join(dataDir, 'bridge.json') : null
   const logFile = dataDir ? path.join(dataDir, 'bridge.log') : null
+
+  /** 剪藏页覆盖（只给自测；产品路径不传，用模块常量）。 */
+  const clipOptions = options.clip && typeof options.clip === 'object' ? options.clip : {}
+  const clipDistRoot =
+    typeof clipOptions.distRoot === 'string' && clipOptions.distRoot !== '' ? clipOptions.distRoot : CLIP_DIST_ROOT
+  /** 暂存区：内存 + TTL，进程退出即失效（不落盘，也不假装是持久队列）。 */
+  const clipStore = createClipStageStore({ ttlMs: clipOptions.ttlMs, maxStages: clipOptions.maxStages })
+
 
   /** 内存状态。持久化只在给了 dataDir 时发生（默认零文件副作用）。 */
   const persisted = readPersisted()
@@ -781,6 +902,47 @@ function createBridge(options = {}) {
     })
   }
 
+  /**
+   * 读 + 解析 JSON 请求体。**唯一一份**：`/v1/import`、`/v1/clip/stage`、`/v1/clip/commit`
+   * 三个入口共用它，否则「空体 / 非 JSON / 顶层不是对象」这三条规则会在三处各写一遍并迟早漂移。
+   *
+   * 行为（与契约 §2.6 / §6.2 逐条对应）：
+   *   - 超过 16 MiB → IMP-4005（`readBody` 在**解析前**按 Content-Length 拦，不读 body）；
+   *   - 连接中断 → 返回 null，**不发响应**（对端已经走了）；
+   *   - 空体 → IMP-3003；非 JSON → IMP-3002；顶层不是对象 → IMP-4001。
+   *
+   * @returns {Promise<object|null>} 失败时返回 null（响应已发或对端已断）
+   */
+  async function readJsonObject(req, res) {
+    const body = await readBody(req, res)
+    if (body.tooLarge) {
+      writeLog('import.error', { code: 'IMP-4005' })
+      return null
+    }
+    if (body.aborted) return null
+    const text = body.buffer ? body.buffer.toString('utf8') : ''
+    if (text.trim() === '') {
+      writeLog('import.error', { code: 'IMP-3003' })
+      sendError(req, res, 'IMP-3003')
+      return null
+    }
+
+    let parsed = null
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      writeLog('import.error', { code: 'IMP-3002' })
+      sendError(req, res, 'IMP-3002')
+      return null
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      writeLog('import.error', { code: 'IMP-4001' })
+      sendError(req, res, 'IMP-4001')
+      return null
+    }
+    return parsed
+  }
+
   // -------------------------------------------------------------------------
   // 导入队列（全局 1 并发）
   // -------------------------------------------------------------------------
@@ -846,18 +1008,9 @@ function createBridge(options = {}) {
 
     const method = req.method === 'HEAD' ? 'GET' : req.method
 
-    // OPTIONS 预检：只走 Host + Origin，不校验令牌（预检不携带 Authorization）。
-    if (req.method === 'OPTIONS') {
-      if (!checkHost(req, res)) return
-      if (!checkOrigin(req, res)) return
-      if (!route.startsWith('/v1/')) {
-        sendError(req, res, 'IMP-3005', { path: route })
-        return
-      }
-      res.writeHead(204, { 'Cache-Control': 'no-store', 'Content-Length': 0, ...(res.__cors ? corsHeaders(res.__cors.origin, true) : {}) })
-      res.end()
-      return
-    }
+    // 预检**只在这里判一次**（上面那段，见到 `OPTIONS` 就 return）。
+    // 这里原本还有**逐字重复的第二段** OPTIONS 分支 —— 它永远不可达（本项目一路在打的
+    // 「死路由 / 死订阅 / 死导入」同族），已删除；判据 `C-13m` 咬这个死代码不会复发。
 
     if (!checkHost(req, res)) return
     if (!checkOrigin(req, res)) return
@@ -887,6 +1040,11 @@ function createBridge(options = {}) {
       })
       return
     }
+
+    // 网页版剪藏页（0.3.2，契约 §5.9）：静态面 + /v1/clip/*。
+    // **必须放在令牌校验之前**：剪藏页是普通网页，拿的是 `stageId + k`，不是长期令牌
+    // （页面永不持有长期凭据）。POST /v1/clip/stage 仍走 Content-Type + 令牌两道。
+    if (await handleClipRoutes(req, res, url, method, startedAt)) return
 
     if (!checkContentType(req, res)) return
 
@@ -1005,32 +1163,8 @@ function createBridge(options = {}) {
       return
     }
 
-    const body = await readBody(req, res)
-    if (body.tooLarge) {
-      writeLog('import.error', { code: 'IMP-4005' })
-      return
-    }
-    if (body.aborted) return
-    const text = body.buffer ? body.buffer.toString('utf8') : ''
-    if (text.trim() === '') {
-      writeLog('import.error', { code: 'IMP-3003' })
-      sendError(req, res, 'IMP-3003')
-      return
-    }
-
-    let envelope = null
-    try {
-      envelope = JSON.parse(text)
-    } catch {
-      writeLog('import.error', { code: 'IMP-3002' })
-      sendError(req, res, 'IMP-3002')
-      return
-    }
-    if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) {
-      writeLog('import.error', { code: 'IMP-4001' })
-      sendError(req, res, 'IMP-4001')
-      return
-    }
+    const envelope = await readJsonObject(req, res)
+    if (!envelope) return
 
     const client = envelope.client && typeof envelope.client === 'object' ? envelope.client : {}
     const clientName = typeof client.name === 'string' ? client.name.slice(0, 80) : 'unknown'
@@ -1048,12 +1182,32 @@ function createBridge(options = {}) {
       }
     }
 
+    await runEnvelopePipeline(req, res, { envelope, importId, clientName, clientVersion, warnings, startedAt })
+  }
+
+  /**
+   * **唯一一条入库通路**：信封 → `onEnvelope`（转交渲染层）→ `respondWithReceipt`。
+   *
+   * `POST /v1/import` 与 `POST /v1/clip/commit` 都走这里 —— 剪藏页复用这条通路，
+   * **不许另造第二条写路径**（否则「落点分配 / 去重 / 前像 / 通知」会在两处各写一份，
+   * 而其中一份迟早会漏掉 D03/D08 那类边界）。
+   *
+   * 调用方负责：限流、读请求体、解析、字段校验、组装信封。这里只做三件**所有**通道
+   * 都必须做的事：绝对路径闸门 → 窗口在场 → 单并发排队。
+   *
+   * 返回值：`{ result, status }`（成功，已发响应）或 `{ errorCode, status }`（失败，已发响应）。
+   * 返回值只是给调用方记账用的（剪藏页要用它记「已提交」的幂等指纹）——
+   * **响应已经在这里发出**，调用方不得再写第二次。
+   */
+  async function runEnvelopePipeline(req, res, context) {
+    const { envelope, importId, clientName, clientVersion, warnings, startedAt } = context
+
     if (typeof envelope.target === 'object' && envelope.target && typeof envelope.target.folder === 'string') {
-      const reject = rejectAbsoluteFolder(envelope.target.folder)
+      const reject = rejectIllegalFolder(envelope.target.folder)
       if (reject) {
         writeLog('import.error', { code: 'IMP-4008', importId })
         sendError(req, res, 'IMP-4008', { field: 'target.folder' })
-        return
+        return { errorCode: 'IMP-4008', status: ERROR_TABLE['IMP-4008'].http }
       }
     }
 
@@ -1061,14 +1215,14 @@ function createBridge(options = {}) {
       // 窗口不在场：桥的生命周期跟随窗口，绝不假成功（契约 IMP-4006，可重试）。
       writeLog('import.error', { code: 'IMP-4006', importId, client: clientName })
       sendError(req, res, 'IMP-4006')
-      return
+      return { errorCode: 'IMP-4006', status: ERROR_TABLE['IMP-4006'].http }
     }
 
     const acquired = await acquireImportSlot()
     if (!acquired) {
       writeLog('ratelimit', { code: 'IMP-4020', importId })
       sendError(req, res, 'IMP-4020', { importId })
-      return
+      return { errorCode: 'IMP-4020', status: ERROR_TABLE['IMP-4020'].http }
     }
 
     let receipt
@@ -1082,20 +1236,35 @@ function createBridge(options = {}) {
       const code = timedOut ? 'IMP-1004' : 'IMP-5001'
       writeLog('import.error', { code, importId, client: clientName, ms: Date.now() - startedAt })
       sendError(req, res, code, { importId })
-      return
+      return { errorCode: code, status: ERROR_TABLE[code].http }
     } finally {
       releaseImportSlot()
     }
 
-    respondWithReceipt(req, res, receipt, { importId, clientName, warnings, startedAt })
+    return respondWithReceipt(req, res, receipt, { importId, clientName, warnings, startedAt })
   }
 
-  /** 桥不接受来自信封的绝对路径（§11 硬红线）。 */
-  function rejectAbsoluteFolder(folder) {
+  /**
+   * 落点是否**非法**（02 §2.4 的落点层规则，§11 硬红线）：绝对路径 / 盘符 / `\` / `\0` /
+   * `..` 段 / 含 `:` 的段。
+   *
+   * 为什么连 `..` 与 `\` 也在这里拦：它们不是「目录不存在」，而是**名字本身非法** ——
+   * L2 的 `assertSafeRelative()` 一定会拒（02 §7.3 要求落点层独立再跑一遍），
+   * 桥先拦只是把同一个判定提前，给客户端的错误码与文案都更准确（`IMP-4008`），
+   * 而不是让一个带 `..` 的落点走到「目录不存在」（`IMP-4022`）那条分支上去。
+   *
+   * 反过来也成立：`IMP-4022` 只留给「名字合法、但工作区里没有这个目录」。
+   * 两个码号的分界线就是**合法性 vs 存在性**，不许混（一个码一个含义）。
+   */
+  function rejectIllegalFolder(folder) {
     if (folder === '') return false
     if (/^[A-Za-z]:/.test(folder)) return true
     if (folder.startsWith('/') || folder.startsWith('\\')) return true
     if (folder.includes('\0')) return true
+    if (folder.includes('\\')) return true
+    const segments = folder.split('/')
+    if (segments.some((segment) => segment === '..')) return true
+    if (segments.some((segment) => segment.includes(':'))) return true
     return false
   }
 
@@ -1125,6 +1294,10 @@ function createBridge(options = {}) {
    *   1) 错误：`{ ok:false, error:{ code } }` 或 `{ code:'IMP-xxxx' }`
    *   2) 完整：`{ ok:true, status:200, result:{…} }`
    *   3) 结果：`{ status:'created', path, … }`
+   *
+   * 返回值（**响应已经发出**，只用于调用方记账）：
+   *   成功 → `{ result, status }`；失败 → `{ errorCode, status }`。
+   * 剪藏页靠它把「这一份已存回执」原样重放给同一个 stageId 的重试（幂等，不写第二遍）。
    */
   function respondWithReceipt(req, res, receipt, context) {
     const { importId, clientName, warnings, startedAt } = context
@@ -1140,7 +1313,7 @@ function createBridge(options = {}) {
     if (value == null) {
       writeLog('import.error', { code: 'IMP-5001', importId, client: clientName, ms: Date.now() - startedAt })
       sendError(req, res, 'IMP-5001', { importId })
-      return
+      return { errorCode: 'IMP-5001', status: ERROR_TABLE['IMP-5001'].http }
     }
 
     const errorCode =
@@ -1160,7 +1333,7 @@ function createBridge(options = {}) {
       if (value.error && value.error.detail !== undefined) error.detail = sanitizeDetail(value.error.detail)
       writeLog('import.error', { code: errorCode, importId, client: clientName, ms: Date.now() - startedAt })
       sendJson(req, res, spec.http, { ok: false, error })
-      return
+      return { errorCode, status: spec.http }
     }
 
     const result = value.result && typeof value.result === 'object' ? value.result : value
@@ -1179,6 +1352,589 @@ function createBridge(options = {}) {
       ms: Date.now() - startedAt,
     })
     sendOk(req, res, status, result)
+    return { result, status }
+  }
+
+  // -------------------------------------------------------------------------
+  // 网页版剪藏页（0.3.2，契约 §5.9）
+  // -------------------------------------------------------------------------
+
+  /**
+   * **这里曾经有一个 `CLIP_HINTS`（按用途索引的 userMessage 覆盖表），0.3.2 已整体删除。**
+   *
+   * 为什么不再有它（这条要留下来，免得下次有人再造一个）：同一个码号配另一句话，
+   * 就是「一个码号两个含义」—— 而且 `verify-contract` 的 C-6c/C-6f 只比对**错误表**，
+   * **看不见**路由里的覆盖。也就是说那种漂移是**恒绿**的：表还是逐字一致，
+   * 实现却已经给了另一个说法。恒绿的检查比没有检查更坏，所以这个口子必须关掉，
+   * 而不是靠「表还一致」给它发通行证。
+   *
+   * 于是剪藏页的每一类失败都有自己的正式码号（各自只在一个地方产出）：
+   *   `k` 不匹配 / 缺失                          → `IMP-4019`（401）
+   *   暂存不存在 / 已过期                        → `IMP-4021`（404）
+   *   落点目录不存在                             → `IMP-4022`（422）
+   *   同一暂存已入库且内容不同                    → `IMP-4018`（409）
+   *   产物未构建                                 → `IMP-5003`（503）
+   *   目录列表：工作区没打开 / 挂钩拿不到          → `IMP-4007`（409）/ `IMP-4014`（500），原样用登记文案
+   * **全部原样用登记文案**：一个码号只有一处文案产地。
+   */
+
+  /** 页面入口 / 静态资源目录的绝对路径（产物不存在时这里只是「一个不存在的路径」，由调用方回 503）。 */
+  function clipIndexPath() {
+    return path.join(clipDistRoot, CLIP_INDEX_RELATIVE)
+  }
+
+  function clipAssetsDir() {
+    return path.join(clipDistRoot, CLIP_ASSETS_RELATIVE)
+  }
+
+  function safeDecode(value) {
+    if (typeof value !== 'string' || value === '') return ''
+    try {
+      return decodeURIComponent(value)
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * 发剪藏页 HTML：CSP 逐字冻结 + `no-store`（页面每次都要新的一份，避免旧 bundle 卡住）。
+   * 引导数据走 `<script type="application/json">`：**它不会被浏览器执行**，
+   * 所以 CSP 里的 `script-src 'self'` 不需要 `unsafe-inline`。
+   */
+  function sendHtml(req, res, httpStatus, html) {
+    if (res.writableEnded || res.destroyed) return
+    const body = Buffer.from(html, 'utf8')
+    const headers = {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': CLIP_CSP,
+      'Content-Length': body.length,
+    }
+    if (res.__cors && !res.__noCors) Object.assign(headers, corsHeaders(res.__cors.origin, res.__cors.preflight))
+    res.writeHead(httpStatus, headers)
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
+  /**
+   * 工作区目录列表。
+   *
+   * 三种结果**必须分开**（一个返回值扛两种含义就是撒谎）：
+   *   - `{ ok:true, folders: ["", …] }`：拿到了。`""` 恒为第 0 项（= 收件箱）；
+   *     **列表真的为空**也走这里（如实说「工作区里只有收件箱」）。
+   *   - `{ ok:false, code:'IMP-4007' }`：**工作区没打开**（`getWorkspaceInfo().open` 非真）。
+   *     登记文案本来就是「Opennote 里还没有打开笔记本文件夹…」，语义精确，**原样用**。
+   *   - `{ ok:false, code:'IMP-4014' }`：**挂钩拿不到**（缺失 / 抛错 / 返回非数组 / 10 秒无响应）。
+   *     这是接口侧的内部错误，登记文案「导入时出现了内部错误…」同样是精确的，**原样用**。
+   *
+   * 分类顺序：先判工作区（没打开工作区时，目录列表这个问题本身问不出来）。
+   */
+  async function clipFolders() {
+    const info = typeof options.getWorkspaceInfo === 'function' ? options.getWorkspaceInfo() : null
+    if (!info || info.open !== true) return { ok: false, code: 'IMP-4007' }
+    if (!getFoldersHook) return { ok: false, code: 'IMP-4014' }
+    let raw
+    try {
+      // 同步实现与 relay（异步）实现都要能用；relay 卡死由 withTimeout 兜底。
+      raw = await withTimeout(Promise.resolve().then(() => getFoldersHook()), REQUEST_TIMEOUT_MS)
+    } catch {
+      return { ok: false, code: 'IMP-4014' }
+    }
+    if (!Array.isArray(raw)) return { ok: false, code: 'IMP-4014' }
+    const seen = new Set()
+    for (const item of raw) {
+      if (typeof item === 'string' && item.trim() !== '') seen.add(item)
+    }
+    // 码元序排序：不依赖 ICU 语言环境，跨机器/跨 Node 版本结果一致。
+    return { ok: true, folders: ['', ...[...seen].sort()] }
+  }
+
+  /**
+   * 校验 `stageId + k`（页面唯一凭据）。返回 entry；失败时已发响应并返回 null。
+   *
+   * 顺序：先按 stageId 取（不存在/过期 → `IMP-4021` 404），再**定时安全**比较 k
+   * （不符 → `IMP-4019` 401，`timingSafeEqualText` 是本文件里唯一的比较实现）。
+   * 两个码号可区分是**有意**的：stageId 是 32 字节随机数、不可枚举，泄漏「某 id 是否存在」
+   * 没有可利用价值；而页面要能如实区分「链接过期了」与「链接被改过」。
+   *
+   * 两者**都原样用登记文案**：`k` 不是长期令牌，所以不能借 `IMP-2002`（那句让用户去
+   * 「重新生成令牌」，页面上根本没有这回事）；暂存过期也不是 `IMP-4017`（查导入记录）。
+   */
+  function resolveClipStage(req, res, stageId, key) {
+    const id = typeof stageId === 'string' && CLIP_SECRET_PATTERN.test(stageId) ? stageId : ''
+    const entry = id ? clipStore.get(id) : null
+    if (!entry) {
+      writeLog('import.error', { code: 'IMP-4021', detail: 'clip-stage' })
+      sendError(req, res, 'IMP-4021', { reason: 'unknown-or-expired' })
+      return null
+    }
+    if (typeof key !== 'string' || !timingSafeEqualText(key, entry.key)) {
+      // k 是「一份剪藏一份凭据」，与长期令牌无关：**不**记进 authFailWindow
+      // （那把窗口是给长期令牌的爆破限流用的，把 k 的失败混进去会误伤真客户端）。
+      writeLog('auth.fail', { code: 'IMP-4019', detail: 'clip-key' })
+      sendError(req, res, 'IMP-4019', { header: 'k' })
+      return null
+    }
+    return entry
+  }
+
+  /** url 只接受 http(s) 或 null / 空（与信封 §2.3 同一口径）。 */
+  function clipUrl(value) {
+    if (value === undefined || value === null || value === '') return { ok: true, value: null }
+    if (typeof value !== 'string') return { ok: false }
+    let parsed
+    try {
+      parsed = new URL(value)
+    } catch {
+      return { ok: false }
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { ok: false }
+    return { ok: true, value }
+  }
+
+  function clipText(value) {
+    return typeof value === 'string' && value !== '' ? value : null
+  }
+
+  /**
+   * `POST /v1/clip/stage` —— 扩展在「还有 activeTab 授权」时把内容交给桥暂存。
+   * 鉴权：Bearer 长期令牌（复用 `checkToken`），与 `/v1/import` 同一把。
+   * 响应形状（**冻结，平铺、不套 `result`**）：`{ ok:true, stageId, expiresAt, openUrl }`。
+   */
+  async function handleClipStageCreate(req, res) {
+    // 与 /v1/import 共用同一只令牌桶：都是「本机客户端往桥里塞内容」，没必要开第二套限流。
+    const wait = takeToken(importBucket)
+    if (wait > 0) {
+      writeLog('ratelimit', { code: 'IMP-4015', detail: 'clip-stage' })
+      sendJson(req, res, ERROR_TABLE['IMP-4015'].http, errorBody('IMP-4015'), { 'Retry-After': String(wait) })
+      return
+    }
+
+    const payload = await readJsonObject(req, res)
+    if (!payload) return
+
+    if (payload.spec !== CLIP_SPEC) {
+      writeLog('import.error', { code: 'IMP-4002', detail: 'clip-spec' })
+      sendError(req, res, 'IMP-4002', { field: 'spec' })
+      return
+    }
+    if (typeof payload.title !== 'string' || payload.title.trim() === '') {
+      writeLog('import.error', { code: 'IMP-4003', detail: 'clip-title' })
+      sendError(req, res, 'IMP-4003', { field: 'title' })
+      return
+    }
+    if (typeof payload.body !== 'string') {
+      writeLog('import.error', { code: 'IMP-4003', detail: 'clip-body' })
+      sendError(req, res, 'IMP-4003', { field: 'body' })
+      return
+    }
+    if (Buffer.byteLength(payload.body, 'utf8') > MAX_CLIP_BODY_BYTES) {
+      writeLog('import.error', { code: 'IMP-4004', detail: 'clip-body' })
+      sendError(req, res, 'IMP-4004', { field: 'body', limit: MAX_CLIP_BODY_BYTES })
+      return
+    }
+    if (payload.selection !== undefined && typeof payload.selection !== 'boolean') {
+      writeLog('import.error', { code: 'IMP-4003', detail: 'clip-selection' })
+      sendError(req, res, 'IMP-4003', { field: 'selection' })
+      return
+    }
+    const url = clipUrl(payload.url)
+    if (!url.ok) {
+      writeLog('import.error', { code: 'IMP-4003', detail: 'clip-url' })
+      sendError(req, res, 'IMP-4003', { field: 'url' })
+      return
+    }
+
+    const tags = []
+    if (payload.tags !== undefined && payload.tags !== null) {
+      if (!Array.isArray(payload.tags)) {
+        writeLog('import.error', { code: 'IMP-4003', detail: 'clip-tags' })
+        sendError(req, res, 'IMP-4003', { field: 'tags' })
+        return
+      }
+      for (const item of payload.tags) {
+        if (typeof item !== 'string') {
+          writeLog('import.error', { code: 'IMP-4003', detail: 'clip-tags' })
+          sendError(req, res, 'IMP-4003', { field: 'tags' })
+          return
+        }
+        // 超过 32 个由 L2 依据 §2.7 截断 + warning；这里只是不再往暂存里堆。
+        if (tags.length < 32) tags.push(item)
+      }
+    }
+
+    let source = {}
+    if (payload.source !== undefined && payload.source !== null) {
+      if (typeof payload.source !== 'object' || Array.isArray(payload.source)) {
+        writeLog('import.error', { code: 'IMP-4003', detail: 'clip-source' })
+        sendError(req, res, 'IMP-4003', { field: 'source' })
+        return
+      }
+      for (const key of ['site', 'author', 'publishedAt']) {
+        const value = payload.source[key]
+        if (value !== undefined && value !== null && typeof value !== 'string') {
+          writeLog('import.error', { code: 'IMP-4003', detail: `clip-source-${key}` })
+          sendError(req, res, 'IMP-4003', { field: `source.${key}` })
+          return
+        }
+      }
+      source = {
+        site: clipText(payload.source.site),
+        author: clipText(payload.source.author),
+        publishedAt: clipText(payload.source.publishedAt),
+      }
+    }
+
+    const assets = []
+    if (payload.assets !== undefined && payload.assets !== null) {
+      if (!Array.isArray(payload.assets)) {
+        writeLog('import.error', { code: 'IMP-4003', detail: 'clip-assets' })
+        sendError(req, res, 'IMP-4003', { field: 'assets' })
+        return
+      }
+      if (payload.assets.length > MAX_CLIP_ASSETS) {
+        writeLog('import.error', { code: 'IMP-4013', detail: 'clip-assets' })
+        sendError(req, res, 'IMP-4013', { field: 'assets', limit: MAX_CLIP_ASSETS, received: payload.assets.length })
+        return
+      }
+      for (const [index, item] of payload.assets.entries()) {
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+          writeLog('import.error', { code: 'IMP-4003', detail: 'clip-asset' })
+          sendError(req, res, 'IMP-4003', { field: `assets[${index}]` })
+          return
+        }
+        if (typeof item.name !== 'string' || item.name === '') {
+          writeLog('import.error', { code: 'IMP-4003', detail: 'clip-asset-name' })
+          sendError(req, res, 'IMP-4003', { field: `assets[${index}].name` })
+          return
+        }
+        if (typeof item.mime !== 'string' || item.mime === '') {
+          writeLog('import.error', { code: 'IMP-4003', detail: 'clip-asset-mime' })
+          sendError(req, res, 'IMP-4003', { field: `assets[${index}].mime` })
+          return
+        }
+        // 只搬 L0 认得的那几个键（未知字段一律忽略，02 §2.2）。base64 / MIME 白名单由 L2 判（IMP-4012）。
+        const copy = { name: item.name, mime: item.mime }
+        if (typeof item.dataBase64 === 'string') copy.dataBase64 = item.dataBase64
+        if (typeof item.file === 'string') copy.file = item.file
+        assets.push(copy)
+      }
+    }
+
+    const entry = clipStore.stage({
+      url: url.value,
+      title: payload.title,
+      body: payload.body,
+      selection: payload.selection === true,
+      tags,
+      source,
+      assets,
+      // 「剪藏时间」在这里定格：这是用户按下剪藏的那一刻，不是入库那一刻。
+      capturedAt: new Date().toISOString(),
+    })
+
+    // openUrl 只由桥拼（扩展不许自己拼）：端口是 8787–8796 里选出来的，客户端无法预知。
+    const openUrl = `http://127.0.0.1:${listeningPort}/clip/${entry.stageId}?k=${encodeURIComponent(entry.key)}`
+    // 形状冻结：平铺 { ok, stageId, expiresAt, openUrl }，**不套 result**（契约 §5.9）。
+    // 这里**不写日志**：stageId / k 绝不进 bridge.log，成功暂存又没有别的可记字段。
+    sendJson(req, res, 200, { ok: true, stageId: entry.stageId, expiresAt: entry.expiresAt, openUrl })
+  }
+
+  /** `GET /v1/clip/stage?stageId=&k=` —— 页面读暂存内容（新增端点，理由见契约 §5.9.4）。 */
+  async function handleClipStageRead(req, res, url) {
+    const entry = resolveClipStage(req, res, url.searchParams.get('stageId'), url.searchParams.get('k'))
+    if (!entry) return
+    const staged = entry.payload
+    sendJson(req, res, 200, {
+      ok: true,
+      stage: {
+        url: staged.url,
+        title: staged.title,
+        body: staged.body,
+        selection: staged.selection,
+        tags: staged.tags,
+        source: staged.source,
+        assets: staged.assets,
+        capturedAt: staged.capturedAt,
+      },
+      expiresAt: entry.expiresAt,
+    })
+  }
+
+  /** `GET /v1/clip/folders?stageId=&k=` —— 落点候选（`""` 恒为第 0 项）。 */
+  async function handleClipFolders(req, res, url) {
+    const entry = resolveClipStage(req, res, url.searchParams.get('stageId'), url.searchParams.get('k'))
+    if (!entry) return
+    const folders = await clipFolders()
+    if (!folders.ok) {
+      writeLog('import.error', { code: folders.code, detail: 'clip-folders' })
+      sendError(
+        req,
+        res,
+        folders.code,
+        folders.code === 'IMP-4007' ? { reason: 'workspace-closed' } : { hook: 'getFolders', reason: 'unavailable' },
+      )
+      return
+    }
+    sendJson(req, res, 200, { ok: true, folders: folders.folders })
+  }
+
+  /**
+   * `POST /v1/clip/commit { stageId, k, title, body, folder }`
+   *   - `folder` 省略 / `""` → `target.folder: null`（不指定落点）。默认设置（㉕ `importConflict:"inbox"`）
+   *     下它进收件箱；若用户改成「直接入库」则是工作区根。**页面不得承诺「一定进收件箱」**，
+   *     一律以回执 `status` 为准。
+   *   - `folder` 非空 → 必须是 `getFolders()` 里**已存在**的目录；不在列表 → IMP-4008，
+   *     **绝不自动创建**（契约 §5.9.6）。
+   *   - 内部**复用** `runEnvelopePipeline`（信封 → onEnvelope → respondWithReceipt），
+   *     不另造第二条写路径。
+   *   - 单次性：同一 stageId 已成功提交过 → 同内容重放同一份回执（不写第二遍）；
+   *     内容不同 → IMP-4018（409），不静默覆盖。
+   */
+  async function handleClipCommit(req, res, startedAt) {
+    const payload = await readJsonObject(req, res)
+    if (!payload) return
+
+    const entry = resolveClipStage(req, res, payload.stageId, payload.k)
+    if (!entry) return
+
+    if (typeof payload.title !== 'string' || payload.title.trim() === '') {
+      writeLog('import.error', { code: 'IMP-4003', detail: 'clip-commit-title' })
+      sendError(req, res, 'IMP-4003', { field: 'title' })
+      return
+    }
+    if (typeof payload.body !== 'string') {
+      writeLog('import.error', { code: 'IMP-4003', detail: 'clip-commit-body' })
+      sendError(req, res, 'IMP-4003', { field: 'body' })
+      return
+    }
+
+    let folder = null
+    if (payload.folder !== undefined && payload.folder !== null && payload.folder !== '') {
+      if (typeof payload.folder !== 'string') {
+        writeLog('import.error', { code: 'IMP-4003', detail: 'clip-commit-folder' })
+        sendError(req, res, 'IMP-4003', { field: 'folder' })
+        return
+      }
+      if (rejectIllegalFolder(payload.folder)) {
+        writeLog('import.error', { code: 'IMP-4008', detail: 'clip-commit-folder' })
+        sendError(req, res, 'IMP-4008', { field: 'folder' })
+        return
+      }
+      folder = payload.folder
+    }
+
+    /** 幂等指纹：只认「最终要写下去的三件事」，与请求里其他噪声无关。 */
+    const fingerprint = sha256Hex(JSON.stringify(['opennote.clip/commit/v1', payload.title, payload.body, folder]))
+
+    if (entry.commit) {
+      if (entry.commit.fingerprint === fingerprint) {
+        // 幂等重放：同一 stageId + 同一内容 → 原样回**同一份**已存回执，磁盘不再动一次。
+        sendOk(req, res, entry.commit.httpStatus, entry.commit.receipt)
+        return
+      }
+      // 内容不同 → 正式码号 IMP-4018（409），不静默覆盖、也不把第二次提交当成一次新导入。
+      writeLog('import.error', { code: 'IMP-4018', detail: 'clip-committed' })
+      sendError(req, res, 'IMP-4018', { stage: 'committed', reason: 'different-content' })
+      return
+    }
+
+    if (folder !== null) {
+      const folders = await clipFolders()
+      if (!folders.ok) {
+        writeLog('import.error', { code: folders.code, detail: 'clip-folders' })
+        sendError(
+          req,
+          res,
+          folders.code,
+          folders.code === 'IMP-4007' ? { reason: 'workspace-closed' } : { hook: 'getFolders', reason: 'unavailable' },
+        )
+        return
+      }
+      if (!folders.folders.includes(folder)) {
+        // 目录**不存在**（名字合法）→ IMP-4022；字面非法（绝对路径 / .. / 盘符）在更上面那一支走 IMP-4008。
+        writeLog('import.error', { code: 'IMP-4022', detail: 'clip-folder-missing' })
+        sendError(req, res, 'IMP-4022', { field: 'folder', reason: 'not-in-workspace', folder })
+        return
+      }
+    }
+
+    const staged = entry.payload
+    const envelope = {
+      spec: SPEC_VERSION,
+      // importId **由桥生成**、且与 stageId 无关：stageId 是暂存身份，importId 是幂等键。
+      importId: crypto.randomUUID(),
+      title: payload.title,
+      body: payload.body,
+      source: {
+        url: staged.url,
+        // `source.title` = 暂存那一刻抓到的网页标题（用户随后在页面里改的是笔记标题，
+        // 不该反过来改写「来源信息」）—— 这样 front-matter 的 source_title 才有意义。
+        title: staged.title,
+        site: staged.source.site,
+        author: staged.source.author,
+        publishedAt: staged.source.publishedAt,
+        capturedAt: staged.capturedAt,
+        selection: staged.selection === true,
+      },
+      target: { folder, notePath: null },
+      conflict: 'new',
+      tags: staged.tags,
+      assets: staged.assets,
+      client: { name: CLIP_CLIENT_NAME, version: '' },
+    }
+
+    const outcome = await runEnvelopePipeline(req, res, {
+      envelope,
+      importId: envelope.importId,
+      clientName: CLIP_CLIENT_NAME,
+      clientVersion: '',
+      warnings: [],
+      startedAt,
+    })
+    // 只有**成功**才记「已提交」：失败必须能用同一个 stageId 重试（失败不该把暂存用掉）。
+    if (outcome && outcome.result) {
+      clipStore.recordCommit(entry.stageId, fingerprint, outcome.result, outcome.status)
+    }
+  }
+
+  /** 静态资源名：单段、白名单扩展名、无量词可疑字符（穿越/盘符/反斜杠/NUL）。 */
+  function isClipAssetName(name) {
+    if (typeof name !== 'string' || name === '' || name.length > 200) return false
+    if (name.includes('/') || name.includes('\\') || name.includes('\0') || name.includes(':')) return false
+    if (name.includes('..')) return false
+    if (path.basename(name) !== name) return false
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css|woff2|png|svg|map)$/.test(name)) return false
+    return true
+  }
+
+  /** 静态资源的一律 404（路径穿越、白名单外、文件不存在都是它，不区分）。 */
+  function clipAssetMiss(req, res) {
+    // 用 import.error（「这个请求被拒绝了」）而不是 origin.reject：后者是「来源不被允许」的专属事件，
+    // 拿它记一个资源 404 会把日志的语义搅浑。
+    writeLog('import.error', { code: 'IMP-3005', detail: 'clip-asset' })
+    sendError(req, res, 'IMP-3005', { path: '/clip/assets/<file>' })
+  }
+
+  /** `GET /clip/assets/<file>` —— 无令牌，只服务产物 `clip/assets/**`。 */
+  function handleClipAsset(req, res, route) {
+    const prefix = '/clip/assets/'
+    if (!route.startsWith(prefix)) {
+      clipAssetMiss(req, res)
+      return
+    }
+    const name = safeDecode(route.slice(prefix.length))
+    if (!isClipAssetName(name)) {
+      clipAssetMiss(req, res)
+      return
+    }
+    const dir = clipAssetsDir()
+    const target = path.join(dir, name)
+    const relative = path.relative(dir, target)
+    if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+      clipAssetMiss(req, res)
+      return
+    }
+    let stat = null
+    let body = null
+    try {
+      stat = fs.statSync(target)
+      if (stat.isFile()) body = fs.readFileSync(target)
+    } catch {
+      body = null
+    }
+    if (!body) {
+      clipAssetMiss(req, res)
+      return
+    }
+    const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase()
+    const headers = {
+      'Content-Type': CLIP_ASSET_TYPES[ext] || 'application/octet-stream',
+      'Content-Length': body.length,
+      // no-store：产物可能刚重建，别让浏览器吃旧 bundle。
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    }
+    if (res.__cors && !res.__noCors) Object.assign(headers, corsHeaders(res.__cors.origin, res.__cors.preflight))
+    res.writeHead(200, headers)
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
+  /**
+   * `GET /clip/<stageId>?k=` —— 剪藏页本体：产物原文 + 注入的引导数据块。
+   * 无令牌（页面永不持有长期令牌），凭 `k`；`k` 不对 → 401、暂存不存在/过期 → 404。
+   * 产物不存在 → **503 + 明确文案**，绝不回空 200（空 200 会让页面白屏且没人知道为什么）。
+   */
+  function handleClipPage(req, res, url, rawStageId) {
+    const entry = resolveClipStage(req, res, safeDecode(rawStageId), url.searchParams.get('k'))
+    if (!entry) return
+    let html
+    try {
+      html = fs.readFileSync(clipIndexPath(), 'utf8')
+    } catch {
+      // 产物不存在 → 503 + 明确文案，**绝不回空 200**（空 200 会让页面白屏且查不出原因）。
+      // 用正式码号 IMP-5003：它与 IMP-5001（写盘失败）是两件事，不借码。
+      writeLog('import.error', { code: 'IMP-5003', detail: 'clip-page-missing' })
+      sendError(req, res, 'IMP-5003', { artifact: `${CLIP_DIST_RELATIVE}/${CLIP_INDEX_RELATIVE}` })
+      return
+    }
+    // `<` 转义成 `\u003c`：即便将来某个值里出现 `<`，也绝不可能从 JSON 里逃出 `</script>`。
+    const boot = JSON.stringify({ port: listeningPort, stageId: entry.stageId, k: entry.key }).replace(/</g, '\\u003c')
+    const snippet = `<script type="application/json" id="${CLIP_BOOT_ID}">${boot}</script>`
+    sendHtml(req, res, 200, injectClipBoot(html, snippet))
+  }
+
+  /**
+   * 剪藏页路由。返回 true = 已处理（响应已发/已在发）。
+   *
+   * 鉴权分两种（**页面永不持有长期令牌**）：
+   *   `POST /v1/clip/stage` → Bearer 长期令牌（扩展在还有 activeTab 授权时提交）
+   *   其余三个端点            → `stageId + k`（页面自己拿到的一次性凭据，15 分钟过期）
+   * 静态面 `/clip/*`         → 无令牌，凭 `k`；不校验 Content-Type（是导航/资源请求）
+   */
+  async function handleClipRoutes(req, res, url, method, startedAt) {
+    const route = url.pathname
+
+    if (route === '/clip' || route.startsWith('/clip/')) {
+      if (method !== 'GET') {
+        sendError(req, res, 'IMP-3005', { method: req.method, path: '/clip/*' })
+        return true
+      }
+      if (route === '/clip/assets' || route.startsWith('/clip/assets/')) {
+        handleClipAsset(req, res, route)
+        return true
+      }
+      handleClipPage(req, res, url, route.slice('/clip/'.length))
+      return true
+    }
+
+    if (route === '/v1/clip/stage') {
+      if (method === 'POST') {
+        if (!checkContentType(req, res)) return true
+        if (!checkToken(req, res)) return true
+        await handleClipStageCreate(req, res)
+        return true
+      }
+      if (method === 'GET') {
+        await handleClipStageRead(req, res, url)
+        return true
+      }
+      sendError(req, res, 'IMP-3005', { method: req.method, path: route })
+      return true
+    }
+
+    if (route === '/v1/clip/folders' && method === 'GET') {
+      await handleClipFolders(req, res, url)
+      return true
+    }
+
+    if (route === '/v1/clip/commit' && method === 'POST') {
+      if (!checkContentType(req, res)) return true
+      await handleClipCommit(req, res, startedAt)
+      return true
+    }
+
+    return false
   }
 
   /*
@@ -1580,4 +2336,14 @@ module.exports = {
   STATE_NAMES,
   generateToken,
   sha256Hex,
+  // 网页版剪藏页（0.3.2）：只导出常量（供 smoke 与文档咬合断言），不导出任何运行时状态。
+  CLIP_SPEC,
+  CLIP_DIST_RELATIVE,
+  CLIP_DIST_ROOT,
+  CLIP_BOOT_ID,
+  CLIP_CSP,
+  CLIP_ASSET_TYPES,
+  CLIP_STAGE_TTL_MS,
+  MAX_CLIP_ASSETS,
+  MAX_CLIP_BODY_BYTES,
 }

@@ -34,8 +34,12 @@ const MAIN = path.join(ROOT, 'electron', 'main.cjs')
  *   getAppVersion    —— /v1/health 的 app 字段，漏了回桥自己的常量（版本说错）
  *   getInboxEnabled  —— /v1/health 的 inbox 字段，漏了恒 false（明明支持收件箱）
  *   getDefaultFolder —— /v1/workspace 的 defaultFolder，落点默认值
+ *   getFolders       —— 网页版剪藏页（0.3.2）的落点候选：漏了 `/v1/clip/folders` 与
+ *                       `/v1/clip/commit`（非空落点）一律 503 —— 页面**一个目录都选不了**，
+ *                       用户只能在收件箱与工作区根之间二选一。这是能力缺失，不是降级，
+ *                       所以它进 REQUIRED（桥侧会明确失败，不会静默回空数组，但功能仍然是坏的）。
  */
-const REQUIRED = ['getWorkspaceInfo', 'getAppVersion', 'getInboxEnabled', 'getDefaultFolder']
+const REQUIRED = ['getWorkspaceInfo', 'getAppVersion', 'getInboxEnabled', 'getDefaultFolder', 'getFolders']
 
 /**
  * 已知**本轮未接线**的挂钩，附原因。列在这里是为了让它们保持「可见」：
@@ -87,8 +91,11 @@ const EXEMPT = exemptNames(BRIDGE_SOURCE)
  *                       `bridgeStatusPayload()` 里如实覆盖 `inboxWatch`，所以不需要
  *   getTokenHash     —— 令牌哈希由桥自己读写 `userData/bridge.json` 持久化；
  *                       只有渲染层代管令牌时才需要这个挂钩
+ *   clip             —— 网页版剪藏页的**自测覆盖**（`{ distRoot, ttlMs, maxStages }`）：
+ *                       把静态页指到临时夹具、把暂存 TTL 调短。产品路径**不该**传它
+ *                       （形态与 `limits` 同源：只给自测用的覆盖袋子）。
  */
-const OPTIONAL_BY_DESIGN = ['isEnabled', 'limits', 'startPort', 'getInboxWatchMode', 'getTokenHash']
+const OPTIONAL_BY_DESIGN = ['isEnabled', 'limits', 'startPort', 'getInboxWatchMode', 'getTokenHash', 'clip']
 
 let pass = 0
 let fail = 0

@@ -36,6 +36,7 @@
     "test:watch": "vitest",
     "icons": "python scripts/make_icons.py",
     "dev:electron": "node scripts/dev-electron.mjs",
+    "build:clip": "vite build --config vite.clip.config.ts",
     "build:desktop": "node scripts/build-desktop.mjs",
     "package:desktop": "node scripts/build-desktop.mjs && electron-builder --config electron-builder.yml"
   },

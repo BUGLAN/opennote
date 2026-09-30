@@ -26,8 +26,13 @@ import {
   getWorkspace,
   endpointOf,
   isValidToken,
+  postClipStage,
 } from "./lib/bridge.js";
 import { readState, mutate } from "./lib/store.js";
+// A（网页版剪藏页）：暂存请求体的**形状**只有这一个产地（纯函数、可执行断言）。
+import { IMAGE_DOWNLOAD_DEFAULT, buildStageRequest as stageRequest, openUrlOf } from "./lib/stage.js";
+// ③ 图片开关：字节层的下载与降级（拿不到字节就不发这一条，正文保留原始 URL + warnings）。
+import { collectImageAssets } from "./lib/assets.js";
 // 元素选择失败原因（四因分离）的**单一文案来源**，popup 也从这里取（task-21）
 import { pickFailCopy } from "./lib/pick.js";
 import { makeQueueItem, enqueue, removeItem, markAttempt, takeBatch } from "./lib/queue.js";
@@ -109,20 +114,6 @@ export function isRestrictedUrl(url) {
 
 export function folderLabelOf(folder) {
   return folder && String(folder).trim() ? String(folder).trim() : "根目录";
-}
-
-/** 显式按 tabId 取来源标签页；非法/过期一律返回 null（由调用方如实记 no_url）。 */
-async function tabById(tabId) {
-  // **同一个事实两种表示**：URL 里的参数永远是**字符串**，而 `chrome.tabs` 用的是数字。
-  // 这里显式归一（Number(...)）再校验，避免「合法 id 被判成非法」—— 与 `file` 两种基准同族。
-  const id = typeof tabId === "string" && /^[0-9]+$/.test(tabId) ? Number(tabId) : tabId;
-  if (typeof id !== "number" || !Number.isInteger(id) || id < 0) return null;
-  try {
-    const tab = await chrome.tabs.get(id);
-    return tab || null;
-  } catch {
-    return null;
-  }
 }
 
 async function activeTab() {
@@ -708,6 +699,107 @@ export async function clipActiveTab(input) {
   });
 }
 
+/* ────────── A · 网页版剪藏页：暂存 + 打开（扩展侧只做两件事） ────────── */
+
+/**
+ * `POST /v1/clip/stage` 的请求体：**形状的唯一定义在 `lib/stage.js`**（纯函数、可执行断言），
+ * 这里只负责把「页面抽取结果 + 用户选的那一份正文 + 已下载到字节的图片」喂给它。
+ * **不在这里拼 openUrl**，也不在这里造资产形状。
+ */
+function buildStageRequest({ extraction, mode, pickedElement, bodyOverride, assets, warnings }) {
+  return stageRequest({
+    url: extraction.url,
+    title: resolveTitle(extraction, mode, "", pickedElement),
+    body: resolveBody(extraction, mode, pickedElement, bodyOverride),
+    selection: mode === "selection",
+    site: extraction.site === undefined ? null : extraction.site,
+    author: extraction.author === undefined ? null : extraction.author,
+    publishedAt: extraction.publishedAt === undefined ? null : extraction.publishedAt,
+    assets,
+    warnings,
+  });
+}
+
+/**
+ * 图片清单**跟随正文来源**：整页 → 整页的图；元素选择 → 被点中那块子树里的图
+ * （不把整页的图塞进来，否则会把用户没剪的内容也拖进下载清单）。
+ * 关闭开关时一次都不抽（默认关 = 不做这件事，连注入都不多做一次）。
+ */
+async function imagesForStage(tabId, mode, picked, extraction) {
+  if (mode === "element" && picked && picked.selector) {
+    const data = await extractFromTab(tabId, picked.selector);
+    if (data && data.images) return data.images;
+  }
+  return (extraction && extraction.images) || { items: [], dropped: 0 };
+}
+
+/**
+ * 暂存一次剪藏并换回 `openUrl`。失败**不打开页面**（打开一个坏页面比失败更糟），
+ * 但必须回一句能读懂的中文（绝不静默）。
+ */
+async function stageClipForWeb({ mode, body, imageDownload }) {
+  const tab = await activeTab();
+  if (!tab || tab.id === undefined || isRestrictedUrl(tab.url)) {
+    return { ok: false, code: "IMP-1006", label: "这个页面不允许插件读取内容。", state: STATE.RESTRICTED_PAGE };
+  }
+  const extraction = await getExtraction(tab.id, { force: true });
+  if (!extraction) {
+    return { ok: false, code: "IMP-1006", label: userMessage("IMP-1006"), state: STATE.RESTRICTED_PAGE };
+  }
+  const normalized = normalizeMode(mode);
+  const pickedElement = normalized === "element" ? await currentPicked(extraction.url) : null;
+  // ③ 打开时：先**真的把字节下下来**（拿不到就降级），再组请求体。
+  // 拿不到字节的图**不进 assets[]**、正文里的原始 URL 原样保留、原因进 warnings（绝不发必拒的形状）。
+  let assets = [];
+  let warnings = [];
+  if (imageDownload) {
+    const candidates = await imagesForStage(tab.id, normalized, pickedElement, extraction);
+    const downloaded = await collectImageAssets(candidates.items || []);
+    assets = downloaded.assets;
+    warnings = [...downloaded.warnings];
+    // 连「候选地址」都取不到的（data: / 懒加载没填 / 超过 32 条）也如实说一句
+    const missing = Number(candidates.dropped) || 0;
+    if (missing > 0) warnings.push(`有 ${missing} 张图片没有可下载的地址，正文里保留原始网址。`);
+  }
+  const { request, warnings: stageWarnings } = buildStageRequest({
+    extraction,
+    mode: normalized,
+    pickedElement,
+    bodyOverride: body,
+    assets,
+    warnings,
+  });
+
+  const state = await readState();
+  const probe = await discover({ preferredPort: state.port, ports: BRIDGE_PORTS });
+  if (!probe.hit) {
+    const code = probe.noWindow ? "IMP-4006" : probe.portBusy || probe.sawListener ? "IMP-1003" : "IMP-1001";
+    return { ok: false, code, label: userMessage(code), state: stateForCode(code) };
+  }
+  if (!state.token) {
+    return { ok: false, code: "IMP-2001", label: userMessage("IMP-2001"), state: STATE.NEEDS_PAIRING, tokenInput: true };
+  }
+  const call = await postClipStage(probe.hit.port, state.token, request);
+  if (call.kind !== "ok") {
+    const code = call.code || "IMP-4014";
+    const message = userMessage(code, call.serverMessage);
+    if (code === "IMP-2001" || code === "IMP-2002") await mutate(() => ({ token: null }));
+    return { ok: false, code, label: message, state: stateForCode(code) };
+  }
+  const result = call.result || {};
+  // `openUrl` 的唯一产地是接口：它缺席就是接口没给，**不许**在扩展侧拼一个出来（见 lib/stage.js）。
+  const openUrl = openUrlOf(result);
+  if (!openUrl) {
+    return { ok: false, code: "IMP-4014", label: "本地接口没有返回可打开的页面地址。", state: STATE.CONNECTED };
+  }
+  await mutate(() => ({
+    port: probe.hit.port,
+    endpoint: endpointOf(probe.hit.port, ""),
+    lastOkAt: new Date().toISOString(),
+  }));
+  return { ok: true, openUrl, stageId: result.stageId || null, warnings: stageWarnings };
+}
+
 /* ─────────────────────────── 令牌（㉞：配对整体删除） ─────────────────────────── */
 
 /**
@@ -753,12 +845,12 @@ async function storeManualToken(token) {
 
 /* ─────────────────────── popup / 页面消息路由 ─────────────────────── */
 
-async function loadSnapshot(options = {}) {
+async function loadSnapshot() {
   await flushQueue({ limit: 2 });
-  // 「哪个标签页」变成**显式入参**：clip.html 打开时它自己就是活动标签，再用 activeTab() 会读到
-  // **它自己**（chrome-extension:// → restricted → 正文永远读不到，用户实测）。传了 tabId 就只按 tabId
-  // 取，取不到如实记 no_url —— **绝不静默退回读自己**。
-  const tab = options.tabId === undefined ? await activeTab() : await tabById(options.tabId);
+  // 「哪个标签页」**只有 activeTab 一条路**：M3（本轮）删掉插件里的可编辑剪藏页之后，
+  // 那条显式 `?tabId=` 路由（`opennote:load {tabId}` / `tabById()`）**没有任何发送方**了。
+  // 死路由必须与它的目标成对消失（C-10p 的教训）：留着它，下一个人会以为还有个页面在用。
+  const tab = await activeTab();
   // task-21 四因分离：`restricted`（受限 scheme）与 `extractionFailed`（抽取失败）**是两件事**，
   // 不再把它们合并成同一句「只有普通网页支持」。
   const snapshot = { ok: true, tab: null, extraction: null, restricted: false, extractionFailed: false, pickFailReason: null };
@@ -857,7 +949,7 @@ async function handle(message) {
     case "opennote:load":
     case "opennote:retry": {
       // 「等待必须有出口」：整次 load 到点必须给 popup 一个**可重试**的失败态，绝不无限 pending。
-      const pending = loadSnapshot(message.tabId === undefined ? {} : { tabId: message.tabId }).catch((error) => {
+      const pending = loadSnapshot().catch((error) => {
         console.warn("[opennote] loadSnapshot 抛错：%s", (error && error.message) || error);
         return null;
       });
@@ -893,6 +985,9 @@ async function handle(message) {
       const mode = normalizeMode(message.mode);
       // M1：高亮退场，预览里也不会再出现「## 高亮」小节。
       const pickedElement = await currentPicked(extraction.url);
+      // ③：开关打开时回一份图片清单（条数 + 没有地址的条数），让用户在**剪藏之前**就看见降级。
+      // 关闭时一次都不抽（默认关 = 不多注入一次）：连 `imagesForStage` 都不调用。
+      const images = message.images ? await imagesForStage(tab.id, mode, pickedElement, extraction) : null;
       // M2：preview 只带 mode；来源信息全部来自页面抽取结果（用户无可填字段）。
       const composed = composeDelivery({ extraction, mode, pickedElement });
       return {
@@ -924,6 +1019,8 @@ async function handle(message) {
                 markdown: pickedElement.markdown || "",
               }
             : null,
+          // ③ 图片清单：只有开关打开时才存在（null = 这次没要，不是「没有图片」）
+          images: images ? { items: images.items || [], dropped: images.dropped || 0 } : null,
         },
       };
     }
@@ -956,6 +1053,17 @@ async function handle(message) {
           code: "IMP-1001",
         }),
       };
+    }
+    case "opennote:clip-stage": {
+      // A（网页版剪藏页）：扩展侧只做两件事 —— ① POST /v1/clip/stage（在这里）；
+      // ② 拿到 openUrl 后 chrome.tabs.create（由 popup 做，见 popup.js）。失败绝不打开页面。
+      const reply = await stageClipForWeb({
+        mode: message.mode,
+        body: message.body,
+        imageDownload:
+          message.imageDownload === undefined ? IMAGE_DOWNLOAD_DEFAULT : Boolean(message.imageDownload),
+      });
+      return { ok: true, reply };
     }
     case "opennote:pick":
       return { ok: true, reply: await startPick() };

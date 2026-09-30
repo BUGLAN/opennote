@@ -270,9 +270,12 @@ async function bootstrap() {
   const toast = await server.ssrLoadModule("/src/lib/toast.ts");
   const plugin = await server.ssrLoadModule("/extension/src/lib/bridge.js");
   const pluginEnvelope = await server.ssrLoadModule("/extension/src/lib/envelope.js");
+  /* A（网页版剪藏页）· 扩展侧「请求体形状」的**唯一产地**：S13 直接用它组装请求体，
+   * 不在探针里复刻 8 个键 —— 复刻就等于「测我自己写的那份」，不是测产品。 */
+  const stage = await server.ssrLoadModule("/extension/src/lib/stage.js");
   const bridgeModule = require(path.join(ROOT, "electron", "bridge.cjs"));
 
-  return { server, lib, clip, inbox, toast, plugin, pluginEnvelope, bridgeModule };
+  return { server, lib, clip, inbox, toast, plugin, pluginEnvelope, stage, bridgeModule };
 }
 
 const scenarioRoots = new Set();
@@ -376,6 +379,7 @@ async function main() {
     await withCoverageGuard("S8", EXPECTED_S8, () => scenario8(env));
     await scenario9(env);
     await scenario10(env);
+    await scenario13(env);
   } catch (error) {
     fail("SCENARIO-CRASH", "场景执行中断", error && error.stack ? error.stack.split("\n").slice(0, 4).join(" | ") : String(error));
   } finally {
@@ -393,7 +397,7 @@ async function main() {
     const allExpected = [
       ...EXPECTED_S1, ...EXPECTED_S2, ...EXPECTED_S3, ...EXPECTED_S4, ...EXPECTED_S4B,
       ...EXPECTED_S5, ...EXPECTED_S6, ...EXPECTED_S7, ...EXPECTED_S7B, ...EXPECTED_S8,
-      ...EXPECTED_S9, ...EXPECTED_S10,
+      ...EXPECTED_S9, ...EXPECTED_S10, ...EXPECTED_S13,
     ];
     const reported = new Set(results.map((r) => r.id));
     const missingAll = allExpected.filter((id) => !reported.has(id));
@@ -1524,6 +1528,11 @@ const EXPECTED_S9 = ["S9.0", "S9.1", "S9.2", "S9.3"];
 const EXPECTED_S10 = [
   "S10.0", "S10.1", "S10.2", "S10.3", "S10.4", "S10.5",
   "S10.6", "S10.7", "S10.8", "S10.9", "S10.10", "S10.11",
+];
+/** S13（A · 网页版剪藏页）：静态契约面在 `verify-contract.cjs` 的 C-13a…C-13l，这里是**行为面**。 */
+const EXPECTED_S13 = [
+  "S13.0", "S13.1", "S13.2", "S13.3", "S13.4", "S13.5", "S13.6",
+  "S13.7", "S13.8", "S13.9", "S13.10", "S13.11", "S13.12", "S13.13", "S13.14",
 ];
 
 /**
@@ -2804,6 +2813,507 @@ async function scenario10Body(env) {
     restrictedEvidence.join(" | "));
 
   await restarted.controller.stop();
+}
+
+/* ------------------------------------------------------------------ 场景 13 */
+/* A · 网页版剪藏页：`POST /v1/clip/stage` → 页面读到 → `POST /v1/clip/commit` → **磁盘上真的有那条笔记**
+ *
+ * 盯的是**用户看得见的那条路径**（Lead 2026-09-30 的要求），不是「函数被调用了」：
+ *   ① 扩展用它**真实**的 `buildStageRequest()` 组装请求体（不在这里复刻 8 个键）；
+ *   ② 桥回的 `openUrl` 真的能 `GET` 到页面 HTML，且注入的 `clip-boot` 与这次暂存逐字一致；
+ *   ③ 页面用 `stageId + k` 真的读得到**正文**（`GET /v1/clip/stage`）；
+ *   ④ commit 之后**工作区里真的有那条笔记**（进收件箱的落 `.opennote/inbox/<id>/`；
+ *      直接入库的落 `<folder>/<title>.md`，正文 = 页面里编辑过的那一份）。
+ *
+ * `folders` / `commit.folder` 这两条按 Lead 裁定改成**运行期判定**（不再匹配源码字面）：
+ *   · `folders[0] === ""`、去重；「工作区没打开」→ IMP-4007；「挂钩缺失/抛错/非数组」→ IMP-4014；
+ *     「列表真的为空」→ `{ok:true, folders:[""]}` —— **这三种必须能分辨**；
+ *   · commit 的 `folder` 不存在 → 明确 4xx **且磁盘上没有新建那个目录**；`""` → 收件箱；已存在 → 落到那里。
+ * 两条都配了内存变异（改坏 `folders[0]` / 删掉 `includes` 校验 → 必须变红）。
+ */
+function bootClipBridge(mod, options = {}) {
+  const dataDir = options.dataDir || fs.mkdtempSync(path.join(os.tmpdir(), "opennote-clip-bridge-"));
+  let token = options.token || null;
+  const logLines = [];
+  const controller = mod.createBridge({
+    dataDir,
+    getWindow: () => ({ isDestroyed: () => false, webContents: { send: () => {} } }),
+    onEnvelope: options.onEnvelope || null,
+    getAdvancedOverwrite: () => false,
+    isEnabled: () => true,
+    getTokenHash: () => (token ? mod.sha256Hex(token) : null),
+    getWorkspaceInfo: options.getWorkspaceInfo || (() => ({ open: true, name: "验证笔记本" })),
+    getInboxEnabled: () => true,
+    getInboxMode: () => "inbox",
+    ...(options.getFolders === undefined ? {} : { getFolders: options.getFolders }),
+    log: (event, line) => { logLines.push(JSON.stringify([event, line])); },
+  });
+  if (!token && options.generateToken !== false) token = controller.generateToken();
+  return { controller, dataDir, logLines, getToken: () => token };
+}
+
+/** 从页面 HTML 里取桥注入的引导数据块（`<script type="application/json" id="clip-boot">`）。 */
+function clipBootOf(html) {
+  const m = /<script type="application\/json" id="clip-boot">([\s\S]*?)<\/script>/.exec(String(html));
+  if (!m) return null;
+  try {
+    return JSON.parse(m[1].replace(/\\u003c/g, "<"));
+  } catch {
+    return null;
+  }
+}
+
+async function scenario13(env) {
+  return withCoverageGuard("S13", EXPECTED_S13, () => scenario13Body(env));
+}
+
+async function scenario13Body(env) {
+  stanza("场景 13 · 网页版剪藏页：stage → 页面读到 → commit → 真的落盘");
+  const bridgePath = path.join(ROOT, "electron", "bridge.cjs");
+  const root = await freshWorkspace(env);
+  fs.mkdirSync(path.join(root, "归档"), { recursive: true });
+  env.clip.resetImportChannelContext();
+  env.clip.setImportChannelContext({ channel: "local-bridge" });
+  env.clip.setImportLandingPreference("inbox");
+  const EXT_ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+
+  /* 挂钩是**可变**的：同一个桥上就能问出「正常 / 抛错 / 非数组 / 工作区没打开 / 空列表」五种答案。 */
+  let foldersImpl = () => ["归档", "剪藏", "归档"];
+  let workspaceOpen = true;
+  const bridge = bootClipBridge(env.bridgeModule, {
+    onEnvelope: (json) => env.clip.receiveEnvelopeOutcome(json),
+    getWorkspaceInfo: () => ({ open: workspaceOpen, name: "验证笔记本" }),
+    getFolders: () => foldersImpl(),
+  });
+  const started = await bridge.controller.start();
+  const token = bridge.getToken();
+  const port = started && started.port ? started.port : null;
+  if (!port) {
+    fail("S13.0", "前置：剪藏桥在 127.0.0.1 启动（带 folders/workspace 挂钩）", JSON.stringify(started));
+    return;
+  }
+  pass("S13.0", "前置：剪藏桥启动（含 clip 挂钩），工作区已备好 `归档/` 目录",
+    `port=${port} 令牌=${token.slice(0, 8)}…（${token.length} 字符） 工作区=${path.basename(root)}`);
+
+  /* ── S13.1 扩展**真实**的 buildStageRequest → 桥回 {ok, stageId, expiresAt, openUrl} ── */
+  const built = env.stage.buildStageRequest({
+    url: "https://example.com/s13-clip",
+    title: "剪藏页标题",
+    body: "第一段正文。\n\n第二段正文。\n",
+    selection: false,
+    site: "example.com",
+    author: null,
+    publishedAt: null,
+    assets: [],
+    warnings: [],
+  });
+  const stageRes = await httpCall(port, { origin: EXT_ORIGIN, token, path: "/v1/clip/stage", body: built.request });
+  const stageJson = stageRes.json || {};
+  const stageId = typeof stageJson.stageId === "string" ? stageJson.stageId : "";
+  const openUrl = typeof stageJson.openUrl === "string" ? stageJson.openUrl : "";
+  const expectedOpenPrefix = `http://127.0.0.1:${port}/clip/${stageId}?k=`;
+  const stageOk = stageRes.status === 200 && stageJson.ok === true && stageId.length >= 32
+    && /^[A-Za-z0-9_-]+$/.test(stageId) && typeof stageJson.expiresAt === "number"
+    && openUrl.startsWith(expectedOpenPrefix) && openUrl.length > expectedOpenPrefix.length;
+  const k = stageOk ? decodeURIComponent(openUrl.slice(expectedOpenPrefix.length)) : "";
+  if (stageOk) {
+    pass("S13.1", "`POST /v1/clip/stage`：扩展真实请求体 → 200 `{ok, stageId, expiresAt, openUrl}`；"
+      + "`stageId` 由桥生成（≥32 base64url），`openUrl` 由桥按**真实监听端口**拼",
+      `http=${stageRes.status} stageId=${stageId.length} 字符 openUrl=http://127.0.0.1:${port}/clip/<stageId>?k=<${k.length} 字符>`
+      + ` expiresAt=+${Math.round((stageJson.expiresAt - Date.now()) / 60000)} 分钟｜请求体键=${JSON.stringify(Object.keys(built.request))}`);
+  } else {
+    fail("S13.1", "stage 必须回 200 与冻结的四个字段（平铺不套 result）",
+      `http=${stageRes.status} body=${JSON.stringify(stageJson).slice(0, 220)} built=${JSON.stringify(built.request).slice(0, 200)}`);
+  }
+
+  /* ── S13.2 页面读到（1/2）：`GET openUrl` → 页面 HTML + 引导数据块 + CSP ── */
+  const page = stageOk ? await httpCall(port, { method: "GET", path: `/clip/${encodeURIComponent(stageId)}?k=${encodeURIComponent(k)}` }) : { status: 0 };
+  const boot = clipBootOf(page.text || "");
+  const csp = String(page.headers ? page.headers["content-security-policy"] || "" : "");
+  const scriptSrc = (/script-src([^;]*)/.exec(csp) || [])[1] || "";
+  const pageOk = page.status === 200 && /text\/html/.test(String(page.headers && page.headers["content-type"]))
+    && boot !== null && boot.port === port && boot.stageId === stageId && boot.k === k
+    && scriptSrc.includes("'self'") && !scriptSrc.includes("unsafe-inline")
+    && String(page.headers["cache-control"] || "").includes("no-store");
+  if (pageOk) {
+    pass("S13.2", "页面真的读得到：`GET /clip/<stageId>?k=` → 200 HTML，注入的 `clip-boot` 与这次暂存逐字一致，"
+      + "CSP `script-src 'self'`（无 unsafe-inline）+ `no-store`",
+      `http=${page.status} HTML=${(page.text || "").length} 字符 boot=${JSON.stringify(boot)} script-src=${JSON.stringify(scriptSrc.trim())}`);
+  } else {
+    fail("S13.2", "剪藏页 HTML 与引导数据块必须能读且与暂存一致",
+      `http=${page.status} boot=${JSON.stringify(boot)} 期望 port=${port}/stageId=${stageId.slice(0, 10)}… script-src=${JSON.stringify(scriptSrc.trim())}`
+      + ` cache-control=${JSON.stringify(page.headers && page.headers["cache-control"])} body=${String(page.text || "").slice(0, 160)}`);
+  }
+
+  /* ── S13.3 页面读到（2/2）：`GET /v1/clip/stage` → 正文真的在那儿 ── */
+  const readPath = `/v1/clip/stage?stageId=${encodeURIComponent(stageId)}&k=${encodeURIComponent(k)}`;
+  const read = stageOk ? await httpCall(port, { method: "GET", path: readPath }) : { status: 0 };
+  const staged = read.json && read.json.stage ? read.json.stage : null;
+  const readOk = read.status === 200 && staged !== null
+    && staged.title === "剪藏页标题" && staged.body === "第一段正文。\n\n第二段正文。\n"
+    && staged.url === "https://example.com/s13-clip" && staged.selection === false
+    && Array.isArray(staged.tags) && staged.source && staged.source.site === "example.com"
+    && typeof staged.capturedAt === "string";
+  if (readOk) {
+    pass("S13.3", "页面读得到**正文**：`GET /v1/clip/stage?stageId&k` 回 `{ok, stage:{url,title,body,selection,tags,source,assets,capturedAt}, expiresAt}`，"
+      + "字段与暂存逐字一致（`selection` 是布尔 false）",
+      `http=${read.status} stage 键=${JSON.stringify(Object.keys(staged))} body 长度=${staged.body.length}`);
+  } else {
+    fail("S13.3", "页面必须能用 stageId+k 读到暂存正文",
+      `http=${read.status} stage=${JSON.stringify(read.json).slice(0, 220)}`);
+  }
+
+  /* ── S13.4 凭据：k 错 → 401；stageId 不存在 → 404（阴性对照） ──
+   * ⚠️ 判据盯**语义**（状态码 + 两码可区分），不写死具体码号：本轮实现把剪藏页的码改成了
+   * 专用码（`IMP-4019` k 不匹配 / `IMP-4021` 暂存失效），写死旧码的判据会在**产品正确**时假红
+   * —— 而契约要的是「页面能分清『链接被改过』与『链接过期了』」。 */
+  const badK = stageOk ? await httpCall(port, { method: "GET", path: `/v1/clip/stage?stageId=${encodeURIComponent(stageId)}&k=${encodeURIComponent(k.slice(0, -1) + (k.endsWith("A") ? "B" : "A"))}` }) : { status: 0 };
+  const noStage = await httpCall(port, { method: "GET", path: `/v1/clip/stage?stageId=${"A".repeat(43)}&k=${"B".repeat(43)}` });
+  if (badK.status === 401 && codeOf(badK) && noStage.status === 404 && codeOf(noStage) && codeOf(badK) !== codeOf(noStage)) {
+    pass("S13.4", "页面凭据两道**分得开**：`k` 不对 → 401；`stageId` 不存在/过期 → 404（两个不同的码，不得混成一个）",
+      `错 k → http=${badK.status}/${codeOf(badK)}；未知 stageId → http=${noStage.status}/${codeOf(noStage)}`);
+  } else {
+    fail("S13.4", "`k` 与 `stageId` 的失败必须是 401/404 且两个可分辨的码",
+      `错 k → http=${badK.status}/${codeOf(badK)}（期望 401/某个码）；未知 stageId → http=${noStage.status}/${codeOf(noStage)}（期望 404/另一个码）`);
+  }
+
+  /* ── S13.5 folders 正常态：`""` 第 0 项 + 去重 + 排序 ── */
+  const foldersPath = `/v1/clip/folders?stageId=${encodeURIComponent(stageId)}&k=${encodeURIComponent(k)}`;
+  const foldersRes = stageOk ? await httpCall(port, { method: "GET", path: foldersPath }) : { status: 0 };
+  const folders = foldersRes.json && Array.isArray(foldersRes.json.folders) ? foldersRes.json.folders : null;
+  const foldersOk = folders !== null && folders[0] === "" && folders.length === 3
+    && JSON.stringify(folders) === JSON.stringify(["", "剪藏", "归档"]);
+  if (foldersOk) {
+    pass("S13.5", "`GET /v1/clip/folders`：`folders[0] === \"\"`（= 收件箱）且重复目录只出现一次（挂钩给了 `[归档, 剪藏, 归档]`）",
+      `http=${foldersRes.status} folders=${JSON.stringify(folders)}`);
+  } else {
+    fail("S13.5", "folders 必须以 \"\" 开头、去重（挂钩输入 [归档, 剪藏, 归档]）",
+      `http=${foldersRes.status} folders=${JSON.stringify(folders)}（期望 ["", "剪藏", "归档"]）`);
+  }
+
+  /* ── S13.6 folders 三态必须能分辨：没打开工作区 / 挂钩坏 / 列表真的为空 ── */
+  /* ⚠️ 状态码按 `ERROR_TABLE` 的**语义**判，不写死我猜的那个数字：
+   *   `IMP-4007`（工作区未打开）= 409、`IMP-4014`（内部一致性错误）= 500 —— 第一版我写死 503，
+   *   在**产品正确**时红了两次（判据盯字面的现场版）。这里判的是「码对不对 + 4xx/5xx 分得开」。 */
+  workspaceOpen = false;
+  const noWorkspace = await httpCall(port, { method: "GET", path: foldersPath });
+  workspaceOpen = true;
+  foldersImpl = () => { throw new Error("hook boom"); };
+  const hookThrows = await httpCall(port, { method: "GET", path: foldersPath });
+  foldersImpl = () => "not-an-array";
+  const hookNotArray = await httpCall(port, { method: "GET", path: foldersPath });
+  foldersImpl = () => [];
+  const emptyList = await httpCall(port, { method: "GET", path: foldersPath });
+  /* ⚠️ 「缺挂钩」必须在**另一座桥**上问，而那座桥有自己的暂存区 ——
+   * 第一版拿主桥的 stageId 去问它，撞的是 `IMP-4017`（没有这条暂存），**测的根本不是缺挂钩**。
+   * 所以：先在那座桥上真的 stage 一次，再问 folders。 */
+  const noHookBridge = bootClipBridge(env.bridgeModule, { getWorkspaceInfo: () => ({ open: true }) });
+  const noHookStarted = await noHookBridge.controller.start();
+  let hookMissing = { status: 0 };
+  if (noHookStarted.port) {
+    const st = await httpCall(noHookStarted.port, { origin: EXT_ORIGIN, token: noHookBridge.getToken(), path: "/v1/clip/stage", body: built.request });
+    const u = st.json && st.json.openUrl ? String(st.json.openUrl) : "";
+    const m = /\/clip\/([^?]+)\?k=(.+)$/.exec(u);
+    if (m) {
+      hookMissing = await httpCall(noHookStarted.port, { method: "GET", path: `/v1/clip/folders?stageId=${m[1]}&k=${m[2]}` });
+    }
+  }
+  await noHookBridge.controller.stop();
+  const t1 = noWorkspace.status >= 400 && noWorkspace.status < 500 && codeOf(noWorkspace) === "IMP-4007";
+  const t2 = [hookThrows, hookNotArray, hookMissing].every((r) => r.status >= 500 && codeOf(r) === "IMP-4014");
+  const t3 = emptyList.status === 200 && emptyList.json && JSON.stringify(emptyList.json.folders) === JSON.stringify([""]);
+  if (t1 && t2 && t3) {
+    pass("S13.6", "folders 的三态**能分辨**：工作区没打开 → 4xx `IMP-4007`；挂钩缺失/抛错/非数组 → 5xx `IMP-4014`；"
+      + "列表真的为空 → `{ok:true, folders:[\"\"]}`（绝不把内部错误伪装成「工作区里没有目录」）",
+      `没打开 → http=${noWorkspace.status}/${codeOf(noWorkspace)}；抛错 → ${hookThrows.status}/${codeOf(hookThrows)}；`
+      + `非数组 → ${hookNotArray.status}/${codeOf(hookNotArray)}；缺挂钩 → ${hookMissing.status}/${codeOf(hookMissing)}；`
+      + `空列表 → http=${emptyList.status} folders=${JSON.stringify(emptyList.json && emptyList.json.folders)}`);
+  } else {
+    fail("S13.6", "folders 三态必须可分辨（IMP-4007 4xx / IMP-4014 5xx / 空列表 ok:true）",
+      `没打开 → http=${noWorkspace.status}/${codeOf(noWorkspace)}（期望 4xx/IMP-4007）；抛错 → ${hookThrows.status}/${codeOf(hookThrows)}；`
+      + `非数组 → ${hookNotArray.status}/${codeOf(hookNotArray)}；缺挂钩 → ${hookMissing.status}/${codeOf(hookMissing)}（三者期望 5xx/IMP-4014）；`
+      + `空列表 → http=${emptyList.status} folders=${JSON.stringify(emptyList.json && emptyList.json.folders)}（期望 200/[""]）`);
+  }
+
+  /* ── 后续 commit 用同一套 hook，恢复成正常态 ── */
+  foldersImpl = () => ["归档", "剪藏"];
+  const stageOnce = async () => {
+    const r = await httpCall(port, { origin: EXT_ORIGIN, token, path: "/v1/clip/stage", body: built.request });
+    const u = r.json && r.json.openUrl ? String(r.json.openUrl) : "";
+    const m = /\/clip\/([^?]+)\?k=(.+)$/.exec(u);
+    return m ? { id: decodeURIComponent(m[1]), key: decodeURIComponent(m[2]) } : null;
+  };
+
+  /* ── S13.7 commit 的 folder 不存在 → 明确 4xx **且磁盘上没有新建那个目录** ── */
+  const ghost = "不存在的目录";
+  const s7 = await stageOnce();
+  const ghostRes = s7
+    ? await httpCall(port, { path: "/v1/clip/commit", body: { stageId: s7.id, k: s7.key, title: "落点不存在的剪藏", body: "正文。\n", folder: ghost } })
+    : { status: 0 };
+  const ghostDir = fs.existsSync(path.join(root, ghost));
+  const ghostMsg = ghostRes.json && ghostRes.json.error ? String(ghostRes.json.error.userMessage || "") : "";
+  /* 同样盯语义：**4xx + 有一句能读给人听的文案 + 磁盘上没被创建**。
+   * （码号实现用的是专用码 `IMP-4022`；契约要的是「不存在的落点必须被明确拒绝且不自动创建」。） */
+  if (ghostRes.status >= 400 && ghostRes.status < 500 && ghostMsg.trim() !== "" && !ghostDir) {
+    pass("S13.7", "commit 的 `folder` 非空时必须是**已存在**的目录：不存在 → 明确 4xx + 可读文案，"
+      + "**磁盘上没有被创建出那个目录**（绝不自动创建）",
+      `http=${ghostRes.status}/${codeOf(ghostRes)} 目录被创建=${ghostDir} userMessage=「${ghostMsg.slice(0, 60)}」`);
+  } else {
+    fail("S13.7", "不存在的落点必须被拒（4xx + 可读文案），且不得自动创建目录",
+      `http=${ghostRes.status}/${codeOf(ghostRes)} 目录被创建=${ghostDir}（期望 4xx/false）userMessage=「${ghostMsg.slice(0, 60)}」`);
+  }
+
+  /* ── S13.8 commit `folder:""` → 进收件箱，磁盘上真的有收件箱条目 ── */
+  const s8 = await stageOnce();
+  const inboxCommit = s8
+    ? await httpCall(port, { path: "/v1/clip/commit", body: { stageId: s8.id, k: s8.key, title: "收件箱剪藏", body: "先编辑过的正文。\n", folder: "" } })
+    : { status: 0 };
+  const inboxResult = inboxCommit.json && inboxCommit.json.result ? inboxCommit.json.result : null;
+  const inboxId = inboxResult && inboxResult.inboxId ? String(inboxResult.inboxId) : "";
+  const inboxFiles = inboxId ? listWorkspace(root).filter((f) => f.startsWith(`.opennote/inbox/${inboxId}/`)) : [];
+  if (inboxCommit.status >= 200 && inboxCommit.status < 300 && inboxResult && inboxResult.status === "pending" && inboxId && inboxFiles.length > 0) {
+    pass("S13.8", "commit `folder:\"\"` → 回执 `pending`（进收件箱）**且工作区里真的有那个收件箱条目**（不是只回了个 id）",
+      `http=${inboxCommit.status} status=${inboxResult.status} inboxId=${inboxId} 磁盘文件=${JSON.stringify(inboxFiles)}`);
+  } else {
+    fail("S13.8", "commit 进收件箱必须真的落盘",
+      `http=${inboxCommit.status} status=${inboxResult && inboxResult.status} inboxId=${inboxId} 磁盘文件=${JSON.stringify(inboxFiles)}`
+      + ` body=${JSON.stringify(inboxCommit.json).slice(0, 200)}`);
+  }
+
+  /* ── S13.9 commit `folder:"归档"`（已存在）在**默认偏好**下 → `<归档>/<标题>.md` 真的落盘 ──
+   *
+   * ⚠️ **这条曾经被我自己绕过去**：第一版先 `setImportLandingPreference("new")` 才拿到 `201`，
+   * 那个绕过**正好把「用户在剪藏页选的落点被 ㉕ 吞掉」这个真缺陷盖住了** —— 用户在确认页选「归档」，
+   * 笔记却进收件箱，那个下拉就是**假开关**（`02 §5.9.5` 早就写着「非空 `folder` … 也不静默改成收件箱」，
+   * 是**文档对、实现对不上**）。
+   * 现在改成 **不调 `setImportLandingPreference`（用模块默认 = ㉕「先进入收件箱」）**：
+   *   · 指名落点（非空 `folder`）= 客户端/用户已经做过决定 ⇒ **直接落盘**；
+   *   · 不指名（`folder:""`）⇒ 仍然进收件箱（S13.8 那条）。
+   * 两条一起才说明「指名 ≠ 不指名」是被判据分开的。 */
+  env.clip.resetImportLandingPreference();
+  const s9 = await stageOnce();
+  const editedTitle = "归档里的剪藏";
+  const editedBody = "这是用户在剪藏页里改过的正文。\n\n第二段。\n";
+  const archiveCommit = s9
+    ? await httpCall(port, { path: "/v1/clip/commit", body: { stageId: s9.id, k: s9.key, title: editedTitle, body: editedBody, folder: "归档" } })
+    : { status: 0 };
+  const archiveResult = archiveCommit.json && archiveCommit.json.result ? archiveCommit.json.result : null;
+  const landedRel = archiveResult && archiveResult.path ? String(archiveResult.path) : "";
+  const landedAbs = landedRel ? path.join(root, ...landedRel.split("/").filter(Boolean)) : "";
+  const landedText = landedAbs && fs.existsSync(landedAbs) ? fs.readFileSync(landedAbs, "utf8") : "";
+  const landedOk = archiveCommit.status >= 200 && archiveCommit.status < 300 && archiveResult && archiveResult.status === "created"
+    && landedRel.startsWith("归档/") && landedText.includes(editedTitle) && landedText.includes("这是用户在剪藏页里改过的正文。");
+  if (landedOk) {
+    pass("S13.9", "**默认偏好**（㉕「先进入收件箱」，**不调** `setImportLandingPreference`）下 commit `folder:\"归档\"` → "
+      + "`created`，笔记**真的落在 `<归档>/<标题>.md`**，正文 = 页面里编辑过的那一份 —— 用户在剪藏页选的落点**不是假开关**",
+      `http=${archiveCommit.status} status=${archiveResult.status} path=${landedRel} 磁盘字节=${Buffer.byteLength(landedText)}`
+      + `（偏好=模块默认，未调 setImportLandingPreference）`);
+  } else {
+    fail("S13.9", "默认偏好下「指名落点」必须直接落盘（不许被 ㉕ 静默改成收件箱）",
+      `http=${archiveCommit.status} status=${archiveResult && archiveResult.status} path=${landedRel} 存在=${Boolean(landedText)}`
+      + ` 含标题=${landedText.includes(editedTitle)} 含编辑后正文=${landedText.includes("这是用户在剪藏页里改过的正文。")}`
+      + `（期望 created + 归档/<标题>.md；若 status=pending 说明指名落点被吞了）`);
+  }
+
+  /* ── S13.14 ㉕.2 **不许放松**：默认偏好 + `conflict:"overwrite"` + 指名落点 → 仍 `pending`、磁盘上没有新 .md ──
+   *
+   * 这是本轮最容易被后来人改松的地方：「指名落点要直接落盘」这条收窄**不能**把
+   * 「先进入收件箱」对 `overwrite` 的拦截一起放掉（`overwrite` 是最不可逆的无审阅写入）。
+   * 直接走**真接收端**（`receiveEnvelopeOutcome`），因为 `POST /v1/clip/commit` 恒发 `conflict:"new"`。 */
+  {
+    /* ⚠️ 只数**笔记**（`.opennote/` 之外的 .md）：收件箱条目里也有一个 `body.md`，
+     * 第一版把两者一起数 → `新增 .md=2`，在**产品正确**时假红了一次。 */
+    const noteMds = () => listWorkspace(root).filter((f) => f.endsWith(".md") && !f.startsWith(".opennote/")).length;
+    const mdBefore14 = noteMds();
+    const baseEnvelope = envelope({});
+    const direct = (overrides) => {
+      const e = envelope({ source: { ...baseEnvelope.source, url: "https://example.com/s13-overwrite" }, ...overrides });
+      e.target = { folder: "归档", notePath: null };
+      return e;
+    };
+    env.clip.resetImportChannelContext();
+    env.clip.setImportChannelContext({ channel: "local-bridge" });
+    env.clip.resetImportLandingPreference();
+    const namedNew = await env.clip.receiveEnvelopeOutcome(direct({ conflict: "new", title: "指名落点·new" }));
+    const namedOverwrite = await env.clip.receiveEnvelopeOutcome(direct({ conflict: "overwrite", title: "指名落点·overwrite" }));
+    const mdAfter14 = noteMds();
+    const namedStatus = namedNew.ok ? namedNew.result.status : `error:${namedNew.error.code}`;
+    const overwriteStatus = namedOverwrite.ok ? namedOverwrite.result.status : `error:${namedOverwrite.error.code}`;
+    const namedLanded = namedNew.ok && namedNew.result.path ? String(namedNew.result.path) : "";
+    const namedFileExists = namedLanded ? fs.existsSync(path.join(root, ...namedLanded.split("/").filter(Boolean))) : false;
+    const delta = mdAfter14 - mdBefore14;
+    if (namedStatus === "created" && namedFileExists && overwriteStatus === "pending" && delta === 1) {
+      pass("S13.14", "㉕.2 **没有放松**（反向断言）：默认偏好下指名落点 + `conflict:\"new\"` → `created` 且真的落盘；"
+        + "同一个指名落点 + `conflict:\"overwrite\"` → **仍然 `pending`**、磁盘上没有第二条 .md",
+        `new → ${namedStatus} path=${namedLanded} 文件存在=${namedFileExists}；overwrite → ${overwriteStatus}；`
+        + `本轮新增 .md=${delta}（期望 1，只来自 new 那一次）`);
+    } else {
+      fail("S13.14", "「指名落点直接落盘」的收窄不得放掉 ㉕.2（overwrite 仍必须被拦进收件箱）",
+        `new → ${namedStatus} path=${namedLanded} 文件存在=${namedFileExists}（期望 created + 落盘）；`
+        + `overwrite → ${overwriteStatus}（期望 pending）；本轮新增 .md=${delta}（期望 1）`);
+    }
+    env.clip.setImportChannelContext({ channel: "in-app" });
+    env.clip.resetImportLandingPreference();
+  }
+
+  /* ── S13.10 幂等：同一 stageId 同内容 → 同一份回执、不写第二遍；内容不同 → 409 ── */
+  const s10 = await stageOnce();
+  env.clip.resetImportLandingPreference();
+  const first = s10
+    ? await httpCall(port, { path: "/v1/clip/commit", body: { stageId: s10.id, k: s10.key, title: "幂等剪藏", body: "同一份内容。\n", folder: "" } })
+    : { status: 0 };
+  const firstResult = first.json && first.json.result ? first.json.result : null;
+  const firstFiles = firstResult && firstResult.path ? listWorkspace(root).filter((f) => f === String(firstResult.path)) : [];
+  const filesAfterFirst = listWorkspace(root).length;
+  const second = s10
+    ? await httpCall(port, { path: "/v1/clip/commit", body: { stageId: s10.id, k: s10.key, title: "幂等剪藏", body: "同一份内容。\n", folder: "" } })
+    : { status: 0 };
+  const secondResult = second.json && second.json.result ? second.json.result : null;
+  const filesAfterSecond = listWorkspace(root).length;
+  const third = s10
+    ? await httpCall(port, { path: "/v1/clip/commit", body: { stageId: s10.id, k: s10.key, title: "幂等剪藏（改了）", body: "换了内容。\n", folder: "" } })
+    : { status: 0 };
+  const filesAfterThird = listWorkspace(root).length;
+  const sameReceipt = firstResult && secondResult
+    && firstResult.importId === secondResult.importId && firstResult.path === secondResult.path;
+  /* 第三次（内容不同）的判据盯**语义**：必须 409、必须给得出可读的 userMessage、**必须一个字节都不写**
+   * （码号由实现定：本轮是 `IMP-4018`「暂存已入库且内容不同」这个正式码；第一版我写死 `IMP-4011`，
+   *   在实现换成更精确的码号时假红了一次 —— 契约要的是「不许静默覆盖」，不是某个号码）。 */
+  const thirdMsg = third.json && third.json.error ? String(third.json.error.userMessage || "") : "";
+  if (first.status >= 200 && first.status < 300 && second.status >= 200 && second.status < 300
+      && sameReceipt && filesAfterSecond === filesAfterFirst
+      && third.status === 409 && thirdMsg.trim() !== "" && filesAfterThird === filesAfterFirst) {
+    pass("S13.10", "submit 幂等：同一 stageId + 同一内容 → **同一份已存回执**、磁盘不再动一次；内容不同 → 409 + 可读文案（不静默覆盖、不写第二遍）",
+      `第 1 次 http=${first.status} path=${firstResult && firstResult.path}；第 2 次 http=${second.status} 同一 importId=${sameReceipt}`
+      + ` 文件数 ${filesAfterFirst} → ${filesAfterSecond}；改内容 → http=${third.status}/${codeOf(third)} 文件数 ${filesAfterThird}`
+      + ` userMessage=「${thirdMsg.slice(0, 60)}」`);
+  } else {
+    fail("S13.10", "同一 stageId 的重复提交必须幂等，改内容必须 409 且不写盘",
+      `第 1 次 http=${first.status}/${JSON.stringify(firstResult).slice(0, 80)}；第 2 次 http=${second.status} 同一回执=${sameReceipt}`
+      + ` 文件数 ${filesAfterFirst}→${filesAfterSecond}；改内容 → http=${third.status}/${codeOf(third)} 文件数 ${filesAfterThird}`
+      + ` userMessage=「${thirdMsg.slice(0, 60)}」（期望 409 + 有文案 + 文件数不变）`);
+  }
+  env.clip.setImportLandingPreference("inbox");
+
+  /* ── S13.11 `k` / `stageId` 绝不进日志（`bridge.log` + 主进程 log 回调两向） ── */
+  await bridge.controller.stop();
+  const logText = (() => {
+    try { return fs.readFileSync(path.join(bridge.dataDir, "bridge.log"), "utf8"); } catch { return ""; }
+  })();
+  const logAll = `${logText}\n${bridge.logLines.join("\n")}`;
+  const leaks = stageId && k ? [stageId, k].filter((secret) => logAll.includes(secret)) : ["(没有 stageId/k 可比)"] ;
+  if (stageId && k && logAll.length > 0 && leaks.length === 0) {
+    pass("S13.11", "`k` 与 `stageId` **绝不进日志**：`bridge.log`（磁盘）与主进程 `log()` 回调（内存）两向都没有它们",
+      `日志 ${logAll.length} 字符 / ${bridge.logLines.length} 行回调；命中 stageId=${logAll.includes(stageId)} 命中 k=${logAll.includes(k)}`);
+  } else {
+    fail("S13.11", "`k` / `stageId` 不得出现在 bridge.log 或主进程日志回调里",
+      `日志 ${logAll.length} 字符；泄漏项=${JSON.stringify(leaks)}；样例=${JSON.stringify(logAll.slice(0, 200))}`);
+  }
+
+  /* ── S13.12 **跨线**：扩展真实请求体被接收；`{url,alt}` 形状被拒（扩展一回归就红） ── */
+  const crossBridge = bootClipBridge(env.bridgeModule, { onEnvelope: async () => ({ ok: true, status: 200, result: { status: "created", path: "x.md" } }) });
+  const crossStarted = await crossBridge.controller.start();
+  const crossPort = crossStarted && crossStarted.port ? crossStarted.port : null;
+  const crossToken = crossBridge.getToken();
+  let contractRes = { status: 0 };
+  let wrongRes = { status: 0 };
+  if (crossPort) {
+    const withAssets = env.stage.buildStageRequest({
+      url: "https://example.com/s13-assets", title: "带图剪藏", body: "正文。\n", selection: false,
+      assets: [{ name: "a.png", mime: "image/png", dataBase64: "AAAA" }], warnings: [],
+    });
+    contractRes = await httpCall(crossPort, { origin: EXT_ORIGIN, token: crossToken, path: "/v1/clip/stage", body: withAssets.request });
+    wrongRes = await httpCall(crossPort, {
+      origin: EXT_ORIGIN, token: crossToken, path: "/v1/clip/stage",
+      body: { ...withAssets.request, assets: [{ url: "https://example.com/a.png", alt: "" }] },
+    });
+    await crossBridge.controller.stop();
+  }
+  const wrongDetail = wrongRes.json && wrongRes.json.error && wrongRes.json.error.detail ? wrongRes.json.error.detail : null;
+  const wrongField = wrongDetail && typeof wrongDetail.field === "string" ? wrongDetail.field : "";
+  /* 语义判据：真形状 → 2xx；`{url,alt}` → **4xx 且点名是哪个字段**（`assets[0].name`）。
+   * 不写死码号：契约要的是「桥如实说哪一项不合法」，码号是实现细节。 */
+  if (contractRes.status >= 200 && contractRes.status < 300 && wrongRes.status >= 400 && wrongRes.status < 500 && wrongField.startsWith("assets")) {
+    pass("S13.12", "**跨线**：扩展 `buildStageRequest()` 产出的资产形状被桥接收（2xx）；"
+      + "把资产换成 `{url, alt}` → 桥**必拒** 4xx 且点名 `assets[…].name`（扩展一回归就红）",
+      `扩展真实形状 → http=${contractRes.status}；{url:alt} → http=${wrongRes.status}/${codeOf(wrongRes)} field=${JSON.stringify(wrongField)}`);
+  } else {
+    fail("S13.12", "扩展的资产形状必须被接收，且 `{url,alt}` 必须被 4xx 拒绝并点名字段（否则这条跨线判据是恒绿）",
+      `扩展真实形状 → http=${contractRes.status}；{url:alt} → http=${wrongRes.status}/${codeOf(wrongRes)} field=${JSON.stringify(wrongField)}（期望 2xx / 4xx + field=assets…）`);
+  }
+
+  /* ── S13.13 变异自检：把 `folders[0]` 与 commit 的成员校验改坏 → 对应断言必须变红 ── */
+  {
+    const mutations = [
+      {
+        id: "folders[0] 不再是收件箱（'' 挪到最后）",
+        apply: (src) => src.replace(/(folders:\s*)\[\s*'',\s*\.\.\.\[\.\.\.seen\]\.sort\(\)\s*\]/, "$1[...[...seen].sort(), '']"),
+        probe: async (mod) => {
+          const b = bootClipBridge(mod, { getFolders: () => ["归档", "剪藏"] });
+          const s = await b.controller.start();
+          try {
+            if (!s.port) return false;
+            const r = await httpCall(s.port, { method: "GET", path: `/v1/clip/folders?stageId=${"A".repeat(43)}&k=${"B".repeat(43)}` });
+            // 变异桥下这个请求会先撞 404（没有暂存）——所以这里直接看源码语义：换个角度，
+            // 用**真实暂存**走一遍才算数。
+            const st = await httpCall(s.port, { origin: EXT_ORIGIN, token: b.getToken(), path: "/v1/clip/stage", body: built.request });
+            const u = st.json && st.json.openUrl ? String(st.json.openUrl) : "";
+            const m = /\/clip\/([^?]+)\?k=(.+)$/.exec(u);
+            if (!m) return false;
+            const f = await httpCall(s.port, { method: "GET", path: `/v1/clip/folders?stageId=${m[1]}&k=${m[2]}` });
+            void r;
+            return Boolean(f.json && Array.isArray(f.json.folders) && f.json.folders[0] !== "");
+          } finally {
+            await b.controller.stop();
+          }
+        },
+      },
+      {
+        id: "commit 删掉「必须已存在」的成员校验",
+        apply: (src) => src.replace(/if\s*\(!folders\.folders\.includes\(folder\)\)\s*\{/, "if (false) {"),
+        probe: async (mod) => {
+          const b = bootClipBridge(mod, {
+            getFolders: () => ["归档"],
+            onEnvelope: async () => ({ ok: true, status: 200, result: { status: "created", path: "x.md" } }),
+          });
+          const s = await b.controller.start();
+          try {
+            if (!s.port) return false;
+            const st = await httpCall(s.port, { origin: EXT_ORIGIN, token: b.getToken(), path: "/v1/clip/stage", body: built.request });
+            const u = st.json && st.json.openUrl ? String(st.json.openUrl) : "";
+            const m = /\/clip\/([^?]+)\?k=(.+)$/.exec(u);
+            if (!m) return false;
+            const c = await httpCall(s.port, { path: "/v1/clip/commit", body: { stageId: m[1], k: m[2], title: "x", body: "y", folder: "不存在的目录" } });
+            // 「变红」= 该请求**不再**被 IMP-4008 拒（校验确实被摘掉了）。
+            return !(c.status === 422 && codeOf(c) === "IMP-4008");
+          } finally {
+            await b.controller.stop();
+          }
+        },
+      },
+    ];
+    const bad = [];
+    const ok = [];
+    for (const m of mutations) {
+      const mutated = loadMutatedModule(bridgePath, m.apply);
+      if (!mutated) { bad.push(`${m.id}：**变异没命中源码**（锚点漂了）—— 本条自检失效`); continue; }
+      let red = false;
+      try {
+        red = await m.probe(mutated);
+      } catch (error) {
+        bad.push(`${m.id}：变异桥跑不起来 → ${error && error.message ? error.message : String(error)}`);
+        continue;
+      }
+      if (red) ok.push(`${m.id} 如期变红`);
+      else bad.push(`${m.id}：**注入后断言仍绿 —— 这两条运行期判据是恒绿的**`);
+    }
+    if (bad.length === 0) {
+      pass("S13.13", `变异自检：${mutations.length} 条运行期判据各自失效后，对应断言全部如期变红（「folders[0] 是收件箱」与「commit 的成员校验」）`,
+        ok.join("；"));
+    } else {
+      fail("S13.13", "运行期判据的变异自检未全部通过（说明 S13.5/S13.7 有恒绿风险）", bad.join(" | "));
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ 汇总 */

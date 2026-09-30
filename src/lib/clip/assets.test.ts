@@ -95,9 +95,16 @@ function resolveRef(notePath: string, ref: string): string {
   return segments.join("/");
 }
 
-/** 正文里的图片引用。目标里**允许空格**（笔记名带空格时 `备注 2.assets/x.png` 是合法引用）。 */
+/**
+ * 正文里的图片引用（取 `](…)` 里的目标，**剥掉 CommonMark 的角度括号**）。
+ *
+ * 目标里**允许空格**（笔记名带空格时 `备注 2.assets/x.png` 是合法引用），而带空格的目标
+ * 必须写成 `<…>` 形式（`markdownRef` 唯一产地），否则空格会截断链接目标、图片不渲染。
+ * 这里剥掉尖括号，让用例继续断言**路径**；「尖括号形式真的能渲染」由
+ * `src/editor/media.test.ts` 的 `rendersAsImage()` 用应用自己的渲染器咬。
+ */
 function imageRefs(markdown: string): string[] {
-  return [...markdown.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map((match) => match[1].trim());
+  return [...markdown.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map((match) => match[1].trim().replace(/^<|>$/g, ""));
 }
 
 /** 工作区里所有非笔记、非 `.opennote/` 的文件（= 资产）。 */
@@ -156,7 +163,11 @@ describe("L2 接收端 · 附件目录按笔记名派生（foo.md → foo.assets
     expect(receipt.status).toBe("created");
     expect(receipt.path).toBe("测试标题 2.md");
     expect(receipt.assets[0].startsWith("测试标题 2.assets/")).toBe(true);
-    expect(resolveRef(receipt.path!, imageRefs(testBackend.text(receipt.path!)!)[0])).toBe(receipt.assets[0]);
+    const text = testBackend.text(receipt.path!)!;
+    expect(resolveRef(receipt.path!, imageRefs(text)[0])).toBe(receipt.assets[0]);
+    // 目标里带空格（`测试标题 2.assets/…`）⇒ 必须写成 `<…>`，否则空格截断目标、图片不渲染。
+    // 判据盯**用户看得见的那条路径**：正文里那一行到底能不能被渲染器认出来。
+    expect(text.includes(`](<测试标题 2.assets/`), `引用没有走 <…> 形式：${text}`).toBe(true);
   });
 
   it("落点在子目录：附件目录跟着笔记进同一个子目录（相对引用不带目录前缀也能解析）", async () => {
@@ -269,6 +280,17 @@ describe("L2 接收端 · 撤销时资产与正文一致", () => {
     // `foo.assets/` 不能留在原地（否则下一篇同名笔记会撞上它）。
     expect(testBackend.paths().some((path) => path.startsWith(dir))).toBe(false);
     expect(testBackend.paths().some((path) => path.startsWith(".opennote/trash/") && path.includes(".assets/"))).toBe(true);
+    /*
+     * 撤销的**那句话**也必须是真的。
+     *
+     * 这里咬的是一个「结论一样、过程是假的」的洞：附件目录在两个地方各搬了一次
+     * （`receive.ts` 自己的 `trashAssetsDir` + `library.ts` 的 `trashNote`）。
+     * 目标路径恰好相同，所以**功能上看不出区别**，但第二处必然失败（源目录已经被搬走）
+     * ⇒ 用户会收到一句假告警「图片目录 x.assets 没能一起移入回收站，请手动处理」。
+     * 判据盯的是**用户看得见的那句话**，不是「文件最后在哪」。
+     */
+    expect(result.message).not.toContain("没能一起移入回收站");
+    expect(result.message).toBe("已把《测试标题》移入回收站，可以再找回来。");
   });
 
   it("撤销「追加」：前像还回来，这次新增的图跟着删掉，复用的旧图**不删**", async () => {

@@ -96,6 +96,13 @@ export function errorBody(code, message, userMessage, extra = {}) {
 
 const ISO_WITH_TZ = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
 const TAG_RE = /^[\p{L}\p{N}_\-/]+$/u;
+/**
+ * `assets[].mime` 白名单（02 §2.5）：与真桥同一份口径。mock 也照它校验，
+ * 这样「扩展发出一个桥必拒的形状」在集成测试里就会红，而不是等到真机。
+ */
+const ASSET_MIME_WHITELIST = [
+  "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/svg+xml", "image/bmp",
+];
 
 /**
  * @param {object} options
@@ -130,6 +137,8 @@ export function startMockBridge(options = {}) {
     // 应用侧「先进入收件箱」（㉕）：非 in-app 通道一律强制 pending
     inboxEnabled,
     imports: [],
+    // A · 网页版剪藏页的暂存条目（`POST /v1/clip/stage`）：测试断言收到的请求体形状
+    stages: [],
     pairs: [],
     rejections: [],
     // 判定链轨迹（created / appended / pending / duplicate / deduped），测试直接断言它
@@ -350,6 +359,58 @@ export function startMockBridge(options = {}) {
             inboxEnabled: false,
           },
         });
+        return;
+      }
+
+      // ── A · 网页版剪藏页：POST /v1/clip/stage ────────────────────────────────
+      // 与 electron/bridge.cjs 的契约同形状（交接文档 §四-A）：
+      //   请求 { spec:"opennote.clip/v1", url, title, body, selection, tags[], source{...}, assets[] }
+      //   响应 { ok:true, result:{ stageId, expiresAt, openUrl } }
+      // **openUrl 是服务端产出的**（端口 + 不透明 stageId + 一次性 `k`），扩展侧只负责打开它。
+      // `mode: "stage-no-open-url"` 复现「接口没回 openUrl」：扩展必须**如实报错、不打开页面**。
+      if (request.method === "POST" && path === "/v1/clip/stage") {
+        let payload = null;
+        try {
+          payload = JSON.parse(raw || "null");
+        } catch {
+          send(400, errorBody("IMP-3002", "bad json", "暂存内容不是有效的 JSON，请重试。"));
+          return;
+        }
+        // 形状校验与真桥同一口径（02 §2.5）：`assets[]` 的每条**必须**是
+        // `{ name, mime, dataBase64 }`。少了 name → 422 IMP-4003，`detail.field` 指到具体哪一条
+        // （独立验证者用真桥探到过：扩展发 `{url, alt}` → `assets[0].name` 不合法）。
+        const assets = payload && payload.assets;
+        if (!Array.isArray(assets)) {
+          send(422, errorBody("IMP-4003", "assets must be an array", "暂存内容缺了图片清单。", { detail: { field: "assets" } }));
+          return;
+        }
+        for (let index = 0; index < assets.length; index += 1) {
+          const item = assets[index] || {};
+          const field =
+            typeof item.name !== "string" || !item.name
+              ? "name"
+              : typeof item.mime !== "string" || !ASSET_MIME_WHITELIST.includes(item.mime)
+                ? "mime"
+                : typeof item.dataBase64 !== "string" || !item.dataBase64
+                  ? "dataBase64"
+                  : null;
+          if (field) {
+            send(
+              422,
+              errorBody("IMP-4003", `asset ${index} invalid`, "暂存内容里的图片格式不合法。", {
+                detail: { field: `assets[${index}].${field}` },
+              }),
+            );
+            return;
+          }
+        }
+        const stageId = `stage-${state.stages.length + 1}-${createHash("sha256").update(raw).digest("hex").slice(0, 8)}`;
+        state.stages.push({ stageId, payload, at: new Date().toISOString() });
+        const result = { stageId, expiresAt: Date.now() + 30 * 60 * 1000 };
+        if (mode !== "stage-no-open-url") {
+          result.openUrl = `http://127.0.0.1:${state.port}/clip/${stageId}?k=${createHash("sha256").update(`${token}:${stageId}`).digest("hex").slice(0, 16)}`;
+        }
+        send(200, { ok: true, result });
         return;
       }
 

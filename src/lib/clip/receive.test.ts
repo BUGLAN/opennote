@@ -923,11 +923,11 @@ describe("L2 接收端 · 冲突对话框挂钩（UI-06/S3）", () => {
  * ===================================================================================== */
 
 describe("L2 接收端 · 落点偏好（00 §6.14㉕㉖）", () => {
-  it("默认值就是 inbox：外部通道（local-bridge）投递 → pending，磁盘上不出现新 .md", async () => {
+  it("默认值就是 inbox：外部通道（local-bridge）**没说落点**的投递 → pending，磁盘上不出现新 .md", async () => {
     expect(getImportLandingPreference()).toBe("inbox");
     setImportChannelContext({ channel: "local-bridge" });
 
-    const receipt = await receiveEnvelope(raw({ target: { folder: "剪藏/技术", notePath: null } }));
+    const receipt = await receiveEnvelope(raw({ target: { folder: null, notePath: null } }));
 
     expect(receipt.status).toBe("pending");
     expect(receipt.path).toBeNull();
@@ -943,6 +943,39 @@ describe("L2 接收端 · 落点偏好（00 §6.14㉕㉖）", () => {
     expect(inboxCalls).toHaveLength(1);
     // 附件/目标目录没被解析成落点，也就不会创建空目录。
     expect(testBackend.paths().some((path) => path.startsWith("剪藏/"))).toBe(false);
+  });
+
+  /*
+   * 0.3.3 收窄（Lead 裁定，`00` 号 §6.16（52））：**偏好管的是「没有指明落点的投递」**。
+   *
+   * 这一条原来断言的是「外部通道 + `target.folder = "剪藏/技术"` 也照样进收件箱」。
+   * 那个口径让**网页版剪藏页的落点下拉变成假开关**（用户在确认页上选了「归档」，笔记还是进收件箱）——
+   * 用**真接收端**跑端到端时才露出来：桥的替身回 `created`，真接收端回 `pending`。
+   * 用户原话「先编辑，确认后再入库」「支持移动到收件箱或者说其他目录」是这条收窄的依据；
+   * 而 ㉕ 自己的措辞也是「剪藏落点**默认**进收件箱」—— 默认 ≠ 客户端明确指名。
+   */
+  it("指名落点 = 已经做过决定：外部通道 + `target.folder` 非空 → **直接落盘**，不进收件箱", async () => {
+    setImportChannelContext({ channel: "local-bridge" });
+
+    const receipt = await receiveEnvelope(raw({ target: { folder: "剪藏/技术", notePath: null } }));
+
+    expect(receipt.status).toBe("created");
+    expect(receipt.path).toBe("剪藏/技术/测试标题.md");
+    expect(receipt.inboxId).toBeNull();
+    expect(testBackend.text("剪藏/技术/测试标题.md")).toContain("第一段");
+    expect(inboxCalls).toHaveLength(0);
+  });
+
+  it("㉕.2 一条都不放松：指名落点 + 客户端下发 `overwrite` 仍**强制进收件箱**（不可被绕过）", async () => {
+    setImportChannelContext({ channel: "local-bridge" });
+
+    const receipt = await receiveEnvelope(
+      raw({ conflict: "overwrite", target: { folder: "剪藏/技术", notePath: null } }),
+    );
+
+    expect(receipt.status).toBe("pending");
+    expect(receipt.path).toBeNull();
+    expect(notePaths()).toEqual([]);
   });
 
   it("同 importId 重投两次 → 第二次 deduped，收件箱里只有 1 条（㉕「第 1 步依然优先」）", async () => {

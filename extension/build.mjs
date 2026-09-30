@@ -60,10 +60,26 @@ function copyTokens() {
   return { hash, css: css.toString("utf8"), bytes: css.length };
 }
 
-/** `:root` → `:host`：影子 DOM 里没有 `:root`，宿主元素用 `:host` 承接令牌。 */
+/**
+ * `:root` → `:host`：影子 DOM 里没有 `:root`，宿主元素用 `:host` 承接令牌。
+ *
+ * 还要把**挂在文档根上的属性选择器**一起搬进来（如 `[data-theme="night"]`、
+ * `[data-theme="night"][data-accent="seal"]`、`[data-font="mono"]`）：影子根里的
+ * 属性选择器**匹配不到影子树外面的祖先**，所以原样保留的话，覆盖层永远只有亮色一套值
+ * —— 这就是「`page-01-mask-paper` 与 `page-02-mask-night` 字节数完全相同（31744）」的根因
+ * （不是 `Emulation.setEmulatedMedia` 不生效）。搬成 `:host([data-theme="night"])` 之后，
+ * 只要覆盖层把页面根上的这几个属性**镜像到自己的宿主元素**上（`content/picker.js`），
+ * 夜版就有真正的帧差异，且**一个色值都不用手抄**。
+ */
 function scopeTokensForShadow(css) {
   const count = (css.match(/:root/g) || []).length;
-  return { css: css.replace(/:root/g, ":host"), replacements: count };
+  let scoped = css.replace(/:root/g, ":host");
+  let attributeHits = 0;
+  scoped = scoped.replace(/(\[data-[a-z-]+="[^"]*"\])+/g, (match) => {
+    attributeHits += 1;
+    return `:host(${match})`;
+  });
+  return { css: scoped, replacements: count, attributeHits };
 }
 
 /* ── 2. 图标：解析令牌里的 --accent / --accent-ink，自己编码 PNG ───────── */
@@ -240,7 +256,7 @@ function copyTree() {
       }
       const scoped = scopeTokensForShadow(TOKENS_SNAPSHOT.css);
       content = Buffer.from(source.replace(FLOAT_PLACEHOLDER, JSON.stringify(scoped.css)), "utf8");
-      copied.push({ path: relPosix, note: `tokens 注入（:root→:host ${scoped.replacements} 处）` });
+      copied.push({ path: relPosix, note: `tokens 注入（:root→:host ${scoped.replacements} 处；根属性选择器→:host(...) ${scoped.attributeHits} 处）` });
     } else {
       copied.push({ path: relPosix });
     }

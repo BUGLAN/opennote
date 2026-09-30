@@ -11,6 +11,8 @@ import { maskTokenTail } from "../lib/bridge.js";
 import { userMessage } from "../lib/errors.js";
 // task-21：四因文案与后台**同一份来源**（不再各写一套、也不再统一伪装成「页面类型不支持」）
 import { PICK_FAIL_COPY } from "../lib/pick.js";
+// ③ 图片开关的**默认值**与「暂存请求体」的形状都只有这一个产地（lib/stage.js）
+import { IMAGE_DOWNLOAD_DEFAULT } from "../lib/stage.js";
 import { STATE, planFor } from "../lib/state.js";
 
 const $ = (id) => document.getElementById(id);
@@ -60,10 +62,20 @@ let closeTimer = null;
 let currentImportId = null;
 let lastSignature = null;
 let pendingNotePath = null;
+/** 暂存成功、但因为图片降级说明要先给用户看，所以**延后**打开的那个 openUrl（接口给的原文，不改写）。 */
+let pendingOpenUrl = null;
 
 let previewTimer = null;
 /** 预览里读到的「实际会发出去的值」，用于标签自动补全等展示。 */
 let lastPreview = null;
+/**
+ * ③ 图片下载开关（00 §6.8③ / 交接 C-2 ③）：**默认关**。
+ * 关闭时：不下发 `assets[]`（空数组）、不多注入一次、不产生任何额外请求；
+ * 打开时：把「要保存哪些图」的清单（每项只有 `url` + `alt`）随正文一起交给本地接口。
+ * **插件不下载图片字节**：host_permissions 只有 127.0.0.1 这 10 条，跨站 fetch 必然失败；
+ * 下载与落盘由 Opennote 侧完成 —— 这是「不新增权限」的唯一诚实做法。
+ */
+let imageDownload = IMAGE_DOWNLOAD_DEFAULT;
 
 /* ─────────────────────────── 基础设施 ─────────────────────────── */
 
@@ -197,37 +209,245 @@ function iconExternal() {
   return svg;
 }
 
+/* ─────────────── 预览卡的只读排版（② 「像 Opennote」） ───────────────
+
+   判据来自用户给的编辑器截图，取值**逐条对照** src/styles/tokens.css + editor.css 的真实值，
+   不凭感觉配色、不手抄色值；新增令牌 0（全部走 var(--…)）：
+     - 深色纸（近黑）：`--paper` / `--paper-2`（夜读主题下就是 #14120f / #1c1915）
+     - 正文等宽、行高：`--font-mono` + `--doc-fs` + `--doc-lh`（应用里正文的**同一批令牌**）
+     - H1 衬线粗体大字 + 下方通栏细线：`--font-serif` + 1.85em/600/-.014em + 2px `--rule`
+     - `#` 暗灰色：`--ink-3`（与 editor.css 的 md-src 同色）
+     - H2 衬线粗体 + 1px `--rule` 下边线：1.45em/600
+     - 表格通栏 1px `--rule` 边框、表头 `--paper-3` 底、单元格等宽
+     - 左侧留白：卡片 `var(--s3)` + 文档层 `var(--s4)`（360px 宽度下的等比取舍，见 03 §UI-01）
+     - 没有默认聚焦环：文档层不可聚焦（不是输入控件）；控件自身的 `:focus-visible` **照 S-C3 保留**
+   这是**预览**不是编辑器：只认标题 / 表格 / 代码块 / 引用 / 列表 / 分隔线 / 段落七种块，
+   行内只认粗体 / 斜体 / 行内代码三种；图片渲染成文字占位 —— popup **不加载任何远程图片**。
+   全部用 createElement + textContent 拼装，不用 innerHTML。 */
+
+const DOC_MAX_BLOCKS = 40;
+const DOC_MAX_CHARS = 4000;
+
+function inlineNodes(text) {
+  const out = [];
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/g;
+  let last = 0;
+  let match = re.exec(text);
+  while (match) {
+    if (match.index > last) out.push(document.createTextNode(text.slice(last, match.index)));
+    const token = match[0];
+    if (token.startsWith("**")) out.push(el("strong", null, token.slice(2, -2)));
+    else if (token.startsWith("`")) out.push(el("code", "doc-inline", token.slice(1, -1)));
+    else out.push(el("em", null, token.slice(1, -1)));
+    last = match.index + token.length;
+    match = re.exec(text);
+  }
+  if (last < text.length) out.push(document.createTextNode(text.slice(last)));
+  return out;
+}
+
+function paragraph(tag, text) {
+  const node = el(tag);
+  for (const child of inlineNodes(text)) node.appendChild(child);
+  return node;
+}
+
+function tableCells(line) {
+  let text = String(line).trim();
+  if (text.startsWith("|")) text = text.slice(1);
+  if (text.endsWith("|")) text = text.slice(0, -1);
+  return text.split("|").map((cell) => cell.trim());
+}
+
+function isTableDelimiter(line) {
+  const cells = tableCells(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{1,}:?$/.test(cell));
+}
+
+function codeBlock(lines) {
+  const pre = el("pre", "doc-code");
+  const code = el("code");
+  code.textContent = lines.join("\n");
+  pre.appendChild(code);
+  return pre;
+}
+
+function tableBlock(header, rows) {
+  const wrap = el("div", "doc-table-wrap");
+  const table = el("table", "doc-table");
+  const thead = el("thead");
+  const headRow = el("tr");
+  for (const cell of header) headRow.appendChild(paragraph("th", cell));
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+  for (const row of rows) {
+    const tr = el("tr");
+    for (let index = 0; index < header.length; index += 1) tr.appendChild(paragraph("td", row[index] || ""));
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function renderDoc(markdown) {
+  const box = el("div", "clip__doc");
+  const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
+  let blocks = 0;
+  let used = 0;
+  let truncated = false;
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (blocks >= DOC_MAX_BLOCKS || used >= DOC_MAX_CHARS) {
+      truncated = true;
+      break;
+    }
+    if (/^\s*$/.test(line)) {
+      index += 1;
+      continue;
+    }
+    used += line.length;
+    const fence = line.match(/^\s*```/);
+    if (fence) {
+      const body = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```/.test(lines[index])) {
+        body.push(lines[index]);
+        index += 1;
+      }
+      index += 1;
+      box.appendChild(codeBlock(body));
+      blocks += 1;
+      continue;
+    }
+    const heading = line.match(/^\s*(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const level = Math.min(heading[1].length, 4);
+      const node = paragraph(`h${level}`, heading[2].trim());
+      // 判据里的「`#` 号暗灰色」在编辑器里是**源码标记**；预览保留它，让卡片与编辑器同一副面孔。
+      if (level <= 2) node.insertBefore(el("span", "doc-hash", "#".repeat(level)), node.firstChild);
+      box.appendChild(node);
+      blocks += 1;
+      index += 1;
+      continue;
+    }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      box.appendChild(el("hr", "doc-hr"));
+      blocks += 1;
+      index += 1;
+      continue;
+    }
+    if (line.includes("|") && index + 1 < lines.length && isTableDelimiter(lines[index + 1])) {
+      const header = tableCells(line);
+      const rows = [];
+      let cursor = index + 2;
+      while (cursor < lines.length && lines[cursor].trim() && lines[cursor].includes("|")) {
+        rows.push(tableCells(lines[cursor]));
+        cursor += 1;
+      }
+      box.appendChild(tableBlock(header, rows));
+      blocks += 1;
+      index = cursor;
+      continue;
+    }
+    if (/^\s*>/.test(line)) {
+      const quoted = [line.replace(/^\s*>\s?/, "")];
+      index += 1;
+      while (index < lines.length && /^\s*>/.test(lines[index])) {
+        quoted.push(lines[index].replace(/^\s*>\s?/, ""));
+        index += 1;
+      }
+      const quote = el("blockquote", "doc-quote");
+      quote.appendChild(paragraph("p", quoted.join(" ")));
+      box.appendChild(quote);
+      blocks += 1;
+      continue;
+    }
+    const bullet = line.match(/^\s*([-*+]|\d+\.)\s+(.*)$/);
+    if (bullet) {
+      const list = el(/^\d/.test(bullet[1]) ? "ol" : "ul", "doc-list");
+      let cursor = index;
+      while (cursor < lines.length) {
+        const item = lines[cursor].match(/^\s*([-*+]|\d+\.)\s+(.*)$/);
+        if (!item) break;
+        list.appendChild(paragraph("li", item[2]));
+        cursor += 1;
+      }
+      box.appendChild(list);
+      blocks += 1;
+      index = cursor;
+      continue;
+    }
+    const para = [];
+    while (index < lines.length && lines[index].trim() && !/^\s*(#{1,6}\s|>|```|[-*+]\s|\d+\.\s)/.test(lines[index]) && !isTableDelimiter(lines[index])) {
+      para.push(lines[index].trim());
+      index += 1;
+      if (para.length >= 3) break;
+    }
+    box.appendChild(paragraph("p", para.join(" ")));
+    blocks += 1;
+  }
+  if (truncated) box.appendChild(el("p", "doc-note", "预览只显示开头，剪藏后是完整正文。"));
+  return box;
+}
+
+/** ③ 图片开关（默认关）：只在卡片上，不占工具条（M1 冻结：工具条恰好两个按钮）。 */
+function imageRow() {
+  const info = (lastPreview && lastPreview.images) || (extraction() && extraction().images) || null;
+  const count = info && Array.isArray(info.items) ? info.items.length : 0;
+  const row = el("div", "clip__assets");
+  const label = el("label", "clip__assets-sw");
+  label.setAttribute("for", "imgDownload");
+  const input = el("input");
+  input.type = "checkbox";
+  input.id = "imgDownload";
+  input.checked = imageDownload;
+  input.setAttribute("aria-describedby", "imgDownloadNote");
+  input.addEventListener("change", () => {
+    imageDownload = input.checked;
+    render();
+    schedulePreview();
+  });
+  label.appendChild(input);
+  label.appendChild(el("span", null, "图片一起保存"));
+  row.appendChild(label);
+  const note = el("p", "clip__assets-note", "");
+  note.id = "imgDownloadNote";
+  if (!imageDownload) note.textContent = "关：正文里保留图片的原始网址。";
+  else if (count === 0) note.textContent = "这一页没找到可以下载的图片，正文里保留原始网址。";
+  else note.textContent = `开：会尝试下载这 ${count} 张图片随笔记一起保存；下载失败的，正文里保留原始网址。`;
+  row.appendChild(note);
+  return row;
+}
+
 function previewNode() {
   const ex = extraction();
   const box = el("div", "clip__preview");
+  // L3 首行（--fs-xs --ink-3）：**正文来源**，与两个按钮的选中态说的是同一件事。
+  const picked = snapshot && snapshot.pickedElement;
+  box.appendChild(
+    el("p", "clip__origin", mode === "element" && picked && picked.tagName ? `已选择 ${picked.tagName}` : "整页正文"),
+  );
   const row = el("div", "clip__title-row");
-  // 03 §UI-01 ②：标题的**唯一输入源**在属性区；正文卡上的标题行是只读的，
-  // 右侧给一个「改标题」按钮跳到属性区并聚焦标题输入框（不做第二个输入框，避免两个真源）。
   const title = el("p", "clip__title-in");
   title.id = "inlineTitle";
   title.textContent = titleValue || defaultTitle();
   row.appendChild(title);
-  // task-29 入口：**卡片标题行上的图标按钮** → 打开可编辑页（clip/clip.html）。
-  // 工具条仍是两个按钮（M1 冻结决定不破）；**无网址时不渲染**（不画死按钮）。
-  // **入口暂时隐藏**（第四态：已构建但被新架构取代）。新的剪藏页由 Opennote 自己服务
-  // （http://127.0.0.1:8787/clip/<id>，用应用源码构建 ⇒ 渲染与编辑体验一致）。
-  // 等它上线后：这个按钮改为「把 url/title/body/folder 暂存给本地接口 + 打开该 URL」。
-  // 在那之前**不留一个点了没用的按钮**；下面这段跳转 clip/clip.html 的实现保留但不再启用。
-  const CLIP_WEB_READY = false;
+  // task-29 ②：卡片标题行上的图标按钮 → **Opennote 自己服务的网页版剪藏页**
+  // （扩展侧只做两件事：POST /v1/clip/stage、chrome.tabs.create({url: openUrl})）。
+  // A 已上线，所以 `CLIP_WEB_READY` 现在是 true；**没有网址时不渲染**（不画死按钮）。
+  const CLIP_WEB_READY = true;
   const openTarget = CLIP_WEB_READY && ((ex && ex.url) || (snapshot && snapshot.tab && snapshot.tab.url) || "");
   if (openTarget) {
     const open = el("button", "clip__open");
     open.type = "button";
     open.id = "openEditable";
-    open.title = "在可编辑页里剪藏";
-    open.setAttribute("aria-label", "在可编辑页里剪藏");
+    open.title = "在新标签页里编辑后保存";
+    open.setAttribute("aria-label", "在新标签页里编辑后保存");
     open.appendChild(iconExternal());
-    open.addEventListener("click", () => {
-      // 带上**源标签 id**：clip 页自己是活动标签，不带就会读到它自己（正文永远为空）
-const id = snapshot && snapshot.tab && snapshot.tab.id;
-const suffix = id === undefined || id === null ? "" : "?tabId=" + id;
-void chrome.tabs.create({ url: chrome.runtime.getURL("clip/clip.html") + suffix });
-    });
+    open.addEventListener("click", () => void openClipWeb(open));
     row.appendChild(open);
   }
   if (mode === "page") {
@@ -237,11 +457,9 @@ void chrome.tabs.create({ url: chrome.runtime.getURL("clip/clip.html") + suffix 
   box.appendChild(row);
 
   // 预览正文的**唯一**来源：`currentMarkdown()`（它内部再按 mode 分流：元素选择 → 被点中的那块）。
-  // 这里原来写死 `ex.article.excerpt` —— 于是**元素模式的预览永远显示整页摘要**，与整页提取一模一样
-  // （用户实测：「重新选择的预览和整页提取的预览是一样的」）。**优先级：元素模式 > 整页；
-  // 任何兜底都不得用另一份正文顶替「被选中的那一块」**（冒充比空白更糟：用户无从发现）。
-  const excerpt = currentMarkdown();
-  box.appendChild(el("p", "clip__excerpt", String(excerpt).slice(0, 600)));
+  // 任何兜底都不得用另一份正文顶替「被选中的那一块」——冒充比空白更糟：用户无从发现。
+  box.appendChild(renderDoc(currentMarkdown()));
+  box.appendChild(imageRow());
 
   const src = el("p", "clip__src");
   if (mode === "selection") {
@@ -258,13 +476,56 @@ void chrome.tabs.create({ url: chrome.runtime.getURL("clip/clip.html") + suffix 
     src.appendChild(document.createTextNode(` · 剪藏于 ${formatDate(new Date().toISOString())}`));
   }
   box.appendChild(src);
-  // C65：来源 = 元素选择且已选过时，标题行右侧一行 `已选择 {标签名}`
-  // M1：只有两个按钮，这里如实显示当前来源（元素选择 / 整页提取）
   // 选中的是 iframe：如实说明只剪到外框，不假装读到了里面的内容
-  if (mode === "element" && snapshot && snapshot.pickedElement && snapshot.pickedElement.isIframe) {
+  if (mode === "element" && picked && picked.isIframe) {
     box.appendChild(el("p", "clip__hint", "这块是嵌入的内容，只能剪到它的外框，里面的内容读不到。"));
   }
   return box;
+}
+
+/**
+ * 打开网页版剪藏页（A）：**先暂存、再打开**，两件事都是扩展的全部职责。
+ * - 请求体由 background 按冻结形状组装；`openUrl` 由接口返回 —— 扩展**绝不自己拼**；
+ * - 失败（桥不在 / 令牌失效 / 接口没给 openUrl）→ **不打开页面**，把原因如实写在 popup 里；
+ * - 成功但有 `warnings[]`（③ 的图片降级：没权限 / 跨站 / 超时 / 太大）→ **不静默打开**：
+ *   先把这几句摆在用户眼前，再给一个「打开编辑页」按钮（少一次点击不值得藏掉一个事实）。
+ */
+async function openClipWeb(button) {
+  if (button && button.disabled) return;
+  if (button) button.disabled = true;
+  const payload = collectPayload();
+  const response = await send({
+    type: "opennote:clip-stage",
+    mode: payload.mode,
+    body: payload.body,
+    imageDownload,
+  });
+  if (button) button.disabled = false;
+  const reply = response && response.reply;
+  if (!reply || !reply.ok || !reply.openUrl) {
+    const code = (reply && reply.code) || "IMP-4014";
+    renderBlockReply({
+      status: "error",
+      code,
+      label: (reply && reply.label) || userMessage(code),
+      state: (reply && reply.state) || STATE.CONNECTED,
+    });
+    return;
+  }
+  const warnings = Array.isArray(reply.warnings) ? reply.warnings.filter((item) => item) : [];
+  if (warnings.length) {
+    pendingOpenUrl = reply.openUrl;
+    const plan = planForState(STATE.CONNECTED);
+    plan.block = { kind: "error", message: warnings.join(" "), next: null, code: null };
+    plan.actions = [];
+    plan.rows = false;
+    plan.preview = false;
+    plan.primary = { label: "打开编辑页", disabled: false, busy: false, intent: "open-clip-web" };
+    render(plan);
+    return;
+  }
+  // ②：`openUrl` 的唯一产地是接口返回值（这里不许拼端口、不许拼 stageId）。
+  await chrome.tabs.create({ url: reply.openUrl });
 }
 
 function actionButton(action) {
@@ -412,6 +673,12 @@ function syncPickRow() {
   const picked = snapshot && snapshot.pickedElement;
   const armed = Boolean(snapshot && snapshot.pickArmed);
   pickButton.textContent = picked && picked.tagName ? "重新选择" : "选择当前元素";
+  // ⑤ 两个按钮的选中态（用户报过「看不出选的是元素还是整页」）：
+  // **视觉与读屏一次解决** —— `aria-pressed` 既是可访问性状态，也是 CSS 的选中态选择器
+  // （`.btn[aria-pressed="true"]`，着色只用既有令牌 `--accent-soft` / `--accent` / `--accent-line`）。
+  // 「谁后点谁生效」：默认整页提取选中（03 §UI-01「两个按钮」表）。
+  pickButton.setAttribute("aria-pressed", mode === "element" ? "true" : "false");
+  extractPageButton.setAttribute("aria-pressed", mode === "page" ? "true" : "false");
   if (armed) {
     pickNote.textContent = "正在页面上等待你点选…在页面上点一下要剪的部分；按 Esc 取消。";
     pickNote.hidden = false;
@@ -459,7 +726,8 @@ function render(planInput) {
     primary.appendChild(document.createTextNode(loading ? busyLabel : plan.primary.label));
     primary.disabled = Boolean(plan.primary.disabled) || busy;
     primary.setAttribute("aria-busy", loading ? "true" : "false");
-    primary.dataset.intent = plan.primary.label === "暂存在插件里" ? "stage" : "submit";
+    // `intent` 由 plan 显式给（阶段结果里的「打开编辑页」就是一个意图，不能靠 label 反推）
+    primary.dataset.intent = plan.primary.intent || (plan.primary.label === "暂存在插件里" ? "stage" : "submit");
   } else {
     primary.hidden = true;
   }
@@ -476,7 +744,8 @@ async function refreshPreview() {
   if (!snapshot || snapshot.restricted) return;
   // M1：popup 不再发 templateId / props / dirty（模板与属性区已退场）；
   // 来源信息（标题/网址/站点/作者/发布时间）由页面自动提取，后台按「null 则省略整行」生成 front-matter。
-  const response = await send({ type: "opennote:preview", mode });
+  // ③：只有开关打开时才多要一份图片清单（默认关 = 连这次注入都不做）。
+  const response = await send({ type: "opennote:preview", mode, images: imageDownload });
   if (!response || !response.ok || !response.preview) {
     // 出口（不许静默 return）：预览拿不到 = 用户看不到正文，必须**看得见**并能重试。
     renderUnreadableBody(snapshot && snapshot.pickFailReason);
@@ -951,6 +1220,11 @@ function bindEvents() {
     if (event.target.closest(".spinner")) return;
     if (primary.dataset.intent === "stage") {
       void stage();
+      return;
+    }
+    // 暂存成功但有图片降级说明时：先看说明，再点这里打开网页版剪藏页（URL 仍是接口给的那个）
+    if (primary.dataset.intent === "open-clip-web") {
+      if (pendingOpenUrl) void chrome.tabs.create({ url: pendingOpenUrl });
       return;
     }
     void submit();

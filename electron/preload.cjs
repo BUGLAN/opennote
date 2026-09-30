@@ -10,7 +10,18 @@
 
 const { contextBridge, ipcRenderer } = require('electron')
 
-const MENU_CHANNEL = 'opennote:menu'
+/**
+ * 原生菜单命令（`opennote:menu`）**已删除**，不是漏发。
+ *
+ * `main.cjs` 的 `installApplicationMenu()` 在非 darwin 上 `Menu.setApplicationMenu(null)`，
+ * darwin 上只有纯 role 的最小菜单，注释写明「不额外增加自定义项」——菜单栏是被**故意移除**的。
+ * 所以 preload 这里原来那个 `onMenu` 订阅**听了没人发**（`verify-contract.cjs` 的 C-12c
+ * 死订阅判据咬的就是这一条）。
+ *
+ * **若将来恢复原生菜单，这里是接入点**：主进程用 `webContents.send` 往这个频道发命令，
+ * preload 用上面那个 `subscribe` 订阅并暴露给渲染层，`src/App.tsx` 里重建命令映射表。
+ * 三处要一起加，只加一处就是「配对只守一半」。
+ */
 const VERSION_CHANNEL = 'opennote:app:version'
 /** D11 关窗握手：主进程请求落盘 / 渲染层确认落盘完成。 */
 const FLUSH_REQUEST_CHANNEL = 'opennote:app:request-flush'
@@ -39,8 +50,12 @@ const IMPORT_LOG_CHANNEL = 'opennote:import:log'
 const INBOX_LIST_CHANNEL = 'opennote:inbox:list'
 const INBOX_COMMIT_CHANNEL = 'opennote:inbox:commit'
 const INBOX_DISCARD_CHANNEL = 'opennote:inbox:discard'
-/** 入库完成后主进程广播（`deduped`/`duplicate`/`skipped` 不发）。 */
-const IMPORT_NOTICE_CHANNEL = 'opennote:import:notice'
+/** 入库完成后的 `opennote:import:notice` 广播**已删除**（同上：主进程从未发过它）。
+ * 它想做的那三件事都已经各有产地，逐条比对见 `docs/import/00-项目简报与范围锁定.md`：
+ *   ① 文件变化后重扫 → `opennote:fs:workspace-changed`（`library.ts:startWatching` → 去抖重扫）
+ *   ② 收件箱计数与列表刷新 → `opennote:inbox:changed`（main.cjs 的独立 watcher，去抖 450ms）
+ *   ③ 入库成功提示与撤销入口 → L2 的 `announce()`（`src/lib/clip/receive.ts`，唯一一份实现）
+ * 只剩「自动打开刚入库的那条笔记」没有产地 —— 那是个**没人要求的功能**，不为了门禁变绿把它补上。 */
 /** 收件箱目录变化。`.opennote/**` 被工作区 watcher 跳过，故这是独立 watcher。 */
 const INBOX_CHANGED_CHANNEL = 'opennote:inbox:changed'
 /**
@@ -59,7 +74,7 @@ const IMPORT_REPLY_CHANNEL = 'opennote:import:reply'
 
 const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args)
 
-/** 订阅一个主进程频道，返回退订函数（与 onMenu 同一套写法）。 */
+/** 订阅一个主进程频道，返回退订函数（与 `onDeepLink` / `onInboxChanged` 同一套写法）。 */
 function subscribe(channel, callback) {
   if (typeof callback !== 'function') return () => {}
   const listener = (_event, payload) => {
@@ -183,21 +198,6 @@ const bridge = {
       ipcRenderer.send(IMPORT_REPLY_CHANNEL, { reqId, outcome })
     },
   },
-
-  /** 订阅主进程菜单命令，返回取消订阅函数。 */
-  onMenu(callback) {
-    if (typeof callback !== 'function') return () => {}
-    const listener = (_event, command) => {
-      callback(command)
-    }
-    ipcRenderer.on(MENU_CHANNEL, listener)
-    return () => {
-      ipcRenderer.removeListener(MENU_CHANNEL, listener)
-    }
-  },
-
-  /** 入库完成后主进程的通知（`deduped`/`duplicate`/`skipped` 不发）。 */
-  onImportNotice: (callback) => subscribe(IMPORT_NOTICE_CHANNEL, callback),
 
   /**
    * `opennote://` 深链（00 号 §6.14㉛ / 02 号 §5.6）。

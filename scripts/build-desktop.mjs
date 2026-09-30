@@ -28,4 +28,8 @@ const vite = join(root, "node_modules", "vite", "bin", "vite.js");
 console.log("[opennote] 构建桌面版（资源使用相对路径）…");
 await run(process.execPath, [tsc, "--noEmit"]);
 await run(process.execPath, [vite, "build"]);
-console.log("[opennote] 完成：dist/ 可以直接被 Electron 以 file:// 加载");
+// 网页版剪藏页（`GET /clip/<stageId>?k=` 的产物）走自己的配置与输出目录 `dist-clip/`：
+// 主构建会 `emptyOutDir` 掉 `dist/`，两者不能共用目录。bridge 只认 `dist-clip/clip/index.html`。
+console.log("[opennote] 构建网页版剪藏页（dist-clip/）…");
+await run(process.execPath, [vite, "build", "--config", "vite.clip.config.ts"]);
+console.log("[opennote] 完成：dist/ 可以被 Electron 以 file:// 加载，dist-clip/ 由桥在 /clip/ 下服务");

@@ -28,7 +28,16 @@ const {
   APP_VERSION,
   APP_VERSION_FALLBACK,
   sha256Hex,
-} = require('../electron/bridge.cjs')
+  CLIP_SPEC,
+  CLIP_DIST_RELATIVE,
+  CLIP_DIST_ROOT,
+  CLIP_BOOT_ID,
+  CLIP_CSP,
+  CLIP_STAGE_TTL_MS,
+  MAX_CLIP_ASSETS,
+} = require(process.env.OPENNOTE_BRIDGE_UNDER_TEST || '../electron/bridge.cjs')
+
+const ROOT_DIR = path.join(__dirname, '..')
 
 /**
  * 应用版本的**唯一产地**：`package.json`。
@@ -39,9 +48,8 @@ const {
  * 旧 L1624 的 `assert.equal(result.app, '0.2.0')`）—— 两个产地一起错，所以它一直绿。
  * 教训：**断言里不许再抄一份事实**，必须去读那个唯一的产地（否则自测只是自我确认）。
  */
-const PKG_VERSION = JSON.parse(
-  fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'),
-).version
+const PKG = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'))
+const PKG_VERSION = PKG.version
 
 const VERBOSE = process.argv.includes('--verbose')
 const KEEP = process.argv.includes('--keep')
@@ -51,10 +59,14 @@ const EXT_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
 const MOZ_ORIGIN = 'moz-extension://fedcba9876543210fedcba9876543210'
 const DEV_ORIGIN = 'http://127.0.0.1:5173'
 /** UI 文案的**唯一来源**：设置面板 R1 的四个选项名必须与它逐字一致（㉕ 把「推荐」移到了收件箱）。 */
-const UI_SPEC_PATH = path.join(__dirname, '..', 'docs', 'import', '03-UI设计规范-剪藏与导入.md')
-const PANEL_PATH = path.join(__dirname, '..', 'src', 'components', 'ImportApiPanel.tsx')
-/** 桥源码：用来断言「配对实现真的被删干净了」，而不是只看行为。 */
-const BRIDGE_PATH = path.join(__dirname, '..', 'electron', 'bridge.cjs')
+const UI_SPEC_PATH = path.join(ROOT_DIR, 'docs', 'import', '03-UI设计规范-剪藏与导入.md')
+const PANEL_PATH = path.join(ROOT_DIR, 'src', 'components', 'ImportApiPanel.tsx')
+/**
+ * 桥源码（**永远是仓库里的那份**，即使行为跑的是 `OPENNOTE_BRIDGE_UNDER_TEST` 指向的变异副本）：
+ * 用来断言「配对实现真的被删干净了」这类**源码级**事实。
+ * 变异自检只替换行为（`require` 的目标），不替换这份源码 —— 否则变异会把自己的锚点也改掉。
+ */
+const BRIDGE_PATH = path.join(ROOT_DIR, 'electron', 'bridge.cjs')
 /** 私有端口：给隔离实例用，避开 8787–8796（那条范围要留给「全占用」断言）。 */
 let privatePortCounter = 19870
 
@@ -343,6 +355,13 @@ function makeBridge(options = {}) {
     getTokenHash: () => holder.tokenHash,
     getAdvancedOverwrite: () => options.advancedOverwrite === true,
     getWorkspaceInfo: options.workspace ? () => ({ open: true, name: options.workspaceName || '我的笔记' }) : undefined,
+    /**
+     * 网页版剪藏页（0.3.2）的落点候选。替身是**函数形态**：可以抛错、可以返回 Promise、
+     * 也可以返回 `[]` —— 「空数组」与「拿不到」是两件事，这两种都必须能被断言。
+     */
+    getFolders: typeof options.folders === 'function' ? options.folders : undefined,
+    /** 剪藏页自测覆盖（`{ distRoot, ttlMs, maxStages }`）：静态页夹具 + 短 TTL。 */
+    clip: options.clip,
     // 版本号**不抄一份**：主进程真实接线传的就是 `package.json` 的版本（`app.getVersion()`）。
     getAppVersion: () => (options.appVersion === undefined ? PKG_VERSION : options.appVersion),
     getInboxEnabled: () => false,
@@ -371,9 +390,38 @@ async function main() {
   fs.mkdirSync(path.join(workspace, '.opennote'), { recursive: true })
   const dataDir = tempDir('opennote-bridge-userdata-')
 
+  // 剪藏页夹具：**不依赖 `pnpm build:clip` 的产物**（产物还没构建也必须能测全部用例）。
+  // 目录形状与真实产物逐字一致：`clip/index.html` + `clip/assets/**`。
+  const clipDistRoot = tempDir('opennote-clip-dist-')
+  const emptyClipRoot = tempDir('opennote-clip-empty-')
+  fs.mkdirSync(path.join(clipDistRoot, 'clip', 'assets', 'sub'), { recursive: true })
+  fs.writeFileSync(
+    path.join(clipDistRoot, 'clip', 'index.html'),
+    [
+      '<!doctype html>',
+      '<html lang="zh-CN">',
+      '  <head><meta charset="utf-8"><title>Opennote 剪藏</title></head>',
+      '  <body>',
+      '    <div id="app">CLIP_FIXTURE_PAGE</div>',
+      '  </body>',
+      '</html>',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  fs.writeFileSync(path.join(clipDistRoot, 'clip', 'assets', 'app.js'), 'window.__CLIP_APP__ = "CLIP_FIXTURE_APP_JS";\n', 'utf8')
+  fs.writeFileSync(path.join(clipDistRoot, 'clip', 'assets', 'style.css'), '.clip-fixture { color: red; }\n', 'utf8')
+  // 下面三个文件都**不允许**出网：白名单外扩展名 / 目录外 / 子目录里。
+  fs.writeFileSync(path.join(clipDistRoot, 'clip', 'assets', 'secret.txt'), 'CLIP_FIXTURE_TXT\n', 'utf8')
+  fs.writeFileSync(path.join(clipDistRoot, 'clip', 'outside.js'), 'window.__CLIP_OUTSIDE__ = "CLIP_OUTSIDE_SENTINEL";\n', 'utf8')
+  fs.writeFileSync(path.join(clipDistRoot, 'clip', 'assets', 'sub', 'inner.js'), 'window.__CLIP_INNER__ = "CLIP_NESTED_SENTINEL";\n', 'utf8')
+
   console.log('Opennote 本地桥自测（不需要 Electron）')
   console.log(`node=${process.version} platform=${process.platform}`)
   console.log(`临时工作区：${workspace}${KEEP ? '（--keep：不清理）' : ''}`)
+  if (process.env.OPENNOTE_BRIDGE_UNDER_TEST) {
+    console.log(`被测桥：${process.env.OPENNOTE_BRIDGE_UNDER_TEST}（变异副本；源码级断言仍读仓库里的 bridge.cjs）`)
+  }
 
   // 主实例：放宽限流，专做功能断言（限流本身由独立实例断言）。
   const main = makeBridge({
@@ -381,6 +429,9 @@ async function main() {
     workspace: true,
     limits: { importCapacity: 5000, importRefillPerMinute: 6000, authFailLimit: 5000 },
     onInboxStateWrite: false,
+    // 落点替身故意带上重复项与空串：桥必须自己补 ""、去重、排序。
+    folders: () => ['归档', '剪藏/技术', '归档', ''],
+    clip: { distRoot: clipDistRoot },
   })
   const bridge = main.bridge
   const holder = main.holder
@@ -1391,13 +1442,15 @@ async function main() {
     return '200 deduped'
   })
 
-  await check('⑨ 渲染层报 IMP-4008（folder 越界）→ 422，且工作区外无新文件', async () => {
+  await check('⑨ folder 越界（../../etc）→ 422 IMP-4008，且工作区外无新文件', async () => {
     const before = listFilesRecursive(path.dirname(workspace)).filter((file) => file.startsWith(workspace)).length
     const res = await postImport(port, token, validEnvelope({ target: { folder: '../../etc', notePath: null } }))
     expectError(res, 'IMP-4008', 422)
     const after = listFilesRecursive(path.dirname(workspace)).filter((file) => file.startsWith(workspace)).length
     assert.equal(after, before, '越界请求不得产生任何文件')
-    return '422 IMP-4008'
+    // 桥侧先拦（§2.4 的落点层规则：`..` 段是**非法**，不是「不存在」）；渲染层的 `assertSafeRelative()`
+    // 仍然独立跑一遍（02 §7.3），两层给的是同一个码号。
+    return '422 IMP-4008（桥侧落点层先拦）'
   })
 
   await check('S-09 桥侧直接拒绝信封里的绝对路径 target.folder', async () => {
@@ -2192,6 +2245,596 @@ async function main() {
   })
 
   // -------------------------------------------------------------------------
+  section('⑭ 网页版剪藏页：/v1/clip/* 与 /clip/ 静态服务（0.3.2）')
+  // -------------------------------------------------------------------------
+  // 判据盯的是**用户看得见的那条路径**：扩展把内容交给桥 → 页面用 k 读到它 →
+  // 用户在页面里改完 → commit 走**同一条**入库通路 → 落点/单次性/日志红线。
+  // 静态页全部用夹具（真实产物要跑 pnpm build:clip，不能让人「没构建就跳过用例」）。
+
+  const CLIP_BODY = '在浏览器里剪下的一段话。\n\n## 为什么\n\n本地优先。'
+  /** 一条合法的剪藏暂存请求体（字段逐字来自冻结契约）。 */
+  const clipStageBody = (overrides = {}) => ({
+    spec: 'opennote.clip/v1',
+    url: 'https://example.com/posts/local-first',
+    title: '写给工程师的本地优先笔记',
+    body: CLIP_BODY,
+    selection: false,
+    tags: ['剪藏', '本地优先'],
+    source: { site: 'example.com', author: '张三', publishedAt: '2026-08-14T09:30:00+08:00' },
+    assets: [],
+    ...overrides,
+  })
+
+  const stageClip = (portNo, tokenValue, overrides = {}) =>
+    request({
+      port: portNo,
+      path: '/v1/clip/stage',
+      method: 'POST',
+      headers: jsonHeaders(portNo, tokenValue),
+      body: JSON.stringify(clipStageBody(overrides)),
+    })
+
+  const clipGet = (portNo, pathname) => request({ port: portNo, path: pathname, headers: withHost(portNo) })
+
+  const clipPost = (portNo, tokenValue, pathname, body) =>
+    request({
+      port: portNo,
+      path: pathname,
+      method: 'POST',
+      headers: jsonHeaders(portNo, tokenValue),
+      body: JSON.stringify(body),
+    })
+
+  /** 断言 stage 回执形状（**平铺，不套 result**），并解出 stageId / k / 端口。 */
+  const clipStagedInfo = (res) => {
+    assert.equal(res.status, 200, `stage 应 200，实际 ${res.status}：${res.text.slice(0, 200)}`)
+    assert.ok(res.json, `stage 必须回 JSON：${res.text.slice(0, 200)}`)
+    assert.equal(res.json.ok, true)
+    assert.equal('result' in res.json, false, 'stage 形状是平铺 { ok, stageId, expiresAt, openUrl }，不套 result')
+    assert.equal(typeof res.json.stageId, 'string')
+    assert.equal(typeof res.json.expiresAt, 'number')
+    assert.equal(typeof res.json.openUrl, 'string')
+    const parsed = new URL(res.json.openUrl)
+    return { stageId: res.json.stageId, expiresAt: res.json.expiresAt, key: parsed.searchParams.get('k'), parsed }
+  }
+
+  /** 起一个独立的剪藏页实例（自己的 dataDir / 端口 / 钩子），用完就停。 */
+  const withClipBridge = async (options, fn) => {
+    const dir = tempDir('opennote-clip-inst-')
+    const inst = makeBridge({
+      dataDir: dir,
+      // `workspace` 决定 `/v1/clip/folders` 走哪条失败分支：工作区没打开 → IMP-4007；
+      // 工作区打开但挂钩拿不到 → IMP-4014。两种都必须能被断言。
+      workspace: options.workspace === true,
+      clip: { distRoot: clipDistRoot, ...(options.clip || {}) },
+      folders: options.folders,
+    })
+    const plain = inst.bridge.regenerateToken()
+    const up = await inst.bridge.startWithPort(privatePortCounter++)
+    try {
+      assert.ok(up.port, `剪藏页实例应能监听：${up.error || '未知'}`)
+      return await fn({ bridge: inst.bridge, holder: inst.holder, port: up.port, token: plain, dataDir: dir })
+    } finally {
+      await inst.bridge.stop()
+    }
+  }
+
+  /** 读一个实例自己的 bridge.log（日志红线与「记一条 IMP-4014」都要看盘上那份）。 */
+  const readBridgeLog = (dir) => {
+    try {
+      return fs.readFileSync(path.join(dir, 'bridge.log'), 'utf8')
+    } catch {
+      return ''
+    }
+  }
+
+  let clipStaged = null
+
+  await check('⑭ 冻结常量：spec / 注入块 id / CSP 逐字 / TTL / 附件上限 / 五个剪藏码号', () => {
+    assert.equal(CLIP_SPEC, 'opennote.clip/v1', '暂存的 spec 与导入信封的 spec 不是同一个值')
+    assert.equal(CLIP_BOOT_ID, 'clip-boot')
+    assert.equal(
+      CLIP_CSP,
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      'CSP 必须逐字等于契约冻结值',
+    )
+    assert.equal(/script-src[^;]*unsafe-inline/.test(CLIP_CSP), false, 'script-src 不得放开内联脚本（引导数据走 JSON 数据块）')
+    assert.equal(CLIP_STAGE_TTL_MS, 15 * 60 * 1000, '暂存 TTL 冻结为 15 分钟')
+    assert.equal(MAX_CLIP_ASSETS, 32, '单条暂存附件上限 = 02 §2.7 的 32')
+    // 剪藏页的每一类失败都有自己的码号（一个码号一个含义、一处文案产地）。
+    const clipCodes = [
+      ['IMP-4018', 409, false],
+      ['IMP-4019', 401, false],
+      ['IMP-4021', 404, false],
+      ['IMP-4022', 422, false],
+      ['IMP-5003', 503, true],
+    ]
+    for (const [code, http, retryable] of clipCodes) {
+      const row = ERROR_TABLE[code]
+      assert.ok(row, `${code} 必须在 ERROR_TABLE 里（不许再借别的码号）`)
+      assert.equal(row.http, http, `${code} 的 http 登记值`)
+      assert.equal(row.retryable, retryable, `${code} 的 retryable 登记值`)
+      assert.equal(row.userMessage.includes('`'), false, `${code} 的文案不得含反引号`)
+    }
+    return `spec=opennote.clip/v1 · id=clip-boot · TTL=15min · assets<=32 · ${clipCodes.length} 个剪藏码号`
+  })
+
+  await check('⑭ 路由层不许再「借码号 + 换文案」（CLIP_HINTS 已删除；表比对看不见这种漂移）', () => {
+    // 为什么单列这条：C-6c/C-6f 只比对 ERROR_TABLE，**看不见** sendError 的 userMessage 覆盖 ——
+    // 那种漂移是恒绿的。所以「没有这个口子」必须由行为之外的源码断言来守。
+    // **只认代码、不认注释**：桥里留了一段解释「这个口子为什么被关掉」的注释，它当然会提到这个名字。
+    const source = fs.readFileSync(BRIDGE_PATH, 'utf8')
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+      .replace(/^[ \t]*\/\/.*$/gm, (line) => ' '.repeat(line.length))
+    assert.equal(code.includes('CLIP_HINTS'), false, '桥的**代码**里不得再有 userMessage 覆盖表（一句话两个产地的口子）')
+    // 锚点在**原文**里找（它们本身就是注释文字，剥注释时会被抹掉），
+    // 但切片切的是**剥过注释的代码**（两处替换都保长度，所以偏移量一一对应）。
+    // 起点必须取**最后一次**出现：`handleRequest` 里的路由注释也含同样的字串，
+    // 从它开始切会把 `respondWithReceipt()`（那里合法地有 userMessage）一起圈进来 —— 假红。
+    const start = source.lastIndexOf('// 网页版剪藏页（0.3.2，契约 §5.9）')
+    const end = source.indexOf('POST /v1/pair 与配套的配对码状态机')
+    assert.ok(start > 0 && end > start, '剪藏段落的锚点漂了，这条断言必须先修（否则它会静默变空）')
+    const clipSection = code.slice(start, end)
+    assert.ok(clipSection.length > 4000, `剪藏段落只有 ${clipSection.length} 字符，锚点可能已失效`)
+    assert.equal(
+      clipSection.includes('function respondWithReceipt'),
+      false,
+      '切片的起点锚错了（把回执映射那些合法代码也圈进来了）—— 先修锚点，别信这条断言的红',
+    )
+    assert.equal(
+      /userMessage\s*:/.test(clipSection),
+      false,
+      '剪藏路由里不得出现任何 userMessage 覆盖：每类失败都用自己的码号 + 登记文案',
+    )
+    return `代码里 CLIP_HINTS 0 处；剪藏段 ${clipSection.length} 字符内 userMessage 覆盖 0 处`
+  })
+
+  await check('⑭ stage：POST /v1/clip/stage 生成 stageId + openUrl（stageId 不是客户端的 importId）', async () => {
+    const callsBefore = holder.calls.length
+    const res = await stageClip(port, token, { importId: 'client-supplied-import-id-0001' })
+    clipStaged = clipStagedInfo(res)
+    assert.match(clipStaged.stageId, /^[A-Za-z0-9_-]{32,}$/, `stageId 必须是 >=32 字符的 base64url，实际「${clipStaged.stageId}」`)
+    assert.notEqual(clipStaged.stageId, 'client-supplied-import-id-0001', 'stageId 只由桥生成 —— 绝不用客户端给的 importId')
+    assert.equal(clipStaged.parsed.origin, `http://127.0.0.1:${port}`, 'openUrl 只由桥拼：回环地址 + 实际监听端口')
+    assert.equal(clipStaged.parsed.pathname, `/clip/${clipStaged.stageId}`, 'openUrl 路径必须逐字是 /clip/<stageId>')
+    assert.ok(
+      typeof clipStaged.key === 'string' && clipStaged.key.length >= 32,
+      `k 必须不可猜（>=32 字符），实际「${String(clipStaged.key)}」`,
+    )
+    assert.notEqual(clipStaged.key, token, 'k 绝不能是长期令牌（页面永不持有长期凭据）')
+    const ttl = clipStaged.expiresAt - Date.now()
+    assert.ok(ttl > 14 * 60 * 1000 && ttl <= 15 * 60 * 1000, `TTL 应在 14-15 分钟之间，实际 ${Math.round(ttl / 1000)} 秒`)
+    assert.equal(holder.calls.length, callsBefore, '暂存不得触碰入库通路（onEnvelope）—— 暂存不等于写盘')
+    return `stageId ${clipStaged.stageId.length} 字符 · k ${clipStaged.key.length} 字符 · ${clipStaged.parsed.pathname}`
+  })
+
+  await check('⑭ stage：令牌非法一律 401（缺令牌 IMP-2001 / 错令牌 IMP-2002）', async () => {
+    expectError(await stageClip(port, null), 'IMP-2001', 401)
+    expectError(await stageClip(port, `opn_${'A'.repeat(43)}`), 'IMP-2002', 401)
+    return '缺令牌 401 IMP-2001；错令牌 401 IMP-2002'
+  })
+
+  await check('⑭ stage：请求形态错误 → 明确 4xx（spec / title / body / url / 超大正文）', async () => {
+    expectError(await stageClip(port, token, { spec: 'opennote.import/v1' }), 'IMP-4002', 422)
+    expectError(await stageClip(port, token, { title: '   ' }), 'IMP-4003', 422)
+    expectError(await stageClip(port, token, { body: 42 }), 'IMP-4003', 422)
+    expectError(await stageClip(port, token, { url: 'javascript:alert(1)' }), 'IMP-4003', 422)
+    expectError(await stageClip(port, token, { body: 'x'.repeat(8 * 1024 * 1024 + 1) }), 'IMP-4004', 413)
+    return 'spec→4002；title/body/url→4003；8 MiB+1 → 4004'
+  })
+
+  await check('⑭ GET /clip/<stageId>：产物原文 + clip-boot JSON 数据块 + CSP 逐字', async () => {
+    const page = await clipGet(port, `/clip/${clipStaged.stageId}?k=${encodeURIComponent(clipStaged.key)}`)
+    assert.equal(page.status, 200, `页面应 200，实际 ${page.status}：${page.text.slice(0, 200)}`)
+    assert.match(String(page.headers['content-type']), /^text\/html/, 'Content-Type 必须是 text/html')
+    assert.equal(page.headers['cache-control'], 'no-store')
+    assert.equal(page.headers['x-content-type-options'], 'nosniff')
+    assert.equal(page.headers['content-security-policy'], CLIP_CSP, 'CSP 必须逐字等于冻结值')
+    assert.ok(page.text.includes('CLIP_FIXTURE_PAGE'), '产物原文必须原样返回')
+    const match = new RegExp(`<script type="application/json" id="${CLIP_BOOT_ID}">([\\s\\S]*?)</script>`).exec(page.text)
+    assert.ok(match, `必须注入 <script type="application/json" id="${CLIP_BOOT_ID}"> 数据块`)
+    const boot = JSON.parse(match[1])
+    assert.equal(boot.port, port, '引导数据的 port 必须是实际监听端口')
+    assert.equal(boot.stageId, clipStaged.stageId)
+    assert.equal(boot.k, clipStaged.key)
+    assert.deepEqual(Object.keys(boot).sort(), ['k', 'port', 'stageId'], '引导数据只允许 { port, stageId, k } 三个键')
+    assert.ok(page.text.indexOf('id="clip-boot"') < page.text.indexOf('</body>'), '数据块必须在 </body> 之前（页面脚本先拿到它）')
+    return `HTML ${page.text.length} 字节 · boot={port,stageId,k} 三键 · CSP 逐字一致`
+  })
+
+  await check('⑭ /clip/<stageId>：k 错 → 401 IMP-4019（原样用登记文案，不借令牌码）', async () => {
+    const wrong = await clipGet(port, `/clip/${clipStaged.stageId}?k=${'A'.repeat(43)}`)
+    const error = expectError(wrong, 'IMP-4019', 401)
+    assert.equal(error.userMessage, ERROR_TABLE['IMP-4019'].userMessage, '正式码号 + 登记文案，路由里不许再覆盖')
+    assert.notEqual(error.userMessage, ERROR_TABLE['IMP-2002'].userMessage, '页面上的 k 不是长期令牌：不许借 IMP-2002')
+    assert.equal(wrong.text.includes('CLIP_FIXTURE_PAGE'), false, 'k 不对时绝不能把页面吐出来')
+    return `${error.code} 401「${error.userMessage}」`
+  })
+
+  await check('⑭ /clip/<stageId>：k 缺失 → 401 IMP-4019；stageId 不存在 → 404 IMP-4021', async () => {
+    expectError(await clipGet(port, `/clip/${clipStaged.stageId}`), 'IMP-4019', 401)
+    const missing = await clipGet(port, `/clip/${'B'.repeat(43)}?k=${'A'.repeat(43)}`)
+    const error = expectError(missing, 'IMP-4021', 404)
+    assert.equal(error.userMessage, ERROR_TABLE['IMP-4021'].userMessage, '正式码号 + 登记文案；不许借 IMP-4017')
+    assert.notEqual(error.userMessage, ERROR_TABLE['IMP-4017'].userMessage, '「暂存过期」不是「查不到导入记录」')
+    return 'k 缺失 401 IMP-4019；stageId 不存在 404 IMP-4021'
+  })
+
+  await check('⑭ 过期：TTL 到期后 stageId + k 一律失效（404 IMP-4021，不假装还能用）', async () => {
+    await withClipBridge({ clip: { ttlMs: 60 }, folders: () => [] }, async (inst) => {
+      const staged = clipStagedInfo(await stageClip(inst.port, inst.token))
+      const live = await clipGet(inst.port, `/v1/clip/stage?stageId=${staged.stageId}&k=${encodeURIComponent(staged.key)}`)
+      assert.equal(live.status, 200, `未过期时必须能读到（先证明这条例程本来是通的）：${live.text.slice(0, 160)}`)
+      await new Promise((resolve) => setTimeout(resolve, 140))
+      const gone = await clipGet(inst.port, `/v1/clip/stage?stageId=${staged.stageId}&k=${encodeURIComponent(staged.key)}`)
+      expectError(gone, 'IMP-4021', 404)
+      const page = await clipGet(inst.port, `/clip/${staged.stageId}?k=${encodeURIComponent(staged.key)}`)
+      expectError(page, 'IMP-4021', 404)
+      return '未过期可读；过期后读端点与页面都 404 IMP-4021'
+    })
+  })
+
+  await check('⑭ 产物缺失：GET /clip/<stageId> → 503 + IMP-5003（绝不回空 200）', async () => {
+    await withClipBridge({ clip: { distRoot: emptyClipRoot }, folders: () => [] }, async (inst) => {
+      const staged = clipStagedInfo(await stageClip(inst.port, inst.token))
+      const res = await clipGet(inst.port, `/clip/${staged.stageId}?k=${encodeURIComponent(staged.key)}`)
+      assert.equal(res.status, 503, `产物不存在必须 503，实际 ${res.status}`)
+      const error = expectError(res, 'IMP-5003', 503)
+      assert.equal(error.userMessage, ERROR_TABLE['IMP-5003'].userMessage, '原样用登记文案，不覆盖')
+      assert.ok(error.userMessage.includes('pnpm build:clip'), `文案必须告诉用户怎么修，实际「${error.userMessage}」`)
+      assert.equal(error.retryable, true, '缺构建产物是可修的部署问题，必须可重试')
+      // 静态资源同理：缺产物时 404，不得假装 200。
+      expectError(await clipGet(inst.port, '/clip/assets/app.js'), 'IMP-3005', 404)
+      return `503 IMP-5003「${error.userMessage}」+ 资源 404`
+    })
+  })
+
+  await check('⑭ 静态资源：白名单扩展名可读、内容一致、no-store', async () => {
+    const js = await clipGet(port, '/clip/assets/app.js')
+    assert.equal(js.status, 200, `app.js 应 200，实际 ${js.status}：${js.text.slice(0, 160)}`)
+    assert.match(String(js.headers['content-type']), /^text\/javascript/, 'js 的 Content-Type 不能含糊')
+    assert.equal(js.headers['cache-control'], 'no-store')
+    assert.ok(js.text.includes('CLIP_FIXTURE_APP_JS'), 'js 内容必须与产物逐字一致')
+    const css = await clipGet(port, '/clip/assets/style.css')
+    assert.equal(css.status, 200)
+    assert.match(String(css.headers['content-type']), /^text\/css/)
+    return `app.js ${js.text.length} 字节 + style.css ${css.text.length} 字节`
+  })
+
+  await check('⑭ 静态资源：白名单外的扩展名一律 404（含产物里的 index.html）', async () => {
+    for (const bad of ['secret.txt', 'index.html', 'data.json', 'noext']) {
+      const res = await clipGet(port, `/clip/assets/${bad}`)
+      expectError(res, 'IMP-3005', 404)
+      assert.equal(res.text.includes('CLIP_FIXTURE_TXT'), false, `${bad} 的内容绝不能出网`)
+    }
+    return 'txt / html / json / 无扩展名 全部 404'
+  })
+
+  await check('⑭ 路径穿越一律 404，且 assets 目录外的文件绝不出网', async () => {
+    // 判据盯**契约与意图**（「一律 404 + 一个字节都不外泄」），不盯某个具体码号：
+    // `new URL()` 会先把路径里的 `..` 段正规化掉（`/clip/assets/../outside.js` → `/clip/outside.js`），
+    // 于是它落到页面路由上，回的是 IMP-4017（同为 404）而不是资源面的 IMP-3005。
+    // 两者都是「拒绝」，而且都读不到文件 —— 真正要守的是这一条，不是码号长相。
+    const attacks = [
+      '/clip/assets/../outside.js',
+      '/clip/assets/%2e%2e/outside.js',
+      '/clip/assets/%2e%2e%2foutside.js',
+      '/clip/assets/..%2foutside.js',
+      '/clip/assets/..%5coutside.js',
+      '/clip/assets//outside.js',
+      '/clip/assets/sub/inner.js',
+      '/clip/assets/C:%5Cwindows%5Cwin.js',
+      '/clip/assets/%2Fetc%2Fpasswd.js',
+    ]
+    const codes = []
+    for (const pathName of attacks) {
+      const res = await clipGet(port, pathName)
+      assert.equal(res.status, 404, `${pathName} 必须是 404，实际 ${res.status}`)
+      assert.ok(res.json && res.json.ok === false, `${pathName} 必须回明确失败，实际 ${res.text.slice(0, 120)}`)
+      codes.push(`${pathName}→${res.json.error && res.json.error.code}`)
+      assert.equal(res.text.includes('CLIP_OUTSIDE_SENTINEL'), false, `${pathName} 读到了 assets 目录外的文件`)
+      assert.equal(res.text.includes('CLIP_NESTED_SENTINEL'), false, `${pathName} 读到了子目录里的文件`)
+      assert.equal(res.text.includes('CLIP_FIXTURE_TXT'), false, `${pathName} 读到了白名单外的文件`)
+    }
+    return `${attacks.length} 种写法全部 404 且 0 字节外泄：${codes.join(' ')}`
+  })
+
+  await check('⑭ 页面读暂存：GET /v1/clip/stage 返回正文/标题/来源/标签/时间', async () => {
+    const res = await clipGet(port, `/v1/clip/stage?stageId=${clipStaged.stageId}&k=${encodeURIComponent(clipStaged.key)}`)
+    assert.equal(res.status, 200, `读暂存应 200，实际 ${res.status}：${res.text.slice(0, 200)}`)
+    assert.equal(res.json.ok, true)
+    assert.equal('result' in res.json, false, '形状是平铺 { ok, stage, expiresAt }')
+    const staged = res.json.stage
+    assert.equal(staged.body, CLIP_BODY, '页面必须能拿到**正文**（没有这条端点页面就是个空壳）')
+    assert.equal(staged.title, '写给工程师的本地优先笔记')
+    assert.equal(staged.url, 'https://example.com/posts/local-first')
+    assert.equal(staged.selection, false)
+    assert.equal(typeof staged.selection, 'boolean', '契约里 selection 是布尔（不是「选中的那段文字」，选中的文字走 body）')
+    assert.deepEqual(staged.tags, ['剪藏', '本地优先'])
+    assert.deepEqual(staged.source, { site: 'example.com', author: '张三', publishedAt: '2026-08-14T09:30:00+08:00' })
+    assert.deepEqual(staged.assets, [])
+    assert.match(String(staged.capturedAt), /(Z|[+-]\d{2}:\d{2})$/, 'capturedAt 必须含时区')
+    assert.equal(res.json.expiresAt, clipStaged.expiresAt, 'expiresAt 与 stage 回执必须是同一个值（一个产地）')
+    return `${staged.body.length} 字符正文 + 来源/标签/时间齐备`
+  })
+
+  await check('⑭ 落点列表：folders[0] === ""（收件箱）+ 去重 + 排序', async () => {
+    const res = await clipGet(port, `/v1/clip/folders?stageId=${clipStaged.stageId}&k=${encodeURIComponent(clipStaged.key)}`)
+    assert.equal(res.status, 200, `folders 应 200，实际 ${res.status}：${res.text.slice(0, 200)}`)
+    assert.equal(res.json.ok, true)
+    const folders = res.json.folders
+    assert.ok(Array.isArray(folders), 'folders 必须是数组')
+    assert.equal(folders[0], '', 'folders[0] 必须是 ""（= 收件箱）—— 页面第一项就是它')
+    assert.deepEqual(folders, ['', '剪藏/技术', '归档'], '挂钩给的重复项与空串必须被去重，且顺序确定（码元序）')
+    return JSON.stringify(folders)
+  })
+
+  await check('⑭ 落点列表：挂钩回 [] → 只有收件箱（空数组 != 读失败）', async () => {
+    await withClipBridge({ workspace: true, folders: () => [] }, async (inst) => {
+      const staged = clipStagedInfo(await stageClip(inst.port, inst.token))
+      const res = await clipGet(inst.port, `/v1/clip/folders?stageId=${staged.stageId}&k=${encodeURIComponent(staged.key)}`)
+      assert.equal(res.status, 200, '工作区里没有目录不是失败：必须如实回「只有收件箱」')
+      assert.deepEqual(res.json.folders, [''])
+      return JSON.stringify(res.json.folders)
+    })
+  })
+
+  await check('⑭ 落点列表：工作区没打开 → IMP-4007（409，原样用登记文案）', async () => {
+    await withClipBridge({ folders: () => ['归档'] }, async (inst) => {
+      const staged = clipStagedInfo(await stageClip(inst.port, inst.token))
+      const res = await clipGet(inst.port, `/v1/clip/folders?stageId=${staged.stageId}&k=${encodeURIComponent(staged.key)}`)
+      const error = expectError(res, 'IMP-4007', 409)
+      assert.equal(error.userMessage, ERROR_TABLE['IMP-4007'].userMessage, '工作区没打开是登记语义的精确命中，不许换文案')
+      // 非空落点的提交也要在同一处被拦住（不能先写盘再去发现没有工作区）。
+      const commit = await clipPost(inst.port, inst.token, '/v1/clip/commit', {
+        stageId: staged.stageId,
+        k: staged.key,
+        title: 't',
+        body: 'b',
+        folder: '归档',
+      })
+      expectError(commit, 'IMP-4007', 409)
+      assert.equal(inst.holder.calls.length, 0, '工作区没打开时绝不能进入库通路')
+      return `folders 与 commit 都 409 IMP-4007（原样文案），入库通路 0 次`
+    })
+  })
+
+  await check('⑭ 落点列表：挂钩缺失 → IMP-4014（500，原样文案 + 日志留痕）', async () => {
+    await withClipBridge({ workspace: true, folders: undefined }, async (inst) => {
+      const staged = clipStagedInfo(await stageClip(inst.port, inst.token))
+      const res = await clipGet(inst.port, `/v1/clip/folders?stageId=${staged.stageId}&k=${encodeURIComponent(staged.key)}`)
+      const error = expectError(res, 'IMP-4014', 500)
+      assert.equal(error.userMessage, ERROR_TABLE['IMP-4014'].userMessage, '内部错误用登记文案，不另编一句')
+      assert.equal('folders' in (res.json.result || {}), false, '失败响应里不得夹带一个空 folders 数组')
+      const commit = await clipPost(inst.port, inst.token, '/v1/clip/commit', {
+        stageId: staged.stageId,
+        k: staged.key,
+        title: '没有目录列表',
+        body: 'x',
+        folder: '剪藏/技术',
+      })
+      expectError(commit, 'IMP-4014', 500)
+      assert.equal(inst.holder.calls.length, 0, '拿不到目录列表时绝不能进入库通路（否则等于静默改落点）')
+      const log = readBridgeLog(inst.dataDir)
+      assert.ok(log.includes('"code":"IMP-4014"'), '挂钩拿不到目录列表必须在 bridge.log 留一条事实')
+      assert.equal(log.includes(staged.stageId), false, '日志里不得出现 stageId')
+      assert.equal(log.includes(staged.key), false, '日志里不得出现 k')
+      return '两个端点都 500 IMP-4014 + 日志留痕（不含 stageId/k），入库通路 0 次'
+    })
+  })
+
+  await check('⑭ commit：复用入库通路（onEnvelope 被调用，信封逐字段正确）', async () => {
+    const staged = clipStagedInfo(await stageClip(port, token))
+    const before = holder.calls.length
+    const res = await clipPost(port, token, '/v1/clip/commit', {
+      stageId: staged.stageId,
+      k: staged.key,
+      title: '改写后的标题',
+      body: '页面里编辑过的正文。',
+      folder: '',
+    })
+    assert.equal(res.status, 201, `commit 应 201，实际 ${res.status}：${res.text.slice(0, 200)}`)
+    assert.equal(res.json.ok, true)
+    assert.equal(holder.calls.length, before + 1, 'commit 必须走 onEnvelope（入库通路）—— 不许另造第二条写路径')
+    const envelope = JSON.parse(holder.calls[before].envelopeJson)
+    assert.equal(envelope.spec, 'opennote.import/v1')
+    assert.equal(envelope.title, '改写后的标题', '标题取 commit 的（页面里编辑过的那份）')
+    assert.equal(envelope.body, '页面里编辑过的正文。', '正文取 commit 的')
+    assert.equal(envelope.conflict, 'new')
+    assert.deepEqual(envelope.target, { folder: null, notePath: null }, 'folder 省略/"" = 不指定落点')
+    assert.equal(envelope.client.name, 'opennote.clip-web')
+    assert.deepEqual(envelope.tags, ['剪藏', '本地优先'], 'tags 从暂存带过来')
+    assert.equal(envelope.source.url, 'https://example.com/posts/local-first')
+    assert.equal(envelope.source.title, '写给工程师的本地优先笔记', 'source.title = 抓取那一刻的网页标题')
+    assert.equal(envelope.source.site, 'example.com')
+    assert.equal(envelope.source.author, '张三')
+    assert.equal(envelope.source.publishedAt, '2026-08-14T09:30:00+08:00')
+    assert.equal(envelope.source.selection, false)
+    assert.match(String(envelope.source.capturedAt), /(Z|[+-]\d{2}:\d{2})$/, 'capturedAt 必须含时区（02 §2.3 硬要求）')
+    assert.deepEqual(envelope.assets, [])
+    assert.ok(
+      typeof envelope.importId === 'string' && envelope.importId.length >= 8,
+      `importId 必须是桥生成的有效值，实际「${String(envelope.importId)}」`,
+    )
+    assert.notEqual(envelope.importId, staged.stageId, 'importId（幂等键）与 stageId（暂存身份）是两件事')
+    assert.equal(holder.calls[before].meta.clientName, 'opennote.clip-web', 'meta.clientName 也要如实（日志与 UI 展示用）')
+    assert.equal(res.json.result.status, 'created')
+    assert.equal(res.json.result.path, '改写后的标题.md', '回执形状与 /v1/import 同形，落点来自渲染层')
+    return `信封 ${Object.keys(envelope).length} 键逐项正确；path=${res.json.result.path}`
+  })
+
+  await check('⑭ commit：非空落点必须是已存在目录（不存在 → 422 IMP-4022，且不进入库通路）', async () => {
+    const missStaged = clipStagedInfo(await stageClip(port, token))
+    const beforeMiss = holder.calls.length
+    const miss = await clipPost(port, token, '/v1/clip/commit', {
+      stageId: missStaged.stageId,
+      k: missStaged.key,
+      title: '落点不存在',
+      body: 'x',
+      folder: '不存在的目录',
+    })
+    const missError = expectError(miss, 'IMP-4022', 422)
+    assert.equal(missError.userMessage, ERROR_TABLE['IMP-4022'].userMessage, '目录不存在有自己的码号，登记文案原样用')
+    assert.notEqual(missError.userMessage, ERROR_TABLE['IMP-4008'].userMessage, '「不存在」不是「字面非法」，不许借 IMP-4008')
+    assert.equal(holder.calls.length, beforeMiss, '落点非法时必须拦在入库通路之前（绝不自动创建目录）')
+
+    // 字面非法那一支**照旧**走 IMP-4008（两条分支不许混成一个码）。
+    const absStaged = clipStagedInfo(await stageClip(port, token))
+    expectError(
+      await clipPost(port, token, '/v1/clip/commit', {
+        stageId: absStaged.stageId,
+        k: absStaged.key,
+        title: '绝对路径',
+        body: 'x',
+        folder: '../../etc',
+      }),
+      'IMP-4008',
+      422,
+    )
+
+    const okStaged = clipStagedInfo(await stageClip(port, token))
+    const beforeOk = holder.calls.length
+    const ok = await clipPost(port, token, '/v1/clip/commit', {
+      stageId: okStaged.stageId,
+      k: okStaged.key,
+      title: '落到已有目录',
+      body: 'x',
+      folder: '剪藏/技术',
+    })
+    assert.equal(ok.status, 201, `已有目录应能落，实际 ${ok.status}：${ok.text.slice(0, 200)}`)
+    const envelope = JSON.parse(holder.calls[beforeOk].envelopeJson)
+    assert.equal(envelope.target.folder, '剪藏/技术')
+    assert.equal(ok.json.result.path, '剪藏/技术/落到已有目录.md')
+    return '不存在 → 422 IMP-4022（未入库）；字面非法 → 422 IMP-4008；已有目录 → 201'
+  })
+
+  await check('⑭ commit：单次性（同内容重放同一份回执 200/201；不同内容 409 IMP-4018）', async () => {
+    const staged = clipStagedInfo(await stageClip(port, token))
+    const body = { stageId: staged.stageId, k: staged.key, title: '单次性', body: '第一版正文。', folder: '' }
+    const first = await clipPost(port, token, '/v1/clip/commit', body)
+    assert.equal(first.status, 201, `首次提交应 201，实际 ${first.status}：${first.text.slice(0, 200)}`)
+    const afterFirst = holder.calls.length
+    const replay = await clipPost(port, token, '/v1/clip/commit', { ...body })
+    assert.equal(replay.status, first.status, '幂等重放必须是同一个 HTTP 状态')
+    assert.deepEqual(replay.json.result, first.json.result, '同内容重放必须逐字段返回**同一份**已存回执')
+    assert.equal(holder.calls.length, afterFirst, '幂等重放不得再走一次入库通路（不写第二遍）')
+    const different = await clipPost(port, token, '/v1/clip/commit', { ...body, body: '第二版正文（不同）。' })
+    const error = expectError(different, 'IMP-4018', 409)
+    assert.equal(error.userMessage, ERROR_TABLE['IMP-4018'].userMessage, '正式码号，原样用登记文案')
+    assert.equal(error.retryable, false, '同一暂存 + 不同内容重试也没用：必须换一次剪藏')
+    assert.equal(holder.calls.length, afterFirst, '内容不同也不许写入（不得静默覆盖）')
+    return `首次 ${first.status} → 同内容重放 ${replay.status}（同一 importId，通路未再调）→ 改内容 409 IMP-4018`
+  })
+
+  await check('⑭ commit：k 错 401 IMP-4019 / stageId 不存在 404 IMP-4021 / Content-Type 非 JSON 415', async () => {
+    const staged = clipStagedInfo(await stageClip(port, token))
+    const base = { stageId: staged.stageId, k: staged.key, title: 't', body: 'b', folder: '' }
+    expectError(await clipPost(port, token, '/v1/clip/commit', { ...base, k: 'A'.repeat(43) }), 'IMP-4019', 401)
+    expectError(
+      await clipPost(port, token, '/v1/clip/commit', { ...base, stageId: 'B'.repeat(43), k: 'A'.repeat(43) }),
+      'IMP-4021',
+      404,
+    )
+    const badType = await request({
+      port,
+      path: '/v1/clip/commit',
+      method: 'POST',
+      headers: withHost(port, { 'Content-Type': 'text/plain', Authorization: `Bearer ${token}` }),
+      body: JSON.stringify(base),
+    })
+    expectError(badType, 'IMP-3004', 415)
+    return '401 / 404 / 415'
+  })
+
+  await check('⑭ 日志红线：bridge.log 里没有 k / stageId / 正文 / 令牌', async () => {
+    const logPath = path.join(dataDir, 'bridge.log')
+    const text = fs.readFileSync(logPath, 'utf8')
+    assert.ok(text.trim() !== '', '日志必须真有内容 —— 否则这条断言只是空跑（恒绿的检查比没有检查更坏）')
+    assert.ok(text.includes('"event":"import.ok"'), '剪藏页的 commit 走同一条入库通路，应留下 import.ok')
+    const secrets = [
+      ['k', clipStaged.key],
+      ['stageId', clipStaged.stageId],
+      ['暂存正文', CLIP_BODY],
+      ['页面里编辑过的正文', '页面里编辑过的正文。'],
+      ['长期令牌', token],
+    ]
+    for (const [label, value] of secrets) {
+      assert.equal(text.includes(value), false, `bridge.log 不得出现${label}`)
+    }
+    return `${text.split('\n').filter(Boolean).length} 行日志；5 类敏感值 0 命中`
+  })
+
+  await check('⑭ 产物路径：默认目录 = 仓库根下的 dist-clip，且 build:clip 脚本存在', () => {
+    assert.equal(
+      CLIP_DIST_RELATIVE,
+      'dist-clip',
+      '产物目录名不得漂移：package.json 的 build:clip 就写它，.gitignore 与 electron-builder.yml 也按它排除/打包',
+    )
+    assert.equal(typeof PKG.scripts['build:clip'], 'string', 'package.json 必须有 build:clip 脚本（503 的文案就是让用户跑它）')
+    const configPath = path.join(ROOT_DIR, 'vite.clip.config.ts')
+    if (fs.existsSync(configPath)) {
+      assert.ok(
+        fs.readFileSync(configPath, 'utf8').includes('dist-clip'),
+        'vite.clip.config.ts 的产物目录必须是 dist-clip（否则桥按约定找不到剪藏页）',
+      )
+    } else {
+      console.log('  INFO vite.clip.config.ts 还不存在（clip-web 正在写）：本轮只钉「目录名 = dist-clip」这一半')
+    }
+    assert.equal(path.basename(CLIP_DIST_ROOT), 'dist-clip')
+    assert.equal(
+      path.relative(CLIP_DIST_ROOT, path.join(CLIP_DIST_ROOT, 'clip', 'index.html')).split(path.sep).join('/'),
+      'clip/index.html',
+      '页面入口必须在产物根的 clip/index.html（与契约逐字一致）',
+    )
+    if (!process.env.OPENNOTE_BRIDGE_UNDER_TEST) {
+      assert.equal(path.resolve(CLIP_DIST_ROOT), path.join(ROOT_DIR, 'dist-clip'), '默认产物目录必须就在仓库根下')
+    }
+    return `${CLIP_DIST_RELATIVE}；真实产物 ${fs.existsSync(path.join(ROOT_DIR, 'dist-clip', 'clip', 'index.html')) ? '已存在' : '尚未构建（本轮用夹具替身）'}`
+  })
+
+  await check('⑭ 真产物（若已构建）：默认产物路径能读到 dist-clip/clip/index.html', async () => {
+    const realIndex = path.join(ROOT_DIR, 'dist-clip', 'clip', 'index.html')
+    if (process.env.OPENNOTE_BRIDGE_UNDER_TEST) {
+      // 变异自检时被测桥是临时目录里的副本（`__dirname/..` = 临时目录），默认产物路径天然指向别处；
+      // 这条断言在那种跑法下**不可比**，但不是失败 —— 夹具替身已覆盖同一路径的全部行为。
+      skip('被测桥是临时目录里的变异副本：默认产物路径不可比')
+    }
+    if (!fs.existsSync(realIndex)) {
+      skip('dist-clip/clip/index.html 还没构建（clip-web 的 pnpm build:clip）；夹具替身已覆盖同一路径的全部行为')
+    }
+    // 不传 clip.distRoot：走的就是产品路径（与 main.cjs 装配出来的一模一样）。
+    const inst = makeBridge({ dataDir: tempDir('opennote-clip-real-'), folders: () => [] })
+    const plain = inst.bridge.regenerateToken()
+    const up = await inst.bridge.startWithPort(privatePortCounter++)
+    try {
+      const staged = clipStagedInfo(await stageClip(up.port, plain))
+      const page = await clipGet(up.port, `/clip/${staged.stageId}?k=${encodeURIComponent(staged.key)}`)
+      assert.equal(page.status, 200, `默认路径必须能读到真实产物，实际 ${page.status}：${page.text.slice(0, 200)}`)
+      assert.ok(page.text.includes(`id="${CLIP_BOOT_ID}"`), '真实产物也必须被注入引导数据块')
+      assert.equal(page.headers['content-security-policy'], CLIP_CSP)
+      // **用户看得见的那条路径**：页面引用的每个静态资源都必须真的能取到 ——
+      // 产物里写的是相对路径（`../clip/assets/index-*.js`），只要桥的路由或产物的 base 有一边漂了，
+      // 页面就是一片白（脚本 404）。这里逐个按页面 URL 解析并真取一遍，比断言字符串可靠。
+      const refs = [...page.text.matchAll(/(?:src|href)="([^"]+)"/g)].map((match) => match[1]).filter((ref) => !ref.startsWith('data:'))
+      assert.ok(refs.length > 0, '产物必须引用至少一个静态资源（否则页面不可能渲染）')
+      for (const ref of refs) {
+        const assetUrl = new URL(ref, `http://127.0.0.1:${up.port}/clip/${staged.stageId}`)
+        assert.equal(
+          assetUrl.pathname.startsWith('/clip/assets/'),
+          true,
+          `产物引用的 ${ref} 解析成 ${assetUrl.pathname}，落在桥不服务的位置（只服务 /clip/assets/）`,
+        )
+        const asset = await clipGet(up.port, `${assetUrl.pathname}${assetUrl.search}`)
+        assert.equal(asset.status, 200, `产物引用的资源取不到：${assetUrl.pathname} → ${asset.status}`)
+      }
+      return `真实产物 ${page.text.length} 字节 + 注入块 + ${refs.length} 个引用资源全部 200`
+    } finally {
+      await inst.bridge.stop()
+    }
+  })
+
+  // -------------------------------------------------------------------------
   // 收尾
   // -------------------------------------------------------------------------
   await bridge.stop()
@@ -2206,7 +2849,7 @@ async function main() {
   console.log('='.repeat(66))
 
   if (!KEEP) {
-    for (const dir of [workspace, dataDir]) {
+    for (const dir of [workspace, dataDir, clipDistRoot, emptyClipRoot]) {
       try {
         fs.rmSync(dir, { recursive: true, force: true })
       } catch {
@@ -2214,7 +2857,7 @@ async function main() {
       }
     }
   } else {
-    console.log(`保留临时目录：${workspace} / ${dataDir}`)
+    console.log(`保留临时目录：${workspace} / ${dataDir} / ${clipDistRoot} / ${emptyClipRoot}`)
   }
 
   if (failCount > 0) process.exitCode = 1
@@ -2232,10 +2875,211 @@ async function main() {
  *   ⑧ 限流触发                             → 「⑧ 限流与体积上限…」
  *   ⑨ 合法信封经 onEnvelope 转交并返回回执 → 「⑨ 合法信封…」
  *   ⑩ 令牌明文只返回一次、内部只存 sha256  → 「⑩ 令牌…」
+ *   ⑭ 网页版剪藏页（/v1/clip/*、/clip/）   → 「⑭ …」（0.3.2）
  * 契约 S-01…S-12 见各断言名前缀。
  */
-main().catch((error) => {
-  console.error('\n[bridge-smoke] 未捕获异常：')
-  console.error(error && error.stack ? error.stack : error)
-  process.exitCode = 1
-})
+
+// ---------------------------------------------------------------------------
+// 变异自检（node scripts/bridge-smoke.cjs --mutations）
+// ---------------------------------------------------------------------------
+//
+// 为什么自成一段：**守卫的价值不在被写出来，而在被证明能红**。上面那批 ⑭ 用例如果
+// 恒绿（例如判据盯错了对象），它们比没有检查更坏 —— 会让下一个人以为这条覆盖了。
+// 所以每条变异对应**用户看得见的一条契约**，逐个证明「删掉它，用例真的会红」：
+//
+//   M1 去掉 k 校验          → 任何人拿到 stageId 就能读走用户正在编辑的剪藏内容
+//   M2 commit 绕开入库通路  → 剪藏页变成第二条写路径（落点/去重/前像/通知全绕过）
+//   M3 folders[0] 不是 ""   → 页面第一项不再是收件箱，用户点「收件箱」会落到别处
+//   M4 产物缺失回空 200     → 页面白屏且没人知道为什么（任务书明令禁止的行为）
+//   M5 把 k 的失败改回借 IMP-2002 + 覆盖文案 → 证明「借码号 + 一句话两个产地」这条口子也被守着
+//      （C-6c/C-6f 只比对错误表，看不见路由里的覆盖，那种漂移是恒绿的 —— 所以必须自证能红）
+//
+// 纪律（今天花代价换来的）：
+//   - **先证明落地**：打印「锚点命中 N 处 + 改动前后 sha256」；没落地 / 命中数不符 /
+//     回读不一致 / `node --check` 失败 → 报 `NO_EFFECT` 并 **exit 2**，不许进入红绿判定。
+//   - **M0 零变异对照**：先把**未变异**的副本跑一遍，必须全绿 —— 证明「红」来自变异本身，
+//     而不是复制/加载/夹具坏了（否则我们会把工具坏了当成守卫有效）。
+//   - 变异只写临时目录，**绝不碰仓库里的 bridge.cjs**。
+const MUTATIONS = [
+  {
+    id: 'M1',
+    title: '去掉 /clip 页面的 k 校验（定时安全比较被短路）',
+    anchor: "    if (typeof key !== 'string' || !timingSafeEqualText(key, entry.key)) {",
+    replace: '    if (false) {',
+    expectHits: 1,
+    expectFail: '⑭ /clip/<stageId>：k 错',
+  },
+  {
+    id: 'M2',
+    title: 'commit 绕过入库通路，自己造一份回执（第二条写路径）',
+    // 锚点必须覆盖**整个调用表达式**（含它的参数对象），只替第一行会把参数悬空 → 语法错误，
+    // 那样「红」来自 SyntaxError 而不是产品行为（第一次跑就是这么被 node --check 拦下的）。
+    anchor: [
+      '    const outcome = await runEnvelopePipeline(req, res, {',
+      '      envelope,',
+      '      importId: envelope.importId,',
+      '      clientName: CLIP_CLIENT_NAME,',
+      "      clientVersion: '',",
+      '      warnings: [],',
+      '      startedAt,',
+      '    })',
+    ].join('\n'),
+    replace: [
+      '    const outcome = await (async () => {',
+      "      const receipt = { status: 'created', importId: envelope.importId, path: `${envelope.title}.md`,",
+      '        deduped: false, dedupedBy: null, assets: [], tags: envelope.tags, revertible: true,',
+      '        preimage: null, warnings: [], committedAt: new Date().toISOString() }',
+      '      sendOk(req, res, 201, receipt)',
+      '      return { result: receipt, status: 201 }',
+      '    })()',
+    ].join('\n'),
+    expectHits: 1,
+    expectFail: '⑭ commit：复用入库通路',
+  },
+  {
+    id: 'M3',
+    title: 'folders 第一项不再是 ""（收件箱从列表里消失）',
+    anchor: "    return { ok: true, folders: ['', ...[...seen].sort()] }",
+    replace: '    return { ok: true, folders: [...seen].sort() }',
+    expectHits: 1,
+    expectFail: '⑭ 落点列表：folders[0]',
+  },
+  {
+    id: 'M4',
+    title: '产物缺失时回空 200（页面白屏且无人知道原因）',
+    anchor: "      writeLog('import.error', { code: 'IMP-5003', detail: 'clip-page-missing' })",
+    replace: ["      sendHtml(req, res, 200, '')", "      writeLog('import.error', { code: 'IMP-5003', detail: 'clip-page-missing' })"].join('\n'),
+    expectHits: 1,
+    expectFail: '⑭ 产物缺失',
+  },
+  {
+    id: 'M5',
+    title: 'k 的失败改回「借 IMP-2002 + 覆盖 userMessage」（一句话两个产地）',
+    anchor: "      sendError(req, res, 'IMP-4019', { header: 'k' })",
+    replace:
+      "      sendError(req, res, 'IMP-2002', { header: 'k' }, { userMessage: '剪藏链接的密钥不正确。请回到插件里重新剪藏一次。' })",
+    expectHits: 1,
+    expectFail: '⑭ /clip/<stageId>：k 错',
+  },
+]
+
+function countOccurrences(text, needle) {
+  return text.split(needle).length - 1
+}
+
+/** 把一份（可能变异过的）桥源码落到临时目录：连同 `clip-stage.cjs` 与 `package.json`。 */
+function writeBridgeCopy(dir, name, source) {
+  const root = path.join(dir, name)
+  fs.mkdirSync(path.join(root, 'electron'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'electron', 'bridge.cjs'), source, 'utf8')
+  fs.copyFileSync(path.join(ROOT_DIR, 'electron', 'clip-stage.cjs'), path.join(root, 'electron', 'clip-stage.cjs'))
+  fs.copyFileSync(path.join(ROOT_DIR, 'package.json'), path.join(root, 'package.json'))
+  return path.join(root, 'electron', 'bridge.cjs')
+}
+
+/** 跑一遍自测（子进程），返回 `{ code, stdout, summary }`。 */
+function runSmoke(bridgeFile) {
+  const { spawnSync } = require('node:child_process')
+  const result = spawnSync(process.execPath, [__filename], {
+    encoding: 'utf8',
+    env: { ...process.env, OPENNOTE_BRIDGE_UNDER_TEST: bridgeFile },
+    timeout: 180000,
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  const stdout = `${result.stdout || ''}${result.stderr || ''}`
+  const summary = /^PASS (\d+) · FAIL (\d+) · SKIP (\d+)$/m.exec(stdout)
+  return { code: result.status, stdout, summary: summary ? summary[0] : '(没有拿到汇总行)' }
+}
+
+async function runMutations() {
+  const source = fs.readFileSync(BRIDGE_PATH, 'utf8')
+  const dir = tempDir('opennote-bridge-mutants-')
+  console.log('='.repeat(66))
+  console.log('桥变异自检：每条变异都必须让指定用例变红（纪律：先证明落地，再判红绿）')
+  console.log('='.repeat(66))
+
+  // ---- M0 零变异对照 -------------------------------------------------------
+  const m0File = writeBridgeCopy(dir, 'm0', source)
+  const m0 = runSmoke(m0File)
+  console.log(`\n── M0 零变异对照（未变异的副本，必须全绿）──`)
+  console.log(`  sha256 ${sha256Hex(fs.readFileSync(m0File, 'utf8'))}`)
+  console.log(`  ${m0.summary}`)
+  const m0Fail = /FAIL 0/.test(m0.summary)
+  if (!m0Fail || m0.code !== 0) {
+    console.log('  NO_EFFECT：未变异的副本自己就跑不绿 —— 之后的红绿判定无效（问题在夹具/复制环节，不在守卫）')
+    console.log(m0.stdout.split(/\r?\n/).filter((line) => /FAIL/.test(line)).slice(0, 12).join('\n'))
+    process.exit(2)
+  }
+
+  let survived = 0
+  for (const mutation of MUTATIONS) {
+    console.log(`\n── ${mutation.id} ${mutation.title} ──`)
+    const hits = countOccurrences(source, mutation.anchor)
+    const beforeSha = sha256Hex(source)
+    console.log(`  锚点：${JSON.stringify(mutation.anchor)}`)
+    console.log(`  锚点命中 ${hits} 处（要求 ${mutation.expectHits} 处）`)
+    if (hits !== mutation.expectHits) {
+      console.log(`  NO_EFFECT：命中 ${hits} 处，期望 ${mutation.expectHits} 处 —— 变异没落地，禁止进入红绿判定`)
+      process.exit(2)
+    }
+    const mutated = source.split(mutation.anchor).join(mutation.replace)
+    const afterSha = sha256Hex(mutated)
+    console.log(`  sha256 ${beforeSha} → ${afterSha}`)
+    if (afterSha === beforeSha) {
+      console.log('  NO_EFFECT：改动前后 sha256 相同（替换没有产生任何字节差异），禁止进入红绿判定')
+      process.exit(2)
+    }
+    const file = writeBridgeCopy(dir, mutation.id.toLowerCase(), mutated)
+    // 落地自检：回读确认盘上的字节就是我们要的那份。
+    const back = sha256Hex(fs.readFileSync(file, 'utf8'))
+    if (back !== afterSha) {
+      console.log(`  NO_EFFECT：回读 sha256 ${back} != 期望 ${afterSha}（写盘没落地或读到了别的文件）`)
+      process.exit(2)
+    }
+    const { spawnSync } = require('node:child_process')
+    const syntax = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' })
+    console.log(`  node --check：${syntax.status === 0 ? '通过（变异后仍可加载）' : '失败'}`)
+    if (syntax.status !== 0) {
+      console.log(`  NO_EFFECT：变异把文件改成了语法错误，「红」不是产品行为造成的\n${syntax.stderr || ''}`)
+      process.exit(2)
+    }
+    const run = runSmoke(file)
+    const failLines = run.stdout.split(/\r?\n/).filter((line) => /^\s+FAIL /.test(line))
+    const hit = failLines.find((line) => line.includes(mutation.expectFail))
+    console.log(`  该次自测：${run.summary}`)
+    if (hit && run.code !== 0) {
+      console.log(`  RED 如期：${hit.trim()}`)
+      if (failLines.length > 1) console.log(`  （另有 ${failLines.length - 1} 条一并变红，符合预期：同一份实现被多处用例守着）`)
+    } else if (!hit) {
+      console.log(`  MUTATION SURVIVED：变异已落地，但「${mutation.expectFail}」没有变红 —— 这条守卫是恒绿的，必须修`)
+      survived += 1
+    } else {
+      console.log(`  MUTATION SURVIVED：目标用例红了，但退出码是 ${run.code}（应当非 0）`)
+      survived += 1
+    }
+  }
+
+  console.log(`\n${'='.repeat(66)}`)
+  console.log(survived === 0 ? `变异自检 PASS：M0 对照绿 + ${MUTATIONS.length}/${MUTATIONS.length} 条变异如期变红` : `变异自检 FAIL：${survived} 条变异存活`)
+  console.log('='.repeat(66))
+  try {
+    fs.rmSync(dir, { recursive: true, force: true })
+  } catch {
+    /* 清理失败不影响结论 */
+  }
+  process.exit(survived === 0 ? 0 : 1)
+}
+
+if (process.argv.includes('--mutations')) {
+  runMutations().catch((error) => {
+    console.error('\n[bridge-smoke --mutations] 未捕获异常：')
+    console.error(error && error.stack ? error.stack : error)
+    process.exit(2)
+  })
+} else {
+  main().catch((error) => {
+    console.error('\n[bridge-smoke] 未捕获异常：')
+    console.error(error && error.stack ? error.stack : error)
+    process.exitCode = 1
+  })
+}

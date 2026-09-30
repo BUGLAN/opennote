@@ -748,7 +748,7 @@ function TrashList({ library }: { library: LibraryState }): ReactNode {
               onClick={async () => {
                 const ok = await askConfirm({
                   title: `彻底删除「${note.title}」？`,
-                  message: "此操作不可撤销：笔记、它的历史快照，以及同目录 assets/ 里的附件都会被删除。",
+                  message: "此操作不可撤销：笔记、它的历史快照，以及跟笔记走的附件目录（<笔记名>.assets/）都会被删除。",
                   confirmLabel: "彻底删除",
                   danger: true,
                 });
@@ -769,7 +769,7 @@ function TrashList({ library }: { library: LibraryState }): ReactNode {
           onClick={async () => {
             const ok = await askConfirm({
               title: "清空回收站？",
-              message: `${notes.length} 条笔记将被永久删除，连同各自的历史快照与同目录 assets/ 里的附件。`,
+              message: `${notes.length} 条笔记将被永久删除，连同各自的历史快照与跟笔记走的附件目录（<笔记名>.assets/）。`,
               confirmLabel: "清空",
               danger: true,
             });

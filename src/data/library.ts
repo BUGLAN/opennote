@@ -19,6 +19,10 @@ import {
 } from "../fs";
 import { createStore, useStore } from "../lib/store";
 import { countText, deriveTags, deriveTitle, normalizeEol, splitFrontMatter, stripMarkdown, uid } from "../lib/utils";
+// 附件目录的**唯一产地**（`<目录>/<笔记名>.assets/`）。这里只 import，绝不自己再写一遍
+// 派生规则 —— 剪藏接收端（`src/lib/clip/receive.ts`）用的是同一个函数，两个产地会漂移。
+// 同理，引用文本的写法（带空格时要写成 `<…>`）也只从 `markdownRef` 来。
+import { assetsDirFor, markdownRef } from "../lib/clip/landing";
 import { desktopBridge } from "../desktop/bridge";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
 import type { Folder, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
@@ -327,7 +331,21 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
         for (const entry of node.entries) {
           if (entry.kind !== "directory") continue;
           const path = joinPath(node.path, entry.name);
-          if (!node.inTrash && (isHiddenPath(path) || entry.name === ASSETS_DIR || entry.name === "node_modules" || entry.name === "dist" || entry.name === "release")) continue;
+          // 附件目录不是「文件夹」：公共 `assets/` 与**按笔记名派生**的 `<笔记名>.assets/`
+          // 都只是图片的家，出现在左栏里会把用户的目录树弄脏（`foo.assets` 不是他建的目录）。
+          // **这条规则的镜像在 `electron/main.cjs` 的 `listWorkspaceFoldersForClip()`**
+          // （剪藏页的落点候选也必须是「真的文件夹」）—— 改一处就要改两处。
+          if (
+            !node.inTrash &&
+            (isHiddenPath(path) ||
+              entry.name === ASSETS_DIR ||
+              entry.name.endsWith(".assets") ||
+              entry.name === "node_modules" ||
+              entry.name === "dist" ||
+              entry.name === "release")
+          ) {
+            continue;
+          }
           const child: ScanDir = { path, inTrash: node.inTrash, entries: [], listed: false };
           children.set(path, child);
           next.push(child);
@@ -1082,6 +1100,8 @@ export async function moveNote(id: Id, folderId: Id | null): Promise<void> {
     await target.move(id, nextPath);
     remapIds(id, nextPath);
     await moveHistory(target, id, nextPath);
+    // 换目录就是换路径 ⇒ 派生附件目录必须跟着换（否则单篇笔记挪走后正文引用指空）。
+    await moveNoteAssets(target, id, nextPath);
   } catch (error) {
     reportError(error, "移动笔记失败");
   }
@@ -1104,6 +1124,31 @@ export function touchNoteOpened(id: Id): void {
 
 /* --------------------------------------------------------------------- trash */
 
+/**
+ * 图片跟笔记走（用户原话「从收件箱移动到其他位置时，图片位置也应改变」）。
+ *
+ * 剪藏落盘的笔记把附件放在**按笔记名派生**的 `<笔记名>.assets/` 里，所以「笔记换到哪条路径」
+ * 就决定了「附件应该在哪条路径」——搬笔记时**必须**把附件目录一起搬，否则正文里的
+ * `./foo.assets/x.png` 就指空（图丢了，而且不报错）。
+ *
+ * 两个方向都要走同一条派生规则（`assetsDirFor`，唯一产地）：
+ *   入回收站：`assetsDirFor(笔记原路径)` → `assetsDirFor(回收站路径)`
+ *   恢复/移动：`assetsDirFor(来源路径)` → `assetsDirFor(目标路径)`
+ *
+ * 目标已存在 → **绝不静默覆盖**（那是丢图的第二种写法）：如实报告，把原目录留在原地。
+ */
+async function moveNoteAssets(target: FileSystemBackend, fromNote: Id, toNote: Id): Promise<void> {
+  const from = assetsDirFor(fromNote);
+  const to = assetsDirFor(toNote);
+  if (from === to) return;
+  if (!(await target.exists(from))) return;
+  if (await target.exists(to)) {
+    reportError(new Error(`图片目录已存在，未覆盖：${to}`), "图片未随笔记移动");
+    return;
+  }
+  await target.move(from, to);
+}
+
 export async function trashNote(id: Id): Promise<void> {
   const note = libraryStore.get().notes[id];
   const target = backend;
@@ -1115,6 +1160,8 @@ export async function trashNote(id: Id): Promise<void> {
     const trashPath = await resolveAvailablePath(target, requested, taken, id);
     await target.move(id, trashPath);
     await moveHistory(target, id, trashPath);
+    // 附件目录随笔记进回收站：留着它就会变成「删了再恢复，图丢了」（或在 trash 里留孤儿）。
+    await moveNoteAssets(target, id, trashPath);
     const current = libraryStore.get().notes[id] ?? note;
     setState((prev) => {
       const notes = { ...prev.notes };
@@ -1147,6 +1194,10 @@ export async function restoreNote(id: Id): Promise<void> {
     if (await target.exists(sourceAssets) && !(await target.exists(restoredAssets))) {
       await target.move(sourceAssets, restoredAssets);
     }
+    // 派生附件目录（`<笔记名>.assets/`）按**恢复后的最终路径**搬回来。
+    // 必须用 `nextPath` 而不是 `id`：`id` 还在回收站前缀下，派生出来的目录会指错地方
+    // （“方向反了”就是这一条：两个方向用了同一个基准，等于一个方向都没修）。
+    await moveNoteAssets(target, id, nextPath);
     setState((prev) => {
       const trash = { ...prev.trash };
       delete trash[id];
@@ -1201,6 +1252,10 @@ function otherNoteInFolder(dir: Id, except: Id): boolean {
 async function removeNoteArtifacts(target: FileSystemBackend, id: Id): Promise<void> {
   const history = joinPath(HISTORY_DIR, id);
   if (await target.exists(history)) await target.remove(history, { recursive: true });
+  // 派生附件目录是**这一篇笔记自己的**（按笔记名派生），所以没有兄弟笔记共用的问题：
+  // 笔记被真删了，它就必须一起消失，否则回收站里永远留着孤儿图片。
+  const own = assetsDirFor(id);
+  if (await target.exists(own)) await target.remove(own, { recursive: true });
   const folders = new Set<Id>([parentPath(id)]);
   // A trashed note keeps the path it came from, and its images stay there.
   if (id.startsWith(`${TRASH_DIR}/`)) folders.add(parentPath(id.slice(TRASH_DIR.length + 1)));
@@ -2013,20 +2068,42 @@ export async function restoreSnapshot(snapshot: Snapshot): Promise<void> {
 
 /* ------------------------------------------------------- images & uploads */
 
-export function assetsDirectory(): string {
-  return ASSETS_DIR;
-}
-
-/** Persist an image next to the note and return the markdown-ready relative path. */
-export async function saveImage(blob: Blob, suggestedName: string, baseDir = ""): Promise<{ path: string; markdown: string }> {
+/**
+ * Persist an image next to the note and return the markdown-ready relative path.
+ *
+ * 第三参是**最终笔记路径**（`归档/foo 2.md`），不是笔记所在目录 —— 附件目录按笔记名派生
+ * （`assetsDirFor`：`归档/foo 2.md` → `归档/foo 2.assets/`），这样「只把一篇笔记挪走」
+ * 时图片跟着走，不依赖任何搬迁代码记得搬。旧数据不迁移：老笔记的图仍在公共
+ * `<目录>/assets/` 里，正文照旧引用 `./assets/x.png`，照样能读。
+ */
+export async function saveImage(
+  blob: Blob,
+  suggestedName: string,
+  notePath: string,
+): Promise<{ path: string; markdown: string }> {
+  /*
+   * 守卫：第三参必须是**笔记文件路径**，不是笔记所在目录。
+   *
+   * 为什么需要它：这两个参数的**类型都是 `string`**，TypeScript 一个字都拦不住 ——
+   * 调用方仍旧传目录时（`assetsDirFor("")` → `未命名.assets/`）编译通过、类型检查通过、
+   * 单测也可能照样绿，只有用户会发现图片跑去了一个莫名其妙的目录。
+   * 这类「静默接错来源」正是本轮 P0 的根因形态（`body: payload.body` 那次）。
+   * 所以把一个**语义**约束写成一条**运行期**断言：错了就大声报，绝不猜。
+   */
+  if (!isMarkdownPath(notePath)) {
+    throw new Error(`saveImage 的第三参必须是笔记路径（如 归档/foo.md），收到的是「${notePath || "(空)"}」`);
+  }
   const target = requireBackend();
-  const dir = joinPath(baseDir, ASSETS_DIR);
+  const dir = assetsDirFor(notePath);
   const existing = await listOptionalDirectory(target, dir);
   const taken = new Set(existing.map((entry) => entry.name));
   const name = uniquePath(sanitizeName(suggestedName, `图片-${Date.now()}.png`), taken);
   const path = joinPath(dir, name);
   await target.writeBytes(path, blob);
-  return { path, markdown: `./${ASSETS_DIR}/${name}` };
+  // 引用里的目录名从**同一个派生结果**现取，别在这里再拼一次 `<笔记名>.assets`。
+  // 目标串再过一次 `markdownRef`（唯一产地）：笔记名带空格时（`备注 2.md`、`无标题 2.md`）
+  // 目录名也带空格，裸写会被**空格截断** —— 图片不渲染，而且不报错。
+  return { path, markdown: markdownRef(`./${baseName(dir)}/${name}`) };
 }
 
 /* ------------------------------------------------------------------ bootstrap */

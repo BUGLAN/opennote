@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#fbf8f3" />
+    <title>Opennote · 剪藏确认</title>
+    <meta name="description" content="Opennote 网页版剪藏页：先编辑，确认后再入库。" />
+    <!-- 桥不会为这个页面准备 favicon；`data:,` 只是让浏览器不用去请求一个必然 404 的图标。 -->
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <!--
+      静态兜底：模块脚本没跑起来（被 CSP 拦下、资源 404、JS 被禁用）时，这里也是一句人话
+      加一条可照做的指引，而不是一片白。React 挂载时会接管并清掉这段（createRoot 会清空容器）。
+      页面里没有任何内联可执行脚本 —— 桥给的是 `script-src 'self'`。
+    -->
+    <div id="clip-root">
+      <div class="boot">
+        <div class="boot__seal" aria-hidden="true">記</div>
+        <div class="boot__name">Opennote 剪藏</div>
+        <div class="boot__hint">正在读取这次剪藏的内容…</div>
+        <p class="boot__note">
+          如果这段提示停留超过十几秒，说明页面脚本没有加载成功：请回到 Opennote 剪藏扩展的弹窗重新发起剪藏，并确认 Opennote 正在运行。
+        </p>
+      </div>
+    </div>
+    <noscript>
+      <div class="boot__noscript">这个页面需要启用 JavaScript 才能编辑剪藏内容。请启用后重新打开本页。</div>
+    </noscript>
+    <script type="module" src="../src/clip-web/main.tsx"></script>
+  </body>
+</html>

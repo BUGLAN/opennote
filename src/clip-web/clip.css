@@ -1,0 +1,290 @@
+/* ============================================================================
+   Opennote 剪藏页 —— 这一页自己的布局
+   只用 tokens.css 里已有的令牌（新增令牌 0）：颜色、间距、圆角、字体全部走变量，
+   正文排版交给 prose.css 的 .prose，失败卡复用 base.css 的 .boot--failed。
+   ========================================================================= */
+
+.clip {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100vh;
+  height: 100dvh;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+/* ---- 顶栏：这次剪的是什么 ---------------------------------------------- */
+.clip__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s4);
+  padding: var(--s3) var(--s5);
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper-2);
+  box-shadow: var(--shadow-1);
+}
+
+.clip__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.clip__brand-name {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.clip__facts {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s4);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
+
+.clip__facts li {
+  max-width: 52ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clip__facts--muted {
+  color: var(--ink-3);
+}
+
+.clip__bar-note {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: var(--fs-sm);
+}
+
+/* ---- 两栏：左边编辑，右边预览 ------------------------------------------ */
+.clip__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.clip__pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.clip__pane--edit {
+  border-right: 1px solid var(--rule);
+}
+
+.clip__pane--preview {
+  background: var(--paper-2);
+}
+
+.clip__label {
+  padding: var(--s3) var(--s5) var(--s1);
+  color: var(--ink-3);
+  font-size: var(--fs-sm);
+  letter-spacing: var(--tracking-wide);
+}
+
+.clip__title {
+  display: block;
+  width: auto;
+  height: 34px;
+  margin: 0 var(--s5);
+  font-family: var(--font-serif);
+  font-size: var(--fs-lg);
+}
+
+.clip__editor {
+  flex: 1;
+  min-height: 0;
+  margin: var(--s1) var(--s5) var(--s5);
+  padding: var(--s4);
+  overflow: auto;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--doc-fs);
+  line-height: var(--doc-lh);
+  resize: none;
+  tab-size: 2;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.clip__editor:focus-visible,
+.clip__title:focus-visible,
+.clip__select:focus-visible {
+  outline: none;
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.clip__preview-scroll {
+  flex: 1;
+  min-height: 0;
+  padding: var(--s5) var(--s6);
+  overflow: auto;
+}
+
+.clip__prose {
+  max-width: var(--measure);
+  margin: 0 auto;
+}
+
+/* ---- 底部：落点 + 入库 -------------------------------------------------- */
+.clip__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: var(--s3) var(--s5);
+  border-top: 1px solid var(--rule);
+  background: var(--paper-2);
+  box-shadow: var(--shadow-1);
+}
+
+.clip__field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
+
+.clip__select {
+  width: auto;
+  min-width: 180px;
+  max-width: 40ch;
+}
+
+.clip__grow {
+  flex: 1;
+  min-width: var(--s4);
+}
+
+.clip__status {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
+
+/* ---- 说明与卡片 --------------------------------------------------------- */
+.clip__note {
+  margin: 0 var(--s5) var(--s3);
+  color: var(--ink-3);
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+}
+
+.clip__error {
+  color: var(--accent);
+}
+
+.clip__center {
+  display: grid;
+  grid-column: 1 / -1;
+  place-items: center;
+  padding: var(--s7) var(--s5);
+  overflow: auto;
+}
+
+.clip__card {
+  width: 100%;
+  max-width: 62ch;
+  padding: var(--s4) var(--s5);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  box-shadow: var(--shadow-1);
+}
+
+.clip__card--ok {
+  border-color: var(--accent-line);
+}
+
+.clip__card-title {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.clip__card-lines,
+.clip__card-warnings {
+  margin: var(--s2) 0 0;
+  padding-left: 1.1em;
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+  line-height: 1.8;
+  word-break: break-all;
+}
+
+.clip__card-next {
+  margin: var(--s3) 0 0;
+  color: var(--ink-3);
+  font-size: var(--fs-sm);
+}
+
+.clip__actions {
+  display: flex;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+/* ---- 入库回执 ----------------------------------------------------------- */
+.clip__receipt {
+  max-height: 34vh;
+  padding: var(--s3) var(--s5) var(--s4);
+  overflow: auto;
+  border-top: 1px solid var(--rule);
+  background: var(--paper-3);
+}
+
+.clip__receipt-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.clip__receipt-head .clip__card-title {
+  flex: 1;
+}
+
+.clip__warn-title {
+  margin-top: var(--s3);
+  color: var(--accent);
+  font-size: var(--fs-md);
+}
+
+.clip__empty {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: var(--fs-md);
+}
+
+@media (max-width: 900px) {
+  .clip__body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .clip__pane--edit {
+    border-right: none;
+    border-bottom: 1px solid var(--rule);
+  }
+}

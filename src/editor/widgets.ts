@@ -1,6 +1,7 @@
 import { EditorView, WidgetType } from "@codemirror/view";
 import { resolveImageSrc } from "../data/assets";
 import type { ThemeId } from "../data/types";
+import { parentPath } from "../fs";
 import { bridge } from "./bridge";
 import { mathHtmlSync, renderMath } from "./math";
 import { mermaidHtmlSync, renderMermaid } from "./mermaid";
@@ -12,14 +13,15 @@ export class ImageWidget extends WidgetType {
     readonly raw: string,
     readonly alt: string,
     readonly block: boolean,
-    readonly baseDir: string,
+    /** 图片所属笔记的**路径**（`归档/foo 2.md`）；相对引用按它所在目录解析。 */
+    readonly notePath: string,
   ) {
     super();
   }
 
   eq(other: ImageWidget): boolean {
     return (
-      other.raw === this.raw && other.alt === this.alt && other.block === this.block && other.baseDir === this.baseDir
+      other.raw === this.raw && other.alt === this.alt && other.block === this.block && other.notePath === this.notePath
     );
   }
 
@@ -33,7 +35,9 @@ export class ImageWidget extends WidgetType {
     img.draggable = false;
     wrap.appendChild(img);
 
-    void resolveImageSrc(this.raw, this.baseDir).then((url) => {
+    // `resolveImageSrc()` 的基准仍是**目录**（`./foo.assets/x.png` 与 `./assets/x.png` 都要能读），
+    // 而编辑器里唯一的事实是笔记路径 —— 目录由它换算，不另存一份。
+    void resolveImageSrc(this.raw, parentPath(this.notePath)).then((url) => {
       if (!url) {
         wrap.classList.add("is-missing");
         wrap.textContent = this.alt ? `图片未找到：${this.alt}` : `图片未找到：${this.raw}`;

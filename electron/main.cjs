@@ -22,7 +22,7 @@
 
 const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron')
 const { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } = require('node:fs/promises')
-const { existsSync, watch } = require('node:fs')
+const { existsSync, watch, readdirSync } = require('node:fs')
 const { createHash } = require('node:crypto')
 const path = require('node:path')
 
@@ -1216,6 +1216,47 @@ function writeInboxStateForBridge(entryId, stateJson) {
   return writeInboxStateAtomic(root, entryId, stateJson)
 }
 
+/**
+ * 网页版剪藏页的「落点」候选：工作区里**已存在**的目录（工作区相对路径）。
+ *
+ * 为什么由主进程从磁盘现读，而不是问渲染层要：`folder` 的契约是「非空必须是**已存在的
+ * 目录**，不自动创建」，这句话说的是**文件系统事实**，而文件系统事实的产地就是磁盘。
+ * 让渲染层的内存树再产一份，就会出现「渲染层以为有、磁盘上没有」这种第二种事实。
+ *
+ * 跳过规则与渲染层一致（`src/data/library.ts` 的 rescan：隐藏目录 / node_modules /
+ * dist / release 不当文件夹），另加两条剪藏自己引入的：公共 `assets/` 与
+ * `<笔记名>.assets/` 是**附件目录，不是落点**。
+ * **规则改一处就要改两处** —— 所以两边的注释互相点名（这边指向 library.ts，那边指向这里）。
+ *
+ * 有界：最多 3 层、最多 400 个目录。无工作区、读不动、结果为空一律如实回空数组，
+ * 绝不用一个假的默认值冒充「工作区里没有别的目录」。
+ */
+const CLIP_FOLDER_SKIP = new Set(['node_modules', 'dist', 'release', 'assets', '.git'])
+function listWorkspaceFoldersForClip(root) {
+  if (!root) return []
+  const out = []
+  const walk = (dir, prefix, depth) => {
+    if (depth > 3 || out.length >= 400) return
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (out.length >= 400) return
+      if (!entry.isDirectory()) continue
+      const name = entry.name
+      if (!name || name.startsWith('.') || CLIP_FOLDER_SKIP.has(name) || name.endsWith('.assets')) continue
+      const rel = prefix ? `${prefix}/${name}` : name
+      out.push(rel)
+      walk(path.join(dir, name), rel, depth + 1)
+    }
+  }
+  walk(root, '', 1)
+  return out.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))
+}
+
 // --- 本地桥装配 ---------------------------------------------------------------
 
 function bridgeStatusPayload() {
@@ -1318,6 +1359,17 @@ function ensureBridge() {
     // 落点默认是工作区根（00 号 §6.13⑤ 裁定：default landing = workspace root），
     // `null` 即「根目录」。
     getDefaultFolder: () => null,
+    /**
+     * 网页版剪藏页的落点候选（`GET /v1/clip/folders`）与
+     * `POST /v1/clip/commit` 的 `folder` 合法性校验共用这一份。
+     *
+     * 契约（00 号 §6.14㉕ + 本轮冻结）：`""` = 进收件箱；非空必须是**已存在的目录**，
+     * 不自动创建。桥负责把 `""` 放在第一项 —— 主进程只回**真实存在**的目录名，
+     * 不在这里掺一个「收件箱」的假目录（否则「收件箱」会同时是目录名和落点模式两种含义）。
+     *
+     * 拿不到工作区时回空数组：桥必须把「空」和「读失败」分开报，绝不回一个假列表。
+     */
+    getFolders: () => listWorkspaceFoldersForClip(currentWorkspaceRoot),
     log: (event, fields) => {
       // 契约要求日志不含令牌、配对码、正文与 userData 绝对路径；
       // 桥自己已经脱敏，这里只补一条事件名，避免把整个 fields 打进主进程日志。

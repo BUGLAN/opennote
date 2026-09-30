@@ -202,10 +202,97 @@ for (const [label, base] of [["src", SRC], ["dist", DIST]]) {
   }
 }
 if (existsSync(join(SRC, "options"))) deadRouteHits.push("src/options/（目录已随 M2 删除）");
+// A（网页版剪藏页）：插件里那个「可编辑剪藏页」（src/clip/clip.html + clip.js）被新架构取代并删除，
+// 它专用的 `?tabId=` 路由与 `tabById()` 也**必须一起消失** —— 目标没了、路由还在，就是下一个 C-10p。
+if (existsSync(join(SRC, "clip"))) deadRouteHits.push("src/clip/（已被网页版剪藏页取代，必须整目录删除）");
+for (const [label, base] of [["src", SRC], ["dist", DIST]]) {
+  for (const rel of walkFiles(base, base)) {
+    if (!rel.endsWith(".js") && !rel.endsWith(".html") && !rel.endsWith(".json")) continue;
+    const text = readFileSync(join(base, rel), "utf8");
+    const stripped = text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+    const hit = /clip\/clip\.html|tabById|\?tabId=|\bclip-page\.js\b/.exec(stripped);
+    if (hit) deadRouteHits.push(`${label}/${rel.replaceAll(sep, "/")}（旧剪藏页的痕迹：${hit[0]}）`);
+  }
+}
+// 目录形态与路由形态都要查：旧页的产物目录（dist/clip/**）也算「目标还在」
+if (existsSync(join(DIST, "clip"))) deadRouteHits.push("dist/clip/**（旧剪藏页的构建产物还在）");
 if (deadRouteHits.length) {
   fail(GROUP_V2, `options 页已删除，但通往它的路由还在（死按钮 C-10p）：${deadRouteHits.join("、")}`);
 } else {
   pass("options 路由与目标成对不存在（没有通往已删页面的死按钮）");
+}
+
+/* ── V2b 产物清单（正面断言：逐个核对「该在的」与「必须不在的」） ────────────
+ * 起因（Lead 要求）：原来这里只写「产物文件数不超过 N」这种**数字上界**，
+ * 它挡不住「删掉一个、又混进来一个」。更糟的是：把一个模块整个删掉时，
+ * 后面那些 `import(dist/lib/…)` 会**先抛异常**，于是「缺少清单里的文件」这句人话根本来不及打印。
+ * 所以清单核对放在**读产物之前**，并且正面列出每一个文件。
+ */
+const GROUP_V2B = "V2b 产物清单";
+const EXPECTED_DIST_FILES = [
+  "BUILD-INFO.json",
+  "background.js",
+  "content/clipboard.js",
+  "content/extract-page.js",
+  "content/picker.js",
+  "icons/icon128.png",
+  "icons/icon16.png",
+  "icons/icon32.png",
+  "icons/icon48.png",
+  "lib/assets.js",
+  "lib/bridge.js",
+  "lib/envelope.js",
+  "lib/errors.js",
+  "lib/pick.js",
+  "lib/queue.js",
+  "lib/stage.js",
+  "lib/state.js",
+  "lib/store.js",
+  "lib/timeout.js",
+  "manifest.json",
+  "popup/popup.css",
+  "popup/popup.html",
+  "popup/popup.js",
+  "styles/tokens.css",
+];
+const FORBIDDEN_DIST_PATHS = [
+  "clip/clip.html",
+  "clip/clip.js",
+  "lib/templates.js",
+  "lib/highlights.js",
+  "content/highlight.js",
+  "content/float.js",
+  "options/options.html",
+];
+// `distFiles` 里带 `dist/` 前缀（相对 extension/）；清单用相对 dist/ 的写法更直观。
+const distRelFiles = distFiles.map((file) => file.replace(/^dist\//, ""));
+const extraDistFiles = distRelFiles.filter((file) => !EXPECTED_DIST_FILES.includes(file));
+const missingDistFiles = EXPECTED_DIST_FILES.filter((file) => !distRelFiles.includes(file));
+const smuggledDistFiles = FORBIDDEN_DIST_PATHS.filter((file) => distRelFiles.includes(file));
+if (extraDistFiles.length) {
+  fail(GROUP_V2B, `产物里出现了清单之外的文件（正面断言，新增文件必须同步到 verify 的清单）：${extraDistFiles.join(", ")}`);
+}
+if (missingDistFiles.length) fail(GROUP_V2B, `产物缺少清单里的文件：${missingDistFiles.join(", ")}`);
+if (smuggledDistFiles.length) fail(GROUP_V2B, `已退场的产物又回来了：${smuggledDistFiles.join(", ")}`);
+// 清单与 manifest 的引用必须对得上：manifest 指向的每个文件都要在清单里（V2 另有「文件真实存在」）
+const manifestRefs = [
+  manifest.background.service_worker,
+  manifest.action.default_popup,
+  ...Object.values(manifest.action.default_icon || {}),
+  ...Object.values(manifest.icons || {}),
+];
+for (const ref of manifestRefs) {
+  if (!EXPECTED_DIST_FILES.includes(ref)) fail(GROUP_V2B, `manifest 引用的 ${ref} 不在产物清单里（清单漏了或 manifest 改了）`);
+}
+if (!extraDistFiles.length && !missingDistFiles.length && !smuggledDistFiles.length) {
+  pass(`产物清单逐个核对通过：${distRelFiles.length} 个文件，manifest 引用的 ${manifestRefs.length} 个都在清单内（M1 时 27、task-29 删页前 24）`);
+} else {
+  // 清单不对就**停在这里**：后面的断言会去 import 产物里的模块，缺文件时那一步会先抛 ENOENT，
+  // 于是「缺少清单里的文件」这句人话根本来不及打印（实测过：node 直接把异常栈吐在最后）。
+  // 宁可明确地说「清单不对，没继续验」，也不要在一个半截产物上跑完再报一堆假红。
+  console.error("产物清单不对：后面的断言会跑在半截产物上，因此**在这里停**（不是跑完发现红，而是不跑）。");
+  for (const item of failures) console.error(`  ${item}`);
+  process.exit(1);
 }
 
 // service worker 的静态导入图
@@ -432,6 +519,26 @@ const requiredCopy = [
   "清除",
   "留下",
   "来源未被允许。本地接口只接受浏览器扩展与本机程序发来的请求。",
+  // A（网页版剪藏页）+ ②/③/⑤（task-3，本轮新增的用户可见文案，逐字）：
+  // 卡片上的「在新标签页编辑」入口、两个按钮的选中态来源行、图片开关、预览截断提示、
+  // 以及「接口没给 openUrl」时的失败原因（失败必须有人话，不许静默）。
+  "在新标签页里编辑后保存",
+  "整页正文",
+  "图片一起保存",
+  "关：正文里保留图片的原始网址。",
+  "这一页没找到可以下载的图片，正文里保留原始网址。",
+  "开：会尝试下载这 ",
+  " 张图片随笔记一起保存；下载失败的，正文里保留原始网址。",
+  " 张图片没有可下载的地址，正文里保留原始网址。",
+  // ③ 的降级句（图片下载失败：原因逐条如实说，绝不用一句「失败」糊过去）
+  "图片没能下载（",
+  "正文里保留原始网址：",
+  "不是支持的图片格式",
+  "图片太大（超过 8 MiB）",
+  "只下载了前 ",
+  "打开编辑页",
+  "预览只显示开头，剪藏后是完整正文。",
+  "本地接口没有返回可打开的页面地址。",
   // 右键菜单最终两项（03 §UI-03）
   "剪藏整页正文",
   "高亮这段文字",
@@ -556,6 +663,62 @@ if (JSON.stringify(menuItems) !== JSON.stringify(MENU_EXPECTED)) {
   fail(GROUP_V12, `⋯ 菜单文案必须逐字：${JSON.stringify(MENU_LABELS)}，实际 ${JSON.stringify(menuLabels)}`);
 } else pass(`⋯ 菜单恰好 5 项且文案逐字：${menuLabels.join(" / ")}`);
 
+/* ── V12b 消息契约清单（T-01 的出口：清单在 03 §13，这里机检「清单与代码对得上」） ──
+ * T-01 的原文：「按 02 §5.2.11 的写法补一份消息契约清单，并加一条 verify.mjs 断言：
+ * 清单里的每个消息名都能在 popup.js 与 background.js 里找到对应的收发点」。
+ * 所以这里**逐条点名**：每条消息都必须有 background 的接收点 + 声明的发送方。
+ * 加消息却忘了写进清单（或删了清单里的消息）→ 这一条红。
+ */
+const GROUP_V12B = "V12b 消息契约";
+const DECLARED_MESSAGES = [
+  { name: "opennote:load", sender: "popup" },
+  { name: "opennote:retry", sender: "popup" },
+  { name: "opennote:preview", sender: "popup" },
+  { name: "opennote:submit", sender: "popup" },
+  { name: "opennote:stage", sender: "popup" },
+  { name: "opennote:clip-stage", sender: "popup" },
+  { name: "opennote:pick", sender: "popup" },
+  { name: "opennote:set-token", sender: "popup" },
+  { name: "opennote:forget-token", sender: "popup" },
+  { name: "opennote:open-settings", sender: "popup" },
+  { name: "opennote:open-note", sender: "popup" },
+  { name: "opennote:copy-in-page", sender: "popup" },
+  { name: "opennote:element-picked", sender: "picker" },
+  { name: "opennote:pick-cancelled", sender: "picker" },
+];
+const pickerSrc = readDist("dist/content/picker.js");
+const senderText = { popup: popupJs, picker: pickerSrc };
+const contractHits = [];
+for (const item of DECLARED_MESSAGES) {
+  if (!background.includes(`case "${item.name}":`) && !background.includes(`"${item.name}"`)) {
+    contractHits.push(`清单里的 ${item.name} 在 background.js 里找不到接收点`);
+  }
+  if (!senderText[item.sender].includes(item.name)) {
+    contractHits.push(`清单里的 ${item.name} 在发送方 ${item.sender} 里找不到发送点`);
+  }
+}
+// 发送方的**载荷键集合**也点一条名（Lead 裁定把它做成声明式的）：preview 只许带这三个键
+const DECLARED_PREVIEW_KEYS = ["type", "mode", "images"];
+const previewCall = (popupJs.match(/send\(\{\s*type: "opennote:preview"[^}]*\}\)/) || [])[0] || "";
+if (!previewCall) {
+  contractHits.push("popup 里找不到 opennote:preview 的发送点（清单说它只带 type/mode/images）");
+} else {
+  for (const key of DECLARED_PREVIEW_KEYS) {
+    if (!new RegExp(`\\b${key}\\b`).test(previewCall)) contractHits.push(`opennote:preview 的载荷缺少声明的键 ${key}`);
+  }
+  const extra = [...previewCall.matchAll(/(?:^|[{,\s])([a-zA-Z][a-zA-Z0-9_]*)\s*:/g)]
+    .map((match) => match[1])
+    .filter((key) => !DECLARED_PREVIEW_KEYS.includes(key));
+  if (extra.length) contractHits.push(`opennote:preview 的载荷多出了未声明的键：${extra.join(", ")}（清单必须同步）`);
+}
+if (!background.includes('case "opennote:clip-stage":')) contractHits.push("background 缺少 opennote:clip-stage 的接收点");
+if (/return \{ ok: false, code: "IMP-3005" \};/.test(background) === false) contractHits.push("background 缺少「未知消息」的兜底回执（IMP-3005）");
+if (contractHits.length) {
+  for (const hit of contractHits) fail(GROUP_V12B, hit);
+} else {
+  pass(`消息契约清单 ${DECLARED_MESSAGES.length} 条与代码逐条对得上（发送方 + 接收点 + preview 载荷键集合）`);
+}
+
 /* ── V17 极简形态：只剩两个按钮、无死元素、来源信息允许空值（M1 / task-24） ───────── */
 
 const GROUP_V17 = "V17 极简形态";
@@ -607,13 +770,9 @@ const distText = distFiles
   .join("\n");
 const stillReferenced = DEAD_TOKENS.filter((token) => distText.includes(token));
 if (stillReferenced.length) fail(GROUP_V17, `已退场的存储键/符号仍在产物里：${stillReferenced.join(", ")}`);
-  // task-29: the user-chosen editable clip page adds 2 artifacts (clip/clip.html + clip/clip.js).
-  // The bound moves 23 -> 25 because the decision changed, not to turn a red green: the M2-removed
-  // template/highlight modules are still absent, and the total (24) is still far below the M1 count of 27.
-if (distFiles.length > 25) fail(GROUP_V17, `产物文件数应随 M2 明显下降，实际 ${distFiles.length}（M1 时是 27）`);
-if (!stillShipped.length && !stillReferenced.length && distFiles.length <= 25) {
-  pass(`模板/高亮的模块与存储键都不在产物里，产物 ${distFiles.length} 个文件（M1 时 27）`);
-}
+// task-29 曾在这里写「产物文件数不超过 N」；task-3（本轮）把那两件旧剪藏页产物删掉、
+// 新增 `lib/stage.js` + `lib/assets.js` ⇒ 仍是 24。**数字上界已删除**：
+// 判据改成 V2b 的**正面清单**（逐个核对「该在的 / 必须不在的」），因为上界挡不住「删一个、混进来一个」。
 
 // ④ 来源信息自动填写、**允许空值**：缺失字段必须是 null（不是空串、不是占位值）
 const envelopeModule = await import(pathToFileURL(join(DIST, "lib", "envelope.js")).href);
@@ -651,6 +810,117 @@ else {
 }
 if (!failures.some((item) => item.includes(GROUP_V17))) {
   pass("来源信息自动填写且允许空值：缺失字段为 null（不是空串），提取到的字段如实带上");
+}
+
+/* ── V21 段（并入 V17 组）：A 接通 + ⑤ 选中态 + ③ 图片开关（task-3） ────────────
+ * 这一段的每一条都对应一条**自认欠账**：
+ *  - A 接通：`CLIP_WEB_READY` 从 false 改 true 的变异必须红（入口恢复渲染 + 只打开接口给的 openUrl）；
+ *  - ⑤：两个按钮「看不出选的是元素还是整页」—— 选中态必须是**既有令牌**着色 + `aria-pressed`；
+ *  - ③：图片开关**默认关**（默认值只有一个产地 `lib/stage.js`），关着时 `assets[]` 必须为空。
+ */
+const GROUP_V17A = "V17 A 接通与 ③⑤";
+const popupCodeV17A = popupJs.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+const stageDist = readDist("dist/lib/stage.js");
+const backgroundDistV17A = readDist("dist/background.js");
+
+// ① A 接通：请求体形状的唯一定义 + openUrl 的唯一产地
+if (!/export const STAGE_SPEC = "opennote\.clip\/v1";/.test(stageDist)) {
+  fail(GROUP_V17A, "lib/stage.js 必须声明 spec = opennote.clip/v1（形状的唯一定义）");
+}
+// 行为断言（比文本匹配强）：真的 import 产物里的模块，跑一次组装，逐字比对键集合与默认值
+const stageModule = await import(pathToFileURL(join(DIST, "lib", "stage.js")).href);
+const FROZEN_STAGE_KEYS = ["spec", "url", "title", "body", "selection", "tags", "source", "assets"];
+const builtKeys = Object.keys(stageModule.buildStageRequest({}).request);
+if (JSON.stringify(builtKeys) !== JSON.stringify(FROZEN_STAGE_KEYS)) {
+  fail(GROUP_V17A, `暂存请求体的键集合被改了：期望 ${JSON.stringify(FROZEN_STAGE_KEYS)}，实际 ${JSON.stringify(builtKeys)}`);
+}
+if (stageModule.buildStageRequest({}).request.assets.length !== 0) {
+  fail(GROUP_V17A, "默认关：没有下载到字节时 assets 必须是空数组");
+}
+// 资产形状（02 §2.5）：合法形状原样保留；`{url,alt}` 这种信封里不存在的形状**必须**被丢掉并记 warning
+// （独立验证者用真桥探到过：发 `{url,alt}` → 422 IMP-4003 detail.field="assets[0].name"）
+const goodAsset = { name: "a.png", mime: "image/png", dataBase64: "aGVsbG8=" };
+const goodStage = stageModule.buildStageRequest({ url: "u", title: "t", body: "b", assets: [goodAsset] });
+if (JSON.stringify(goodStage.request.assets) !== JSON.stringify([goodAsset])) {
+  fail(GROUP_V17A, "合法的 {name,mime,dataBase64} 资产必须原样进 assets");
+}
+const badStage = stageModule.buildStageRequest({ url: "u", title: "t", body: "b", assets: [{ url: "https://a/b.png", alt: "x" }] });
+if (badStage.request.assets.length !== 0) {
+  fail(GROUP_V17A, "assets 里混进了 {url,alt} 形状：桥会 422 拒掉整条剪藏（必须有回归闸门）");
+}
+if (!badStage.warnings.some((item) => item.includes("没能保存成可入库的格式") && item.includes("正文里保留原始网址"))) {
+  fail(GROUP_V17A, "丢掉一条资产必须如实说明（降级为原始 URL + warnings[]，不许静默）");
+}
+if (stageModule.openUrlOf({}) !== null || stageModule.openUrlOf({ openUrl: "   " }) !== null) {
+  fail(GROUP_V17A, "openUrlOf 对缺失/空白必须返回 null（否则会打开一个坏页面）");
+}
+if (stageModule.IMAGE_DOWNLOAD_DEFAULT !== false) {
+  fail(GROUP_V17A, `图片开关默认值必须关，实际 ${JSON.stringify(stageModule.IMAGE_DOWNLOAD_DEFAULT)}`);
+}
+// ③ 的字节层必须在产物里（拿到字节才发），且不许出现「按网址造资产」的老写法
+const assetsDist = readDist("dist/lib/assets.js");
+for (const needle of ["export async function collectImageAssets(", "export function assetFromBytes(", "export function sniffMime("]) {
+  if (!assetsDist.includes(needle)) fail(GROUP_V17A, `dist/lib/assets.js 缺少 ${needle}`);
+}
+if (/assets\.push\(\{\s*url/.test(readDist("dist/lib/stage.js")) || /assets\.push\(\{\s*url/.test(assetsDist)) {
+  fail(GROUP_V17A, "不许再把「网址」当资产推进 assets（信封里没有这个形状）");
+}
+if (!/export function buildStageRequest\(input\)/.test(stageDist) || !/export function openUrlOf\(result\)/.test(stageDist)) {
+  fail(GROUP_V17A, "lib/stage.js 必须导出 buildStageRequest 与 openUrlOf");
+}
+if (/\/clip\//.test(stageDist.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 "))) {
+  fail(GROUP_V17A, "扩展侧不许出现 /clip/ 路径拼接（openUrl 只能来自接口）");
+}
+if (!backgroundDistV17A.includes("const openUrl = openUrlOf(result);")) {
+  fail(GROUP_V17A, "background 必须用 openUrlOf(result) 取 openUrl（缺席就不打开页面）");
+}
+if (!popupCodeV17A.includes("chrome.tabs.create({ url: reply.openUrl })")) {
+  fail(GROUP_V17A, "popup 必须用接口返回的 openUrl 打开页面");
+}
+if (!popupCodeV17A.includes('type: "opennote:clip-stage"')) {
+  fail(GROUP_V17A, "popup 必须走 opennote:clip-stage（不许退回旧的 clip.html 跳转）");
+}
+if (!popupCodeV17A.includes("const CLIP_WEB_READY = true;")) {
+  fail(GROUP_V17A, "A 已上线：卡片上的入口开关必须恢复为 true（否则图标按钮又变成点了没用的死按钮）");
+}
+if (!/if \(!reply \|\| !reply\.ok \|\| !reply\.openUrl\) \{[\s\S]{0,400}?return;/.test(popupCodeV17A)) {
+  fail(GROUP_V17A, "失败/没有 openUrl 时必须先 return（不许打开一个坏页面，也不许静默）");
+}
+
+// ② ⑤ 选中态：aria-pressed（读屏）+ 既有令牌着色（视觉），一次解决
+const pickBtn = (popupHtmlBare.match(/<button[^>]*id="pick"[^>]*>/) || [])[0] || "";
+const extractBtn = (popupHtmlBare.match(/<button[^>]*id="extractPage"[^>]*>/) || [])[0] || "";
+if (!/aria-pressed="(true|false)"/.test(pickBtn)) fail(GROUP_V17A, "「选择当前元素」必须有 aria-pressed（选中态的可访问性半边）");
+if (!/aria-pressed="true"/.test(extractBtn)) fail(GROUP_V17A, "「整页提取」默认选中（aria-pressed=\"true\"），与 03 §UI-01 一致");
+if (!/pickButton\.setAttribute\("aria-pressed", mode === "element" \? "true" : "false"\)/.test(popupCodeV17A)) {
+  fail(GROUP_V17A, "popup 必须按当前来源设置「选择当前元素」的 aria-pressed");
+}
+if (!/extractPageButton\.setAttribute\("aria-pressed", mode === "page" \? "true" : "false"\)/.test(popupCodeV17A)) {
+  fail(GROUP_V17A, "popup 必须按当前来源设置「整页提取」的 aria-pressed");
+}
+const popupCss = readDist("dist/popup/popup.css");
+if (!/\.clip__pick \.btn\[aria-pressed="true"\]\{[^}]*background:var\(--accent-soft\)/.test(popupCss)) {
+  fail(GROUP_V17A, "选中态必须用既有令牌 --accent-soft 着色（V6 另有「0 新增令牌」兜底）");
+}
+if (!/\.clip__pick \.btn\[aria-pressed="true"\]\{[^}]*color:var\(--accent\)/.test(popupCss)) {
+  fail(GROUP_V17A, "选中态的字色必须是 --accent（S-C8）");
+}
+
+// ③ 图片开关：默认关（唯一定义）+ 关着时不下发 assets
+if (!/export const IMAGE_DOWNLOAD_DEFAULT = false;/.test(stageDist)) {
+  fail(GROUP_V17A, "lib/stage.js 必须声明 IMAGE_DOWNLOAD_DEFAULT = false（默认关）");
+}
+if (!popupCodeV17A.includes("let imageDownload = IMAGE_DOWNLOAD_DEFAULT;")) {
+  fail(GROUP_V17A, "popup 的图片开关必须取 IMAGE_DOWNLOAD_DEFAULT（默认值只有一个产地）");
+}
+if (!/id = "imgDownload";/.test(popupCodeV17A) || !/input\.type = "checkbox";/.test(popupCodeV17A)) {
+  fail(GROUP_V17A, "图片开关必须是卡片上的一个复选框（工具条仍是两个按钮）");
+}
+if (!/images: imageDownload/.test(popupCodeV17A)) {
+  fail(GROUP_V17A, "预览必须按开关状态要图片清单（关着时不多注入一次）");
+}
+if (!failures.some((item) => item.includes(GROUP_V17A))) {
+  pass("A 接通（请求体形状唯一定义 + openUrl 只来自接口 + 失败不打开页面）、⑤ 选中态（aria-pressed + 既有令牌）、③ 图片开关（默认关）");
 }
 /* ── V14 元素选择（00 §6.15㉝ / 03 §UI-16） ──────────────────────── */
 
@@ -695,6 +965,50 @@ if (!pickerSource) {
   if (!/\$\{element\.tagName\.toLowerCase\(\)\} · \$\{width\} × \$\{height\}/.test(pickerSource)) {
     fail(GROUP_V14, "跟随标签必须逐字写成 `{标签名} · {宽} × {高}`（03 §UI-16/C01）");
   } else pass("跟随标签格式逐字：`{标签名} · {宽} × {高}`（整数像素、不写单位）");
+
+  /* ① 夜版帧（v5）：影子根里没有主题 —— **两半缺一不可**，缺哪一半都只剩亮色一套值。
+   * 起因：`page-01-mask-paper` 与 `page-02-mask-night` 字节数完全相同（31744）。
+   * 真因不是 `Emulation.setEmulatedMedia`，而是注入的令牌里那些**根属性选择器**
+   * （`[data-theme="night"]`）在影子根里匹配不到影子树外面的祖先。 */
+  const injected = (() => {
+    const match = pickerSource.match(/const TOKENS_CSS = ("(?:[^"\\]|\\.)*");/);
+    if (!match) return "";
+    try {
+      return JSON.parse(match[1]);
+    } catch {
+      return "";
+    }
+  })();
+  if (!injected) {
+    fail(GROUP_V14, "取不到注入影子根的 TOKENS_CSS（构建期的占位符替换没生效？）");
+  } else {
+    // 「裸」= 不在任何 `:host(...)` 里的根属性选择器。先把 `:host(...)` 组摘掉再数 ——
+    // 直接 lookbehind 会把 `:host([data-theme="night"][data-accent="seal"])` 里**第二个**属性
+    // 误判成裸的（探针自己错，不是 CSS 错）。
+    const withoutHost = injected.replace(/:host\((?:[^()]|\([^()]*\))*\)/g, ":host");
+    const bare = (withoutHost.match(/\[data-(theme|accent|font|width)=/g) || []).length;
+    if (bare > 0) {
+      fail(GROUP_V14, `注入影子根的令牌里还有 ${bare} 处裸的根属性选择器：影子根匹配不到影子树外的祖先 ⇒ 夜版/强调色永远不生效`);
+    }
+    if (!/:host\(\[data-theme="night"\]\)/.test(injected)) {
+      fail(GROUP_V14, "夜版属性选择器必须搬成 :host([data-theme=…])（构建期机械改写，不许手抄色值）");
+    }
+  }
+  // 另一半：宿主元素必须把页面根上的主题属性**镜像**过来，否则 `:host([data-theme=…])` 永不匹配
+  if (!/for \(const name of \["data-theme", "data-accent", "data-font", "data-width"\]\)/.test(pickerCode)) {
+    fail(GROUP_V14, "覆盖层必须把页面根的主题属性镜像到宿主元素（只写我们自己创建的节点）");
+  }
+  if (!/host\.setAttribute\(name, value\)/.test(pickerCode)) {
+    fail(GROUP_V14, "镜像要真的写到宿主元素上（host.setAttribute）");
+  }
+  // 两半的**唯一产地**：构建期的机械改写必须在 build.mjs 里（运行时镜像只是另一半）
+  const buildSource = readFileSync(join(HERE, "build.mjs"), "utf8");
+  if (!buildSource.includes(":host(${match})")) {
+    fail(GROUP_V14, "build.mjs 必须做「根属性选择器 → :host(...)」的机械改写（否则运行时镜像也白搭）");
+  }
+  if (!failures.some((item) => item.includes(GROUP_V14))) {
+    pass("① 夜版帧的两半都在产物里：根属性选择器搬进 :host(...) + 宿主镜像页面主题属性");
+  }
 }
 
 /* ── V15 去配对（00 §6.15㉞㊱） ──────────────────────────────────── */

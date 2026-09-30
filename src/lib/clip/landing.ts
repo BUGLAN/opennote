@@ -183,6 +183,25 @@ function safeAssetPath(path: string, name: string): string {
   }
 }
 
+/**
+ * Markdown 链接/图片目标的**唯一产地**（`](…)` 里那个字符串）。
+ *
+ * 为什么需要它：附件目录是**按笔记名派生**的，而笔记名可以带空格（`备注 2.md` → `备注 2.assets/`，
+ * 而且 `uniquePath` 给每一篇重名笔记加序号也会产生空格）。**空格会截断链接目标**：
+ *   - `![x](./备注 2.assets/a.png)` ⇒ markdown-it 不产 `<img>`（原样输出文本）、lezer 不产 URL 子节点
+ *     ⇒ 编辑器里图片不显示，而且**不报错**；
+ *   - `![x](<./备注 2.assets/a.png>)` ⇒ 两边都正常。
+ *
+ * CommonMark 的**角度括号目标**是唯一既能表达空格、又被 markdown-it / lezer / Typora / VS Code
+ * 共同支持的写法（百分号编码要靠各渲染器愿意解码，不可靠）。
+ * 注意：这里说的是**引用文本**的写法；落盘目录名**不改**（00 号 §6.16（51）逐字是 `<笔记名>.assets/`）。
+ * 把两个产地（`saveImage` 的 markdown、剪藏的 `rewriteAssetRefs`）都接到这一个函数上，
+ * 免得一处转义、另一处不转义。
+ */
+export function markdownRef(path: string): string {
+  return /[\s()<>]/.test(path) ? `<${path}>` : path;
+}
+
 export interface AssetRename {
   /** 信封里的原始 `name`（正文引用的就是它）。 */
   name: string;
@@ -203,6 +222,7 @@ export interface AssetRename {
  * 表里查不到的名字**原样保留**（未声明的引用不静默删除，配合 `IMP-W002`）。
  * 新引用前缀**从 `finalPath` 现取**（`归档/foo.assets/a1b2-photo.png` → `foo.assets/a1b2-photo.png`），
  * 不重复推导笔记名——落盘在哪，正文就指哪，两边不可能漂移。
+ * 目标串一律过 {@link markdownRef}（带空格时写成 `<…>`，否则图片不会渲染）。
  */
 export function rewriteAssetRefs(body: string, renames: AssetRename[]): string {
   if (!renames.length) return body;
@@ -210,7 +230,7 @@ export function rewriteAssetRefs(body: string, renames: AssetRename[]): string {
   for (const { name, finalPath } of renames) {
     const file = baseName(finalPath);
     const dir = baseName(parentPath(finalPath));
-    refs.set(name, dir ? `${dir}/${file}` : file);
+    refs.set(name, markdownRef(dir ? `${dir}/${file}` : file));
   }
   const lookup = (token: string): string | undefined => refs.get(token);
   // ① 带目录的写法：`./assets/x` 与 `assets/x`（客户端约定的两种变体）。

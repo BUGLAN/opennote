@@ -50,3 +50,22 @@ describe("editorSettingsField", () => {
     expect(state.field(editorSettingsField).theme).not.toBe(defaultEditorSettings.theme);
   });
 });
+
+/**
+ * 附件落点按笔记名派生（`<目录>/<笔记名>.assets/`），而相对引用的基准是目录 ——
+ * 两个需求都从**一个事实**（笔记路径）出发。这个字段曾经叫 `baseDir` 装目录：
+ * 名字与内容不符，类型还都是 `string`，于是粘贴的图静默写进了 `未命名.assets/`。
+ */
+describe("editorSettings 的笔记路径：一个事实一个产地", () => {
+  it("默认值里只有 `notePath`，`baseDir` 不再存在（一个字段不许有两个含义）", () => {
+    expect(defaultEditorSettings.notePath).toBe("");
+    expect(Object.prototype.hasOwnProperty.call(defaultEditorSettings, "baseDir")).toBe(false);
+  });
+
+  it("facet 与 effect 写入的都是笔记路径本身", () => {
+    const state = EditorState.create({ extensions: [editorSettings({ notePath: "归档/备注 2.md" })] });
+    expect(state.field(editorSettingsField).notePath).toBe("归档/备注 2.md");
+    const next = state.update({ effects: setEditorSettings.of({ notePath: "备注 2.md" }) }).state;
+    expect(next.field(editorSettingsField).notePath).toBe("备注 2.md");
+  });
+});

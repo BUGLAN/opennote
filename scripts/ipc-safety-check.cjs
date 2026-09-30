@@ -1138,6 +1138,22 @@ async function main() {
 
   section('preload 面：既有契约不得改变，新 API 必须存在')
   const preload = loadPreloadBridge()
+  /**
+   * **声明的删除**（与 `verify-contract.cjs` 的 `BR-14` 同一范式）。
+   *
+   * `onMenu` 于 0.3.3 按 `00` 号 §6.16 ㊿ 删除：`main.cjs` 的 `installApplicationMenu()`
+   * 在非 darwin 上 `Menu.setApplicationMenu(null)`、darwin 上只装纯 role 的最小菜单
+   * （注释写明「不额外增加自定义项」）⇒ **菜单栏是被故意移除的**，主进程从不下发
+   * `opennote:menu`，preload 那个订阅是「听了没人发」的死订阅（`C-12c` 咬的就是它）。
+   *
+   * 豁免必须**自证**，且**只对这里列出的名字生效**：
+   *   ① 名字要能在 `electron/preload.cjs` 的**注释**里找到（写清为什么删、以及恢复时的接入点）；
+   *   ② 它必须**真的不存在** —— 哪天它又冒出来，这一条就要删掉、恢复 arity 断言，
+   *      否则「声明的删除」会变成一张永久免死金牌。
+   */
+  const DECLARED_PRELOAD_REMOVALS = {
+    onMenu: 'C-12c 删死订阅：菜单栏被故意移除（00 §6.16 ㊿）；preload 顶部注释是恢复接入点',
+  }
   await check('contextBridge 只暴露 window.opennote，不泄漏 require/process', async () => {
     assert.equal(preload.exposed.key, 'opennote')
     const bridge = preload.exposed.value
@@ -1146,6 +1162,15 @@ async function main() {
     assert.equal(bridge.isElectron, true)
     assert.equal(bridge.version, '9.9.9-test')
     return `version=${bridge.version}`
+  })
+  await check('声明的删除必须自证：被删的名字写在 preload 注释里，且它真的不在', async () => {
+    const bridge = preload.exposed.value
+    const source = fs.readFileSync(PRELOAD_PATH, 'utf8')
+    for (const [name, reason] of Object.entries(DECLARED_PRELOAD_REMOVALS)) {
+      assert.ok(source.includes(name), `声明的删除 ${name} 必须在 preload.cjs 的注释里自证（${reason}）`)
+      assert.equal(bridge[name], undefined, `${name} 已声明删除，但它又出现了：请从 DECLARED_PRELOAD_REMOVALS 删掉这一条并恢复 arity 断言`)
+    }
+    return `${Object.keys(DECLARED_PRELOAD_REMOVALS).join('、')} 已自证`
   })
   await check('既有 fs / dialog / shell / app 方法名与参数个数不变', async () => {
     const bridge = preload.exposed.value
@@ -1168,7 +1193,6 @@ async function main() {
       'app.getRecentWorkspaces': 0,
       'app.addRecentWorkspace': 1,
       'window.setTitleBarOverlay': 1,
-      onMenu: 1,
     }
     for (const name of EXISTING_FS_METHODS) {
       assert.equal(typeof bridge.fs[name], 'function', `fs.${name} 必须存在`)
@@ -1179,7 +1203,9 @@ async function main() {
       assert.equal(typeof target, 'function', `${name} 必须存在`)
       assert.equal(target.length, expected, `${name} 参数个数应为 ${expected}`)
     }
-    return `${Object.keys(arity).length + EXISTING_FS_METHODS.length} 项一致`
+    // `onMenu` 已按 DECLARED_PRELOAD_REMOVALS 声明删除，**不在这里再断言它存在**
+    // （那会让「故意删掉一个既有 API」这件事永远无法落地）；自证在下面单独一条里咬。
+    return `${Object.keys(arity).length + EXISTING_FS_METHODS.length} 项一致（另有 ${Object.keys(DECLARED_PRELOAD_REMOVALS).length} 项声明的删除）`
   })
   await check('新增 API：authorizeRoot / watch / flush 握手齐全', async () => {
     const bridge = preload.exposed.value
@@ -1208,23 +1234,22 @@ async function main() {
     assert.ok(preload.sent.some((item) => item.channel === 'opennote:app:flush-done'), 'flushDone 必须发 opennote:app:flush-done')
     return '握手频道正确'
   })
-  await check('onWorkspaceChanged 透传 root；onMenu 透传 command（回归）', async () => {
+  await check('onWorkspaceChanged 透传 root，退订后移除监听（回归）', async () => {
     const bridge = preload.exposed.value
     const roots = []
     const offWorkspace = bridge.fs.onWorkspaceChanged((root) => roots.push(root))
     ;(preload.listeners.get('opennote:fs:workspace-changed') || [])[0]({}, '/ws/path')
     assert.deepEqual(roots, ['/ws/path'])
     offWorkspace()
-    const commands = []
-    const offMenu = bridge.onMenu((command) => commands.push(command))
-    ;(preload.listeners.get('opennote:menu') || [])[0]({}, 'save')
-    assert.deepEqual(commands, ['save'])
-    offMenu()
+    // 这一条原来还测 `onMenu` 的透传（`opennote:menu`）。那个订阅已按
+    // `DECLARED_PRELOAD_REMOVALS` 删除（主进程从不下发它），所以这里只剩
+    // `onWorkspaceChanged` —— **不是漏测，是那条链路不存在了**。
+    assert.equal((preload.listeners.get('opennote:fs:workspace-changed') || []).length, 0, '退订后应移除监听')
     return '透传正常'
   })
   await check('非函数入参不会抛异常（返回空退订函数）', async () => {
     const bridge = preload.exposed.value
-    for (const method of [bridge.onMenu, bridge.fs.onWorkspaceChanged, bridge.app.onFlushRequest]) {
+    for (const method of [bridge.fs.onWorkspaceChanged, bridge.app.onFlushRequest, bridge.onDeepLink, bridge.onInboxChanged]) {
       const off = method(undefined)
       assert.equal(typeof off, 'function')
       off()

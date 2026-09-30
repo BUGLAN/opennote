@@ -27,8 +27,10 @@
       界面上不留任何死元素（模板/高亮的后台模块要到 M2 才删，但用户看不到它们）。
     -->
     <div class="clip__pick" id="pickRow">
-      <button type="button" class="btn" id="pick">选择当前元素</button>
-      <button type="button" class="btn" id="extractPage">整页提取</button>
+      <!-- ⑤ 选中态：`aria-pressed` 是**同一个事实**的两个消费方 —— 读屏（toggle button）与视觉
+           （`.btn[aria-pressed="true"]` 用既有令牌着色）。默认选中 `整页提取`（03 §UI-01）。 -->
+      <button type="button" class="btn" id="pick" aria-pressed="false">选择当前元素</button>
+      <button type="button" class="btn" id="extractPage" aria-pressed="true">整页提取</button>
       <span class="clip__pick-note" id="pickNote"></span>
       <code class="clip__pick-detail" id="pickDetail" hidden></code>
     </div>

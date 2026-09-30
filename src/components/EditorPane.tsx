@@ -16,10 +16,15 @@ export interface CursorInfo {
 }
 
 interface EditorPaneProps {
+  /**
+   * 正在编辑的笔记 id。**id 就是笔记路径**（`归档/foo 2.md`），所以附件落点
+   * （`<笔记名>.assets/`）与图片相对引用的基准目录都从它派生，不另设 `baseDir`：
+   * 同一个事实的第二个产地正是「粘贴的图写进 `未命名.assets/`」那类静默错误的来源。
+   * 没有打开的笔记时是 `null`。
+   */
   noteId: Id | null;
   content: string;
   hidden: boolean;
-  baseDir: string;
   settings: UiSettings;
   onDocChange(doc: string): void;
   onCursor(info: CursorInfo): void;
@@ -146,7 +151,9 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
         focus: props.settings.focus,
         typewriter: props.settings.typewriter,
         imageMode: props.settings.imageMode,
-        baseDir: props.baseDir,
+        // 空态传空串：粘贴时 `insertFileSnippets()` 如实提示「附件没有落点」，
+        // 而不是拿空路径去派生出一个 `未命名.assets/`。
+        notePath: props.noteId ?? "",
       }),
     });
   }, [
@@ -155,7 +162,7 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
     props.settings.focus,
     props.settings.typewriter,
     props.settings.imageMode,
-    props.baseDir,
+    props.noteId,
   ]);
 
   useEffect(() => {

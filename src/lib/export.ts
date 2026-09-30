@@ -121,7 +121,7 @@ export async function buildWorkspaceZip(options: ZipOptions = {}): Promise<Blob>
       "Opennote 笔记本备份",
       `导出时间：${formatDateTime(Date.now())}`,
       "",
-      "这个压缩包就是笔记本文件夹本身：目录结构、Markdown 正文、assets/ 里的图片都在。",
+      "这个压缩包就是笔记本文件夹本身：目录结构、Markdown 正文、图片（跟笔记走的 `<笔记名>.assets/`，以及早年的公共 assets/）都在。",
       `直接解压到任意位置，再用 Opennote「打开文件夹」选择它即可继续写。`,
       `${META_DIR}/ 里是星标、历史快照等附加信息，不需要可以直接删掉。`,
       "",

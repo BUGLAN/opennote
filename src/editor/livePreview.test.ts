@@ -213,6 +213,15 @@ describe("装饰器基线：未改动的形态保持原样", () => {
     expect(keysContaining(keys, "md-media-line")).toHaveLength(1);
   });
 
+  it("图片：widget 收的是**笔记路径** —— 相对引用的基准目录由它派生，编辑设置里不再有 baseDir", () => {
+    const doc = "![图](./备注.assets/x.png)\n";
+    const keys = currentKeys(stateFor(doc, { anchor: doc.length, settings: { notePath: "归档/备注 2.md" } }));
+    const widgets = keysContaining(keys, "ImageWidget");
+    expect(widgets).toHaveLength(1);
+    expect(widgets[0]).toContain('"notePath":"归档/备注 2.md"');
+    expect(widgets[0]).not.toContain("baseDir");
+  });
+
   it("wiki 链接：非激活态换成 WikiLinkWidget", () => {
     const doc = "参考 [[笔记]] 结束\n";
     const keys = currentKeys(stateFor(doc, { anchor: doc.length }));

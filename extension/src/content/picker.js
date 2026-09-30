@@ -28,6 +28,14 @@
   const host = document.createElement("div");
   host.id = HOST_ID;
   host.setAttribute("aria-hidden", "true");
+  // 主题镜像（① 夜版帧证据的根因修复）：影子根**看不见**影子树外面的祖先属性选择器，
+  // 而注入的令牌里夜版/强调色/字体预设正是写成 `:host([data-theme="night"])` 这类选择器的。
+  // 所以把**页面根上的那几个属性**照搬到我们自己的宿主元素上（只写我们创建的节点，
+  // 不动页面已有节点 —— ㉝ 的「不得改页面 DOM」仍然成立）。页面没设就一个都不加。
+  for (const name of ["data-theme", "data-accent", "data-font", "data-width"]) {
+    const value = document.documentElement.getAttribute(name);
+    if (value) host.setAttribute(name, value);
+  }
   host.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none";
   const shadow = host.attachShadow({ mode: "closed" });
   const style = document.createElement("style");

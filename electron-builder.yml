@@ -43,6 +43,9 @@ directories:
 # 渲染层已经是 dist/ 里的静态站点，打包只需要带上它、主进程代码和 package.json。
 files:
   - dist/**/*
+  # 网页版剪藏页（`pnpm build:clip` 的产物）：桥在 `GET /clip/<stageId>?k=` 上原样服务它。
+  # 独立于 `dist/`（主应用构建会 `emptyOutDir`），所以必须是单独一行。
+  - dist-clip/**/*
   - electron/**/*
   - package.json
 

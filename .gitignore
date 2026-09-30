@@ -1,5 +1,6 @@
 node_modules
 dist
+dist-clip
 dist-ssr
 dev-dist
 release

@@ -240,8 +240,12 @@ test("P0：元素模式的预览/提交必须读被点中的那块（不是整�
     .split("\n")
     .filter((line) => !line.trim().startsWith("//"))
     .join("\n");
-  assert.match(pv, /const excerpt = currentMarkdown\(\);/, "预览正文必须取自 currentMarkdown()（唯一产地）");
-  assert.doesNotMatch(pv, /ex\.article\.excerpt/, "预览不得直接取整页摘要（元素模式会被冒充成整页）");
+  // 判据盯**意图**：预览正文只有一个产地 = `currentMarkdown()`（它内部再按 mode 分流）。
+  // ② 「像 Opennote」把这一段从「一行纯文本摘要」换成「块级渲染」（renderDoc），
+  // 所以这里不再钉 `const excerpt = ...` 这个字面形状 —— 但**强度不变**：
+  // 它仍然要求 previewNode 真的调用 currentMarkdown()，且不得直接从 `ex.article` 取正文。
+  assert.match(pv, /currentMarkdown\(\)/, "预览正文必须取自 currentMarkdown()（唯一产地）");
+  assert.doesNotMatch(pv, /ex\.article\.(excerpt|markdown)/, "预览不得直接取整页摘要/整页正文（元素模式会被冒充成整页）");
 });
 
 /* ── 8. 根因四：预览回包到了必须重绘，且字段形状要对 ─────────────────── */

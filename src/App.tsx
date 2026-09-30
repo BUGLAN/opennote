@@ -15,7 +15,6 @@ import {
   libraryStore,
   openNote,
   openWorkspace,
-  parentPathOf,
   reconcileTabs,
   rescanWorkspace,
   seedWelcome,
@@ -334,22 +333,16 @@ export default function App(): ReactNode {
     });
   }, [bridge, openNote]);
 
-  // 主进程广播的入库通知：无 dirty 直接重载，有 dirty 绝不静默覆盖。
-  useEffect(() => {
-    const api = bridge;
-    if (!api || typeof api.onImportNotice !== "function") return;
-    return api.onImportNotice((notice) => {
-      if (!notice || notice.action === undefined) return;
-      void (async () => {
-        await rescanWorkspace();
-        if (notice.path) openNote(notice.path);
-        // 撤销入口由 L2 的 announce() 负责（唯一一份实现，避免双 toast）。
-        // 这里只在通知里补一次收件箱计数刷新，保证徽标即时。
-        await refreshInbox().catch(() => undefined);
-        setInboxPending(inboxCount());
-      })();
-    });
-  }, [bridge]);
+  /*
+   * 入库完成后的刷新：**不订阅 `opennote:import:notice`** —— 主进程从来没有发过它的发送方，
+   * 而它想做的三件事都已经各有产地（判读见 `docs/import/00-项目简报与范围锁定.md`）：
+   *   ① 文件变化后重扫 → `opennote:fs:workspace-changed`（`library.ts:startWatching`，去抖重扫）
+   *   ② 收件箱徽标与列表 → 下面的 `opennote:inbox:changed`（`.opennote/**` 被工作区 watcher
+   *      跳过，所以那是一条独立链路，main.cjs 确实在发）
+   *   ③ 成功提示与撤销入口 → L2 的 `announce()`（`src/lib/clip/receive.ts`，唯一一份实现）
+   * 唯一没有产地的是「自动打开刚入库的那条笔记」——那是个没人要求的功能，**不为了让门禁
+   * 变绿把它补上**（而且默认落点是收件箱，条目还没有 `path`，补了也只会是一条不发的分支）。
+   */
 
   // 收件箱目录变化（主进程独立 watcher，去抖 450ms）。
   useEffect(() => {
@@ -701,34 +694,17 @@ export default function App(): ReactNode {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  /* native menu (desktop build) drives the same commands */
-  useEffect(() => {
-    if (!bridge) return;
-    return bridge.onMenu((command) => {
-      const map: Record<string, () => void> = {
-        "new-note": () => newNote(),
-        "new-folder": () => void newFolder(),
-        "open-folder": () => void openLocalFolder(),
-        import: () => fileInputRef.current?.click(),
-        export: () => void exportLibrary(),
-        save: () => {
-          void flushAll()
-            .then(() => notify("已保存到磁盘"))
-            .catch(() => notify("磁盘写入失败", { kind: "danger" }));
-        },
-        print: () => window.print(),
-        settings: () => setSettingsOpen(true),
-        shortcuts: () => setShortcutsOpen(true),
-        "toggle-sidebar": () => patchUi({ sidebarOpen: !ui.sidebarOpen }),
-        "toggle-outline": () => patchUi({ outlineOpen: !ui.outlineOpen }),
-        "toggle-typewriter": () => patchUi({ typewriter: !ui.typewriter }),
-        "toggle-focus": () => patchUi({ focus: !ui.focus }),
-        "toggle-theme": () => toggleAppearance(),
-        about: () => setSettingsOpen(true),
-      };
-      map[command]?.();
-    });
-  }, [bridge, ui.sidebarOpen, ui.outlineOpen, ui.typewriter, ui.focus]);
+  /*
+   * 原生菜单：**这里是将来恢复菜单时的接入点**，现在刻意不接。
+   *
+   * `main.cjs` 的 `installApplicationMenu()` 在非 darwin 上 `Menu.setApplicationMenu(null)`，
+   * darwin 上只装纯 role 的最小菜单（注释写明「不额外增加自定义项」）⇒ 菜单栏是被**故意
+   * 移除**的，主进程从不下发 `opennote:menu`。原先这里挂着一个 `bridge.onMenu(...)`
+   * 的订阅映射（13 个命令），**听了没人发** —— `verify-contract.cjs` 的 C-12c 死订阅判据
+   * 咬的就是它。补一个发送方等于把「被移除的菜单栏」偷偷加回来，不是我们想要的。
+   * 若将来恢复：主进程 `webContents.send('opennote:menu', command)` + preload
+   * `subscribe('opennote:menu', cb)` + 这里重建映射表，**三处一起**。
+   */
 
   /* dropping files anywhere imports them into the open workspace */
   useEffect(() => {
@@ -954,7 +930,13 @@ export default function App(): ReactNode {
           noteId={activeId}
           content={activeNote?.content ?? ""}
           hidden={!activeNote}
-          baseDir={activeNote ? parentPathOf(activeNote.id) : ""}
+          /*
+           * 这里**不再**传 `baseDir`：`noteId` 本身就是笔记的工作区相对路径，而
+           * 附件目录、图片相对引用的基准都能从它派生（`EditorPane` 内部派生）。
+           * 再传一个同样由 `activeNote.id` 算出来的 `baseDir`，就是**同一个事实的第二个产地** ——
+           * 两边一旦漂移（例如附件目录改成 `<笔记名>.assets/`），就会出现「写图的目录」
+           * 与「读图的基准」不是一个东西，而类型都是 `string`，编译期一个字都不报。
+           */
           settings={ui}
           getTitles={() => Object.values(library.notes).map((note) => note.title)}
           getTags={() => tags.map((entry) => entry.tag)}

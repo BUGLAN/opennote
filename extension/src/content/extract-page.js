@@ -409,6 +409,41 @@ export function extractPage(options) {
     return { present: true, markdown, text, chars: countChars(text), ancestorTitle };
   }
 
+  /* ─────────────────────── 图片清单（③ 图片下载开关的数据源） ─────────────────────── */
+  /**
+   * 只收**绝对 http(s)** 地址，最多 32 条（02 §2.2：`assets` ≤ 32 个）。
+   * `data:` / `blob:` / 相对地址取不到 / 懒加载没填 / 超出上限 —— 一种都不静默丢：
+   * 全部计入 `dropped`，由上层如实告诉用户「正文里保留原始网址」。
+   * **插件不下载图片字节**：host_permissions 只有 127.0.0.1，跨站 fetch 必然失败；
+   * 这里只产出「要保存哪些图」的清单，下载与落盘由 Opennote 侧完成（零新增权限、零依赖）。
+   */
+  const IMAGE_LIMIT = 32;
+  function collectImages(root) {
+    const items = [];
+    const seen = new Set();
+    let dropped = 0;
+    const nodes = root && root.querySelectorAll ? Array.from(root.querySelectorAll("img")) : [];
+    for (const img of nodes) {
+      const srcset = String(img.getAttribute("srcset") || "").split(",")[0].trim().split(" ")[0];
+      const raw = String(
+        img.getAttribute("src") || img.getAttribute("data-src") || img.getAttribute("data-original") || srcset || "",
+      ).trim();
+      const url = raw ? absolute(raw) : null;
+      if (!url || !/^https?:/i.test(url)) {
+        dropped += 1; // 没有可下载的地址（data:/blob:/占位/懒加载没填）
+        continue;
+      }
+      if (seen.has(url)) continue;
+      seen.add(url);
+      if (items.length >= IMAGE_LIMIT) {
+        dropped += 1; // 超出 02 §2.2 的上限
+        continue;
+      }
+      items.push({ url, alt: collapse(img.getAttribute("alt") || "").trim() });
+    }
+    return { items, dropped };
+  }
+
   /* ─────────────────────── 主流程 ─────────────────────── */
   const meta = pageMeta();
   const selection = selectionInfo();
@@ -426,11 +461,13 @@ export function extractPage(options) {
     : null;
 
   let article = null;
+  let articleRoot = null;
   if (includeArticle) {
     let markdown = "";
     if (pickedRoot) {
       const scoped = pickedRoot.cloneNode(true);
       stripNoise(scoped);
+      articleRoot = scoped;
       markdown = htmlToMarkdown(scoped);
     } else {
       const clone = doc.documentElement
@@ -441,6 +478,7 @@ export function extractPage(options) {
       if (clone) {
         stripNoise(clone);
         const root = pickRoot(clone);
+        articleRoot = root;
         markdown = htmlToMarkdown(root);
       }
       if (!markdown.trim()) markdown = selection.present ? selection.markdown : "";
@@ -458,6 +496,8 @@ export function extractPage(options) {
     };
   }
 
+  const images = collectImages(articleRoot || doc.body);
+
   return {
     ok: true,
     url: meta.url,
@@ -466,6 +506,7 @@ export function extractPage(options) {
     author: meta.author,
     publishedAt: meta.publishedAt,
     capturedAt: new Date().toISOString(),
+    images: { items: images.items, dropped: images.dropped, limit: IMAGE_LIMIT },
     selection: {
       present: selection.present,
       markdown: selection.markdown,

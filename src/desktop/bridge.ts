@@ -184,17 +184,6 @@ export interface ImportUndoResult {
   message?: string;
 }
 
-/** 入库完成后主进程广播的通知（`opennote:import:notice`）。 */
-export interface ImportNotice {
-  importId: string;
-  path: string | null;
-  action: "created" | "appended";
-  revertible: boolean;
-  title: string;
-  client: string;
-  at: string;
-}
-
 /** 收件箱变更通知（`opennote:inbox:changed`）。 */
 export interface InboxChanged {
   root: string;
@@ -327,7 +316,6 @@ export interface OpennoteBridge {
      */
     replyToImport(reqId: string, outcome: ImportReply): void;
   };
-  onMenu(callback: (command: string) => void): () => void;
   /**
    * `opennote://` 深链（00 号 §6.14㉛）。**未实现或非法的链接不会走到这里**——
    * 主进程用系统对话框如实告知「暂不支持」，绝不静默无反应（0.2.0 那个
@@ -338,8 +326,6 @@ export interface OpennoteBridge {
       link: { ok: true; kind: "settings"; section: "import" } | { ok: true; kind: "open"; path: string },
     ) => void,
   ): () => void;
-  /** 入库完成后主进程的通知；`deduped`/`duplicate`/`skipped` 不发通知。 */
-  onImportNotice(callback: (notice: ImportNotice) => void): () => void;
   /** 收件箱目录变化（独立 watcher，去抖 450ms）；浏览器后端下不可用。 */
   onInboxChanged(callback: (changed: InboxChanged) => void): () => void;
   /**

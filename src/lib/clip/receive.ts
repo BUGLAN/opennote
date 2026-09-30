@@ -17,14 +17,13 @@
  * - `undoImport(receipt)`：撤销。
  */
 
-import { TRASH_DIR, baseName, joinPath, stripExtension } from "../../fs/paths";
+import { baseName, stripExtension } from "../../fs/paths";
 import type { FileSystemBackend } from "../../fs/types";
 import {
   currentBackend,
   flushAll,
   libraryStore,
   rescanWorkspace,
-  resolveAvailablePath,
   trashNote,
 } from "../../data/library";
 import {
@@ -215,6 +214,35 @@ function isExternalDeliveryChannel(channel: ImportChannel): boolean {
   return channel !== "in-app" && channel !== "inbox";
 }
 
+/** 客户端在信封里**指明了落点**（`target.folder` 非空、非空白）。 */
+function hasExplicitFolder(envelope: ImportEnvelope): boolean {
+  const folder = envelope.target && typeof envelope.target.folder === "string" ? envelope.target.folder : "";
+  return folder.trim() !== "";
+}
+
+/**
+ * ㉕「先进入收件箱」是否把这次外部投递强制成 `pending`。
+ *
+ * 0.3.3 收窄（Lead 裁定，见 `00` 号 §6.16（52））：**偏好管的是「没有指明落点的投递」**。
+ *
+ * 为什么必须收窄：网页版剪藏页的落点下拉是**用户在确认页上做的决定**（原话「先编辑，确认后
+ * 再入库」「支持移动到收件箱或者说其他目录」）。在默认偏好（`importConflict === "inbox"`）下
+ * 无条件强制入箱，会让那个下拉变成一个**假开关**：选了「归档」照样进收件箱 —— 而
+ * 端到端用**真接收端**一跑就露出来了（桥的替身回 `created`，真接收端回 `pending`）。
+ * 本项目已经抓过 4 个假开关，这是第 5 个的同类。
+ *
+ * **一条都不放松的地方**：㉕.2 的 `overwrite` 仍然**在偏好面前一律优先** ——
+ * 「覆盖」是最不可逆的无审阅写入，客户端不能靠「顺手指定一个目录」绕过它。
+ */
+function inboxPreferenceForcesPending(envelope: ImportEnvelope): boolean {
+  if (landingPreference !== "inbox") return false;
+  if (!isExternalDeliveryChannel(getImportChannelContext().channel)) return false;
+  // ㉕.2：客户端下发的 `overwrite` 在「先进入收件箱」下永远不可达。
+  if (envelope.conflict === "overwrite") return true;
+  // 指明落点 = 已经做过决定 ⇒ 偏好的作用对象（「没说落点的投递」）不成立。
+  return !hasExplicitFolder(envelope);
+}
+
 /* ============================ 冲突决策挂钩 ============================ */
 
 export type ImportConflictChoice = "new" | "append" | "skip" | "inbox";
@@ -371,7 +399,11 @@ async function runCommit(backend: FileSystemBackend, envelope: ImportEnvelope, h
   // 为什么连 `conflict: "overwrite"` 也拦：㉕.2 已裁定「该设置优先于客户端下发的 conflict」——
   // 覆盖是本系统里**最不可逆的无审阅写入**，正是这个设置要拦的对象；若客户端能靠显式传值绕过它，
   // 这个设置又会变成假开关（本项目已抓过 4 个）。四道闸门代码保留不动（纵深防御），只是此偏好下不可达。
-  if (landingPreference === "inbox" && isExternalDeliveryChannel(getImportChannelContext().channel)) {
+  //
+  // ⚠️ 这条判断**不是**原来的 `landingPreference === "inbox" && isExternalDeliveryChannel(...)`：
+  // 那种写法把「客户端**指明了落点**」的投递也吞掉，于是网页版剪藏页的落点下拉成了假开关。
+  // 收窄后的完整口径与理由见 `inboxPreferenceForcesPending()` 的注释（`00` 号 §6.16（52））。
+  if (inboxPreferenceForcesPending(envelope)) {
     return enqueuePending(envelope, hashes);
   }
 
@@ -1130,19 +1162,23 @@ async function runUndo(receipt: ImportReceipt): Promise<ImportUndoResult> {
 
   try {
     await rescanWorkspace();
-    const assetsDir = assetsDirFor(path);
-    const hasAssets = await backend.exists(assetsDir);
+    /*
+     * 附件目录**不在这里搬**：`trashNote()` 已经是「笔记 + 它的 `<笔记名>.assets/` 一起进
+     * 回收站」的**唯一产地**（`src/data/library.ts:moveNoteAssets`，两个方向共用一条派生规则）。
+     *
+     * 这里原来自己也搬一次（`trashAssetsDir` → `.opennote/trash/<附件目录>`）。两处搬同一个
+     * 目录 = 同一个事实两个产地：目标路径**恰好相同**，所以功能上看不出来，但第二处必然
+     * 失败（源目录已经被搬走了）→ 用户会收到一句**假的**告警「图片目录 x.assets 没能一起
+     * 移入回收站，请手动处理」，而其实图片好好地躺在回收站里。判据误报一次，就等于教别人
+     * 忽略它一次 —— 所以删掉第二处，而不是留着一个「反正结果一样」的重复。
+     */
     await trashNote(path);
-    // 笔记进了回收站，图片目录必须**一起**进去：图片跟笔记走，撤了笔记却留下 `foo.assets/`
-    // 就是孤儿目录（下一篇同名笔记还会撞上它）。
-    const assetsTrashed = hasAssets ? await trashAssetsDir(backend, assetsDir) : true;
     await markImportUndone(receipt.importId).catch(() => false);
     const removed = libraryStore.get().notes[path] === undefined;
-    const suffix = hasAssets && !assetsTrashed ? `；但图片目录 ${assetsDir} 没能一起移入回收站，请手动处理。` : "";
     return {
       ok: removed,
       mode: "trash",
-      message: removed ? `已把《${title}》移入回收站，可以再找回来。${suffix}` : "撤销失败，请在回收站里手动处理。",
+      message: removed ? `已把《${title}》移入回收站，可以再找回来。` : "撤销失败，请在回收站里手动处理。",
     };
   } catch (error) {
     console.warn("[opennote] 撤销失败", error);
@@ -1182,20 +1218,6 @@ async function rollbackImportAssets(
     // 目录已经被删/从来不存在：不是失败。
   }
   return failed;
-}
-
-/** 把附件目录整体移入回收站（`.opennote/trash/<附件目录>`），与 `trashNote` 同一套去重规则。 */
-async function trashAssetsDir(backend: FileSystemBackend, assetsDir: string): Promise<boolean> {
-  try {
-    const taken = new Set(Object.keys(libraryStore.get().trash));
-    const requested = joinPath(TRASH_DIR, assetsDir);
-    const destination = await resolveAvailablePath(backend, requested, taken, assetsDir);
-    await backend.move(assetsDir, destination);
-    return true;
-  } catch (error) {
-    console.warn("[opennote] 撤销：附件目录移入回收站失败", assetsDir, error);
-    return false;
-  }
 }
 
 /* ============================== 小工具 ============================== */

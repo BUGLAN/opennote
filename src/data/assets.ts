@@ -5,10 +5,16 @@ import { getUi, uiStore } from "./ui";
 import { getLegacyAsset } from "./legacy";
 
 /**
- * Images live next to the notes (`<note dir>/assets/…`) and are referenced with
- * plain relative markdown paths, so a note stays readable in any other editor.
- * Because a relative path only makes sense together with the note's folder, the
- * editor passes its own directory in as `baseDir`.
+ * Images live in a directory derived from the note's own path
+ * (`<note dir>/<note name>.assets/…`) and are referenced with plain relative
+ * markdown paths, so a note stays readable in any other editor and its images
+ * follow it when the single note is moved. Because a relative path only makes
+ * sense together with the note's folder, the editor passes its own **note path**
+ * in as `notePath` (the writer is `saveImage` in `./library`).
+ *
+ * Legacy layout: images pasted before this rule live in the shared
+ * `<note dir>/assets/` and are **not migrated** — the markdown already points at
+ * them, so they keep working; new images never go there any more.
  */
 export const imageUrlStore = createStore<Record<string, string>>({});
 const inflight = new Map<string, Promise<string | null>>();
@@ -19,12 +25,22 @@ export function imageUrl(path: string): string | undefined {
   return imageUrlStore.get()[path];
 }
 
-/** Markdown image references that point at local files (skips remote/data URLs). */
+/**
+ * Markdown image references that point at local files (skips remote/data URLs).
+ *
+ * Two destination spellings have to be understood, because {@link markdownRef}
+ * emits the angle-bracket form whenever the path contains whitespace:
+ *   `![x](./备注 2.assets/a.png)`   — plain destination, no whitespace allowed
+ *   `![x](<./备注 2.assets/a.png>)` — CommonMark angle-bracket destination
+ * Missing the second form is silent: the image would simply never be preloaded
+ * and would stay blank in the preview (no error anywhere).
+ */
 export function collectImagePaths(markdown: string): string[] {
   const out = new Set<string>();
-  const pattern = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  const pattern = /!\[[^\]]*\]\(\s*(?:<([^>]*)>|([^)\s]+))(?:\s+"[^"]*")?\s*\)/g;
   for (const match of markdown.matchAll(pattern)) {
-    const src = match[1];
+    const src = match[1] ?? match[2];
+    if (!src) continue;
     if (/^(https?:|data:|blob:)/i.test(src)) continue;
     out.add(src);
   }

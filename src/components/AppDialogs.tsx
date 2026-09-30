@@ -339,8 +339,10 @@ export function SettingsDialog({
                   </button>
                 </div>
                 <p className="dialog__note">
-                  资源模式把图片写进笔记旁边的 <code>assets/</code>，正文里是相对路径；内联模式让单篇 Markdown
-                  自带图片，代价是文件更大。
+                  资源模式把图片写进**跟笔记同名**的附件目录（<code>&lt;笔记名&gt;.assets/</code>），
+                  正文里是相对路径，所以单篇笔记挪到别处图片照样跟着；内联模式让单篇 Markdown
+                  自带图片，代价是文件更大。早年贴的图仍在原来的公共 <code>assets/</code> 里，
+                  <strong>不迁移</strong>，照旧能读。
                 </p>
               </SettingRow>
 
@@ -410,7 +412,7 @@ export function SettingsDialog({
                       导入到当前笔记本
                     </button>
                   </div>
-                  <p className="dialog__note">导入会把旧笔记和图片写成真实的 .md 与 assets/ 文件，不会删除原数据。</p>
+                  <p className="dialog__note">导入会把旧笔记与图片写成真实的 .md 文件与跟笔记走的 <code>&lt;笔记名&gt;.assets/</code> 目录，不会删除原数据。</p>
                 </SettingRow>
               ) : null}
 

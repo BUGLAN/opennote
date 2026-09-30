@@ -120,6 +120,7 @@ export {
   ensureFolderDirs,
   findUndeclaredAssetRefs,
   isAppendOf,
+  markdownRef,
   requestedNotePath,
   rewriteAssetRefs,
 } from "./landing";

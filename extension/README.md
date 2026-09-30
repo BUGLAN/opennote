@@ -8,7 +8,7 @@
 
 ## 0. 30 秒上手
 
-1. 构建：`cd extension ; node build.mjs` → 产物在 `extension/dist`（21 个文件）。
+1. 构建：`cd extension ; node build.mjs` → 产物在 `extension/dist`（**24 个文件**；逐个清单见 §2 与 `verify.mjs` 的 V2b）。
 2. Chrome → `chrome://extensions` → 打开「开发者模式」→「加载已解压的扩展程序」→ 选 **`E:\repo\opennote\extension\dist`**。
 3. 打开桌面版 Opennote 的「设置 · 文件 · 导入与接口」，开启本地接口，**复制 47 字符长期令牌**。
 4. 点扩展图标 → 在 popup 里**粘贴令牌**（`opn_` + 43 位）→ 芯片变成「本地接口已开启」。
@@ -24,13 +24,16 @@
 
 | 命令 | 覆盖什么 | 期望 |
 | --- | --- | --- |
-| `node build.mjs` | 拷贝 `src/` → `dist/`、tokens 逐字注入（3 处 `:root`→`:host`）、生成 PNG 图标、写 `BUILD-INFO.json`、`verifyManifest()` | `[build] dist 就绪：21 个文件` |
-| `node verify.mjs` | 静态验收 **V1–V19**：清单/权限/引用完整性/零远程主机/零 eval+内联处理器/tokens 逐字同源/0 新令牌/逐字文案/契约硬约束/无 emoji/极简形态（两按钮 + 无死元素 + 来源允许空值）/反引号禁用/元素选择纪律/去配对+令牌格式/四因分离/令牌回显/**产物一致性** | `✓ 19 组验收全部通过（V1–V19）`（退出码 0） |
-| `node --test "tests/**/*.test.mjs"` | 86 条单测：信封、状态、队列、桥（真 HTTP）、自包含性、判定链（真接收端）、元素选择四因、极简形态、令牌回显、产物守卫 | `# tests 86 / # pass 86 / # fail 0` |
-| `node tools/dist-race-probe.mjs --seconds 25 --builds 40` | **诊断工具**（不是门禁）：量化「构建进行中读产物」的窗口有多大 | 半写窗口命中的采样数（见 §1.1） |
-| `node tools/cdp-pick-check.mjs` | 真机：真 Chrome + 真扩展 + 两个按钮 + ㉝ 全链 | `元素选择真机验证：全部 PASS` |
-| `pwsh -File tools/mutation-check.ps1` | 8 个变异**必须变红**且命中期望文案（反向验证门禁本身有效） | 8/8 命中后 `verify exit=0`、tests 0 fail |
-| `node tools/mock-bridge.mjs --mode healthy --port 8795 --token "opn_…" --inbox` | 本地假桥（真 HTTP），用来跑 §4 的六态 | 见 §4 |
+| `node build.mjs` | 拷贝 `src/` → `dist/`、tokens 逐字注入（3 处 `:root`→`:host`；**25 处根属性选择器 → `:host(...)`**，夜版覆盖层靠它）、生成 PNG 图标、写 `BUILD-INFO.json`、`verifyManifest()` | `[build] dist 就绪：24 个文件` |
+| `node verify.mjs` | 静态验收 **V1–V20**：清单/权限/引用完整性/**产物正面清单（V2b：逐个列出该在的与必须不在的）**/零远程主机/零 eval+内联处理器/tokens 逐字同源/0 新令牌/逐字文案/契约硬约束/无 emoji/极简形态（两按钮 + 无死元素 + 来源允许空值）/反引号禁用/元素选择纪律/去配对+令牌格式/四因分离/令牌回显/**产物一致性**/**V17A：A 接通 + ⑤ 选中态 + ③ 图片开关** | `✓ 20 组验收全部通过（V1–V20）`（退出码 0） |
+| `node tools/run-tests.mjs` | **跑测试的唯一入口**：136 条单测（信封、状态、队列、桥（真 HTTP）、自包含性、判定链、四因分离、极简形态、令牌回显、产物守卫、**A 接通/资产形状/图片降级（真回环）**）；失败自动落 `.test-failure.log` | `通过：136 条（node --test 退出码 0）` |
+| `node tools/dist-race-probe.mjs --seconds 25 --builds 40` | **诊断工具**（不是门禁，永远 exit 0）：量化「构建进行中读产物」的窗口有多大 | 半写窗口命中的采样数（见 §1.1） |
+| `node tools/cdp-pick-check.mjs` | 真机：真 Chrome + 真扩展 + 两个按钮 + ㉝ 全链（**诊断工具，不是门禁**） | `元素选择真机验证：全部 PASS` |
+| `node tools/mutation-stage-assets.mjs` | **反向验证**（7 个：资产形状退回 `{url,alt}`、`CLIP_WEB_READY` 退回 false、openUrl 自己拼、stage 退回旧 clip.html、图片开关默认改成开、产物清单多一个/少一个）：每个变异先打印**命中处数 + 前后 sha256**，没落地就 `NO_EFFECT` + `exit 2` | 7/7 命中期望文案后 `verify exit=0` / tests 0 fail |
+| `pwsh -File tools/mutation-check.ps1` | 8 个变异**必须变红**且命中期望文案（历史那一套，变异点不同） | 8/8 命中后 `verify exit=0`、tests 0 fail |
+| `node tools/real-bridge-stage-probe.mjs` | **诊断工具**（不是门禁，永远 exit 0）：起**真桥**（`electron/bridge.cjs`，不需要 Electron）复跑 `/v1/clip/stage` 的三种资产形状 | 三种输入各自的 HTTP 状态 + 错误码 |
+| `node tools/popup-shot.mjs` | **诊断工具**（不是门禁，永远 exit 0）：用**真** `popup.js` / `picker.js` 渲染截图到 `extension/.shots/`（不是 action popup 的截图，见工具头部） | 每个镜头的字节数与 sha256 |
+| `node tools/mock-bridge.mjs --mode healthy --port 8795 --token "opn_…" --inbox` | 本地假桥（真 HTTP），用来跑 §4 的六态；`/v1/clip/stage` 也照 02 §2.5 校验 `assets[]` | 见 §4 |
 
 **两种退出码要分清**：`0` = 通过；`1` = 可信且失败；**`2` = 本次结果不可信**（这时既不算红也不算绿）：
 - `extension/.mutation-running` 存在 → 有变异正在跑（变异脚本自己的 verify 用 `OPENNOTE_MUTATION_SELF=1` 声明身份才会看到真实红）；
@@ -48,6 +51,7 @@
 | `dist` 全量指纹 | `build.mjs` 写进 `BUILD-INFO.json`；`verify.mjs` **V19** 现场重算比对 | 任何来源的半写/事后改动都会红：被 kill 的构建、别的 agent 的构建、手改产物 |
 | `readStableDist()` | `tests/self-contained.test.mjs` 读 dist 的唯一入口 | 读产物前先过守卫，绕过它会被 `tests/build-guard.test.mjs` 的接线断言抓住 |
 | `tools/dist-race-probe.mjs` | 诊断工具（**不是门禁**，永远退出 0） | 一边跑构建风暴一边高频采样，量化半写窗口有多大 |
+| `tools/cdp-pick-check.mjs` · `tools/real-bridge-stage-probe.mjs` · `tools/popup-shot.mjs` | 诊断工具（**都不是门禁**，永远退出 0，**不得当验收证据引用**） | 真机链路探针 / 真桥 stage 形状探针 / 设计稿渲染出图 |
 
 **窗口是真实存在的（实测）**：`node tools/dist-race-probe.mjs --seconds 25 --builds 40` →
 4292 次采样里 **645 次**撞到 `.building`、**6 次**撞到指纹对不上；同一批采样按**修复前**的读法
@@ -68,22 +72,32 @@
 ```
 extension/
 ├─ src/
-│  ├─ manifest.json            # MV3 清单：无 options_ui、无通配 host
-│  ├─ background.js            # SW（module）：探测/状态/信封/投递/暂存/元素选择落盘
-│  ├─ lib/{bridge,envelope,errors,pick,queue,state,store}.js
+│  ├─ manifest.json            # MV3 清单：无 options_ui、无通配 host（host_permissions 恰好 10 条）
+│  ├─ background.js            # SW（module）：探测/状态/信封/投递/暂存/元素选择落盘/暂存给网页版剪藏页
+│  ├─ lib/{assets,bridge,envelope,errors,pick,queue,stage,state,store}.js
 │  ├─ content/{extract-page,picker,clipboard}.js
 │  ├─ popup/{popup.html,popup.css,popup.js}
 │  └─ styles/tokens.css        # 设计令牌唯一来源（构建期逐字注入影子根）
-├─ tests/                      # 86 条单测（含「产物守卫」6 条）
-├─ tools/{cdp-pick-check,mock-bridge,mutation-check,dist-guard,dist-race-probe}
-├─ verify.mjs                  # V1–V19
-├─ .gitignore                  # 两个门禁标记（.building / .mutation-running）不进版本库
+├─ tests/                      # 136 条单测（`node tools/run-tests.mjs`）
+├─ tools/{cdp-pick-check,mock-bridge,mutation-check,mutation-stage-assets,dist-guard,dist-race-probe,popup-shot,real-bridge-stage-probe,run-tests,no-undef-check}
+├─ verify.mjs                  # V1–V20（V2b 产物正面清单、V17A A 接通/⑤/③）
+├─ .gitignore                  # 两个门禁标记（.building / .mutation-running）+ .shots/ 不进版本库
 └─ README.md
 ```
 
+**产物清单（24 个，V2b 逐个正面断言；数字上界已删除）**：
+```
+BUILD-INFO.json  background.js  manifest.json
+content/{clipboard,extract-page,picker}.js
+lib/{assets,bridge,envelope,errors,pick,queue,stage,state,store,timeout}.js
+popup/{popup.css,popup.html,popup.js}   styles/tokens.css   icons/icon{16,32,48,128}.png
+```
+`manifest.json` 引用的 10 个文件都在清单内（V2b 会比对），清单之外的文件一律红。
+
 M2（task-28）删除：`lib/templates.js`、`lib/highlights.js`、`content/highlight.js`、`options/**`、
 manifest 的 `options_ui`、`chrome.storage.local` 的 `opennote.templates.v1` / `opennote.highlights.v1`。
-产物文件数 27 → **21**（V17 正向断言「产物确实变小了」+「死模块与死存储键一个都不许出现」）。
+task-3（本轮）删除：`src/clip/clip.html` + `src/clip/clip.js`（被网页版剪藏页取代，**连它的 `?tabId=` 路由与 `tabById()` 一起删**）；
+新增：`lib/stage.js`（暂存请求体形状的唯一定义）+ `lib/assets.js`（图片字节层与降级）⇒ 27 → **24**。
 
 ## 3. 权限清单与联网边界
 
@@ -189,7 +203,44 @@ node tools\cdp-pick-check.mjs                                   # 真知乎文�
 
 ## 12. 变更记录
 
-### 12.1 0.3.2（本轮：M1 极简 + M2 清死代码）
+### 12.0 0.3.2（task-3：接通网页版剪藏页 + 删旧页 + ⑤②③①）
+
+**A 接通（用户要的「网页版剪藏页」）**：扩展侧只做两件事 —— ① `POST /v1/clip/stage`（Bearer 长期令牌，
+请求体形状冻结在 `lib/stage.js`，**可执行断言**）；② 成功后 `chrome.tabs.create({ url: openUrl })`。
+`openUrl` **只来自接口返回值**（`openUrlOf()` 取不到就是 `null`），扩展侧不拼端口、不拼 `stageId`；
+失败**不打开页面**，把原因如实写在 popup 里。卡片上的图标入口恢复渲染（`CLIP_WEB_READY = true`，
+无网址时不渲染）。旧页 `src/clip/clip.html` + `clip.js` 删除，**连同它的 `?tabId=` 路由与 `tabById()`**。
+
+**⑤ 两个按钮的选中态**（用户报过「看不出选的是元素还是整页」）：`aria-pressed` 同时驱动读屏与视觉
+（`.clip__pick .btn[aria-pressed="true"]`），着色只用既有令牌 `--accent-soft` / `--accent` / `--accent-line`
+（新增令牌 0）。
+
+**② 预览卡片「像 Opennote」**：正文从「一行纯文本摘要」改为**块级渲染**（标题 / 表格 / 代码块 / 引用 /
+列表 / 分隔线 / 段落 + 三种行内标记），取值逐条对照 `src/styles/editor.css` 与 `tokens.css` 的真实值：
+正文 `--font-mono` + `--doc-fs` + `--doc-lh`；H1 1.85em/600/-.014em + 2px `--rule`；`#` 用 `--ink-3`；
+H2 1.45em/600 + 1px `--rule`；表格通栏 1px `--rule`、表头 `--paper-3`、单元格等宽；代码 `--code-bg`。
+**预览不加载任何远程图片**（图片渲染成文字占位）。新增令牌 0。
+
+**③ 图片下载开关（默认关）**：开关在卡片上（工具条仍是两个按钮）。打开时**真的把字节下下来**，
+只有拿到字节才产出 02 §2.5 形状 `{name, mime, dataBase64}`；拿不到字节（无权限 / 跨站 / 超时 /
+HTTP 非 2xx / 太大 / 非图片）→ **这一条不进 `assets[]`**、正文里的原始 URL **原样保留**、
+原因逐条如实进 `warnings[]`，popup 先把说明摆出来再给「打开编辑页」（不静默打开）。
+**绝不发一个桥必拒的形状**（`{url,alt}` 会让真桥 422 `IMP-4003 detail.field="assets[0].name"`）。
+不新增权限、零依赖、新增令牌 0。
+
+**① 夜版帧证据（根因修复）**：`page-01-mask-paper` 与 `page-02-mask-night` 字节数完全相同（31744）的根因
+**不是** `Emulation.setEmulatedMedia`，而是**影子根里没有主题**：注入的令牌原样保留 `[data-theme="night"]`
+这类**根属性选择器**，而影子根匹配不到影子树外面的祖先。修法两步、都不手抄色值：
+① `build.mjs` 把根属性选择器机械改写成 `:host(...)`（25 处）；② `content/picker.js` 把页面根上的
+`data-theme` / `data-accent` / `data-font` / `data-width` **镜像到我们自己创建的宿主元素**上
+（只写我们创建的节点，㉝ 的「不得改页面 DOM」不变）。证据见 §14。
+
+**门禁变化**：V2 新增 **V2b 产物正面清单**（逐个列出「该在的」与「必须不在的」；清单不对就**停在那里**，
+不在半截产物上跑完再报一堆假红）；V17A 新增「A 接通 + ⑤ 选中态 + ③ 图片开关」一组；
+V7 逐字文案 76 → 92 条；`verify.mjs` 顶部 V1–V20 不变。新增反向验证工具
+`tools/mutation-stage-assets.mjs`（7 个变异，每个先证明落地：命中处数 + 前后 sha256，没落地 `NO_EFFECT` + exit 2）。
+
+### 12.1 0.3.2（M1 极简 + M2 清死代码）
 
 **M1（task-24，用户可见）**：界面只剩 `选择当前元素` + `整页提取` 两个按钮；三区分段、模板选择器、
 来源三选一、`存到`、`标签`、`追加到笔记` 的 DOM 全部退场（不留死元素）；右键菜单只剩一项；
@@ -253,3 +304,35 @@ node tools\cdp-pick-check.mjs
 - **这条验收的边界**：「粘贴令牌 → 连接」这一步，**扩展侧的自动化验收到此为止** —— 有效证据来自**用户本人的人工验证，不是机器**。它既不是「未验证」，也不是「机器已验证」。
 - 为此留下的东西（不许撤）：`storeManualToken` 的 **`set-token：收到`** 探针与 `visibilityState` 打印 —— 没有它们只能在「产品坏了 / 工具坏了」之间猜；`tools/cdp-pick-check.mjs` 头部的**边界声明**（下一个人不会再追一遍）。
 - 这一轮顺带查实的**真产品缺口**（独立于上面的 artifact）：`storeManualToken` 的 `discover()` **原先完全没有超时** —— 对 8787–8796 逐个请求，任一端口「接受连接但不回话」就能拖死整条链，用户看到的就是「点了连接什么都没发生」。已加 `settleWithin(..., DISCOVER_TIMEOUT_MS=3000)` 并**先保存令牌再探测**（动作的成败不该由旁支决定）。
+
+## 14. 视觉证据（task-3：⑤②①）· 图在 `extension/.shots/`（已 gitignore）
+
+**先说清这些图是什么**：它们由 `node tools/popup-shot.mjs` 生成 —— **真** `popup.js` / **真** CSS /
+**真** `dist/content/picker.js`，只是换了个宿主（本地 http + 一个 `chrome` 替身）。
+**它们不是 action popup 的截图**（`T-11`：真机 CDP 里 popup 被节流，那条路机器不可验）。
+本工具是**诊断工具、不是门禁、不得当验收证据引用**；逻辑那一半由 `tests/**` 与 `verify.mjs` 卡。
+
+| 文件 | 是什么 | 字节 | sha256（前 16） |
+| --- | --- | --- | --- |
+| `.shots/card-before-page.png` | ② 改之前：正文是一行纯文本摘要（`#`/`**` 原样、4 行截断、无表格） | 37080 | `54329bb19c5f2b84` |
+| `.shots/card-page.png` | ② 改之后：`#` 暗灰 + 衬线粗体大字 + 通栏细线；正文等宽；表格 1px 通栏、表头略深 | 39800 | `1b362b412d8383d7` |
+| `.shots/card-before-element.png` | ⑤ 改之前：两个按钮**一模一样**（用户原话「看不出选的是元素还是整页」） | 32021 | `40b25da8aa1185db` |
+| `.shots/card-element.png` | ⑤ 改之后：`重新选择` 处于选中态（`--accent-soft` 底 + `--accent` 字），来源行写 `已选择 article` | 34740 | `d4f3a13823ad2833` |
+| `.shots/card-page-night.png` / `.shots/card-element-night.png` | 同一套卡片走**夜读**主题（深色纸） | 38354 / 33256 | `7f3dc9f8fe7bbfea` / `4011899806a39418` |
+| `.shots/card-warn.png` | ③ 的降级说明：图片没下载下来 → 说明摆出来 + 主按钮变 `打开编辑页`（不静默打开） | 24655 | `8e5416971d8a03ea` |
+| `.shots/picker-before-paper.png` | ① 修复**前**、亮色：覆盖层用纸色压暗（正常） | 20850 | `5fc17dd3a2f49686` |
+| `.shots/picker-before-night.png` | ① 修复**前**、夜读：覆盖层仍用**亮色纸**（深色页面上蒙一层灰白）＝ 缺陷现场 | 20994 | `dc7f1a725906a9b6` |
+| `.shots/picker-paper.png` | ① 修复**后**、亮色：与修复前**逐字节相同**（`5fc17dd3a2f49686`）⇒ 修复没碰亮色那条路 | 20850 | `5fc17dd3a2f49686` |
+| `.shots/picker-night.png` | ① 修复**后**、夜读：覆盖层改用夜版纸色（「洞」比四周亮、跟随之标签转为浅色墨） | 21267 | `68d79a4a4134b7d6` |
+
+**怎么读这张表（可证伪的签名，不是「看着不一样」）**：
+- 同一个主题下「修复前 vs 修复后」：**亮色两帧字节完全相同**（20850 B / `5fc17dd3…`），
+  **夜读两帧不同**（`dc7f1a72…` → `68d79a4a…`）⇒ 改变的**只有夜版那条路**，正是本次修的范围；
+- 同一个版本下 `paper` vs `night`：修复前**也**不同 —— 但那个差异来自**页面自身**的背景（页面也是
+  亮/暗两套），**不是覆盖层换了装**；所以判据必须盯上面那一条同主题对比，不能只看「两帧不一样」。
+- 旧的 `page-01-mask-paper.png` / `page-02-mask-night.png`（各 31744 B、来自 `cdp-pick-check` 的
+  `Emulation.setEmulatedMedia`）**保持原样留着**，作为「上一次为什么没验出来」的现场：那次两帧字节相同，
+  原因是影子根里根本没有主题可言（见 §12.0 ①）。
+
+**已知边界（不许写成已验）**：以上都是**静态渲染**；真机 action popup 里的点击路径仍归 `T-11`（人工）。
+
