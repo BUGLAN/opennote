@@ -287,6 +287,12 @@ function TreeBody(props: TreeProps): ReactNode {
   // ㊷：「其他」是可折叠组，条目缩进为子项（与文件夹树同一套语言）。
   // 默认展开：收件箱的待确认条数是**要看的**，折叠起来等于把它藏了。
   const [othersOpen, setOthersOpen] = useState(true);
+  // （56）：星标 / 回收站各自也是**可折叠分支**——它们此前与文件夹长得一样（图标 + 计数），
+  // 点下去却只改 scope、什么都不展开（回收站的单子还长在整棵树的末尾），于是「折叠」这件事
+  // 在同一个文件树里有两种说法。现在两者与 `FolderBranch` 同一套语言：caret + 子项缩进一级。
+  // 默认收起，与文件夹树一致（`DEFAULT_UI.expanded` 是空数组）。
+  const [starredOpen, setStarredOpen] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
   const roots = childFolders(library, null);
   const loose = notesInFolder(library, null, { sort: ui.sort });
 
@@ -366,16 +372,34 @@ function TreeBody(props: TreeProps): ReactNode {
             label="星标笔记"
             count={counts.starred}
             active={scope.kind === "starred"}
-            onClick={() => props.onScope({ kind: "starred" })}
-          />
+            open={starredOpen}
+            onClick={() => {
+              props.onScope({ kind: "starred" });
+              setStarredOpen((open) => !open);
+            }}
+          >
+            <StarredNotes
+              library={library}
+              activeId={activeId}
+              onOpen={props.onOpenNote}
+              dropTarget={props.dropTarget}
+              setDropTarget={props.setDropTarget}
+            />
+          </ScopeRow>
           <ScopeRow
             depth={1}
             icon="trash"
             label="回收站"
             count={counts.trash}
             active={scope.kind === "trash"}
-            onClick={() => props.onScope({ kind: "trash" })}
-          />
+            open={trashOpen}
+            onClick={() => {
+              props.onScope({ kind: "trash" });
+              setTrashOpen((open) => !open);
+            }}
+          >
+            <TrashList library={library} />
+          </ScopeRow>
           {/* 外部导入的待确认内容在这里，不属于文件树，所以不参与 scope 高亮。 */}
           <ScopeRow
             depth={1}
@@ -387,8 +411,6 @@ function TreeBody(props: TreeProps): ReactNode {
           />
         </>
       ) : null}
-
-      {scope.kind === "trash" ? <TrashList library={library} /> : null}
     </div>
   );
 }
@@ -400,6 +422,8 @@ function ScopeRow({
   active,
   onClick,
   depth = 0,
+  open,
+  children,
 }: {
   icon: IconName;
   label: string;
@@ -408,20 +432,44 @@ function ScopeRow({
   onClick: () => void;
   /** 缩进层级；与 FolderBranch 用同一公式，保证「其他」的子项和文件夹子项对齐。 */
   depth?: number;
+  /** 传了 `children` 就是**可折叠分支**（星标 / 回收站）：caret、`aria-expanded`、子项缩进一级。 */
+  open?: boolean;
+  children?: ReactNode;
 }): ReactNode {
+  // 有子项的组：caret 与图标同列，展开时才渲染子项 —— 与 `FolderBranch` 完全同构。
+  const hasChildren = children !== undefined;
+  // 收起时才显示计数：展开后子项自己会说话（与文件夹行的写法一致）。
+  const showCount = count > 0 && !(hasChildren && open);
+
   return (
-    <button
-      type="button"
-      className={cn("tree__row", active && "is-active")}
-      style={{ paddingLeft: 6 + depth * 13 }}
-      onClick={onClick}
-    >
-      <span className="tree__icon">
-        <Icon name={icon} size={14} />
-      </span>
-      <span className="tree__label">{label}</span>
-      {count ? <span className="tree__meta">{count}</span> : null}
-    </button>
+    <>
+      <div
+        role="treeitem"
+        tabIndex={0}
+        aria-selected={active}
+        aria-expanded={hasChildren ? open : undefined}
+        className={cn("tree__row", active && "is-active")}
+        style={{ paddingLeft: 6 + depth * 13 }}
+        onClick={onClick}
+        onKeyDown={(event) => {
+          // The row itself is the tree item; inner controls own their own keys.
+          if (event.target !== event.currentTarget) return;
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          onClick();
+        }}
+      >
+        <span className={cn("tree__caret", open && "is-open")}>
+          {hasChildren ? <Icon name="chevronRight" size={13} /> : null}
+        </span>
+        <span className="tree__icon">
+          <Icon name={icon} size={14} />
+        </span>
+        <span className="tree__label">{label}</span>
+        {showCount ? <span className="tree__meta">{count}</span> : null}
+      </div>
+      {hasChildren && open ? children : null}
+    </>
   );
 }
 
@@ -719,13 +767,71 @@ function NoteList({
   );
 }
 
+/** （56）嵌在「星标笔记 / 回收站」下面的子项层级：父行是 `depth = 1`，子项再进一级。
+ *  缩进公式仍是 `6 + depth * 13`，所以子项和文件夹里的笔记行**用同一把尺子**。 */
+const NESTED_DEPTH = 2;
+
+function nestedIndent(): number {
+  return 6 + NESTED_DEPTH * 13;
+}
+
+/** 「星标笔记」展开后的子项：与文件树里的笔记行同一写法（同一套右键菜单、同一套拖放）。 */
+function StarredNotes({
+  library,
+  activeId,
+  onOpen,
+  dropTarget,
+  setDropTarget,
+}: {
+  library: LibraryState;
+  activeId: Id | null;
+  onOpen: (id: Id) => void;
+  dropTarget: string | null;
+  setDropTarget: (key: string | null) => void;
+}): ReactNode {
+  const notes = starredNotes(library);
+  if (!notes.length) {
+    return (
+      <p className="tree__empty" style={{ paddingLeft: nestedIndent(), textAlign: "left" }}>
+        还没有星标笔记。右键任意笔记即可加星标。
+      </p>
+    );
+  }
+  return (
+    <>
+      {notes.map((note) => (
+        <NoteRow
+          key={note.id}
+          note={note}
+          depth={NESTED_DEPTH}
+          dirty={Boolean(library.dirty[note.id])}
+          active={activeId === note.id}
+          onOpen={onOpen}
+          dropTarget={dropTarget}
+          setDropTarget={setDropTarget}
+        />
+      ))}
+    </>
+  );
+}
+
 function TrashList({ library }: { library: LibraryState }): ReactNode {
   const notes = Object.values(library.trash).sort((a, b) => (b.trashedAt ?? 0) - (a.trashedAt ?? 0));
-  if (!notes.length) return <p className="tree__empty">回收站是空的。</p>;
+  if (!notes.length) {
+    return (
+      <p className="tree__empty" style={{ paddingLeft: nestedIndent(), textAlign: "left" }}>
+        回收站是空的。
+      </p>
+    );
+  }
   return (
-    <div className="tree" style={{ marginTop: 6 }}>
+    <>
       {notes.map((note) => (
-        <div key={note.id} className="tree__row" style={{ paddingLeft: 12 }} title={note.title}>
+        <div key={note.id} className="tree__row" style={{ paddingLeft: nestedIndent() }} title={note.title}>
+          <span className="tree__caret" />
+          <span className="tree__icon">
+            <Icon name="note" size={14} />
+          </span>
           <span className="tree__label truncate">{note.title}</span>
           <span className="tree__extra">
             <button
@@ -760,12 +866,12 @@ function TrashList({ library }: { library: LibraryState }): ReactNode {
           </span>
         </div>
       ))}
-      <div className="tree__hint">
-        <span>回收站里的文件在 .opennote/trash 里</span>
+      <div className="tree__hint" style={{ paddingLeft: nestedIndent() }}>
+        <span className="truncate">文件在 .opennote/trash 里</span>
         <button
           type="button"
           className="btn btn--ghost"
-          style={{ height: 22, fontSize: 12 }}
+          style={{ height: 22, fontSize: 12, flex: "none" }}
           onClick={async () => {
             const ok = await askConfirm({
               title: "清空回收站？",
@@ -785,7 +891,7 @@ function TrashList({ library }: { library: LibraryState }): ReactNode {
           清空
         </button>
       </div>
-    </div>
+    </>
   );
 }
 
