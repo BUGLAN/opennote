@@ -30,6 +30,8 @@ import {
   isValidToken,
 } from "./lib/bridge.js";
 import { readState, mutate } from "./lib/store.js";
+// 元素选择失败原因（四因分离）的**单一文案来源**，popup 也从这里取（task-21）
+import { pickFailCopy } from "./lib/pick.js";
 import { makeQueueItem, enqueue, removeItem, markAttempt, takeBatch } from "./lib/queue.js";
 import { STATE, decideState, planFor, busyPlan, stateForCode } from "./lib/state.js";
 import { userMessage } from "./lib/errors.js";
@@ -135,25 +137,45 @@ async function activeTab() {
   return tab || null;
 }
 
+
+/** 把注入错误整理成能给人看的原文（`name: message`，并保留 stack 供 console 自查）。 */
+function describeError(error) {
+  if (!error) return "Error: (没有错误对象)";
+  const name = error.name || "Error";
+  const message = error.message || String(error);
+  return `${name}: ${message}`;
+}
+
 /**
- * 进入页面内元素选择模式（00 §6.15㉝；03 §UI-16）。
- * 只注入 `content/picker.js`（覆盖层 + 监听），**不注入任何持久样式、不改页面 DOM**。
- * 受限页面（`chrome://`、扩展商店、PDF 阅读器…）**不注入**，如实记下原因（C71 / S28）。
+ * 进入页面内元素选择模式（00 §6.15㉝；03 §UI-16；task-21 四因分离）。
+ * - **`executeScript` 失败才是「不能选」的唯一证据**；URL 检查只是快速路径；
+ * - URL **读不到**时不拒绝，照样尝试注入（`no_url` 只用于「连标签页都拿不到」）；
+ * - 注入失败必须把 `chrome.scripting` 的真实原文回传并 `console.warn`，不得伪装成「页面类型不支持」。
  */
 async function startPick() {
   const tab = await activeTab();
-  if (!tab || !tab.id) return { ok: false, code: "IMP-1006", state: "restricted" };
-  if (isRestrictedUrl(tab.url)) {
-    await mutate(() => ({ pickUnsupported: true }));
-    return { ok: false, code: "IMP-1006", state: "restricted" };
+  if (!tab || !tab.id) {
+    const detail = "chrome.tabs.query({active:true,currentWindow:true}) 没有返回可用标签页";
+    console.warn(`[opennote] 元素选择：${detail}`);
+    await mutate(() => ({ pickFailReason: "no_url", pickFailDetail: detail }));
+    return { ok: false, code: "IMP-1006", reason: "no_url", detail, copy: pickFailCopy("no_url") };
+  }
+  const url = tab.url || "";
+  if (url && isRestrictedUrl(url)) {
+    // 快速路径：受限 scheme（chrome:// / 扩展商店 / file: / PDF 阅读器…）**不注入**
+    await mutate(() => ({ pickFailReason: "restricted_scheme", pickFailDetail: `restricted url: ${url}` }));
+    return { ok: false, code: "IMP-1006", reason: "restricted_scheme", detail: `restricted url: ${url}`, copy: pickFailCopy("restricted_scheme") };
   }
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/picker.js"] });
+    const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/picker.js"] });
+    if (!Array.isArray(results) || results.length === 0) throw new Error("executeScript 返回了空结果（脚本没有真正跑起来）");
   } catch (error) {
-    await mutate(() => ({ pickUnsupported: true }));
-    return { ok: false, code: "IMP-1006", detail: String(error && error.message) };
+    const detail = describeError(error);
+    console.warn(`[opennote] 元素选择注入失败：${detail}`, error);
+    await mutate(() => ({ pickFailReason: "injection_failed", pickFailDetail: detail }));
+    return { ok: false, code: "IMP-1006", reason: "injection_failed", detail, copy: pickFailCopy("injection_failed") };
   }
-  await mutate(() => ({ pickUnsupported: false, pickArmedAt: new Date().toISOString() }));
+  await mutate(() => ({ pickUnsupported: false, pickFailReason: null, pickFailDetail: null, pickArmedAt: new Date().toISOString() }));
   return { ok: true };
 }
 
@@ -827,12 +849,18 @@ async function storeManualToken(token) {
 async function loadSnapshot() {
   await flushQueue({ limit: 2 });
   const tab = await activeTab();
-  const snapshot = { ok: true, tab: null, extraction: null, restricted: false };
+  // task-21 四因分离：`restricted`（受限 scheme）与 `extractionFailed`（抽取失败）**是两件事**，
+  // 不再把它们合并成同一句「只有普通网页支持」。
+  const snapshot = { ok: true, tab: null, extraction: null, restricted: false, extractionFailed: false, pickFailReason: null };
   if (!tab || tab.id === undefined) {
     snapshot.restricted = true;
+    snapshot.pickFailReason = "no_url";
   } else {
     snapshot.tab = { id: tab.id, url: tab.url || null, title: tab.title || null };
-    snapshot.restricted = isRestrictedUrl(tab.url);
+    // URL 读不到（没有 tabs 权限且 activeTab 未授予）**不等于**受限页面：如实记成 no_url
+    if (!tab.url) snapshot.pickFailReason = "no_url";
+    snapshot.restricted = Boolean(tab.url) && isRestrictedUrl(tab.url);
+    if (snapshot.restricted) snapshot.pickFailReason = "restricted_scheme";
     if (!snapshot.restricted) {
       const extraction = await getExtraction(tab.id, { force: true });
       if (extraction) {
@@ -840,7 +868,10 @@ async function loadSnapshot() {
         // 0.3.1：popup 打开**不再**往页面里注入任何东西（浮标已删除，㉝）。
         // 元素选择只在用户真的点了「选择页面元素」时才注入覆盖层。
       } else {
-        snapshot.restricted = true;
+        // 抽取失败 ≠ 页面类型不支持（task-21）：如实标成 extraction_failed，
+        // 面板走「没能从这个页面读到正文…」而不是「只有普通网页支持」。
+        snapshot.extractionFailed = true;
+        snapshot.pickFailReason = snapshot.pickFailReason || "extraction_failed";
       }
     }
   }

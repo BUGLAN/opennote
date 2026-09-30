@@ -29,6 +29,9 @@ const DIST = "E:\\repo\\opennote\\extension\\dist";
 const PORT = 9346;
 const DEMO_PORT = 8799;
 const STATE_KEY = "opennote.clip.state.v1";
+// 想验真实站点就传 `OPENNOTE_PICK_URL`（例如知乎那篇）；不传则用本地 demo 页
+const EXTERNAL_URL = process.env.OPENNOTE_PICK_URL || "";
+const TARGET_URL = EXTERNAL_URL || `http://127.0.0.1:${DEMO_PORT}/demo`;
 
 const CHROME_CANDIDATES = [
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
@@ -154,7 +157,7 @@ async function main() {
     process.exit(2);
   }
 
-  const demo = await startDemo();
+  const demo = EXTERNAL_URL ? { close() {} } : await startDemo();
   // 端口自检：如果 9346 已经有 Chrome 在答，说明是**上一轮遗留**的实例，
   // 那我们看到的 target / 扩展都是旧的 —— 这种结果不可信，必须直接中止（不打印红绿）。
   const stale = await httpJson("/json/version").catch(() => null);
@@ -175,7 +178,7 @@ async function main() {
       "--no-first-run",
       "--no-default-browser-check",
       "--window-size=1280,900",
-      `http://127.0.0.1:${DEMO_PORT}/demo`,
+      TARGET_URL,
     ],
     { stdio: "ignore", detached: false },
   );
@@ -201,7 +204,7 @@ async function main() {
     const listed = await waitFor(async () => {
       const targets = await httpJson("/json/list");
       const worker = targets.find((target) => typeof target.url === "string" && target.url.includes(`chrome-extension://${extId}/`));
-      const demoPage = targets.find((target) => target.type === "page" && target.url.includes(`127.0.0.1:${DEMO_PORT}`));
+      const demoPage = targets.find((target) => target.type === "page" && target.url.startsWith(TARGET_URL.slice(0, 40)));
       return worker && demoPage ? { worker, demoPage } : null;
     }, 30000);
     if (!listed) {
@@ -217,7 +220,7 @@ async function main() {
     const tabs = await browser.send("Target.getTargets", { filter: [{ type: "tab" }] }).catch(() => ({ targetInfos: [] }));
     const tabInfos = tabs.targetInfos || [];
     const tab =
-      tabInfos.find((info) => String(info.url || "").includes(`127.0.0.1:${DEMO_PORT}`)) ||
+      tabInfos.find((info) => String(info.url || "").startsWith(TARGET_URL.slice(0, 40))) ||
       (tabInfos.length === 1 ? tabInfos[0] : null);
     if (!tab) {
       console.log(`     tab target 现场：${tabInfos.map((info) => `${info.targetId} ${info.url}`).join(" | ") || "(空)"}`);
@@ -258,16 +261,35 @@ async function main() {
       15000,
     );
     observe(Boolean(host), "页面上出现元素选择覆盖层 #opennote-pick-host", host && JSON.stringify(host));
-    if (!host) return;
+    if (!host) {
+      // 取证：把 popup 里那两句（人话 + 真实错误原文）原样打出来 —— 这才是要修的东西
+      const note = await evaluate(popup, `(() => { const n = document.getElementById("pickNote"); const d = document.getElementById("pickDetail"); return { note: n && n.textContent, detail: d && d.textContent, hidden: d && d.hidden }; })()`).catch(() => null);
+      console.log("     popup 现场：" + JSON.stringify(note));
+      return;
+    }
     observe(
       host.position === "fixed" && host.pointerEvents === "none" && host.shadow === "closed",
       "覆盖层 = position:fixed / pointer-events:none / closed 影子根",
       JSON.stringify(host),
     );
 
+    // 目标元素：本地 demo 用 #para；真实站点用「最长的正文段落」，再退到 article / body
     const point = await evaluate(page, `(() => {
-      const rect = document.getElementById("para").getBoundingClientRect();
-      return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+      const para = document.getElementById("para");
+      let el = para;
+      if (!el) {
+        const paras = Array.from(document.querySelectorAll("p"))
+          .filter((p) => p.textContent.trim().length > 40 && p.getBoundingClientRect().height > 0)
+          .sort((a, b) => b.textContent.trim().length - a.textContent.trim().length);
+        el = paras[0] || document.querySelector("article") || document.querySelector("main") || document.body;
+      }
+      const rect = el.getBoundingClientRect();
+      return {
+        x: Math.round(rect.left + Math.min(rect.width, 300) / 2),
+        y: Math.round(Math.max(rect.top, 4) + Math.min(rect.height, 20) / 2),
+        // 把「指针底下到底是哪个元素」也记下来：断言用它，而不是用猜的 target
+        atPoint: (document.elementFromPoint(Math.round(rect.left + Math.min(rect.width, 300) / 2), Math.round(Math.max(rect.top, 4) + Math.min(rect.height, 20) / 2)) || el).tagName.toLowerCase(),
+      };
     })()`);
     for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
       await page.send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 });
@@ -277,13 +299,19 @@ async function main() {
     observe(Boolean(entry), "点一下之后选择结果落进 chrome.storage.local（picked）",
       entry && `tagName=${entry.tagName} chars=${entry.chars} selector=${entry.selector}`);
     if (entry) {
-      observe(entry.tagName === "p", "抽到的元素 = 被点中的那个 <p>", entry.tagName);
       const markdown = String(entry.markdown || "");
-      observe(markdown.includes("这一段是要被点中的正文段落"), "正文 Markdown 真的来自点中的那块", `${markdown.length} 字符`);
-      observe(
-        !markdown.includes("侧栏噪声") && !markdown.includes("页脚"),
-        "没有把侧栏/页脚带进来（没有退回整页抽取）",
-      );
+      if (EXTERNAL_URL) {
+        observe(entry.tagName === point.atPoint, `抽到的元素 = 指针底下那个 <${point.atPoint}>`, `实际 ${entry.tagName}`);
+        observe(markdown.trim().length > 20, "正文 Markdown 非空（真的抽到了内容）", `${markdown.length} 字符`);
+        observe(!["html", "body"].includes(entry.tagName), "没有退化成「整页/整个 body」", entry.tagName);
+      } else {
+        observe(entry.tagName === "p", "抽到的元素 = 被点中的那个 <p>", entry.tagName);
+        observe(markdown.includes("这一段是要被点中的正文段落"), "正文 Markdown 真的来自点中的那块", `${markdown.length} 字符`);
+        observe(
+          !markdown.includes("侧栏噪声") && !markdown.includes("页脚"),
+          "没有把侧栏/页脚带进来（没有退回整页抽取）",
+        );
+      }
     }
 
     const gone = await waitFor(() => evaluate(page, `!document.getElementById("opennote-pick-host")`), 10000);

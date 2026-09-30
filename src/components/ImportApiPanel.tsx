@@ -181,33 +181,47 @@ const R3_HINT =
   "只监听本机 127.0.0.1，只提供导入，不提供读取和删除。任何网页都可能尝试访问本机端口，所以请勿在不可信的网页上暴露令牌。";
 
 /**
- * R4 令牌区说明（0.3.1 ㉞㊱ + ㊲）：令牌**长期有效**，只在用户重新生成时失效；
- * 明文在本会话内可以反复复制（㊲），应用重启后明文不再可见、需要时重新生成。
+ * R4 令牌区说明（0.3.1 ㉞㊱ + ㊲）。
+ *
+ * **只讲不随状态变化的事实**：令牌长期有效、只在本机使用、不会被上传。
+ * 「现在能不能复制明文」是**随状态变化**的事实，只能由下面那一条真实状态句来说 ——
+ * 2026-09 的用户实测缺陷就是这么来的：这块静态说明写着「明文在本会话内可以反复复制」，
+ * 而同一屏的另一块写着「令牌已不可见」，**同一时刻两个相反的结论**。
+ *
+ * 同一族缺陷：`bridgeStatusPayload`（字段被逐字段重建时静默丢掉）、`getWorkspaceInfo`、
+ * `isLogEnabled` —— 都是**同一个事实被复制成多处**，任何一处漂移都会让用户看到矛盾。
+ * 所以这里的规矩是：**一个事实只有一个产地**。
  */
 const R4_HINT =
-  "令牌长期有效，只在你在 Opennote 里点「重新生成」时才失效。明文在本会话内可以反复复制，应用重启后不再可见，需要时重新生成。令牌只在本机使用，Opennote 不会把它上传到任何地方。";
+  "令牌长期有效，只在你在 Opennote 里点「重新生成」时才失效。令牌只在本机使用，Opennote 不会把它上传到任何地方。";
 
 /**
- * R4b「复制令牌」区说明（0.3.1 ㉞㊱）。第二句是**必须有的代价披露**：
- * 去掉配对后令牌是唯一凭据且长期有效，能读到剪贴板/扩展存储的程序就能拿到它 ——
- * 但同时要说清「拿到它不等于能读笔记」，否则用户会低估或高估风险。
+ * ㊞ 要求的**代价披露句**（逐字，不得因为合并 R4b 而丢）：去掉配对后令牌是唯一凭据，
+ * 能读到剪贴板/扩展存储的程序就能拿到它 —— 但同时要说清「拿到它不等于能读笔记」，
+ * 否则用户会低估或高估风险。
  */
-const R4B_HINT =
-  "在新客户端里粘贴一次即可，长期有效、不用再配对；本会话内可以反复复制这串明文。任何能读到剪贴板或扩展存储的程序都能拿到这串令牌并获得导入能力，但桥只提供导入，不提供读取和删除。";
+const TOKEN_COST_HINT =
+  "在新客户端里粘贴一次即可，长期有效、不用再配对。任何能读到剪贴板或扩展存储的程序都能拿到这串令牌并获得导入能力，但桥只提供导入，不提供读取和删除。";
 
 /**
- * ㊲ 明文不可见时的逐字说明（Lead 裁定）。
- * 这一步必须**说出来**：应用重启后内存明文没了，令牌却仍然有效 ——
+ * ㊲ 明文不可见时的**唯一**状态句（Lead 裁定，逐字）。
+ * 必须**说出来**：应用重启后内存明文没了，令牌却仍然有效 ——
  * 面板要如实解释「为什么现在复制不了」，而不是留一个点了没反应的按钮。
  */
-const R4B_INVISIBLE = "令牌已不可见，需要时请重新生成";
+const R4_INVISIBLE = "令牌已不可见，需要时请重新生成";
 
 /**
- * ㊲ 第三种状态：桥还说「本会话持有明文」，但这个界面手里没有（界面重载过，明文只在
- * 主进程内存里、没有回传通道）。如实说明 + 给出可执行的下一步，不假装可用、也不谎称失效。
+ * ㊲③ 明文在桥的内存里、但这个界面手里没有（整窗重载过且只读频道也没取回来）。
+ * 如实说明 + 给出可执行的下一步，既不假装可用、也不谎称失效。
  */
-const R4B_RELOADED =
-  "本会话的令牌明文还在（令牌没有失效），但界面重载后拿不到它。需要明文时点上面的「重新生成」拿一串新的。";
+const R4_RELOADED =
+  "本会话的令牌明文还在（令牌没有失效），但界面拿不到它。需要明文时点上面的「重新生成」拿一串新的。";
+
+/**
+ * 有明文时的唯一状态句。与 `R4_INVISIBLE` **互斥**：
+ * 面板同一时刻只会渲染其中一条 —— 这就是「一个事实只有一个产地」在 UI 上的落点。
+ */
+const R4_VISIBLE = "这串明文在本会话内可以反复复制；应用重启后明文不再可见，需要时重新生成。";
 
 const FIREWALL_NOTE = "首次开启时系统可能会弹出防火墙提示，允许本机访问即可。";
 
@@ -626,10 +640,16 @@ export function ImportApiPanel({
         ) : null}
       </SettingRow>
 
+      {/*
+        唯一的令牌区块（task-22 合并 R4 + R4b）。
+        合并前这里是两块：R4「访问令牌」与 R4b「复制令牌」，各有一个掩码框和一个复制按钮 ——
+        于是同一时刻会出现两个相反的结论（R4 说「可以反复复制」，R4b 说「令牌已不可见」）。
+        **一个事实只有一个产地**：下面这三条状态句互斥，同一份 HTML 里只会出现一条。
+      */}
       <SettingRow label="访问令牌" hint="剪藏工具用它证明身份">
         <div style={ROW}>
           <span role="group" aria-label="访问令牌" style={{ ...VALUE_BOX, color: copyable ? "var(--ink)" : "var(--ink-2)" }}>
-            {maskToken(status?.tokenLast4)}
+            {copyable ?? maskToken(status?.tokenLast4)}
           </span>
           <button
             type="button"
@@ -646,69 +666,45 @@ export function ImportApiPanel({
             重新生成
           </button>
         </div>
-        {copyable ? (
-          <>
-            <p style={{ ...ERROR, color: "var(--ink)" }}>
-              这串明文在本会话内一直可以复制；应用重启后明文不再可见，需要时重新生成。
-            </p>
-            {!running ? (
-              <div style={{ ...ROW, marginTop: "var(--s2)" }}>
-                <button type="button" className="btn btn--primary" disabled={busy} onClick={() => void doStart(parsePort(portText) ?? undefined)}>
-                  <Icon name="check" size={14} />
-                  我已保存，开启接口
-                </button>
-              </div>
-            ) : null}
-          </>
-        ) : null}
-        <p style={HINT}>{R4_HINT}</p>
-      </SettingRow>
-
-      <SettingRow label="复制令牌" hint="粘贴到新客户端，长期有效">
-        <div style={ROW}>
-          <span role="group" aria-label="复制令牌" style={{ ...VALUE_BOX, color: copyable ? "var(--ink)" : "var(--ink-2)" }}>
-            {copyable ?? maskToken(status?.tokenLast4)}
-          </span>
-          <button
-            type="button"
-            className="btn btn--primary"
-            disabled={!copyable || busy}
-            title={copyable ? "复制后粘贴到客户端即可；本会话内可以反复复制。" : "明文在本会话里已不可见，需要时点「重新生成」"}
-            onClick={() => void handleCopy("token", copyable)}
-          >
-            <Icon name="copy" size={14} />
-            {copied === "token" ? "已复制" : "复制令牌"}
-          </button>
-        </div>
-        {/* ㊲ 两态如实降级：没有明文就**不留一个点了没反应的按钮**，而是说清为什么 + 下一步。 */}
-        {!copyable && status?.tokenVisible === true ? (
-          <p style={HINT}>{R4B_RELOADED}</p>
-        ) : null}
-        {!copyable && status?.tokenVisible !== true ? (
-          <p style={HINT}>{R4B_INVISIBLE}</p>
+        {copyable ? <p style={{ ...ERROR, color: "var(--ink)" }}>{R4_VISIBLE}</p> : null}
+        {!copyable && status?.tokenVisible === true ? <p style={HINT}>{R4_RELOADED}</p> : null}
+        {!copyable && status?.tokenVisible !== true ? <p style={HINT}>{R4_INVISIBLE}</p> : null}
+        {copyable && !running ? (
+          <div style={{ ...ROW, marginTop: "var(--s2)" }}>
+            <button type="button" className="btn btn--primary" disabled={busy} onClick={() => void doStart(parsePort(portText) ?? undefined)}>
+              <Icon name="check" size={14} />
+              我已保存，开启接口
+            </button>
+          </div>
         ) : null}
         {surface ? (
           <p style={ERROR} role="alert">
             {surface}
           </p>
         ) : null}
-        <p style={HINT}>{R4B_HINT}</p>
-        {origins.length > 0 ? (
-          <div style={{ marginTop: "var(--s2)" }}>
-            <div style={{ fontSize: "var(--fs-xs)", color: "var(--ink-3)" }}>
-              0.3.1 之前的来源记录（现在来源按类型判断，这些条目已不生效，可清理）
-            </div>
-            {origins.map((origin) => (
-              <div key={origin} style={{ ...ROW, marginTop: 4 }}>
-                <span style={{ ...VALUE_BOX, flex: "1 1 auto", fontSize: "var(--fs-xs)" }}>{origin}</span>
-                <button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void handleRemoveOrigin(origin)}>
-                  移除
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : null}
+        <p style={HINT}>{R4_HINT}</p>
+        <p style={HINT}>{TOKEN_COST_HINT}</p>
       </SettingRow>
+
+      {/*
+        历史来源记录：**来源清理**，与令牌是两件事，所以独立成块（不折进令牌区块）。
+        仅在非空时渲染 —— 空块只会让人以为「这里本来该有东西」。
+      */}
+      {origins.length > 0 ? (
+        <SettingRow label="历史来源记录" hint="0.3.1 之前的来源条目">
+          <div style={{ fontSize: "var(--fs-xs)", color: "var(--ink-3)" }}>
+            现在来源按类型判断，下面这些条目已不生效，可以清理。
+          </div>
+          {origins.map((origin) => (
+            <div key={origin} style={{ ...ROW, marginTop: 4 }}>
+              <span style={{ ...VALUE_BOX, flex: "1 1 auto", fontSize: "var(--fs-xs)" }}>{origin}</span>
+              <button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void handleRemoveOrigin(origin)}>
+                移除
+              </button>
+            </div>
+          ))}
+        </SettingRow>
+      ) : null}
 
       {recent !== null ? (
         <SettingRow label="最近导入" hint="最近 5 次外部导入">

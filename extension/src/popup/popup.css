@@ -197,3 +197,17 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip[data-busy="true"] .clip__rows,
 .clip[data-busy="true"] .clip__seg{opacity:.6;pointer-events:none}
 .clip[data-busy="true"] #primary{min-width:150px}
+
+/* task-21：元素选择失败的**真实错误原文**（可选中复制，不许吞掉） */
+.clip__pick-detail {
+  display: block;
+  margin-top: 4px;
+  padding: 2px 6px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  background: var(--paper-2);
+  border-radius: 3px;
+  user-select: text;
+  word-break: break-all;
+}

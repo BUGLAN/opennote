@@ -815,6 +815,57 @@ if (backgroundDist.includes("opennote:pair")) fail(GROUP_V15, "background 还留
 if (/postPair|pairWithCode|\/v1\/pair/.test(stripComments(backgroundDist))) fail(GROUP_V15, "background 还在调 /v1/pair（㉞：配对删除）");
 if (!backgroundDist.includes("opennote:pick")) fail(GROUP_V15, "background 缺少 opennote:pick（元素选择入口）");
 
+/* ── V16 元素选择失败原因四因分离（task-21） ───────────────────────── */
+
+const GROUP_V16 = "V16 元素选择四因分离";
+const pickLibCode = stripComments(readDist("dist/lib/pick.js"));
+const REQUIRED_REASONS = ["no_url", "restricted_scheme", "injection_failed", "extraction_failed"];
+const reasonCopies = REQUIRED_REASONS.map((reason) => {
+  const found = pickLibCode.match(new RegExp(reason + ': "([^"]+)"'));
+  return [reason, found ? found[1] : null];
+});
+const missingReasons = reasonCopies.filter(([, copy]) => !copy).map(([reason]) => reason);
+if (missingReasons.length) {
+  for (const reason of missingReasons) fail(GROUP_V16, "lib/pick.js 缺少原因 " + reason + " 的文案");
+} else {
+  const copies = reasonCopies.map(([, copy]) => copy);
+  // ① 四种原因必须产生**四种不同**的文案（共用一句假话 = 这次缺陷的根因）
+  if (new Set(copies).size !== copies.length) fail(GROUP_V16, "四种失败原因必须各有不同文案，实际有重复");
+  // ② 「只有普通网页」这句只许属于 restricted_scheme
+  const schemeCopy = reasonCopies.find(([reason]) => reason === "restricted_scheme")[1];
+  const schemeOnly = copies.filter((copy) => copy.includes("只有普通网页"));
+  if (schemeOnly.length !== 1 || schemeOnly[0] !== schemeCopy) fail(GROUP_V16, "「只有普通网页」这句话只能属于 restricted_scheme");
+  // ③ no_url 不得报成「页面类型不支持」，且必须给可执行的下一步
+  const noUrl = reasonCopies.find(([reason]) => reason === "no_url")[1];
+  if (/普通网页|http 或 https/.test(noUrl)) fail(GROUP_V16, "no_url 不得伪装成「页面类型不支持」：" + noUrl);
+  if (!/刷新|点一下扩展图标/.test(noUrl)) fail(GROUP_V16, "no_url 必须给可执行的下一步：" + noUrl);
+  // ④ injection_failed 不得自称「只有普通网页」，也不得与 extraction_failed 同句
+  const injection = reasonCopies.find(([reason]) => reason === "injection_failed")[1];
+  const extraction = reasonCopies.find(([reason]) => reason === "extraction_failed")[1];
+  if (/普通网页|http 或 https/.test(injection)) fail(GROUP_V16, "injection_failed 不得伪装成「页面类型不支持」：" + injection);
+  if (injection === extraction) fail(GROUP_V16, "injection_failed 与 extraction_failed 必须是两句不同的话");
+}
+// ⑤ background 必须回传真实错误原文（detail）并 console.warn 出来，而不是吞掉
+const bgForPick = readDist("dist/background.js");
+if (!/reason: "injection_failed", detail/.test(bgForPick)) fail(GROUP_V16, "startPick() 必须把注入失败的真实原文放进 detail");
+if (!bgForPick.includes("[opennote] 元素选择注入失败")) fail(GROUP_V16, "注入失败必须 console.warn 出真实 error（含 name/message）");
+if (!/describeError\(error\)/.test(bgForPick)) fail(GROUP_V16, "注入错误必须经 describeError() 整理成 name: message");
+// ⑥ popup 必须把 detail 透出来（不得只看 ok）
+const popupForPick = readDist("dist/popup/popup.js");
+if (!/pickDetail\.textContent = .*reply\.detail/.test(popupForPick)) fail(GROUP_V16, "popup 必须把 detail 原文（reply.detail）真的写进 pickDetail");
+if (pickupHardcoded().length) fail(GROUP_V16, "popup 不得再硬编码「这个页面不能选择元素…」当唯一失败文案");
+if (!/PICK_FAIL_COPY\[reason\]/.test(popupForPick)) fail(GROUP_V16, "popup 必须按后台给的 reason 选文案");
+if (!readDist("dist/popup/popup.html").includes('id="pickDetail"')) fail(GROUP_V16, "popup.html 缺少 pickDetail 节点");
+// ⑦ 抽取失败不许再被合并成 restricted（task-21 的第 5 条根因）
+if (!/snapshot\.extractionFailed = true/.test(bgForPick)) fail(GROUP_V16, "抽取失败必须记成 extractionFailed，不得合并进 restricted");
+if (!/extractionFailed && !snapshot\.restricted/.test(popupForPick)) fail(GROUP_V16, "popup 必须给抽取失败单独一条路径");
+if (failures.filter((item) => item.includes(GROUP_V16)).length === 0) {
+  pass("元素选择四因分离：" + REQUIRED_REASONS.join(" / ") + " 文案互不相同、注入失败带真实原文、popup 按 reason 取文案");
+}
+
+function pickupHardcoded() {
+  return popupForPick.match(/pickNote\.textContent = "这个页面不能选择元素[^"]*"/g) || [];
+}
 /* ── V13 用户可见文案不得含反引号 ────────────────────────────────── */
 
 // Lead 0.3.1 裁定 ①：02 号契约表格里的 `` `..` `` 是 **Markdown 内联代码标记**，不是文案本身。
@@ -867,4 +918,4 @@ if (failures.length > 0) {
   for (const item of failures) console.error(`  ${item}`);
   process.exit(1);
 }
-console.log("\n✓ 15 组验收全部通过（V1–V15）");
+console.log("\n✓ 16 组验收全部通过（V1–V16）");

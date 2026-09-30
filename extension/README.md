@@ -324,7 +324,8 @@ chrome.exe --remote-debugging-port=9335 --user-data-dir=%TEMP%\opennote-hl2-prof
    cd E:\repo\opennote\extension ; node build.mjs ; node tools\cdp-pick-check.mjs
    # 退出码：0 = 全 PASS；1 = 有 FAIL；2 = 环境缺失（没装 Chrome / 没 build / 9346 被上一轮遗留的 Chrome 占用）
    ```
-   **仍未验证**：`Esc` 取消与「popup 打不开时的页面内提示条」这两条**没有真机点到过**（前者要发键盘事件给页面、后者要 `chrome.action.openPopup()` 失败，headless 下不稳），只有静态断言（V14）+ 单测覆盖（`tests/self-contained.test.mjs`）。
+   **真实站点（task-21）**：`$env:OPENNOTE_PICK_URL="https://zhuanlan.zhihu.com/p/555517159" ; node tools\cdp-pick-check.mjs` → 同一套链路在**真知乎文章**上全 PASS（退出码 0）：覆盖层 `closed` 影子根 / `pointer-events:none`、真点一下、从 service worker 回读 `picked`（`tagName=pre`、125 字符 Markdown）、点完覆盖层移除。
+   **仍未验证**（Esc 取消与「popup 打不开时的页面内提示条」这两条**没有真机点到过**）（前者要发键盘事件给页面、后者要 `chrome.action.openPopup()` 失败，headless 下不稳），只有静态断言（V14）+ 单测覆盖（`tests/self-contained.test.mjs`）。
 2. **粘贴令牌的整条真机链路没跑（**UNVERIFIED**）**：`opennote:set-token` 的本地校验与落盘有单测，但「在真 popup 里粘贴 47 字符 → 芯片变 `本地接口已开启`」需要在真机上对着真/假桥点一次。可行验证：`node tools/mock-bridge.mjs --mode healthy --port 8795 --token opn_<43 位> --inbox` → popup 里粘贴同一个令牌 → 芯片应变 `本地接口已开启`。
 2. **键盘快捷键与右键菜单没有在真机上触发过**：`Alt+Shift+S`（元素选择）、右键「高亮这段文字」/「剪藏整页正文到 Opennote」都需要 Chrome 浏览器进程层面的输入/UI 交互，CDP 的 `Input.dispatchKeyEvent` 到不了扩展命令注册表，右键菜单项也无法脚本选择。它们与 popup 共用同一个函数（`background.js` 的 `clipFromChromeEntry` / `captureHighlight`），单测覆盖了消息分支，但**「按快捷键真的会进入选择模式」这一步没人眼确认过**，请人工验一次。
 2. **剪贴板三级降级没在真机走完**：`navigator.clipboard.writeText` 需要真用户手势，CDP 里读剪贴板还要额外授权，所以只测到「第 1 级会调用、失败会往第 2/3 级落」的逻辑层（单测 + 代码路径），没有在真机粘贴出来看一眼。
@@ -345,9 +346,12 @@ chrome.exe --remote-debugging-port=9335 --user-data-dir=%TEMP%\opennote-hl2-prof
 
 ---
 
+
+   **task-21（用户实测缺陷）四因分离**：`选择页面元素`失败时不再一律说「只有普通网页支持」——`no_url` / `restricted_scheme` / `injection_failed` / `extraction_failed` 各一句真话（`src/lib/pick.js` 单一来源，popup 与后台共用）；注入失败会把 `chrome.scripting` 的**真实原文**（`name: message`）显示在 popup 的 `#pickDetail` 里并 `console.warn`；`executeScript` 失败是「不能选」的**唯一证据**，URL 读不到时照样尝试注入。真机在知乎那篇上跑通（见上）。
+
 ## 12. 变更记录
 
-### 12.1 0.3.1（本轮：元素选择 + 去配对）
+## 12.1 0.3.1（本轮：元素选择 + 去配对）
 
 | 文件 | 改动 |
 | --- | --- |
@@ -364,7 +368,7 @@ chrome.exe --remote-debugging-port=9335 --user-data-dir=%TEMP%\opennote-hl2-prof
 | `verify.mjs` | V1 期望清单跟着 `03` 改（`pick-element` + `clip-page`，并断言 `clip-selection` **已删除**）；V7 逐字文案清单换成 0.3.1 冻结句；新增 **V14**（元素选择纪律：closed 影子根 / 覆盖层 only / 点击三件套 / Esc / 退出即移除 / 标签格式 / 无 `float.js`）与 **V15**（去配对 + 令牌格式 + 不产出 `IMP-2004`） |
 | `tools/mutation-check.ps1` | 变异从 4 个扩到 **8 个**（新增 V14 影子根、V15 `opennote:pair`、V15 令牌格式、V1 快捷键语义） |
 
-### 12.2 0.2.0 / BLOCK-1（历史）
+## 12.2 0.2.0 / BLOCK-1（历史）
 
 | 文件 | 改动 |
 | --- | --- |

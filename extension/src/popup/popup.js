@@ -9,6 +9,8 @@
 
 import { filterTags } from "../lib/envelope.js";
 import { userMessage } from "../lib/errors.js";
+// task-21：四因文案与后台**同一份来源**（不再各写一套、也不再统一伪装成「页面类型不支持」）
+import { PICK_FAIL_COPY } from "../lib/pick.js";
 import { STATE, planFor } from "../lib/state.js";
 
 const $ = (id) => document.getElementById(id);
@@ -56,6 +58,7 @@ const deliveryHint = $("deliveryHint");
 // 0.3.1（00 §6.15㉝㉞）：L2 元素入口 + 令牌块 + 高亮来源说明 + 清令牌确认
 const pickButton = $("pick");
 const pickNote = $("pickNote");
+const pickDetail = $("pickDetail");
 const tokenRow = $("tokenRow");
 const tokenSaved = $("tokenSaved");
 const tokenCode = $("tokenCode");
@@ -331,6 +334,16 @@ function planForState(stateId, extra = {}) {
 /** 当前应显示的状态（S4 空态、S5 受限页面都在这里收敛）。 */
 function currentPlan() {
   if (!snapshot) return planForState(STATE.CHECKING);
+  // task-21：抽取失败**不是**页面类型不支持 —— 单独一句真话 + 可执行的下一步
+  if (snapshot.extractionFailed && !snapshot.restricted) {
+    const failed = planForState(snapshot.stateId || STATE.CHECKING);
+    failed.block = null;
+    failed.rows = false;
+    failed.empty = { title: "没能读到正文。", text: PICK_FAIL_COPY.extraction_failed };
+    failed.primary = { label: "剪藏到 Opennote", disabled: true, busy: false };
+    failed.actions = [];
+    return failed;
+  }
   if (snapshot.restricted) return planForState(STATE.RESTRICTED_PAGE);
   const stateId = snapshot.stateId || STATE.CHECKING;
   const plan = planForState(stateId);
@@ -1184,15 +1197,25 @@ async function connectToken(token, fromStart) {
 
 /** L2 元素入口（㉝）：点一下 → 关闭 popup → 页面进入选择模式（覆盖层由 content/picker.js 画）。 */
 async function startPick() {
+  pickNote.hidden = true;
+  pickDetail.hidden = true;
+  pickDetail.textContent = "";
   const response = await send({ type: "opennote:pick" });
   const reply = response && response.reply;
   if (reply && reply.ok) {
     window.close(); // popup 随即关闭（UI-16 进入选择模式）
     return;
   }
-  // S28：受限页面**不注入任何东西**，如实说明原因（口径沿用 IMP-1006）
-  pickNote.textContent = "这个页面不能选择元素：只有普通网页（http 或 https）支持。换个普通网页再试。";
+  // task-21：四因分离 —— 后台说什么原因就说什么原因，**不再统一伪装成「页面类型不支持」**
+  const reason = (reply && reply.reason) || "";
+  pickNote.textContent =
+    (reply && reply.copy) || PICK_FAIL_COPY[reason] || "没能进入元素选择模式。";
   pickNote.hidden = false;
+  // 注入失败/读不到地址：把 `chrome.scripting` 的原文照贴出来（可选中复制），便于用户回报
+  if (reply && reply.detail) {
+    pickDetail.textContent = `${reason || "unknown"} · ${reply.detail}`;
+    pickDetail.hidden = false;
+  }
 }
 
 async function runAction(id, action) {
