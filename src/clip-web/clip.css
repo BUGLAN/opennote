@@ -68,7 +68,7 @@
   font-size: var(--fs-sm);
 }
 
-/* ---- 两栏：左边编辑，右边预览 ------------------------------------------ */
+/* ---- 两栏：左边预览，右边编辑（用户要求换位置） -------------------------- */
 .clip__body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -83,11 +83,10 @@
   overflow: hidden;
 }
 
-.clip__pane--edit {
-  border-right: 1px solid var(--rule);
-}
-
+/* 分隔线挂在**左边那一栏**上（预览在左）。换 DOM 顺序时这里必须一起换，
+   否则线会跑到右边去 —— 视觉与结构不一致正是「注释也是标签」那一类漂移。 */
 .clip__pane--preview {
+  border-right: 1px solid var(--rule);
   background: var(--paper-2);
 }
 
@@ -283,7 +282,9 @@
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   }
 
-  .clip__pane--edit {
+  /* 窄屏改成上下堆叠：上面是预览、下面是编辑（与 DOM 顺序一致），
+     所以分隔线要从**预览**那一栏的右边挪成它的下边。 */
+  .clip__pane--preview {
     border-right: none;
     border-bottom: 1px solid var(--rule);
   }

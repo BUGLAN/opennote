@@ -113,7 +113,24 @@ export function ClipApp({ boot, onReady }: ClipAppProps) {
             </div>
           </div>
         ) : (
+          /*
+           * 两栏顺序：**左预览、右编辑**（用户要求「编辑和预览换一下位置」）。
+           * 这里换的是 **DOM 顺序**，不是 CSS 的 `order` —— 视觉顺序与 Tab 键顺序必须一致，
+           * 否则键盘/读屏用户看到的焦点走向和眼睛看到的相反。
+           * 相应地：`clip.css` 的分隔线从 `--edit` 挪到 `--preview`，
+           * 正文标签里的「右边是预览」也要改成「左边」。
+           */
           <>
+            <section className="clip__pane clip__pane--preview" aria-label="渲染预览">
+              <div className="clip__preview-scroll">
+                {preview.empty ? (
+                  <p className="clip__empty">正文是空的，这里会显示渲染后的效果。</p>
+                ) : (
+                  <article className="prose clip__prose" dangerouslySetInnerHTML={{ __html: preview.html }} />
+                )}
+              </div>
+            </section>
+
             <section className="clip__pane clip__pane--edit" aria-label="编辑剪藏内容">
               <label className="clip__label" htmlFor="clip-title">
                 标题
@@ -127,7 +144,7 @@ export function ClipApp({ boot, onReady }: ClipAppProps) {
                 onChange={(event) => dispatch({ type: "edit-title", title: event.target.value })}
               />
               <label className="clip__label" htmlFor="clip-body">
-                正文（Markdown；右边是同一个渲染器出来的实时预览）
+                正文（Markdown；左边是同一个渲染器出来的实时预览）
               </label>
               <textarea
                 id="clip-body"
@@ -138,16 +155,6 @@ export function ClipApp({ boot, onReady }: ClipAppProps) {
                 onChange={(event) => dispatch({ type: "edit-body", body: event.target.value })}
               />
               {draftHint !== null ? <p className="clip__note">{draftHint}</p> : null}
-            </section>
-
-            <section className="clip__pane clip__pane--preview" aria-label="渲染预览">
-              <div className="clip__preview-scroll">
-                {preview.empty ? (
-                  <p className="clip__empty">正文是空的，这里会显示渲染后的效果。</p>
-                ) : (
-                  <article className="prose clip__prose" dangerouslySetInnerHTML={{ __html: preview.html }} />
-                )}
-              </div>
             </section>
           </>
         )}

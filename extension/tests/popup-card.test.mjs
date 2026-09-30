@@ -50,13 +50,21 @@ test("⑤ 选中态只用既有令牌着色，且 popup.css 里没有任何写�
 
 /* ── ② 预览卡片：取值逐条对照应用 ───────────────────────────────────────── */
 
-test("② 卡片正文用编辑器同一批令牌（等宽正文 + 文档字号/行高）", () => {
+test("② 卡片正文用编辑器同一批令牌（等宽正文 + 行高；**字号在 popup 里收小**）", () => {
   const doc = (CSS.match(/^\.clip__doc\{[^}]*\}/m) || [])[0] || "";
   assert.ok(doc.length > 0, "缺少 .clip__doc 规则");
   assert.match(doc, /font-family:var\(--font-mono\)/, "正文等宽（应用里 --font-mono 是同一族的来源）");
-  assert.match(doc, /font-size:var\(--doc-fs\)/, "字号取 --doc-fs（不凭目测写 20px）");
   assert.match(doc, /line-height:var\(--doc-lh\)/, "行高取 --doc-lh（不凭目测写 1.9）");
   assert.match(doc, /padding-left:var\(--s4\)/, "左侧留白用既有间距令牌");
+  /*
+   * 字号：**0.3.3 起不再是 `--doc-fs`**（用户原话「选择的字体太大了」）。
+   * 应用侧的 `--doc-fs:16.5px` 是给整窗编辑器用的；360px 宽的 popup 里它太大。
+   * 这条判据原来断言的是 `var(--doc-fs)` —— 那是**旧要求**，改规则就要连着改判据，
+   * 并在原地写清为什么（否则下一个人会以为实现漂移了又改回去）。
+   * 新要求：用 popup 自己的层级字号 `--fs-md`（13.5px），**不新增令牌、也不动 tokens.css**。
+   */
+  assert.match(doc, /font-size:var\(--fs-md\)/, "popup 里的正文字号用 --fs-md（用户要求收小）");
+  assert.doesNotMatch(doc, /--doc-fs/, "不许再用应用侧的大字号令牌");
 });
 
 test("② H1/H2 与应用取值一致（衬线粗体 + 通栏细线 + 暗灰 # 标记）", () => {
@@ -127,4 +135,46 @@ test("③ 图片开关是卡片上的复选框、默认关、且说明随状态�
   assert.match(code, /这一页没找到可以下载的图片，正文里保留原始网址。/, "0 张图时也要说清楚");
   // 工具条仍是两个按钮：开关不在工具条里（M1 冻结决定不破）
   assert.doesNotMatch(BARE, /id="imgDownload"/, "开关是渲染出来的，不写死在 popup.html 的工具条里");
+});
+
+/* ── ④ popup 外壳三项（task-7，用户真机截图提的） ─────────────────────── */
+
+/** `.clip{…}` 这条外壳规则（`\.clip\{` 不会误匹配 `.clip__head{`）。 */
+function shellRule() {
+  const found = (CSS.match(/\.clip\{[^}]*\}/) || [])[0] || "";
+  assert.ok(found, "找不到 .clip 外壳规则 —— 判据的被判对象消失了，必须红（不是跳过）");
+  return found;
+}
+
+test("① 外框不做圆角：popup 窗口不可能透明，圆角只会露出窗口自身的底色", () => {
+  const shell = shellRule();
+  assert.doesNotMatch(shell, /border-radius/, "最外层不许有圆角（四个角会露出窗口底色，比不做圆角更难看）");
+  assert.doesNotMatch(shell, /box-shadow/, "元素填满窗口 ⇒ 阴影全在窗口外被裁掉，是写了不生效的死样式");
+  // 反面：不是把圆角一刀切掉 —— 内部卡片仍保留圆角（否则这条判据可以靠「全删圆角」蒙过去）
+  assert.match(CSS, /\.clip__preview\{[^}]*border-radius/, "内部卡片必须保留圆角");
+});
+
+test("③ 高度固定：不许再随内容跳（min-height / max-height 都去掉）", () => {
+  const shell = shellRule();
+  assert.match(shell, /height:600px/, "固定 600px（Chrome popup 的上限）");
+  assert.doesNotMatch(shell, /min-height|max-height/, "不许再有随内容变化的上下限");
+});
+
+test("② 预览正文字号改用既有令牌 --fs-md；tokens.css 一个字节都不动", () => {
+  const doc = (CSS.match(/\.clip__doc\{[^}]*\}/) || [])[0] || "";
+  assert.ok(doc, "找不到 .clip__doc 规则");
+  assert.match(doc, /font-size:var\(--fs-md\)/, "360px 宽的 popup 里 16.5px 太大");
+  assert.doesNotMatch(doc, /--doc-fs/, "不许再用应用侧的大字号令牌");
+  // 只改局部规则、不动令牌表：`--doc-fs` 的值必须原样（另有 55 令牌 sha256 门禁兜底，这里加一层）
+  const tokens = readFileSync(join(ROOT, "src", "styles", "tokens.css"), "utf8");
+  assert.match(tokens, /--doc-fs:\s*16\.5px/, "tokens.css 的 --doc-fs 必须原样不动");
+});
+
+test("④ 交付提示：inbox 那一支不再渲染，被删的那句不许再出现在 popup.js（含注释）", () => {
+  assert.match(code, /if \(inbox === true\) \{/, "必须有 inbox 分支（有意的空分支，理由写在注释里）");
+  assert.match(code, /deliveryHint\.hidden = true;/, "inbox 时要把整行藏起来（空 <p> 仍会占着自己的 margin）");
+  // 扫**原文**（不剥注释）：注释也是标签，留一句「已删除」的原句会让这条判据变成空话。
+  assert.doesNotMatch(JS, /在收件箱里确认后才会写成笔记/, "用户要求删掉的那句不许留在 popup.js 里");
+  assert.match(code, /这次会直接写成笔记，可以在 Opennote 里撤销。/, "C47 保留（说的是另一件事）");
+  assert.match(code, /交付方式由 Opennote 的设置决定，剪藏完成后会如实显示结果。/, "C48 保留");
 });

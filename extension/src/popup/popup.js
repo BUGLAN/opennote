@@ -884,12 +884,33 @@ function precheck() {
   return [];
 }
 
-/** L6（C46/C47/C48）：交付方式**如实显示**，不替用户承诺，也不做假开关。 */
+/**
+ * L6（C47/C48）：交付方式**如实显示**，不替用户承诺，也不做假开关。
+ *
+ * ④ 用户明确要求**删掉**「先进收件箱」那一句（原话是「这次会先进收件箱、要在收件箱里确认」
+ * 那个意思的那一行）。所以 `inbox === true` 时**不显示任何交付提示行** ——
+ * 这是**有意的空分支**，不是漏写；理由写在这里，免得下一个人以为是 bug 又把它加回来：
+ *   - 这句在「默认先进收件箱」的场景下**每次打开 popup 都在说同一件事**，用户已经知道；
+ *   - 入库结果并不会因此变得不可知：回执里仍会如实写「已进入收件箱等待确认：{标题}。」
+ *     （`lib/state.js` 的冻结文案，`S23`），那才是「这次到底去哪了」的最终事实。
+ *   - **被删掉的那句原文不再出现在代码或注释里**（注释也是标签：留一个「已删除」的句子，
+ *     会让「这句不许再出现」的判据变成一句空话）。要查原句请看 `03` §UI-01 的 `C46` 作废行。
+ * 另外两支**保留**，它们说的是不同的事：`direct` = 这次会直接写成笔记（可撤销）；
+ * `unknown` = 旧版桥没给这个字段，判断不出来（如实说「判断不出来」，不猜）。
+ *
+ * 固定高度（③）之后这个空分支还要**把这一行藏起来**（`hidden`）：否则一个空的 `<p>`
+ * 仍会占着它自己的 `margin-bottom`，在 600px 的窗口里留一条没意义的缝。
+ */
 function updateDeliveryHint() {
   if (!deliveryHint) return;
   const inbox = snapshot && snapshot.inbox;
-  if (inbox === true) deliveryHint.textContent = "这次会先进入 Opennote 的收件箱，在收件箱里确认后才会写成笔记。";
-  else if (inbox === false) deliveryHint.textContent = "这次会直接写成笔记，可以在 Opennote 里撤销。";
+  if (inbox === true) {
+    deliveryHint.textContent = "";
+    deliveryHint.hidden = true;
+    return;
+  }
+  deliveryHint.hidden = false;
+  if (inbox === false) deliveryHint.textContent = "这次会直接写成笔记，可以在 Opennote 里撤销。";
   else deliveryHint.textContent = "交付方式由 Opennote 的设置决定，剪藏完成后会如实显示结果。";
 }
 

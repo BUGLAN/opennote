@@ -50,17 +50,26 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
 
-/* ── UI-01 弹窗外壳 ─────────────────────────────────────────────────── */
+/* ── UI-01 弹窗外壳 ───────────────────────────────────────────────────
+   ① 外框**不做圆角**（用户原话：「插件边框需要优化，圆角但是背景又不是透明的」）。
+   事实约束（不许绕过）：Chrome 扩展 popup 的窗口**不可能透明** —— 圆角切掉的那四块露出来的是
+   **窗口自身的底色**，不是 popup 后面的页面。所以「圆角 + 不透明底」在这一层天然矛盾：
+   画了圆角，四个角就露出浏览器给的方块底色，比不做圆角更难看。
+   自洽的做法：**最外层就是干净矩形**（本元素填满整个窗口），圆角留给内部卡片 / 按钮 / 菜单
+   （`.clip__preview`、`.btn`、`.clip__menu` 各自的 `--radius*` 不受影响）。
+   **不许**用 `background:transparent` 假装解决：那只会把窗口底色露得更多，不是变透明。
+   `box-shadow` 一并去掉：元素填满窗口，阴影全落在窗口外被裁掉，留着就是死样式（写了不生效）。
+
+   ③ 高度**固定**（用户原话：「期望插件高度固定」）：`height:600px`（Chrome popup 的上限就是
+   600px），内容多少都不再让窗口跳高度；滚动交给下面那条已有的 `.clip__body{overflow-y:auto}`。
+   代价如实写在这里：内容少时下方会留白 —— 用页面底色如实呈现，不拿「假内容」去填。 */
 .clip{
   width:360px;
-  min-height:380px;
-  max-height:600px;
+  height:600px;
   display:flex;
   flex-direction:column;
   background:var(--paper);
   border:1px solid var(--rule-strong);
-  border-radius:var(--radius-lg);
-  box-shadow:var(--shadow-3);
   overflow:hidden;
 }
 .clip__head{display:flex;align-items:center;gap:var(--s2);height:40px;padding:0 var(--s3);border-bottom:1px solid var(--rule);background:var(--paper-2);flex:none}
@@ -108,7 +117,14 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__src em{font-style:normal;color:var(--ink-2)}
 
 /* 只读文档层：与编辑器同一批令牌；不是输入控件 ⇒ 没有默认聚焦环（控件的 :focus-visible 照 S-C3 保留） */
-.clip__doc{max-height:260px;overflow:auto;padding-left:var(--s4);font-family:var(--font-mono);font-size:var(--doc-fs);line-height:var(--doc-lh);color:var(--ink);overflow-wrap:anywhere}
+/* 只读文档层：与编辑器同一批令牌；不是输入控件 ⇒ 没有默认聚焦环（控件的 :focus-visible 照 S-C3 保留）。
+   ② 字号用 **--fs-md**（13.5px），不用应用侧的 --doc-fs（16.5px）：360px 宽的 popup 里 16.5px 太大
+   （用户原话「选择的字体太大了」）。只改这一条**局部**规则，**不动 tokens.css**（55 个令牌、
+   有 sha256 门禁），也没有新增令牌。层级字号是相对的 em（H1 1.85em / H2 1.45em / 表格 .84em），
+   所以会跟着一起缩，不需要各改一遍。
+   ③ 这里**不再自己滚动**（原来 max-height:260px + overflow:auto）：固定高度的 popup 里只留
+   `.clip__body` 一个滚动容器，避免「嵌套滚动条」那种两层滚动的难用感。 */
+.clip__doc{padding-left:var(--s4);font-family:var(--font-mono);font-size:var(--fs-md);line-height:var(--doc-lh);color:var(--ink);overflow-wrap:anywhere}
 .clip__doc>*:first-child{margin-top:0}
 .clip__doc h1,.clip__doc h2,.clip__doc h3,.clip__doc h4{font-family:var(--font-serif);font-weight:600;letter-spacing:-.005em}
 .clip__doc h1{margin:.85em 0 .3em;font-size:1.85em;line-height:1.28;letter-spacing:-.014em;border-bottom:2px solid var(--rule);padding-bottom:.3em}
