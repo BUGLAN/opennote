@@ -6,6 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   ENVELOPE_KEYS,
@@ -196,16 +197,22 @@ test("body 体积上限 8 MiB（超限交给 IMP-4004，不截断）", () => {
 });
 
 test("错误码总表覆盖契约 A.3 的全部 IMP 码（不存在「未知错误」兜底）", () => {
-  // 基准：docs/import/02 §A.3 错误码索引（33 条）
-  const index = [
-    "IMP-1001", "IMP-1002", "IMP-1003", "IMP-1004", "IMP-1005", "IMP-1006",
-    "IMP-2001", "IMP-2002", "IMP-2003", "IMP-2004",
-    "IMP-3001", "IMP-3002", "IMP-3003", "IMP-3004", "IMP-3005",
-    "IMP-4001", "IMP-4002", "IMP-4003", "IMP-4004", "IMP-4005", "IMP-4006", "IMP-4007",
-    "IMP-4008", "IMP-4009", "IMP-4010", "IMP-4011", "IMP-4012", "IMP-4013", "IMP-4014",
-    "IMP-4015", "IMP-4017", "IMP-4020", "IMP-5001",
-  ];
-  assert.equal(index.length, 33);
+  /*
+   * 基准**从 `docs/import/02` §A.3 现读**，不再手抄。
+   *
+   * 这里原来是一份手写的 33 条清单，注释还写着「基准：02 §A.3 错误码索引（33 条）」——
+   * 而 0.3.3 把网页版剪藏页的 5 个码（`IMP-4018/4019/4021/4022/5003`）登记进 A.3 之后，
+   * 文档有 38 条、这份「基准」还是 33 条：**判据的细节与被判对象不是同一个东西**。
+   * 它当时是绿的（只要求表覆盖那 33 条），直到扩展侧补码才反过来变红 —— 一次漂移，
+   * 两头都会说谎：漏掉的码不会红，补上的码反而红。
+   * 所以改成**解析文档**：文档加一个码，扩展侧不补就当场红。
+   */
+  const doc = readFileSync(new URL("../../docs/import/02-接口契约-导入信封与通道.md", import.meta.url), "utf8");
+  const block = /###\s*A\.3\s*错误码索引\s*```text([\s\S]*?)```/.exec(doc);
+  assert.ok(block, "02 §A.3 的错误码索引块没找到 —— 判据的被判对象消失了，必须红（不是跳过）");
+  const index = [...new Set(block[1].match(/IMP-\d{4}/g) ?? [])].sort();
+  // 防「文档自己缩水」：A.3 的条数不得少于 0.3.1 时的 33 条。
+  assert.ok(index.length >= 33, `A.3 索引条数异常（${index.length} < 33）`);
   // 0.3.1（Lead 裁定）：IMP-2004 已作废，本表不再收录它的文案；码号仍在 02 §A.3 里，
   // 所以这里按「表 = A.3 减去作废码」比对，并要求作废码**确实不在表里**。
   const deprecated = ["IMP-2004"];
