@@ -210,3 +210,48 @@ test("task-29 ①：蒙层用既有令牌、且不再占用 --sel（一个令牌
   assert.doesNotMatch(picker, /--(sel|scrim|mask)\s*:/, "不许新增令牌（红线：新增 0）");
 });
 
+
+/* ── 7. P0：元素模式的预览/提交必须读被点中的那块（不是整页正文） ───────── */
+
+test("P0：元素模式的预览/提交必须读被点中的那块（不是整页正文）", () => {
+  const start = POPUP.indexOf("function currentMarkdown()");
+  assert.ok(start > -1, "找不到 currentMarkdown()");
+  // 注释里出现 `ex.article` 不算「代码走了整页」—— 先剥注释再比位置（上一课：注释会把判据带偏）
+  const raw = POPUP.slice(start, POPUP.indexOf("\n}", start));
+  const fn = raw
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+  assert.match(fn, /mode === "element"/, "元素模式必须有独立分支");
+  // 光是「文本里有 mode === "element"」挡不住「挂了 && false」这种等于忽略模式的写法 ——
+  // 判据要钉在**条件本身**上。注意上一版我把正则写成要求 `)` 紧跟 `element"`，
+  // 于是 `element" && false` 根本不匹配 → 变异照过，**红证明是假的**（自己踩的坑，记录在此）。
+  assert.match(fn, /if \(mode === "element"\) \{/, '元素分支的条件必须**就是** mode === "element"');
+  assert.doesNotMatch(fn, /mode === "element"\s*&&/, "不许给元素分支挂额外条件（等于忽略模式）");
+  assert.match(fn, /pickedElement[\s\S]{0,120}markdown/, "必须取 pickedElement.markdown");
+  // 关键：元素分支必须挡在「落到整页正文」之前，否则又是「写了不读」的假开关
+  assert.ok(fn.indexOf('mode === "element"') < fn.indexOf("ex.article"), "元素分支必须挡在整页正文之前");
+  // ★ 关键补丁：预览渲染（previewNode）必须**调用** currentMarkdown()。
+  // 原来这里只盯 currentMarkdown 本身 —— 而 previewNode 根本不调用它（写死 ex.article.excerpt），
+  // 所以那条断言对"用户看到的预览"是**假覆盖**：函数修好了，预览照样显示整页。
+  const pvRaw = POPUP.slice(POPUP.indexOf("function previewNode()"), POPUP.indexOf("function ", POPUP.indexOf("function previewNode()") + 10));
+  // 注释里提到 `ex.article.excerpt` 不算"代码在取整页摘要"——**第三次**踩这个坑了，一律先剥注释
+  const pv = pvRaw
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+  assert.match(pv, /const excerpt = currentMarkdown\(\);/, "预览正文必须取自 currentMarkdown()（唯一产地）");
+  assert.doesNotMatch(pv, /ex\.article\.excerpt/, "预览不得直接取整页摘要（元素模式会被冒充成整页）");
+});
+
+/* ── 8. 根因四：预览回包到了必须重绘，且字段形状要对 ─────────────────── */
+
+test("根因四：refreshPreview 拿到回包后必须重绘（否则正文永不出现）", () => {
+  const start = POPUP.indexOf("async function refreshPreview()");
+  assert.ok(start > -1, "找不到 refreshPreview()");
+  const raw = POPUP.slice(start, POPUP.indexOf("\n}", start));
+  const fn = raw.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+  assert.match(fn, /lastPreview = preview;[\s\S]{0,400}?render\(\);/, "赋值 lastPreview 之后必须 render()（真机：不重绘 → 正文 15s 全空）");
+  assert.match(fn, /titleValue = preview\.title \|\|/, "标题按回包真实形状读（后台发 preview.title，不发 preview.props）");
+  assert.doesNotMatch(fn, /preview\.props/, "不许再按不存在的 preview.props 读标题");
+});

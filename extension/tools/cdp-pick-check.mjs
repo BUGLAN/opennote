@@ -480,6 +480,48 @@ async function main() {
       await page.send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 });
     }
 
+    // 探针（只读，不改产品）：pick 之后 popup 会不会**自己**把预览切到被点中的那块？
+    // 这一步同时回答两件事：① 断言该怎么写；② 产品该不该自动刷新（挑完元素还得再点一下？）
+    {
+      await new Promise((r) => setTimeout(r, 1500));
+      const readRegion = () => evaluate(popup, `(() => { const r = document.getElementById("region"); const c = document.getElementById("clip"); const t = (r && r.textContent.trim()) || ""; return { mode: c && c.dataset.mode, text: t, len: t.length }; })()`);
+      const afterPick = await readRegion().catch(() => null);
+      console.log(`     探针 · pick 之后（等 1.5s）：data-mode=${afterPick && afterPick.mode} 预览长度=${afterPick && afterPick.len} 头 30 字=${JSON.stringify(afterPick && afterPick.text.slice(0, 30))}`);
+      const rawPick = await readStoredPick(extId).catch(() => null);
+      console.log(`     探针 · 落盘的被选块：tagName=${rawPick && rawPick.tagName} chars=${rawPick && (rawPick.chars || String(rawPick.markdown || "").length)} 头 30 字=${JSON.stringify(String((rawPick && rawPick.markdown) || "").slice(0, 30))}`);
+      await evaluate(popup, `document.getElementById("extractPage").click()`).catch(() => {});
+      await new Promise((r) => setTimeout(r, 1500));
+      const afterPage = await readRegion().catch(() => null);
+      console.log(`     探针 · 再点「整页提取」：data-mode=${afterPage && afterPage.mode} 预览长度=${afterPage && afterPage.len} 头 30 字=${JSON.stringify(afterPage && afterPage.text.slice(0, 30))}`);
+      console.log(`     探针 · 两份预览文本相等？ ${Boolean(afterPick && afterPage && afterPick.text === afterPage.text)}`);
+      // ★ 决定 P0 是否闭环的问题：**重新打开 popup** 之后的初始 mode 是什么？
+      // 用户报的是「重新选择的预览和整页提取的预览是一样的」—— 他看到的必然是"重新打开后"的那一屏。
+      const needle = String(((await readStoredPick(extId).catch(() => null)) || {}).markdown || "").trim().slice(0, 12);
+      // 旧 target 已随 action popup 关闭而销毁（Page.navigate 会 CDP 超时）→ 必须**重新 triggerAction** 并重连
+      const reErr = await browser.send("Extensions.triggerAction", { id: extId, targetId: (tab && tab.targetId) || listed.demoPage.id }).then(() => null).catch((e) => e.message);
+      const popupTarget2 = await waitFor(async () => (await httpJson("/json/list")).find((t) => t.type === "page" && t.url.includes(`chrome-extension://${extId}/popup/popup.html`)), 15000);
+      if (popupTarget2) popup = await connect(popupTarget2.webSocketDebuggerUrl);
+      console.log(`     探针 · 重开方式：triggerAction` + (reErr ? ` 报错：${reErr}` : ` 成功`) + `；新 popup target=` + Boolean(popupTarget2));
+      const entryNow = await readStoredPick(extId).catch(() => null);
+      const pageUrl = ((await httpJson("/json/list")).find((t) => t.type === "page" && t.url.startsWith("http")) || {}).url || "";
+      console.log(`     探针 · picked 还在？ ${Boolean(entryNow)}；entry.url=${entryNow && entryNow.url}；页面 url=${pageUrl}；相等？ ${Boolean(entryNow && entryNow.url === pageUrl)}`);
+      const fresh = await waitFor(() => readRegion().then((r) => (r && r.mode ? r : null)), 20000).catch(() => null);
+      console.log(`     探针 · 重新加载 popup 后：data-mode=${fresh && fresh.mode} 预览长度=${fresh && fresh.len} 头 30 字=${JSON.stringify(fresh && fresh.text.slice(0, 30))}`);
+      console.log(`     探针 · 特征串 ${JSON.stringify(needle)} 出现在预览里？ ${fresh ? Boolean(needle && fresh.text.includes(needle)) : "UNKNOWN（读不到 popup）"}`);
+      // 15s 探针：摘要是"稍后才填上"还是"永远不填"？这决定 ② 是瞬时态还是掩盖根因。
+      let filledAt = null;
+      for (let i = 1; i <= 15; i += 1) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const sample = await readRegion().catch(() => null);
+        const hit = Boolean(sample && needle && sample.text.includes(needle));
+        if (i % 3 === 0 || hit || i === 1) {
+          console.log(`     探针 +${i}s · 长度=${sample && sample.len} 特征串在？ ${hit} 头 30 字=${JSON.stringify(sample && sample.text.slice(0, 30))}`);
+        }
+        if (hit) { filledAt = i; break; }
+      }
+      console.log(`     探针 · 15s 内摘要被填上？ ${filledAt ? `是（第 ${filledAt} 秒）` : "否（15s 仍是空/无特征串）"}`);
+      if (!fresh) console.log("     探针 · 读不到 popup：可能是 action popup 被关闭且 target 已销毁 → 需改用 Extensions.triggerAction 重开");
+    }
     const entry = await waitFor(() => readStoredPick(extId), 25000);
     observe(Boolean(entry), "点一下之后选择结果落进 chrome.storage.local（picked）",
       entry && `tagName=${entry.tagName} chars=${entry.chars} selector=${entry.selector}`);

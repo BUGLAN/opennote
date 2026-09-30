@@ -196,10 +196,11 @@ function previewNode() {
   }
   box.appendChild(row);
 
-  const excerpt =
-    mode === "selection"
-      ? (ex && ex.selection && ex.selection.markdown) || ""
-      : (ex && ex.article && ex.article.excerpt) || "";
+  // 预览正文的**唯一**来源：`currentMarkdown()`（它内部再按 mode 分流：元素选择 → 被点中的那块）。
+  // 这里原来写死 `ex.article.excerpt` —— 于是**元素模式的预览永远显示整页摘要**，与整页提取一模一样
+  // （用户实测：「重新选择的预览和整页提取的预览是一样的」）。**优先级：元素模式 > 整页；
+  // 任何兜底都不得用另一份正文顶替「被选中的那一块」**（冒充比空白更糟：用户无从发现）。
+  const excerpt = currentMarkdown();
   box.appendChild(el("p", "clip__excerpt", String(excerpt).slice(0, 600)));
 
   const src = el("p", "clip__src");
@@ -443,8 +444,11 @@ async function refreshPreview() {
   }
   const preview = response.preview;
   lastPreview = preview;
-  const props = preview.props || {};
-  titleValue = props.title || titleValue || "";
+  // 根因四：回包到了**必须重绘**。`load()` 是「先 render() 再 refreshPreview()」，回包只赋值不重绘
+  // → 正文区永远停在渲染那一刻的空摘要（真机 15s 六次采样全为空，特征串从未出现）。
+  // 标题也按回包的**真实形状**读：后台发的是 `preview.title`（没有 `preview.props`）。
+  titleValue = preview.title || titleValue || "";
+  render();
   // 正文区里的标题行是只读视图（唯一输入源是属性区，03 §UI-01 ②）
   const inlineTitle = document.getElementById("inlineTitle");
   if (inlineTitle) inlineTitle.textContent = titleValue || "未命名笔记";
@@ -466,6 +470,14 @@ function notify(text) {
 function currentMarkdown() {
   const ex = extraction();
   if (!ex) return "";
+  // ㉝ 元素选择：**预览与提交都必须是被点中的那块**。
+  // 这里原来只认 `ex.article.markdown` —— 元素模式于是退化成整页正文，预览和整页提取一模一样
+  // （用户实测：「重新选择的预览和整页提取的预览是一样的」）。数据早就在预览回包里
+  // （后台 `opennote:preview` 的 `pickedElement.markdown`），是**这一端没读**，不是选择没落盘。
+  if (mode === "element") {
+    const picked = (lastPreview && lastPreview.pickedElement) || (snapshot && snapshot.pickedElement) || null;
+    return (picked && picked.markdown) || "";
+  }
   if (mode === "selection") return (ex.selection && ex.selection.markdown) || "";
   return (ex.article && ex.article.markdown) || "";
 }
