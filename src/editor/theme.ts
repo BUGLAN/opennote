@@ -40,7 +40,14 @@ const baseTheme = EditorView.theme({
     borderLeft: "2px solid var(--accent)",
     borderRadius: "1px",
   },
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
+  /*
+   * 选区底色见 `src/styles/editor.css` 的 `.cm-selectionLayer .cm-selectionBackground`：
+   * CM 的 baseTheme 用一条**比这里更专一**的选择器画它自己的固定色（浅 `#d7d4f0` / 深 `#233`），
+   * 而 `EditorView.theme()` 里既写不出 `&light`/`&dark`（会抛 `RangeError: Unsupported selector`），
+   * 特异度也压不过它 —— 所以那条规则写在 CSS 里。
+   * 这两条保留：编辑器**失焦**时用的是原生 `::selection`。
+   */
+  ".cm-selectionBackground, .cm-content ::selection": {
     backgroundColor: "var(--sel)",
   },
   ".cm-activeLine": { backgroundColor: "transparent" },

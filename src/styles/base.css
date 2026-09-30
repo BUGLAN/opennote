@@ -202,6 +202,15 @@ a {
   color: var(--accent);
 }
 
+/* 危险确认按钮（`btn--primary btn--danger`）：底色本身就是强调色，文字必须回到 `--accent-ink`。
+   两条单独写时 `--accent` 文字压在纸底上是「危险」的视觉语言，但一旦和 `btn--primary` 同时出现，
+   `color: var(--accent)` 会盖掉 `btn--primary` 的 `--accent-ink`（同特异度、后写的赢）——
+   结果是 `color === background`，按钮变成一块**没有字的色块**（清空回收站 / 彻底删除 / 丢弃 / 删除文件夹）。
+   两条类一组合就必须让文字色赢，所以这里用双类选择器把特异度提上去。 */
+.btn--primary.btn--danger {
+  color: var(--accent-ink);
+}
+
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;

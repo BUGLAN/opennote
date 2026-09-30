@@ -13,6 +13,30 @@
   padding-right: 2px;
 }
 
+/*
+ * 选区底色：CodeMirror 的 baseTheme 用 `.ͼ2.cm-focused > .cm-scroller > .cm-selectionLayer
+ * .cm-selectionBackground`（5 个类）画它自己的固定色（浅色 `#d7d4f0` / 深色 `#233`）。
+ * 而本应用的主题是 CSS 变量驱动的、CM 这边**永远被当成 light**，于是夜读主题里也会出现那块淡紫：
+ * 浅色的字压在淡紫上几乎看不清。`EditorView.theme()` 里压不过它（也写不出 `&light`/`&dark`，
+ * 会抛 `RangeError: Unsupported selector`），所以这条规则落在这里，用 6 个类压过它，
+ * 颜色交回 `--sel`（跟着主题与强调色走）。失焦时的原生 `::selection` 仍由 `theme.ts` 那条管。
+ *
+ * 颜色要落成**不透明**的：把半透明的 `--sel` 先压在纸色上画（`linear-gradient` 那层），
+ * 而不是只给 `background-color: var(--sel)` —— 因为 CM 的矩形彼此**紧挨**，下面那条规则会把
+ * 每个矩形上下撑开，两个相邻矩形一重叠，半透明色就会叠出 6px 的深色接缝。
+ *
+ * 撑开的原因：CM 给的矩形高度就是**字体盒**，而汉字的墨迹常常从字体盒上沿冒出去（下沿几乎不会），
+ * 只看颜色的话「字冒出色块」看着像没选中。位置仍由 CM 的行内样式定，行高、排版一个像素都不动；
+ * 总增量 6px 仍小于最小行间空隙（行高下限 1.4 ⇒ 空 6.8px），撑开不会吃掉下一行。
+ */
+.editor-host .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
+  background-color: var(--paper);
+  background-image: linear-gradient(var(--sel), var(--sel));
+  box-sizing: content-box;
+  padding-block: 4px 2px;
+  margin-block: -4px -2px;
+}
+
 /* ---- empty document hint ---------------------------------------------- */
 .editor-host.md-empty .cm-content::before {
   content: attr(data-placeholder);
@@ -216,8 +240,19 @@
 }
 
 /* ---- code blocks ------------------------------------------------------- */
+/*
+ * 底色画在 `::after`（负 `z-index`）上，不是 `.cm-line` 自己身上：
+ * CodeMirror 的选区层（`.cm-selectionLayer`）在 `.cm-content` **下面**，行自己带不透明底色
+ * 就会把选区高亮整块盖住 —— 选中代码块里的字**看不见**（失焦时反而看得见，因为那是浏览器
+ * 原生 `::selection`，画在底色之上）。放到负 z-index 的伪元素上，底色落在选区层之下、
+ * 正文之上，两边都看得见。`::before` 被 `.md-code-first[data-lang]` 的语言标签占用了。
+ * `border-radius: inherit` 让首/末行的 8px 圆角照旧。
+ * `-3` 不是随手写的：CM 给 `.cm-selectionLayer` 的是 `z-index: -2`，负值里**更小**的那个先画，
+ * 所以代码块底色必须 `< -2` 才落在选区层底下。
+ */
 .cm-content .cm-line.md-code-line {
-  background: var(--code-bg);
+  position: relative;
+  background: none;
   border-left: 2px solid var(--accent-line);
   border-right: 1px solid var(--rule);
   padding-left: 14px;
@@ -225,6 +260,15 @@
   font-family: var(--font-mono);
   font-size: 0.86em;
   line-height: 1.65;
+}
+
+.cm-content .cm-line.md-code-line::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -3;
+  background: var(--code-bg);
+  border-radius: inherit;
 }
 
 .cm-content .cm-line.md-code-first {
