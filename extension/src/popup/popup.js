@@ -540,17 +540,26 @@ function actionButton(action) {
 /**
  * 令牌块（00 §6.15㉞ / 03 §UI-01 S30–S32）。
  * 0.3.1 起**没有配对码**：这里只有「粘贴 47 字符长期令牌」这一条路，且常显代价披露句（C72）。
+ *
+ * `force = true`：**这次错误就是「令牌不对」**（`plan.tokenInput`）⇒ 即使本地还存着旧令牌，
+ * 也必须把输入框露出来让用户重粘。
+ *
+ * 为什么需要这个参数：原来只看 `state.hasToken` 决定显示只读的「已保存」还是输入框，
+ * 于是「令牌不对」时用户**卡在只读视图上没法重粘** —— 后台为了绕开它，只好在 `IMP-2002`
+ * 时把用户存的令牌**删掉**。那不是修复，那是用一个副作用（毁掉用户配置，与 ㊴「长期有效、
+ * 随时可复制」的承诺冲突）去换一个本该由渲染层解决的显示问题。
  */
-function tokenInputBlock() {
+function tokenInputBlock(force = false) {
   tokenRow.hidden = false;
   const state = snapshot && snapshot.settings ? snapshot.settings : {};
   const hasToken = Boolean(state.hasToken);
-  tokenSaved.hidden = !hasToken;
-  tokenInputRow.hidden = hasToken;
-  tokenHint.hidden = hasToken;
-  tokenMain.hidden = hasToken;
+  const needInput = force || !hasToken;
+  tokenSaved.hidden = needInput;
+  tokenInputRow.hidden = !needInput;
+  tokenHint.hidden = !needInput;
+  tokenMain.hidden = !needInput;
   tokenError.hidden = true;
-  if (hasToken) {
+  if (!needInput) {
     // C58 / UI-04 S6 的只读写法：`opn_••••••••••••1234`（明文不留在界面上）。
     // M2：尾 4 位由后台从**已保存的令牌**推导（settings.tokenTail），这里不再有 `????` 假尾号。
     tokenCode.textContent = maskTokenTail(state.tokenTail);
@@ -570,8 +579,9 @@ function blockNode(block, plan) {
   box.appendChild(el("p", null, message));
   if (block.next) box.appendChild(el("p", "next", block.next));
   if (block.code) box.appendChild(el("div", "code", block.code));
-  // `kind: "token"`（㉞）：这个错误块的下一步动作只有一个 —— 粘贴长期令牌
-  if (plan && plan.tokenInput) box.appendChild(tokenInputBlock());
+  // `kind: "token"`（㉞）：这个错误块的下一步动作只有一个 —— 粘贴长期令牌。
+  // `true` = 这次错误就是「令牌不对」，**即使本地还存着旧令牌也要露出输入框**（否则用户没法重粘）。
+  if (plan && plan.tokenInput) box.appendChild(tokenInputBlock(true));
   if (settingsOpen || (plan && plan.settingsOnly)) box.appendChild(tokenInputBlock());
 
   const acts = el("div", "acts");

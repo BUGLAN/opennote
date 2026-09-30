@@ -252,3 +252,27 @@ test("错误码总表覆盖契约 A.3 的全部 IMP 码（不存在「未知错�
   assert.equal(userMessage("IMP-1005"), null);
   assert.equal(userMessage("IMP-3004"), null);
 });
+
+/*
+ * 0.3.3 修的结构错误：`userMessage()` 原来第一行是 `if (!entry) return null;` ——
+ * **码号不在表里时，服务端自己给的那句话被直接丢掉**。真实现场：桥回 `IMP-5003`
+ * （剪藏页还没构建）并自带一句人话，而扩展侧表里当时没有这个码 ⇒ popup 显示成
+ * 「导入时出现了内部错误，已记录日志。请重试一次。」（IMP-4014 的兜底），用户据此无法定位。
+ */
+test("userMessage：服务端原句是就近事实，**码号不在表里也一样**（不许丢掉它）", () => {
+  /*
+   * 用 `IMP-2004` 当「不在表里」的样本：它是**已登记但已作废**的码
+   * （00 §6.15㉞：码号保留、不再产出，扩展侧表里刻意不收录它的文案）。
+   * 于是它天然就是「02 里有、表里没有」的那一类 —— 不需要在测试里编一个假码号
+   * （编假码会被 `verify-contract` 的 C-6 当场拦下：代码里的每个 IMP-#### 都必须在 A.3 登记，
+   *  那条判据是对的，不该为了测试方便给它开口子）。
+   */
+  assert.equal(isKnownCode("IMP-2004"), false, "前提：它确实不在扩展侧的码表里");
+  assert.equal(userMessage("IMP-2004", "服务端原句"), "服务端原句", "码不在表里 + 服务端原句 → 原句必须出来");
+  assert.equal(userMessage("IMP-2004"), null, "码不在表里 + 服务端没给 → null（调用方落回状态自带的逐字文案）");
+  // 但契约明令「不进用户视野」的码，连服务端原句也不放行（02 §6.2 三条 + IMP-1005）
+  assert.equal(userMessage("IMP-3005", "服务端原句"), null);
+  assert.equal(userMessage("IMP-3001", "服务端原句"), null);
+  assert.equal(userMessage("IMP-3004", "服务端原句"), null);
+  assert.equal(userMessage("IMP-1005", "服务端原句"), null);
+});

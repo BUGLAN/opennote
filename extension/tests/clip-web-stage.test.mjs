@@ -345,6 +345,48 @@ test("A：popup 走 background 的 opennote:clip-stage（popup 不自己发请�
   assert.match(BRIDGE, /headers: authHeaders\(token\)/, "必须复用同一套鉴权头（Bearer + X-Opennote-Token）");
 });
 
+/*
+ * 令牌不对时必须**能重粘**，而且**不许靠删掉用户存的令牌**来实现。
+ *
+ * 真实现场（0.3.3，用户实测点入口报错）：后台在 IMP-2001/IMP-2002 时把令牌删掉，只为让
+ * popup 显示粘贴框；而 ㊴ 的承诺是「长期有效、随时可复制」。更糟的是 `discover()` 是
+ * 8787–8796 **顺序探测命中即停** —— 只要有一个「同形状但不是同一实例」的桥在别的端口
+ * （例如诊断夹具），一次误判就会把用户的配置毁掉。
+ */
+test("令牌不对：露出输入框让用户重粘，但**不删**已存的令牌", () => {
+  const popupCode = stripComments(POPUP);
+  const backgroundCode = stripComments(BACKGROUND);
+  assert.match(POPUP, /function tokenInputBlock\(force = false\)/, "tokenInputBlock 必须支持「强制露出输入框」");
+  assert.match(
+    POPUP,
+    /plan\.tokenInput\) box\.appendChild\(tokenInputBlock\(true\)\)/,
+    "「这次错误就是令牌不对」时必须强制露出输入框（否则用户卡在只读视图上没法重粘）",
+  );
+  /*
+   * 关键的一条：**`force` 必须真的参与判断**。
+   *
+   * 第一版只断言了调用点（`tokenInputBlock(true)` 存在），于是把函数体里的
+   * `const needInput = force || !hasToken;` 改回 `!hasToken`（= 完全忽略 force）时，
+   * 四条断言全绿 —— 守卫恒绿。是变异自检 M2 把它抓出来的：
+   * **守卫的价值不在它被写出来，而在它被证明能红。**
+   */
+  assert.match(
+    POPUP,
+    /const needInput = force \|\| !hasToken;/,
+    "force 必须参与显示判断（只断言调用点等于没断言）",
+  );
+  assert.doesNotMatch(
+    popupCode,
+    /tokenInputRow\.hidden = hasToken;/,
+    "不许退回「只按有没有存过令牌决定显示」的旧写法",
+  );
+  // 反面：剪藏暂存那条失败路径里，不许再出现「删令牌」这个副作用。
+  const stageHandler = backgroundCode.slice(backgroundCode.indexOf("async function stageClipForWeb("));
+  const handlerBody = stageHandler.slice(0, stageHandler.indexOf("\n}\n"));
+  assert.doesNotMatch(handlerBody, /token:\s*null/, "stage 失败不许删掉用户存的令牌（改成保留 + 提示重粘）");
+  assert.match(popupCode, /tokenInputBlock\(true\)/, "popup 里必须真的用到强制形态");
+});
+
 test("A：成功才打开页面；失败先 return（不打开页面）+ 如实显示原因", () => {
   const start = POPUP.indexOf("async function openClipWeb(");
   assert.ok(start > -1, "找不到 openClipWeb()");

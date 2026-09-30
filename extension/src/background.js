@@ -783,7 +783,19 @@ async function stageClipForWeb({ mode, body, imageDownload }) {
   if (call.kind !== "ok") {
     const code = call.code || "IMP-4014";
     const message = userMessage(code, call.serverMessage);
-    if (code === "IMP-2001" || code === "IMP-2002") await mutate(() => ({ token: null }));
+    /*
+     * **不清令牌**（0.3.3 Lead 裁定）。
+     *
+     * 原来这里在 `IMP-2001`/`IMP-2002` 时把用户存的令牌**删掉**，理由是「删掉才能让 popup
+     * 显示粘贴框」。两个问题：
+     *   ① 与 ㊴ 的承诺冲突 —— 令牌是**长期有效、随时可复制**的唯一凭据，一次 401 就毁掉配置；
+     *   ② 一次**误判**就会毁掉配置：`discover()` 是 8787–8796 顺序探测命中即停，
+     *      只要有一个「同形状但不是同一实例」的桥在别的端口上（例如诊断夹具），
+     *      它就会拿你的令牌去撞另一个令牌 → 401 → 你的配置没了。
+     *      （0.3.3 实测踩到过一次：冒烟夹具占着 8788。）
+     * 现在改成「保留 + 提示重粘」：`TOKEN_INVALID` / `NEEDS_PAIRING` 两个状态本来就带
+     * `plan.tokenInput = true`，渲染层会露出输入框（`tokenInputBlock(true)`），不需要删令牌。
+     */
     return { ok: false, code, label: message, state: stateForCode(code) };
   }
   const result = call.result || {};

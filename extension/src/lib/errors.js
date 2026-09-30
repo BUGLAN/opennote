@@ -278,12 +278,24 @@ export const KNOWN_CODES = Object.freeze(Object.keys(IMP_TABLE));
  * 取某个错误码展示给用户的中文文案。
  * 优先级：服务端 userMessage（`serverMessage`，就近事实）> 插件侧覆盖 `ui` > 02 号原句。
  * 返回 null 表示该码按契约**不可见**（IMP-1005 / IMP-3004 / IMP-3005）。
+ *
+ * 注意（0.3.3 修的一处结构错误）：原来第一行是 `if (!entry) return null;` ——
+ * **码号不在表里时，服务端自己给的那句话会被直接丢掉**，用户看到的是与本因无关的兜底句。
+ * 真实现场：桥回 `IMP-5003`（剪藏页还没构建）+ 它自带的那句人话，扩展侧表里当时没有这个码
+ * ⇒ popup 显示成「导入时出现了内部错误，已记录日志。请重试一次。」（`IMP-4014` 的兜底），
+ * 用户据此完全无法定位。**表补齐了不等于这个结构问题消失**：任何未来新增的码都会重演。
+ *
+ * 现在的顺序：① 契约明令不可见的码先拦（服务端原句也不放行）；② **服务端原句优先，码号在不在表里都一样**；
+ * ③ 表里的 `ui` 覆盖 > `userMessage`；④ 表里也没有才是 null（调用方落回状态自带的逐字文案）。
  */
 export function userMessage(code, serverMessage) {
   const entry = IMP_TABLE[code];
-  if (!entry) return null;
+  // ① 契约明令「不进用户视野」的码先拦（服务端原句也不放行）。判据复用 `isVisibleInExtension()`：
+  //    这批码有两种写法（`silentInExtension: true` 与 `userMessage: null`），只看其中一个会漏。
+  if (entry && !isVisibleInExtension(code)) return null;
+  // ② 服务端原句是**就近事实**，优先级最高 —— **码号在不在表里都一样**。
   if (typeof serverMessage === "string" && serverMessage.trim()) return serverMessage;
-  if (entry.silentInExtension) return null;
+  if (!entry) return null;
   return entry.ui || entry.userMessage;
 }
 
