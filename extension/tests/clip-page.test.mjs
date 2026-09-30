@@ -49,3 +49,36 @@ test("无 URL 时入口不渲染（不画死按钮）", () => {
   assert.match(pv, /clip\/clip\.html/, "打开的必须是可编辑页（不是原始网页）");
   assert.match(pv, /aria-label/, "图标按钮必须有等价文字（可读性）");
 });
+
+test("A · 来源标签必须显式传入：clip 页不许再用 activeTab 读自己", () => {
+  const BG = readFileSync(join(ROOT, "src", "background.js"), "utf8");
+  assert.match(js, /new URLSearchParams\(location\.search\)\.get\("tabId"\)/, "clip 页必须从 URL 取 tabId");
+  assert.match(js, /type: "opennote:load", tabId: tabId/, "请求必须把 tabId 传给后台（同一条读取通路）");
+  assert.match(js, /请从 Opennote 剪藏面板/, "缺/非法 tabId 要如实提示，不许静默读自己");
+  assert.doesNotMatch(js, /chrome\.tabs\.query\(\{ active: true, currentWindow: true \}\)/, "clip 页不许再按 activeTab 取来源");
+  assert.match(BG, /options\.tabId === undefined \? await activeTab\(\) : await tabById\(options\.tabId\)/, "后台：显式 tabId 优先，且不退回 activeTab");
+  // 判据修正：不要写死变量名 —— 归一之后取标签用的是 get(id)。判据应盯「按归一后的 id 取」这个**意图**。
+  assert.match(BG, /async function tabById\(tabId\)[\s\S]{0,400}?const tab = await chrome\.tabs\.get\(id\);/, "后台必须有 tabById（用归一后的 id 取，非法/过期返回 null）");
+  // 判据修正：原正则漏了 getURL( 的右括号（真实文本 `getURL("clip/clip.html") + suffix`），
+  // 导致**正确树也红** —— 这是我自己制造的假红（与 U-8「范围与标题不符」同族）：
+  // **判据的细节必须与被判对象逐字一致**，否则它测的是我脑子里的文本，不是文件里的文本。
+  assert.match(POPUP, /getURL\("clip\/clip\.html"\) \+ suffix/, "popup 入口必须把源标签 id 带上");
+});
+
+
+test("A · tabId 类型必须归一：URL 参数是字符串，chrome.tabs 要数字", () => {
+  const BG = readFileSync(join(ROOT, "src", "background.js"), "utf8");
+  assert.match(BG, /typeof tabId === "string" && \/\^\[0-9\]\+\$\/\.test\(tabId\) \? Number\(tabId\) : tabId/, "必须显式把数字字符串归一为 number");
+  assert.match(BG, /const tab = await chrome\.tabs\.get\(id\);/, "取标签必须用归一后的 id");
+  assert.match(js, /Number\(raw\)/, "clip 页解析 URL 参数时必须转成 number");
+});
+
+
+test("入口默认隐藏：web 版剪藏页上线前不留点了没用的按钮", () => {
+  const start = POPUP.indexOf("function previewNode()");
+  const pv = POPUP.slice(start, POPUP.indexOf("\nfunction ", start + 10));
+  assert.match(pv, /const CLIP_WEB_READY = false;/, "必须有一个显式开关，默认关闭");
+  assert.match(pv, /CLIP_WEB_READY && \(/, "渲染条件必须被该开关短路（默认不渲染）");
+  // 旧路（clip/clip.html?tabId=）保留在代码里但不可达；新架构指向 web 版剪藏页后再启用。
+  assert.match(pv, /clip\/clip\.html/, "旧实现保留（供新架构接入时参考/替换）");
+});

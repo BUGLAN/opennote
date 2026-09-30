@@ -16,10 +16,10 @@ function newId() {
   return hex() + hex() + "-" + hex() + "-" + hex() + "-" + hex() + "-" + hex() + hex() + hex();
 }
 
-async function activeSource() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs && tabs[0];
-  return { url: (tab && tab.url) || "", title: (tab && tab.title) || "" };
+/** 来源标签 id 来自 URL；非法/缺失 → null（**不静默退回"活跃标签"**，那样会读到自己）。 */
+function sourceTabId() {
+  const raw = new URLSearchParams(location.search).get("tabId");
+  return raw !== null && /^[0-9]+$/.test(raw) ? Number(raw) : null;
 }
 
 function msg(text, bad) {
@@ -29,14 +29,29 @@ function msg(text, bad) {
 }
 
 async function prefill() {
-  const src = await activeSource();
+  const tabId = sourceTabId();
+  if (tabId === null) {
+    // 如实说明，不假装在读页面（也**不许**退回读自己）
+    $("src").textContent = "（没有来源标签页）";
+    msg("这个页面没有拿到来源标签，请从 Opennote 剪藏面板卡片上的图标按钮打开。", true);
+    $("save").hidden = true;
+    return;
+  }
+  const src = { url: "", title: "" };
   $("src").textContent = src.url || "（这个页面没有可剪藏的网址）";
   $("title").value = src.title || "";
   // **无 URL 就不渲染入口**（不画死按钮）：没有网址就没有可信来源
   $("save").hidden = !src.url;
   if (!src.url) return;
   try {
-    const response = await chrome.runtime.sendMessage({ type: "opennote:load" });
+    const response = await chrome.runtime.sendMessage({ type: "opennote:load", tabId: tabId });
+    const tab = (response && response.tab) || {};
+    src.url = tab.url || "";
+    src.title = tab.title || "";
+    $("src").textContent = src.url || "（这个页面没有可剪藏的网址）";
+    $("title").value = src.title || "";
+    $("save").hidden = !src.url;
+    if (!src.url) return;
     const ex = response && response.extraction;
     if (ex && ex.article && typeof ex.article.markdown === "string" && ex.article.markdown) {
       $("body").value = ex.article.markdown;
@@ -77,3 +92,4 @@ async function save() {
 
 void prefill();
 $("save").addEventListener("click", () => void save());
+

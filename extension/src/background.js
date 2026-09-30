@@ -111,6 +111,20 @@ export function folderLabelOf(folder) {
   return folder && String(folder).trim() ? String(folder).trim() : "根目录";
 }
 
+/** 显式按 tabId 取来源标签页；非法/过期一律返回 null（由调用方如实记 no_url）。 */
+async function tabById(tabId) {
+  // **同一个事实两种表示**：URL 里的参数永远是**字符串**，而 `chrome.tabs` 用的是数字。
+  // 这里显式归一（Number(...)）再校验，避免「合法 id 被判成非法」—— 与 `file` 两种基准同族。
+  const id = typeof tabId === "string" && /^[0-9]+$/.test(tabId) ? Number(tabId) : tabId;
+  if (typeof id !== "number" || !Number.isInteger(id) || id < 0) return null;
+  try {
+    const tab = await chrome.tabs.get(id);
+    return tab || null;
+  } catch {
+    return null;
+  }
+}
+
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab || null;
@@ -739,9 +753,12 @@ async function storeManualToken(token) {
 
 /* ─────────────────────── popup / 页面消息路由 ─────────────────────── */
 
-async function loadSnapshot() {
+async function loadSnapshot(options = {}) {
   await flushQueue({ limit: 2 });
-  const tab = await activeTab();
+  // 「哪个标签页」变成**显式入参**：clip.html 打开时它自己就是活动标签，再用 activeTab() 会读到
+  // **它自己**（chrome-extension:// → restricted → 正文永远读不到，用户实测）。传了 tabId 就只按 tabId
+  // 取，取不到如实记 no_url —— **绝不静默退回读自己**。
+  const tab = options.tabId === undefined ? await activeTab() : await tabById(options.tabId);
   // task-21 四因分离：`restricted`（受限 scheme）与 `extractionFailed`（抽取失败）**是两件事**，
   // 不再把它们合并成同一句「只有普通网页支持」。
   const snapshot = { ok: true, tab: null, extraction: null, restricted: false, extractionFailed: false, pickFailReason: null };
@@ -840,7 +857,7 @@ async function handle(message) {
     case "opennote:load":
     case "opennote:retry": {
       // 「等待必须有出口」：整次 load 到点必须给 popup 一个**可重试**的失败态，绝不无限 pending。
-      const pending = loadSnapshot().catch((error) => {
+      const pending = loadSnapshot(message.tabId === undefined ? {} : { tabId: message.tabId }).catch((error) => {
         console.warn("[opennote] loadSnapshot 抛错：%s", (error && error.message) || error);
         return null;
       });
@@ -1016,3 +1033,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 // service worker 每次启动都尝试补投一次（02 §5.7.7 queued_offline 的「上线后自动补投」）。
 void flushQueue({ limit: 3 });
+
+
+
+

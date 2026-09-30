@@ -209,7 +209,12 @@ function previewNode() {
   row.appendChild(title);
   // task-29 入口：**卡片标题行上的图标按钮** → 打开可编辑页（clip/clip.html）。
   // 工具条仍是两个按钮（M1 冻结决定不破）；**无网址时不渲染**（不画死按钮）。
-  const openTarget = (ex && ex.url) || (snapshot && snapshot.tab && snapshot.tab.url) || "";
+  // **入口暂时隐藏**（第四态：已构建但被新架构取代）。新的剪藏页由 Opennote 自己服务
+  // （http://127.0.0.1:8787/clip/<id>，用应用源码构建 ⇒ 渲染与编辑体验一致）。
+  // 等它上线后：这个按钮改为「把 url/title/body/folder 暂存给本地接口 + 打开该 URL」。
+  // 在那之前**不留一个点了没用的按钮**；下面这段跳转 clip/clip.html 的实现保留但不再启用。
+  const CLIP_WEB_READY = false;
+  const openTarget = CLIP_WEB_READY && ((ex && ex.url) || (snapshot && snapshot.tab && snapshot.tab.url) || "");
   if (openTarget) {
     const open = el("button", "clip__open");
     open.type = "button";
@@ -218,7 +223,10 @@ function previewNode() {
     open.setAttribute("aria-label", "在可编辑页里剪藏");
     open.appendChild(iconExternal());
     open.addEventListener("click", () => {
-      void chrome.tabs.create({ url: chrome.runtime.getURL("clip/clip.html") });
+      // 带上**源标签 id**：clip 页自己是活动标签，不带就会读到它自己（正文永远为空）
+const id = snapshot && snapshot.tab && snapshot.tab.id;
+const suffix = id === undefined || id === null ? "" : "?tabId=" + id;
+void chrome.tabs.create({ url: chrome.runtime.getURL("clip/clip.html") + suffix });
     });
     row.appendChild(open);
   }
@@ -1006,5 +1014,7 @@ document.documentElement.setAttribute(
 );
 bindEvents();
 void load();
+
+
 
 
