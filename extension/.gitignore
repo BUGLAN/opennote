@@ -4,3 +4,4 @@
 # 两个标记都不该进版本库：留在盘上只说明上次构建/变异被 kill 了。
 .building
 .mutation-running
+.shots/

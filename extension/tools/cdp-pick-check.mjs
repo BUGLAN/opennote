@@ -3,6 +3,13 @@
  * 真机验证：**元素选择**（00 §6.15㉝ / 03 §UI-16）。零依赖：只用 node:http / node:child_process +
  * Node 22 自带的 fetch 与全局 WebSocket。
  *
+ * 已知边界（2026-09-30 定案）：**action popup 在 CDP 里可能处于 hidden 态被节流**
+ * （`document.visibilityState === "hidden"` → 定时器不跑）—— 涉及 **popup 内交互**的路径
+ * （例如「粘贴令牌 → 连接」）**不能只靠本工具判定**，它会在「产品坏了」与「工具坏了」之间骗人。
+ * 该路径的结论：**CDP 环境下不可驱动；用户侧已由用户本人人工验证可用**（第三种状态，
+ * 既不是「未验证」也不是「机器已验证」）。判读入口：`storeManualToken` 的 `set-token：收到`
+ * 探针 + 本文件打印的 `visibilityState`。
+ *
  * 为什么必须走 CDP：Chrome 137+ 起命令行的 `--load-extension` 对未打包扩展不再生效，
  * 只能靠 `Extensions.loadUnpacked`（需要 `--enable-unsafe-extension-debugging`）。
  *
@@ -21,7 +28,7 @@
  */
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -75,8 +82,14 @@ function connect(wsUrl) {
     const socket = new WebSocket(wsUrl);
     let id = 0;
     const waiting = new Map();
+    const listeners = new Map();
     socket.addEventListener("message", (event) => {
       const message = JSON.parse(event.data);
+      if (message.method && listeners.has(message.method)) {
+        for (const handler of listeners.get(message.method)) {
+          try { handler(message.params); } catch { /* 事件处理不许影响主流程 */ }
+        }
+      }
       if (message.id && waiting.has(message.id)) {
         const { resolve: done, reject: fail } = waiting.get(message.id);
         waiting.delete(message.id);
@@ -100,12 +113,38 @@ function connect(wsUrl) {
             }, 20000);
           });
         },
+        on(method, handler) {
+          if (!listeners.has(method)) listeners.set(method, []);
+          listeners.get(method).push(handler);
+        },
         close() {
           socket.close();
         },
       }),
     );
   });
+}
+
+/**
+ * 盯住一个上下文的 console / 未捕获异常（Lead 派单③）。
+ * 用户实测的卡死就是 `popup.js` 里一个 `Uncaught ReferenceError` —— 只点按钮、只看 DOM 是**看不见**它的。
+ */
+async function watchConsole(session, sink) {
+  session.on("Runtime.exceptionThrown", (params) => {
+    const d = (params && params.exceptionDetails) || {};
+    sink.push(`Uncaught ${d.exception ? (d.exception.description || d.exception.value) : d.text}`);
+  });
+  session.on("Runtime.consoleAPICalled", (params) => {
+    if (!params || params.type !== "error") return;
+    const text = (params.args || []).map((arg) => arg.value ?? arg.description ?? arg.type).join(" ");
+    sink.push(`console.error ${text}`);
+  });
+  session.on("Log.entryAdded", (params) => {
+    const entry = (params && params.entry) || {};
+    if (entry.level === "error") sink.push(`log.error ${entry.text}`);
+  });
+  await session.send("Runtime.enable").catch(() => {});
+  await session.send("Log.enable").catch(() => {});
 }
 
 async function evaluate(session, expression) {
@@ -118,6 +157,28 @@ let failed = 0;
 function observe(ok, label, extra) {
   if (!ok) failed += 1;
   console.log(`${ok ? "PASS" : "FAIL"} ${label}${extra === undefined ? "" : ` —— ${extra}`}`);
+}
+
+// task-29 ④⑤：视觉类改动**先复现再修** —— 截图钩子（只读，不改产品行为）。
+// 注意区分两处取证面：① 的蒙层活在**页面**里（不受 popup 节流影响），④⑤ 活在 popup 里（可能只拿到空白帧）。
+const SHOT_DIR = join(import.meta.dirname, "..", ".shots");
+async function capture(session, name) {
+  try {
+    const shot = await session.send("Page.captureScreenshot", { format: "png" });
+    if (!shot || !shot.data) {
+      console.log(`     截图 ${name}：**拿不到帧**（data 为空）`);
+      return null;
+    }
+    const bytes = Buffer.from(shot.data, "base64");
+    mkdirSync(SHOT_DIR, { recursive: true });
+    const file = join(SHOT_DIR, `${name}.png`);
+    writeFileSync(file, bytes);
+    console.log(`     截图 ${name}：${file}（${bytes.length} 字节${bytes.length < 4000 ? "，疑似空白帧" : ""}）`);
+    return file;
+  } catch (error) {
+    console.log(`     截图 ${name}：失败（${error.message}）`);
+    return null;
+  }
 }
 
 async function waitFor(check, timeoutMs, stepMs = 250) {
@@ -188,6 +249,7 @@ async function main() {
   let browser = null;
   let page = null;
   let popup = null;
+  let workerSession = null;
   try {
     const version = await waitFor(() => httpJson("/json/version"), 30000);
     observe(Boolean(version), "Chrome 起来了（CDP /json/version）", version && version.Browser);
@@ -239,6 +301,39 @@ async function main() {
     if (!popupTarget) return;
     popup = await connect(popupTarget.webSocketDebuggerUrl);
 
+    // Lead 派单③：把 popup 与 service worker 的 console 全盯住。
+    // 用户实测的卡死就是 `popup.js` 里的一个 `Uncaught ReferenceError`（渲染路径抛错 → 永远停在
+    // 「正在读取页面…」）—— 只点按钮、只看覆盖层的断言**看不见**它。
+    const consoleProblems = [];
+    await watchConsole(popup, consoleProblems);
+    try {
+      workerSession = await connect(listed.worker.webSocketDebuggerUrl);
+      await watchConsole(workerSession, consoleProblems);
+    } catch (error) {
+      console.log(`     注意：service worker 的 console 没接上（${error.message}）`);
+    }
+
+    // 首帧（④ 说的「第一次打开」）：popup target 一出现就抓，此时多半还在骨架/加载态
+    await popup.send("Page.enable").catch(() => {});
+    await capture(popup, "popup-01-first-frame");
+
+    // 重新加载一次 popup：**首次加载期的异常**才是要抓的那类（`bindEvents()` 中途抛错 → 后面的按钮
+    // 全是死的，而 popup 看起来「正常」）。刚才那次加载发生在我们接上 console 之前，会漏掉它。
+    await popup.send("Page.reload", {}).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    // 断言：popup 必须在 8 秒内**离开加载态**（这是此前缺的那条 —— 它本该抓住用户看到的卡死）
+    const leftLoading = await waitFor(      () =>
+        evaluate(
+          popup,
+          `(() => { const b = document.getElementById("clip"); if (!b) return null; const t = (b.textContent || "").trim(); return t && t !== "正在读取页面…" ? t : null; })()`,
+        ),
+      8000,
+    ).catch(() => null);
+    observe(Boolean(leftLoading), "popup 在 8 秒内离开加载态（不会停在「正在读取页面…」）", leftLoading || "(仍是加载态)");
+    // 稳定态（⑤ 的两按钮与「看不出选的是元素还是整页」都看这一张）
+    await capture(popup, "popup-02-stable");
+
     const pickLabel = await waitFor(
       () => evaluate(popup, `(() => { const b = document.getElementById("pick"); return b && b.textContent; })()`),
       15000,
@@ -248,12 +343,55 @@ async function main() {
 
     if (PASTE_TOKEN) {
       // 顺带把「粘贴令牌」这条真机链路也走一遍（此前是 UNVERIFIED）：填 → 连接 → 等落盘
-      await evaluate(popup, `(() => { const input = document.getElementById("tokenInput"); input.value = ${JSON.stringify(PASTE_TOKEN)}; input.dispatchEvent(new Event("input")); return true; })()`);
-      await evaluate(popup, `document.getElementById("tokenSave").click()`);
+      // 注意：**赋值与点击必须在同一次 evaluate 里**（中间任何一次渲染都可能把输入框清掉，
+      // 那样点下去读到的就是空串 —— 这是合成事件与真人输入的差异，不是产品流程的问题）。
+      const filled = await evaluate(
+        popup,
+        `(() => { const i = document.getElementById("tokenInput"); i.value = ${JSON.stringify(PASTE_TOKEN)}; i.dispatchEvent(new Event("input", { bubbles: true })); return i.value.length; })()`,
+      );
+      console.log(`     粘贴令牌：输入框长度=${filled}`);
+      // 差异探针：① 事件到底有没有派发出来（我自己挂一个捕获阶段监听器数一下）
+      //          ② 点完之后本地有没有立刻给反馈 ③ 换 Enter 键这条等价入口再试一次
+      const probe = await evaluate(
+        popup,
+        `(() => {
+           const b = document.getElementById("tokenSave");
+           const i = document.getElementById("tokenInput");
+           let hits = 0;
+           b.addEventListener("click", () => { hits += 1; }, true);
+           i.value = ${JSON.stringify(PASTE_TOKEN)};
+           b.click();
+           return { hits, valueLen: i.value.length, err: (document.getElementById("tokenError") || {}).textContent || null, errHidden: (document.getElementById("tokenError") || {}).hidden, visibility: document.visibilityState, docHidden: document.hidden, focused: document.hasFocus() };
+         })()`,
+      );
+      // `visibility: hidden` 是 action popup 在 CDP 环境里的已知形状：**被隐藏的文档会节流定时器**，
+      // 于是连工具自己的兜底都打不出来 —— 必须与「后台没被调到」区分开（看 SW console 里有没有
+      // `set-token：收到`），否则会把测试环境 artifact 当成产品缺陷。
+      console.log(`     差异探针（合成点击）：${JSON.stringify(probe)}`);
       const saved = await waitFor(async () => {
         const state = await evaluate(popup, `(() => { const code = document.getElementById("tokenCode"); return code && code.textContent.includes("•") ? code.textContent : null; })()`);
         return state;
       }, 15000);
+      if (!saved) {
+        // 失败时把现场打出来：本地预检没过？后台拒绝？还是回显没刷新？
+        const diag = await evaluate(
+          popup,
+          `(() => ({ tokenError: (document.getElementById("tokenError") || {}).textContent || null, tokenErrorHidden: (document.getElementById("tokenError") || {}).hidden, tokenSavedHidden: (document.getElementById("tokenSaved") || {}).hidden, tokenInputRowHidden: (document.getElementById("tokenInputRow") || {}).hidden, tokenCode: (document.getElementById("tokenCode") || {}).textContent || null, notice: (document.getElementById("notice") || {}).textContent || null, region: ((document.getElementById("region") || {}).textContent || "").trim().slice(0, 60) }))()`,
+        ).catch(() => null);
+        console.log(`     粘贴令牌失败现场：${JSON.stringify(diag)}`);
+        // 决定性证据：令牌到底进没进 chrome.storage.local（进了 = 存盘成功，只是回显没刷新）
+        const stored = workerSession
+          ? await workerSession
+              .send("Runtime.evaluate", {
+                expression: `(async () => { const s = ((await chrome.storage.local.get("opennote")).opennote) || {}; return { hasToken: Boolean(s.token), tail: s.tokenTail || null, port: s.port || null, lastOkAt: s.lastOkAt || null }; })()`,
+                awaitPromise: true,
+                returnByValue: true,
+              })
+              .then((r) => r.result && r.result.value)
+              .catch(() => null)
+          : null;
+        console.log(`     后台实际存储：${JSON.stringify(stored)}（粘贴的令牌尾 4 位=${PASTE_TOKEN.slice(-4)}）`);
+      }
       observe(Boolean(saved), "粘贴令牌 → 连接 → 只读回显", saved);
       await evaluate(popup, `document.getElementById("tokenConfirmNo").click()`).catch(() => {});
     }
@@ -268,7 +406,7 @@ async function main() {
     // 判据②（需要可用令牌）：预览区必须渲染出页面上的正文，而不是令牌块/空态
     const previewText = await waitFor(() => evaluate(popup, `(() => { const r = document.getElementById("region"); const text = r && r.textContent.trim(); return text && text.length > 10 ? text : null; })()`), 20000).catch(() => null);
     if (previewText && previewText.includes("令牌")) {
-      console.log(`     （预览区当前显示的是令牌块：${previewText.slice(0, 24)}… —— 本机 8787 是真 Opennote，没有它的令牌，所以「整页提取的预览」这一条按 UNVERIFIED 记）`);
+      console.log(`     （预览区当前显示的是令牌块：${previewText.slice(0, 24)}… —— 说明这次快照停在「未配置令牌」，不是正文预览）`);
     } else {
       observe(Boolean(previewText), "「整页提取」得到正文预览（不是死按钮）", previewText && previewText.slice(0, 30).replace(/\s+/g, " "));
       if (previewText) {
@@ -326,7 +464,19 @@ async function main() {
         atPoint: (document.elementFromPoint(Math.round(rect.left + Math.min(rect.width, 300) / 2), Math.round(Math.max(rect.top, 4) + Math.min(rect.height, 20) / 2)) || el).tagName.toLowerCase(),
       };
     })()`);
-    for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
+    // ① 的取证面在**页面**里（不受 popup 节流影响）：先把指针移到目标上（`.op-box` 出现 = hover 态），
+    // 纸色一张、夜版一张 —— 「更浅 / 被 hover 那块清晰 / 周边变淡」与「两主题都成立」都在这里判。
+    await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "left", clickCount: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await capture(page, "page-01-mask-paper");
+    await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
+    await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "left", clickCount: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await capture(page, "page-02-mask-night");
+    await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
+    await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "left", clickCount: 1 });
+
+    for (const type of ["mousePressed", "mouseReleased"]) {
       await page.send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 });
     }
 
@@ -351,7 +501,15 @@ async function main() {
 
     const gone = await waitFor(() => evaluate(page, `!document.getElementById("opennote-pick-host")`), 10000);
     observe(Boolean(gone), "点完覆盖层已移除（页面上不留节点）");
+
+    // Lead 派单③：任何未捕获异常 / console.error 一律 FAIL —— 渲染路径跑不通就不算过
+    observe(
+      consoleProblems.length === 0,
+      "popup / service worker 没有 Uncaught 或 console.error",
+      consoleProblems.slice(0, 3).join(" | ") || "干净",
+    );
   } finally {
+    if (workerSession) workerSession.close();
     if (popup) popup.close();
     if (page) page.close();
     if (browser) browser.close();

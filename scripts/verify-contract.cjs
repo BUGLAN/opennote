@@ -107,6 +107,16 @@ function check(id, title, cond, okDetail, badDetail) {
   return cond ? pass(id, title, okDetail) : fail(id, title, badDetail);
 }
 
+/** 撤回刚记下的一条：把它换成 SKIP（「树在动 → 本次不判」）。
+ *  用法与 e2e 里那条 `COVERAGE-SELFTEST` 同族：**结论进了台账还能被收回**，
+ *  否则「先判后撤」会留下一条假的 PASS/FAIL。 */
+function withdrawLast(id, why) {
+  const last = results[results.length - 1];
+  if (!last || last.id !== id) throw new Error(`withdrawLast: 最后一条不是 ${id}（是 ${last && last.id}）`);
+  results.pop();
+  return skip(id, last.title, why);
+}
+
 /* ------------------------------------------------------------------ 工具 */
 
 function readIfExists(rel) {
@@ -1601,7 +1611,9 @@ async function dynamicChecks() {
             : `status=${result && result.status}`,
           `实际: ${JSON.stringify(outcome).slice(0, 200)}`);
         if (noWorkspace) {
-          skip("DYN-3", "动态调用里的落盘断言", "本脚本未打开工作区 → 由 verify-e2e.cjs 覆盖（PASS 102 / FAIL 0）");
+          /* ⚠️ 这里**不许写死 e2e 的数字**：写死的数字迟早烂（曾写「PASS 102 / FAIL 0」，
+           * 而 e2e 当时已是 106/0）。要引用就跑它，别在文案里编。 */
+          skip("DYN-3", "动态调用里的落盘断言", "本脚本未打开工作区 → 落盘由 verify-e2e.cjs 覆盖（跑 `node scripts/verify-e2e.cjs` 看它的结果，别信转述）");
           skip("DYN-4", "动态调用里的落盘断言", "同上");
           skip("DYN-5", "动态调用里的落盘断言", "同上");
           skip("DYN-6", "动态调用里的落盘断言", "同上");
@@ -2034,42 +2046,1430 @@ function bridgeStatusChecks(tsText, mainText) {
   }
 }
 
-/* ── C-11d 文档消费侧：02 里一旦有清单就双向咬合；现在没有 → INFO（可复算）──────
+/** 文档侧判据（纯函数）：`02` §5.2.11 的字段表 ↔ `BridgeStatus`，**集合**双向比对。
+ *  为什么必须按「表行」解析、而不是 `doc.includes(字段名)`：后者有个洞 ——
+ *  把 `` `lastRejectedOrigin?` `` 写成 `` `lastRejectedOrigins?` ``（多一个字母），
+ *  名字里仍**包含**原名，`includes` 那套会闭眼放过；而「表里多了个不存在的字段」
+ *  正是文档漂移的典型形态。 */
+function bridgeStatusDocChecks(docText, tsText) {
+  const ifaceMatch = /export interface BridgeStatus \{([\s\S]*?)\n\}/.exec(tsText);
+  const code = ifaceMatch
+    ? [...ifaceMatch[1].matchAll(/^\s{2}([A-Za-z_$][\w$]*)(\??):/gm)].map((m) => ({ name: m[1], optional: m[2] === "?" }))
+    : [];
+  const section = /^####\s*5\.2\.11[^\n]*\n([\s\S]*?)(?=\n####\s|\n###\s|\n---\n)/m.exec(docText);
+  const rows = section
+    ? [...section[1].matchAll(/^\|\s*`([A-Za-z_$][\w$]*)(\??)`\s*\|/gm)].map((m) => ({ name: m[1], optional: m[2] === "?" }))
+    : [];
+  const docNames = rows.map((r) => r.name);
+  const missing = code.filter((c) => !docNames.includes(c.name)).map((c) => c.name);
+  const extra = docNames.filter((n) => !code.some((c) => c.name === n));
+  const markerMismatch = code
+    .filter((c) => rows.some((r) => r.name === c.name && r.optional !== c.optional))
+    .map((c) => `${c.name}（代码${c.optional ? "可选" : "必现"}／文档${rows.find((r) => r.name === c.name).optional ? "可选" : "必现"}）`);
+  const hasAnchor = section !== null;
+  const hasCode = code.length > 0;
+  return {
+    anchor: {
+      ok: hasAnchor,
+      detail: hasAnchor
+        ? `锚点 \`#### 5.2.11\` 找到，表行 ${rows.length} 行`
+        : "锚点 `#### 5.2.11` **未找到** → 咬合失效（删掉一节文档不能让检查闭嘴；若清单搬到别处，请更新本检查的锚点，不要删掉这条检查）",
+    },
+    bite: {
+      ok: hasCode && hasAnchor && missing.length === 0 && extra.length === 0 && markerMismatch.length === 0,
+      detail: `代码 ${code.length} 个字段（可选 ${code.filter((c) => c.optional).length} / 必现 ${code.filter((c) => !c.optional).length}）`
+        + ` ↔ §5.2.11 表行 ${rows.length} 行；缺=${missing.join(",") || "无"} 多=${extra.join(",") || "无"} 可选标记不一致=${markerMismatch.join(",") || "无"}`,
+      failDetail: `文档缺的字段：${missing.join(", ") || "无"}；文档多出的字段（应为空）：${extra.join(", ") || "无"}；`
+        + `可选标记不一致：${markerMismatch.join(", ") || "无"}（表行 ${rows.length} 行 / 代码 ${code.length} 个字段）`,
+    },
+  };
+}
+
+/* ── C-11d 文档消费侧：02 §5.2.11 ↔ `BridgeStatus`，含**不许静默降级** ────────
  * 起因：给 `S7B.1` 的清单找「出处」时我差点写下一个**假引用**（`02 §3.2` 其实是
- * 「H1 与 front-matter 的拼装顺序」）。Lead 已派 d-contract 在 02 补清单；
- * 补完之后本段**自动**从 INFO 升级为真咬合，我不需要再改代码。
- * 识别法：找同时提到 ≥2 个**有辨识度**字段名的行块（`lastRejectedOrigin` / `startPort` /
- * `portRange` / `tokenPersisted` / `inboxWatch`），那种行块不可能是散文巧合。 */
+ * 「H1 与 front-matter 的拼装顺序」）。当时登记为 INFO（文档缺口）。
+ * d-contract 补完 §5.2.11 之后，本段**自动**升级成真咬合 —— 我没有改判据逻辑，只是它现在能咬了。
+ *
+ * ⚠️ **不许静默降级**：契约既然已经把这份清单收编成权威产地，那「清单消失」就必须**红**，
+ * 而不是悄悄退回 INFO（退回 INFO = 删掉一节文档就能让检查闭嘴）。 */
 {
   const doc02 = readIfExists("docs/import/02-接口契约-导入信封与通道.md");
   const tsText = readIfExists(BRIDGE_STATUS_TS) || "";
-  const ifaceMatch = /export interface BridgeStatus \{([\s\S]*?)\n\}/.exec(tsText);
-  const ifaceFields = ifaceMatch
-    ? [...ifaceMatch[1].matchAll(/^\s{2}([A-Za-z_$][\w$]*)\??:/gm)].map((m) => m[1])
-    : [];
-  const DISTINCTIVE = ["lastRejectedOrigin", "startPort", "portRange", "tokenPersisted", "inboxWatch", "endpoint"];
-  if (doc02 === null) info("C-11d", "桥状态字段清单的文档出处", "读不到 02 契约文件，无法统计");
-  else {
-    const counts = DISTINCTIVE.map((k) => `${k}=${doc02.split(k).length - 1}`);
-    const hitLines = doc02.split(/\r?\n/).filter((line) => DISTINCTIVE.filter((k) => line.includes(k)).length >= 2);
-    const docFields = ifaceFields.filter((f) => doc02.includes(f));
-    if (!hitLines.length) {
-      info("C-11d", "`BridgeStatus` 字段清单在 02 号契约里**还没有**出处（文档缺口，登记不改判；d-contract 补完后本条自动变真咬合）",
-        `02 内出现次数：${counts.join(", ")}；没有任何一行同时提到 ≥2 个有辨识度字段`
-        + `。权威出处目前只有 ${BRIDGE_STATUS_TS} 的 BridgeStatus（${ifaceFields.length} 个字段）。`
-        + `→ S7B.1 的清单暂时只能引代码，不能引文档。`);
-    } else {
-      const missingInDoc = ifaceFields.filter((f) => !doc02.includes(f));
-      check("C-11d", "`02` 契约的桥状态字段清单与 `BridgeStatus` **双向一致**（文档漏字段 / 代码多字段都要红）",
-        missingInDoc.length === 0,
-        `02 命中的字段 ${docFields.length}/${ifaceFields.length} 个；清单行（${hitLines.length} 行）：${hitLines.slice(0, 3).map((l) => l.trim().slice(0, 100)).join(" | ")}`,
-        `02 里缺的字段：${missingInDoc.join(", ") || "无"}（清单行 ${hitLines.length} 行）`);
+  if (doc02 === null) {
+    skip("C-11d", "`02 §5.2.11` 字段清单咬合", "读不到 02 契约文件");
+  } else {
+    const verdict = bridgeStatusDocChecks(doc02, tsText);
+    check("C-11d", "`02 §5.2.11` 的字段清单与 `BridgeStatus` **双向一致**（集合 + 可选标记 `?`；清单缺失即红，不静默降级）",
+      verdict.bite.ok, `${verdict.anchor.detail}；${verdict.bite.detail}`, verdict.bite.failDetail);
+
+    const DOC_MUTATIONS = [
+      // ⚠️ 第一版写成把标题改成 `#### 5.2.11x` —— 没用：段首正则里的 `[^\n]*` 把 `x` 一起吞了，
+      // 锚点照样匹配（自检如实报「未红」）。要真删掉锚点，必须**换掉节号**。
+      { name: "drop-anchor", target: "C-11d", expect: [], apply: (s) => s.replace(/^####\s*5\.2\.11/m, "#### 5.2.99") },
+      { name: "drop-row", target: "C-11d", expect: [], apply: (s) => s.replace(/^\|\s*`startPort\?`.*$/m, "") },
+      { name: "typo-extra-row", target: "C-11d", expect: [], apply: (s) => s.replace(/^(\|\s*`)startPort(\?`)/m, "$1startPorts$2") },
+      { name: "flip-optional", target: "C-11d", expect: [], apply: (s) => s.replace(/^(\|\s*`)state(`\s*\|)/m, "$1state?$2") },
+    ];
+    const log = [];
+    let ok = true;
+    for (const m of DOC_MUTATIONS) {
+      const mutated = m.apply(doc02);
+      const changed = mutated !== doc02;
+      const v = bridgeStatusDocChecks(mutated, tsText);
+      const targetRed = v.bite.ok === false;
+      const fine = changed && targetRed;
+      if (!fine) ok = false;
+      log.push(`${m.name}→${targetRed ? "红✓" : "未红✗"}${changed ? "" : "（**变异没改到文本**）"}`);
     }
+    check("C-11d·变异", `C-11d 断言自检：${DOC_MUTATIONS.length} 个内存变异各自让它翻红（证明「清单消失/漂移」真的会红）`,
+      ok, log.join("；"), log.join("；"));
   }
 }
 
 
 
+
+const EXT_MARKERS = ["extension/.building", "extension/.mutation-running"];
+/** 这一轮是不是在「树在动」的窗口里跑的 —— 与 b 的 `extension/.gitignore` 约定对齐。
+ *  · `.building`（build.mjs 正在 rmSync+重写 dist）→ 读 `dist` 的判据不可信；
+ *  · `.mutation-running`（mutation-check.ps1 在故意改坏 extension/src 与 dist）→ **extension 面整体**不可信。
+ *  另附一道不依赖标记的自查：产物文件比 `BUILD-INFO.builtAt` 更新 = 构建之后被改过/写了一半。
+ *  （不重算 b 的指纹算法 —— 那会和 b 的实现漂移；这里的判据是「与 builtAt 的时序关系」，与算法无关。） */
+const UNTRUSTED = { at: false, why: [] };
+function extTrust(opts = {}) {
+  const on = opts.injectMarker ? [opts.injectMarker] : EXT_MARKERS.filter((rel) => exists(rel));
+  if (on.length) {
+    return {
+      trusted: false,
+      scope: on.some((m) => m.endsWith(".mutation-running")) ? "extension" : "dist",
+      why: `标记存在（树在动）：${on.join(", ")}`,
+    };
+  }
+  const raw = readIfExists("extension/dist/BUILD-INFO.json");
+  if (!raw) return { trusted: false, scope: "dist", why: "读不到 extension/dist/BUILD-INFO.json" };
+  let info;
+  try { info = JSON.parse(raw); } catch { return { trusted: false, scope: "dist", why: "BUILD-INFO.json 不是合法 JSON" }; }
+  const builtAt = Date.parse(info.builtAt || "");
+  if (!Number.isFinite(builtAt)) return { trusted: false, scope: "dist", why: "BUILD-INFO.builtAt 缺失或不可解析" };
+  let newer = [];
+  try {
+    newer = walk("extension/dist").filter((rel) => fs.statSync(path.join(ROOT, rel)).mtimeMs > builtAt + 2000);
+  } catch (err) {
+    return { trusted: false, scope: "dist", why: `遍历 dist 失败：${err.message}` };
+  }
+  if (newer.length) {
+    return {
+      trusted: false,
+      scope: "dist",
+      why: `${newer.length} 个产物文件比 BUILD-INFO.builtAt 更新（构建后被改过，或构建被打断写了一半）：${newer.slice(0, 3).join(", ")}`,
+    };
+  }
+  return { trusted: true, scope: "none", why: `无标记；产物文件均早于 builtAt=${info.builtAt}` };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * §13 C-10f…C-10o · ㊵ / ㊶（M2 已落地 `50fb34e`：死代码退场 + 极简形态）
+ *
+ * **与 b 的 `extension/verify.mjs` V17/V18 的分工，先说清，不许谎报新覆盖**：
+ *   · **重叠**（V17 已有，我复算但不算新覆盖）：两个按钮文案；12 个退场 id；
+ *     popup 不发 `templateId`/`props`/`dirty`；死模块不在产物里；两个存储键不在产物里；
+ *     来源字段不得空串兜底。这 6 点我**换产地**复核：V17 看 `extension/dist/**`（产物），
+ *     我看 `extension/src/**`（源码）—— 任一侧漂移都该红，所以重叠部分保留。
+ *   · **新角度**（V17 没有的）：`## 高亮` 小节的**剥注释**源码扫描（V17 只扫 dist 里的符号名）；
+ *     右键菜单**恰好一项**且 id/文案逐字（V17 只查 `opennote-highlight` 不存在）；
+ *     manifest 无 `options_ui`/`options_page` 且 `src/options/` 目录不存在；
+ *     源码里对已删模块的**引用**为 0；`#pickRow` 容器内**恰好两个** button；
+ *     `opennote:preview` 载荷的**键集合恰为 {type, mode}**（V17 是子串判据）；
+ *     存储键在**源码面**也 0 命中。
+ *   · **我不重复劳动**的：来源字段的**运行时**语义由 V17 ④（真调 dist 的 `buildEnvelope`）
+ *     与我的 e2e `S1.5b`（应用侧 front-matter 整行省略）覆盖，这里只做**源码静态**那一面。
+ *
+ * ⚠️ **扫源码查「不许再出现」必须先剥注释**：`background.js` 里就有 **3 处注释**在记录高亮退场的
+ * 事实（L62–67 / L291 / L803），`lib/highlights.js` 的名字也只在注释里出现一次（L149）。
+ * 不剥注释 = 在**记录退场**的文本上判「退场没做」= 三条假红。
+ */
+group("§13 ㊵/㊶ 死代码退场与极简形态（C-10f…C-10o）");
+
+const EXT = (rel) => `extension/src/${rel}`;
+
+/** 剥代码注释（`/* *\/` 与行注释；避开 `http://` 这类冒号后缀）。 */
+function stripCodeComments(text) {
+  return String(text)
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, "$1 ");
+}
+const stripHtmlComments = (text) => String(text).replace(/<!--[\s\S]*?-->/g, " ");
+
+/** 找出**孤儿 JSDoc 块**：一串相邻的 JSDoc 里，JS 只会把紧贴声明的那一块挂上去，
+ *  前面的都挂不上任何东西（`5f553a3` 清过一次「注释里的换页符 + 孤儿 JSDoc」，这是后续例）。
+ *  两条防误报：
+ *   ① 只认「这一串的最后一块**确实紧贴一个声明**」的情形 —— 装饰性注释串不判；
+ *   ② **文件头的模块说明不算孤儿**（`lib/timeout.js:1` 那种横幅本来就该独立存在，
+ *      它不挂声明是设计如此。第一版没排除它 → 误报，我自己在复跑里抓到的）。 */
+function orphanJsdocBlocks(text) {
+  const lines = String(text).split("\n");
+  const isCommentish = (l) => {
+    const t = l.trim();
+    return t === "" || /^(\/\/|\/\*|\*)/.test(t);
+  };
+  const blocks = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/^\s*\/\*\*/.test(lines[i])) continue;
+    let j = i;
+    while (j < lines.length && !/\*\//.test(lines[j])) j += 1;
+    blocks.push({ start: i, end: Math.min(j, lines.length - 1) });
+    i = j;
+  }
+  const orphans = [];
+  for (let k = 0; k < blocks.length - 1; k += 1) {
+    const a = blocks[k];
+    const b = blocks[k + 1];
+    if (!lines.slice(a.end + 1, b.start).every(isCommentish)) continue; // 中间还有别的代码 → 不算一串
+    if (!lines.slice(0, a.start).some((l) => !isCommentish(l))) continue; // ② 文件头横幅
+    const last = blocks[blocks.length - 1];
+    let after = last.end + 1;
+    while (after < lines.length && lines[after].trim() === "") after += 1;
+    const attached = after < lines.length
+      && /^\s*(export\s+)?(async\s+)?(function|const|let|var|class)\b/.test(lines[after]);
+    if (attached) orphans.push(a);
+  }
+  return orphans;
+}
+
+/** 找出**死导入**：`import` 进来的本地名在文件别处一次都没用到。
+ *  与孤儿 JSDoc 同族 —— **声明与使用脱节**（b 清 C44 时留下 `filterTags` 就是这么来的）。
+ *  防误报三条：
+ *   ① 只认静态 import 的**本地绑定名**（含 `as` 重命名）；
+ *   ② `import "…"`（副作用导入）与 `export … from` 不在此列；
+ *   ③ 名字只在**注释**里出现过：不算「用过」，但**不判死** —— 单独列成观察，
+ *      因为 `@type {Foo}` 这类 JSDoc 用法是合法的，判红会误伤。 */
+function deadImportsIn(text) {
+  const code = stripCodeComments(text);
+  /* ⚠️ 「是否只在注释里出现」必须在**去掉 import 语句本身**的文本上判。
+   * 第一版用的是全文 → import 行自己就命中了那个名字 → 每个导入都被算成「在注释里出现过」
+   * → `dead` 永远是空的 = **恒绿的检查**。是给 C-10t 配的 `dead-import` 变异抓出来的
+   * （「目标没有翻红」）；否则它会一直绿着骗人 —— 这就是「NO_EFFECT 不能算 MISSED」。 */
+  const textNoImports = String(text).replace(/^[ \t]*import[\s\S]*?from\s*["'][^"']+["']\s*;?/gm, " ");
+  const dead = [];
+  const commentOnly = [];
+  /* 行号必须取自**原文**：`stripCodeComments` 把块注释压成一个空格，块注释里的换行会消失，
+   * 用它算出来的行号会漂（第一版就漂了）。用法判定则用剥过注释的代码 —— 各取所长。 */
+  const importRe = /^[ \t]*import\s+([\s\S]*?)\s+from\s+["']([^"']+)["']\s*;?/gm;
+  let m = importRe.exec(String(text));
+  while (m !== null) {
+    const clause = m[1];
+    const raw = String(text);
+    const line = raw.slice(0, m.index).split("\n").length; // 行号必须从**原文**数（见上）
+    /* 报给作者的行号要是**名字自己那一行**：多行 import 里 `filterTags` 在 L17，
+     * 而 import 语句从 L13 起 —— 只报 13 会让人白找一趟。 */
+    const nameLineOf = (n) => {
+      const within = m[0].indexOf(n);
+      return within < 0 ? line : line + m[0].slice(0, within).split("\n").length - 1;
+    };
+    const names = [];
+    const braceMatch = /\{([\s\S]*?)\}/.exec(clause);
+    if (braceMatch) {
+      for (const part of braceMatch[1].split(",")) {
+        const t = part.trim();
+        if (!t) continue;
+        const asMatch = /^(\S+)\s+as\s+(\S+)$/.exec(t);
+        names.push(asMatch ? asMatch[2] : t);
+      }
+    }
+    const nsMatch = /^\s*\*\s+as\s+([A-Za-z_$][\w$]*)/.exec(clause);
+    if (nsMatch) names.push(nsMatch[1]);
+    if (!nsMatch) {
+      const defaultMatch = /^[ \t]*([A-Za-z_$][\w$]*)\s*(?:,|$)/.exec(
+        clause.replace(/\{[\s\S]*?\}/, " ").replace(/^[ \t]*\*[^,]*,[ \t]*/, " "),
+      );
+      if (defaultMatch) names.push(defaultMatch[1]);
+    }
+    const rest = code.slice(0, m.index) + code.slice(m.index + m[0].length);
+    void rest;
+    for (const name of names) {
+      if (!name || name === "type") continue;
+      const esc = name.replace(/\$/g, "\\$");
+      const countIn = (s) => (s.match(new RegExp(`\\b${esc}\\b`, "g")) || []).length;
+      /* ⚠️ 用**计数**判定，不要用下标切片：行号取自原文、用法判定取自剥注释后的代码，
+       * 两套下标不是同一坐标系 —— 第一版拿原文下标去切 `code`，越界后 `rest` 变成整段代码，
+       * 于是每个名字都「被用过」，C-10t 变成**恒绿**（第二次了，仍是变异抓出来的）。 */
+      if (countIn(code) > countIn(clause)) continue; // 除本 import 子句外还在代码里出现过 → 用过
+      (countIn(textNoImports) > 0 ? commentOnly : dead).push(`${m[2]} 的 \`${name}\`（第 ${nameLineOf(name)} 行）`);
+    }
+    m = importRe.exec(String(text));
+  }
+  return { dead, commentOnly };
+}
+
+/** 删掉**整条都死**的 import（把还有活名字的那些重建成单行）—— 自我归零型变异的参照系。 */
+function stripDeadImports(text) {
+  const deadNames = new Set(deadImportsIn(text).dead.map((d) => /`([^`]+)`/.exec(d)[1]));
+  if (!deadNames.size) return String(text);
+  return String(text).replace(
+    /^[ \t]*import\s+([\s\S]*?)\s+from\s*(["'][^"']+["'])\s*;?/gm,
+    (full, clause, src) => {
+      const nsMatch = /^\s*\*\s+as\s+([A-Za-z_$][\w$]*)/.exec(clause);
+      if (nsMatch) return deadNames.has(nsMatch[1]) ? "" : full;
+      const names = [];
+      const braceMatch = /\{([\s\S]*?)\}/.exec(clause);
+      if (braceMatch) {
+        for (const part of braceMatch[1].split(",")) {
+          const t = part.trim();
+          if (!t) continue;
+          const asM = /^(\S+)\s+as\s+(\S+)$/.exec(t);
+          names.push(asM ? asM[2] : t);
+        }
+      }
+      const defaultM = /^[ \t]*([A-Za-z_$][\w$]*)\s*,/.exec(clause);
+      if (defaultM) names.push(defaultM[1]);
+      const kept = names.filter((n) => !deadNames.has(n));
+      if (!kept.length) return "";
+      return `import { ${kept.join(", ")} } from ${src};`;
+    },
+  );
+}
+
+/** 把孤儿 JSDoc 块删掉（只留紧贴声明的那一块）—— 自我归零型变异的参照系要用。 */
+function stripOrphanJsdocs(text) {
+  const drop = new Set();
+  for (const b of orphanJsdocBlocks(text)) {
+    for (let i = b.start; i <= b.end; i += 1) drop.add(i);
+  }
+  return String(text).split("\n").filter((_, i) => !drop.has(i)).join("\n");
+}
+
+/** 取 `<div id="…">…</div>` 整块（div 配平）。 */
+function divById(html, id) {
+  const marker = html.indexOf(`id="${id}"`);
+  if (marker < 0) return null;
+  const open = html.lastIndexOf("<div", marker);
+  if (open < 0) return null;
+  const tagRe = /<\/?div\b[^>]*>/g;
+  tagRe.lastIndex = open;
+  let depth = 0;
+  let m;
+  while ((m = tagRe.exec(html))) {
+    if (m[0].startsWith("</")) {
+      depth -= 1;
+      if (depth === 0) return html.slice(open, m.index + m[0].length);
+    } else if (!m[0].endsWith("/>")) depth += 1;
+  }
+  return null;
+}
+
+/** 对象字面量的**顶层键**：支持 `k: v` 与简写 `k`，跳过字符串里的逗号，`...` 记作 spread。 */
+function objectKeyList(objText) {
+  const text = String(objText).trim();
+  const inner = text.startsWith("{") ? text.slice(1, text.lastIndexOf("}")) : text;
+  const parts = [];
+  let depth = 0;
+  let quote = null;
+  let buf = "";
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i];
+    if (quote) {
+      if (ch === quote && inner[i - 1] !== "\\") quote = null;
+      buf += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; buf += ch; continue; }
+    if (ch === "{" || ch === "[" || ch === "(") depth += 1;
+    if (ch === "}" || ch === "]" || ch === ")") depth -= 1;
+    if (ch === "," && depth === 0) { parts.push(buf); buf = ""; continue; }
+    buf += ch;
+  }
+  if (buf.trim()) parts.push(buf);
+  return parts.map((raw) => {
+    const p = raw.trim();
+    if (!p) return "";
+    if (p.startsWith("...")) return "...";
+    const withValue = /^([A-Za-z_$][\w$]*)\s*:/.exec(p);
+    if (withValue) return withValue[1];
+    const shorthand = /^([A-Za-z_$][\w$]*)$/.exec(p);
+    return shorthand ? shorthand[1] : `?${p.slice(0, 24)}`;
+  }).filter(Boolean);
+}
+
+/** `send({…})` 的每个载荷对象文本。 */
+function sendPayloads(text) {
+  const out = [];
+  const re = /send\(\s*\{/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const from = m.index + m[0].length - 1;
+    let depth = 0;
+    let i = from;
+    for (; i < text.length; i += 1) {
+      if (text[i] === "{") depth += 1;
+      else if (text[i] === "}") { depth -= 1; if (depth === 0) { i += 1; break; } }
+    }
+    out.push(text.slice(from, i));
+  }
+  return out;
+}
+
+const M2_IDS = ["C-10f", "C-10g", "C-10h", "C-10i", "C-10j", "C-10k", "C-10l", "C-10m", "C-10n", "C-10o", "C-10p", "C-10r", "C-10s", "C-10t"];
+const M2_GONE_IDS = ["seg", "segmented", "regionHighlight", "regionProps", "sourceSwitch", "tmplRow", "template", "notePath", "tags", "folder", "footRow", "hlList"];
+const M2_GONE_TOKENS = ["data-region=", "data-mode=", "已高亮", "清除本页全部高亮"];
+const M2_DEAD_MODULES = ["lib/templates.js", "lib/highlights.js", "content/highlight.js", "options/options.html"];
+const M2_STORAGE_KEYS = ["opennote.templates.v1", "opennote.highlights.v1"];
+
+/** 纯函数：输入全是文本/清单，输出每条的结论 —— 只有这样变异才能在同一份真源上重跑。 */
+function m2Checks(inp) {
+  const codeTexts = inp.srcFiles.map((f) => ({ rel: f.rel, text: stripCodeComments(f.text) }));
+  const bgCode = stripCodeComments(inp.bgText);
+  const popupCode = stripCodeComments(inp.popupJs);
+  const popupBare = stripHtmlComments(inp.popupHtml);
+  const result = {};
+
+  // C-10f ── `## 高亮` 小节与模板变量彻底不再生成（**剥注释**后扫源码）
+  {
+    const TOKENS = ["## 高亮", "{{highlights}}", "withHighlightSection", "highlightInPage"];
+    const hits = [];
+    for (const f of codeTexts) for (const t of TOKENS) if (f.text.includes(t)) hits.push(`${f.rel}:${t}`);
+    const commentOnly = [];
+    for (const f of inp.srcFiles) {
+      for (const t of TOKENS) {
+        if (f.text.includes(t) && !stripCodeComments(f.text).includes(t)) commentOnly.push(`${f.rel}(${t})`);
+      }
+    }
+    result["C-10f"] = {
+      title: "㊵ 高亮整套不再生成：源码（剥注释后）里没有 `## 高亮` / `{{highlights}}` / `withHighlightSection` / `highlightInPage`",
+      ok: hits.length === 0,
+      detail: `0 命中（扫描 ${inp.srcFiles.length} 个源码文件）；`
+        + `注释里的退场记录 ${commentOnly.length} 处**不计**：${commentOnly.slice(0, 3).join(", ") || "无"}`,
+      failDetail: `仍在生成/引用：${hits.join(", ")}`,
+    };
+  }
+
+  // C-10g ── 右键菜单**恰好一项**，id 与文案逐字
+  {
+    const creates = [...bgCode.matchAll(/contextMenus\.create\(\s*\{([\s\S]*?)\}\s*\)/g)].map((m) => m[1]);
+    const first = creates[0] || "";
+    const title = (/title:\s*"([^"]*)"/.exec(first) || [])[1] || null;
+    const menuId = (/id:\s*"([^"]*)"/.exec(first) || [])[1] || null;
+    const ok = creates.length === 1 && title === "剪藏整页正文到 Opennote" && menuId === "opennote-clip-page";
+    result["C-10g"] = {
+      title: "㊵ 右键菜单**恰好一项**：id `opennote-clip-page`、文案逐字「剪藏整页正文到 Opennote」",
+      ok,
+      detail: `create 调用 ${creates.length} 次；id=${JSON.stringify(menuId)} title=${JSON.stringify(title)}`,
+      failDetail: `create 调用 ${creates.length} 次（应为 1）；id=${JSON.stringify(menuId)} title=${JSON.stringify(title)}（应为 opennote-clip-page / 「剪藏整页正文到 Opennote」）`,
+    };
+  }
+
+  // C-10h ── 死模块不在产物里；产物里没有工具残留；且**每个产物文件都是 BUILD-INFO 声明过的**
+  //          【死模块那半与 V17 ⑤ 重叠；「声明集合 vs 现场集合」与残留扫描是新角度】
+  //          第一版写的是「产物 ≤ 21」这个**魔数**：b 新增一个正常产物（`lib/timeout.js`）它就红。
+  //          改成与 `BUILD-INFO.json` 的声明集合对照 —— 更强（任何未声明文件都抓得到），也不脆。
+  {
+    const shipped = inp.distFiles.filter((rel) => M2_DEAD_MODULES.some((d) => rel.endsWith(d)));
+    const debris = inp.distFiles.filter((rel) => /\.bak|\.orig$|\.tmp$|~$|\.swp$|bak-mutation/i.test(rel));
+    const info = inp.buildInfo;
+    let declared = null;
+    if (info && Array.isArray(info.files)) {
+      const prefix = "extension/dist/";
+      declared = new Set([
+        ...info.files.map((f) => prefix + f),
+        ...((info.icons && Array.isArray(info.icons.sizes)) ? info.icons.sizes.map((s) => `${prefix}icons/icon${s}.png`) : []),
+        ...(info.tokens && info.tokens.source ? [`${prefix}styles/${path.basename(info.tokens.source)}`] : []),
+        `${prefix}BUILD-INFO.json`,
+      ]);
+    }
+    const undeclared = declared ? inp.distFiles.filter((rel) => !declared.has(rel)) : [];
+    const ok = shipped.length === 0 && debris.length === 0 && declared !== null && undeclared.length === 0;
+    result["C-10h"] = {
+      title: "㊵ 死模块不在产物里；产物里没有工具残留（`*.bak-mutation` 等）；且**每个产物文件都是 `BUILD-INFO.json` 声明过的**（与声明集合对照，不用魔数上限）",
+      ok,
+      detail: `产物 ${inp.distFiles.length} 个文件，BUILD-INFO 声明 ${declared ? declared.size : "（读不到）"} 个（含图标与 tokens.css 的换算）；`
+        + `死模块命中=${shipped.join(", ") || "无"}；工具残留=${debris.join(", ") || "无"}；未声明文件=${undeclared.join(", ") || "无"}`
+        + `【与 V17 ⑤ 重叠的部分：死模块不在产物；新角度：残留扫描 + 声明集合对照】`,
+      failDetail: `产物 ${inp.distFiles.length} 个文件；死模块命中=${shipped.join(", ") || "无"}；工具残留=${debris.join(", ") || "无"}；`
+        + `BUILD-INFO 未声明的文件=${undeclared.join(", ") || "无"}${declared ? "" : "（**BUILD-INFO.json 读不到/无 files 清单**）"}。`
+        + `处置：是**残留**（` + "`*.bak-mutation`" + `）就删掉；是**新增的正常产物**就重跑 \`node build.mjs\` 让 BUILD-INFO 收进去 —— 两种都不要改判据。`,
+    };
+  }
+
+  // C-10i ── manifest 不再有 options 入口（新角度）
+  {
+    const hasOptionsKey = /"(options_ui|options_page)"\s*:/.test(inp.manifest);
+    const optionsDir = inp.srcFiles.filter((f) => /\/options\//.test(f.rel)).map((f) => f.rel);
+    result["C-10i"] = {
+      title: "㊵ manifest 不再有 `options_ui`/`options_page`，且 `extension/src/options/` 目录不存在（入口与实现一起删）",
+      ok: !hasOptionsKey && optionsDir.length === 0,
+      detail: `manifest 里 options 键=${hasOptionsKey ? "仍在" : "无"}；src/options 下的文件=${optionsDir.length} 个`,
+      failDetail: `manifest 里仍有 options 键=${hasOptionsKey}；src/options 下仍有 ${optionsDir.length} 个文件：${optionsDir.slice(0, 5).join(", ")}`,
+    };
+  }
+
+  // C-10j ── 源码里没有任何代码**引用**已删模块（剥注释后）
+  {
+    const REFS = ["highlights.js", "highlight.js", "templates.js"];
+    const refHits = [];
+    for (const f of codeTexts) for (const r of REFS) if (f.text.includes(r)) refHits.push(`${f.rel}(${r})`);
+    result["C-10j"] = {
+      title: "㊵ 源码里没有代码引用已删模块（`lib/highlights.js` / `content/highlight.js` / `lib/templates.js`）——注释里的历史说明不算",
+      ok: refHits.length === 0,
+      detail: `剥注释后 0 命中（已删模块的路径字符串）`,
+      failDetail: `仍有引用：${refHits.join(", ")}`,
+    };
+  }
+
+  // C-10k ── 主操作区 `#pickRow` **恰好两个** button，文案逐字（新角度：正向计数）
+  {
+    const row = divById(popupBare, "pickRow");
+    const rowButtons = row ? [...row.matchAll(/<button[^>]*>([^<]*)</g)].map((m) => m[1].trim()) : [];
+    const allButtons = [...popupBare.matchAll(/<button[^>]*>/g)].length;
+    const ok = row !== null && rowButtons.length === 2
+      && rowButtons[0] === "选择当前元素" && rowButtons[1] === "整页提取";
+    result["C-10k"] = {
+      title: "㊶ 主操作区 `#pickRow` **恰好两个** button，文案逐字「选择当前元素」/「整页提取」",
+      ok,
+      detail: `#pickRow 内 ${rowButtons.length} 个：${rowButtons.join(" / ")}；`
+        + `全 popup 共 ${allButtons} 个 button（其余属令牌流程 / 底栏主按钮 / ⋯ 菜单 / 危险确认框）`,
+      failDetail: `#pickRow ${row ? "内" : "**找不到**"}按钮 ${rowButtons.length} 个：${rowButtons.join(" / ") || "无"}`
+        + `（应为 选择当前元素 / 整页提取）`,
+    };
+  }
+
+  // C-10l ── 12 个退场 id 与痕迹不在源码 DOM【与 V17 ② 重叠】
+  {
+    const stillIds = M2_GONE_IDS.filter((id) => popupBare.includes(`id="${id}"`));
+    const stillTokens = M2_GONE_TOKENS.filter((t) => popupBare.includes(t));
+    result["C-10l"] = {
+      title: "㊶ 12 个退场控件 id（seg/segmented/regionHighlight/regionProps/sourceSwitch/tmplRow/template/notePath/tags/folder/footRow/hlList）与三区痕迹不在源码 DOM",
+      ok: stillIds.length === 0 && stillTokens.length === 0,
+      detail: `0 命中（12 个 id + ${M2_GONE_TOKENS.length} 个痕迹词）【与 V17 ② 重叠，我扫源码面】`,
+      failDetail: `仍在源码 DOM 里：id=${stillIds.join(", ") || "无"}；痕迹=${stillTokens.join(", ") || "无"}`,
+    };
+  }
+
+  // C-10m ── preview 载荷**键集合恰为 {type, mode}**，且任何 send 载荷都不带退场字段（新角度：正向集合）
+  {
+    const payloads = sendPayloads(popupCode);
+    const previewIdx = payloads.findIndex((p) => p.includes("opennote:preview"));
+    const previewKeys = previewIdx >= 0 ? objectKeyList(payloads[previewIdx]) : null;
+    const badKeys = [];
+    for (const p of payloads) {
+      for (const k of ["templateId", "props", "dirty"]) if (objectKeyList(p).includes(k)) badKeys.push(k);
+    }
+    const ok = previewKeys !== null
+      && JSON.stringify(previewKeys) === JSON.stringify(["type", "mode"])
+      && badKeys.length === 0;
+    result["C-10m"] = {
+      title: "㊶ `opennote:preview` 载荷的键集合**恰为 {type, mode}**；任何 `send({…})` 载荷都不带 `templateId`/`props`/`dirty` 作为键",
+      ok,
+      detail: `send 载荷 ${payloads.length} 个；preview 的键=${JSON.stringify(previewKeys)}；退场键命中=${badKeys.join(", ") || "无"}`
+        + `【子串判据与 V17 ③ 重叠，键集合是新角度；阅读型 \`preview.props\` 不算发送】`,
+      failDetail: `send 载荷 ${payloads.length} 个；preview 的键=${JSON.stringify(previewKeys)}（应为 ["type","mode"]）；退场键命中=${badKeys.join(", ") || "无"}`,
+    };
+  }
+
+  // C-10n ── 来源字段不得用空串/强转兜底【与 V17 ⑤ 重叠，我扫源码面】
+  {
+    const call = (/return buildEnvelope\(\{[\s\S]*?\n {2}\}\);/m.exec(bgCode) || [])[0] || "";
+    const missing = [];
+    const fallback = [];
+    for (const key of ["url:", "pageTitle:", "site:", "author:", "publishedAt:"]) {
+      const line = call.split("\n").find((l) => l.trim().startsWith(key)) || "";
+      if (!line) { missing.push(key); continue; }
+      if (/\|\|\s*""/.test(line) || /String\(/.test(line)) fallback.push(`${key} ${line.trim()}`);
+    }
+    result["C-10n"] = {
+      title: "㊶ 来源字段不用空串/强转兜底（`|| \"\"` / `String()`）—— 否则「没有作者」会变成「作者是空字符串」，整行省略再也救不回来",
+      ok: call !== "" && missing.length === 0 && fallback.length === 0,
+      detail: `调用点找到=${call !== ""}；5 个来源字段行齐=${missing.length === 0}；兜底命中=${fallback.length}`
+        + `【与 V17 ⑤ 重叠（它扫 dist，我扫源码）；运行时语义见 V17 ④ 与我的 e2e S1.5b】`,
+      failDetail: `调用点找到=${call !== ""}；缺行=${missing.join(", ") || "无"}；兜底命中=${fallback.join(" | ") || "无"}`,
+    };
+  }
+
+  // C-10o ── 两个存储键在源码 + 产物里 0 命中（src 面是新角度）
+  {
+    const inSrc = inp.srcFiles.filter((f) => M2_STORAGE_KEYS.some((k) => f.text.includes(k))).map((f) => f.rel);
+    const inDist = inp.distTexts.filter((f) => M2_STORAGE_KEYS.some((k) => f.text.includes(k))).map((f) => f.rel);
+    const elsewhere = inp.otherFiles.filter((f) => M2_STORAGE_KEYS.some((k) => f.text.includes(k))).map((f) => f.rel);
+    result["C-10o"] = {
+      title: "㊵㊶ `opennote.templates.v1` / `opennote.highlights.v1` 不再被读写（源码 + 产物 0 命中）",
+      ok: inSrc.length === 0 && inDist.length === 0,
+      detail: `源码 0 命中（${inp.srcFiles.length} 个文件）；产物文本 0 命中（${inp.distTexts.length} 个文件）`
+        + `；测试/工具面另有 ${elsewhere.length} 处提及（不计失败，照实打印：${elsewhere.slice(0, 3).join(", ") || "无"}）`
+        + `【产物面与 V17 ⑤ 重叠，源码面是新角度】`,
+      failDetail: `源码命中：${inSrc.join(", ") || "无"}；产物命中：${inDist.join(", ") || "无"}`,
+    };
+  }
+
+  // C-10p ── 路由与目标**同生共死**（新角度：b 的 V2 只断言「manifest 不该有 options_ui」，
+  //          没查**还有没有路走到那个已删的页面**。这是配对判据的另一半。）
+  {
+    const routeSites = [];
+    for (const f of codeTexts) {
+      if (/openOptionsPage\s*\(/.test(f.text)) routeSites.push(`${f.rel}:openOptionsPage()`);
+      if (/opennote:open-options/.test(f.text)) routeSites.push(`${f.rel}:opennote:open-options`);
+      if (/id:\s*"open-options"/.test(f.text)) routeSites.push(`${f.rel}:action "open-options"`);
+    }
+    const manifestDeclares = /"(options_ui|options_page)"\s*:/.test(inp.manifest);
+    const optionsFiles = inp.srcFiles.filter((f) => /\/options\//.test(f.rel)).map((f) => f.rel);
+    const targetExists = manifestDeclares && optionsFiles.length > 0;
+    result["C-10p"] = {
+      title: "㊵ 通往 options 页的路由与声明**同生共死**：有 `openOptionsPage()`/`opennote:open-options` 路由，就必须有 manifest options 声明**且**页面文件存在（或把路由删掉）",
+      ok: routeSites.length === 0 || targetExists,
+      detail: `路由位点 ${routeSites.length} 个：${routeSites.join(" / ") || "无"}；manifest 声明=${manifestDeclares}；options 页面文件=${optionsFiles.length} 个`,
+      failDetail: `发现了 ${routeSites.length} 个路由位点（${routeSites.join(" / ")}），但 **目标不存在**：`
+        + `manifest 声明=${manifestDeclares}、options 页面文件=${optionsFiles.length} 个。`
+        + `三种正当修法任选其一：①删掉整条路由（含 `+"`state.js` 的 action、popup 的 case、background 的 handler"+`）`
+        + `；②恢复 options 页并在 manifest 里声明；③若确定要借浏览器兜底（无声明页时 Chrome 会退到扩展详情页），`
+        + `请把「有意兜底」写进注释并同步文案，然后让我按第③种改判据 —— 现在两处注释说的都还是**已退场的模板管理**。`,
+    };
+  }
+
+  // C-10r ── **分发配对**：谁产出动作、谁负责处理，两边都要有落点（新角度）
+  //          这一条是 `C-10p` 修好之后的**守卫**：删路由最容易只删一半
+  //          （删了 popup 的 case 却留着 state.js 的 action → 界面上多一个点了没反应的按钮）。
+  {
+    const popupCode2 = stripCodeComments(inp.popupJs);
+    const bgCode2 = stripCodeComments(inp.bgText);
+    const stateCode2 = stripCodeComments(inp.stateJs);
+    const cases = new Set([...popupCode2.matchAll(/case\s*"([^"]+)":/g)].map((m) => m[1]));
+    const stateActionIds = new Set([...stateCode2.matchAll(/\{\s*id:\s*"([^"]+)"/g)].map((m) => m[1]));
+    const htmlActionIds = new Set([...popupBare.matchAll(/data-action="([^"]+)"/g)].map((m) => m[1]));
+    const producers = [...new Set([...stateActionIds, ...htmlActionIds])].sort();
+    const orphanActions = producers.filter((id) => !cases.has(id));
+    const sentTypes = new Set([...popupCode2.matchAll(/type:\s*"(opennote:[^"]+)"/g)].map((m) => m[1]));
+    const handled = new Set([...bgCode2.matchAll(/case\s*"(opennote:[^"]+)":/g)].map((m) => m[1]));
+    const orphanMsgs = [...sentTypes].filter((t) => !handled.has(t)).sort();
+    result["C-10r"] = {
+      title: "㊵㊶ **分发配对**：每个动作 id（`state.js` 的 `plan.actions` ∪ `popup.html` 的 `data-action`）都有 popup 的分发分支；每个 popup 发出的 `opennote:*` 消息都有 background 的 handler",
+      ok: orphanActions.length === 0 && orphanMsgs.length === 0,
+      detail: `动作 id ${producers.length} 个（${producers.join("/")}）全部有分支；`
+        + `popup 发出的消息 ${sentTypes.size} 种全部有 handler（background 共 ${handled.size} 个 case）`
+        + `【新角度：守「删路由只删一半」——界面上留一个点了没反应的按钮】`,
+      failDetail: `没有人处理的动作 id：${orphanActions.join(", ") || "无"}；`
+        + `没有 handler 的消息类型：${orphanMsgs.join(", ") || "无"}`
+        + `（popup 发出的消息共 ${sentTypes.size} 种，background 的 case 共 ${handled.size} 个）`,
+    };
+  }
+
+  // C-10s ── **注释面的同族判据**：注释里的「去处」也必须是存在的（新角度）
+  //          `C-10p` 管的是**代码路由**；注释是给下一个读者的事实陈述，同样不能指向已删的落点。
+  //          难点：`background.js:39` 那类「记录某功能已退场」的注释**必须放行** ——
+  //          否则就是在「记录退场」的文本上判「退场没做」（同 `C-10f` 的剥注释教训）。
+  //          规则：同一行/同一注释块里同时出现「已退场功能名」与「已删落点」且**通篇没有退场字样** → 红。
+  //          逃生口：写明「已退场 / 已删除 / 不再」即可通过（这也正是诚实的写法）。
+  {
+    const RETIRED_FEATURES = ["模板", "高亮"];
+    const GONE_TARGETS = ["选项页", "options 页", "options_ui"];
+    // 逃生口只认**强**退场词。第一版把「不再」也算进去，于是
+    // `popup.js:533` 的「popup 里**不再**重复一份」把自己放行了 —— 假绿。
+    // 「不再重复一份」不是「已退场」的陈述，不能当逃生口。
+    const RETIREMENT_WORDS = /退场|已删|删除|随之退场|收回/;
+    const hits = [];
+    for (const f of inp.srcFiles) {
+      if (!/^extension\//.test(f.rel)) continue;
+      const lines = f.text.split("\n");
+      lines.forEach((line, i) => {
+        const trimmed = line.trim();
+        if (!/^(\/\/|\*|\/\*)/.test(trimmed)) return; // 只看注释行
+        if (RETIREMENT_WORDS.test(trimmed)) return;   // 记录了「已退场」→ 放行
+        const feature = RETIRED_FEATURES.find((w) => trimmed.includes(w));
+        const target = GONE_TARGETS.find((w) => trimmed.includes(w));
+        if (feature && target) hits.push(`${f.rel}:${i + 1}`);
+      });
+    }
+    const manifestDeclares2 = /"(options_ui|options_page)"\s*:/.test(inp.manifest);
+    const pageExists = manifestDeclares2 && inp.srcFiles.some((f) => /\/options\//.test(f.rel));
+    /* 同一节的第二半：**孤儿 JSDoc**。JS 只把**紧贴声明的那一块**挂到声明上，
+     * 一串相邻的 JSDoc 块里前面的都挂不上任何东西（`5f553a3` 清过一次，这是第三例）。
+     * 只认「这一串的最后一块**确实紧贴一个声明**」的情形 —— 装饰性注释不会被误判。
+     * 加这半边的理由：不加的话 b 只清 `popup.js:533` 我这条就绿了，
+     * 那 11 行孤儿 JSDoc 会被**放行半个修复** —— 配对只守一半 = 没守，对我自己的判据也一样。 */
+    const orphanJsdocs = [];
+    for (const f of inp.srcFiles) {
+      if (!/^extension\/src\/.*\.js$/.test(f.rel)) continue;
+      for (const b of orphanJsdocBlocks(f.text)) orphanJsdocs.push(`${f.rel}:${b.start + 1}`);
+    }
+    result["C-10s"] = {
+      title: "㊵㊶ **注释也是标签**：注释里的去处必须存在（已退场功能的注释不得把已删的 options 页当去处），且不得留**孤儿 JSDoc**（一串相邻 `/** */` 里挂不上声明的那几块）",
+      ok: (hits.length === 0 || pageExists) && orphanJsdocs.length === 0,
+      detail: `去处命中 ${hits.length} 处：${hits.join(", ") || "无"}；options 页存在=${pageExists}；`
+        + `孤儿 JSDoc ${orphanJsdocs.length} 处：${orphanJsdocs.join(", ") || "无"}`
+        + `【与 C-10p 同族：一个管代码路由、一个管注释里的去处；` + "`background.js:39` 那类「记录退场」的注释被放行】",
+      failDetail: `注释仍把已删的 options 页当去处：${hits.join(", ") || "无"}（options 页存在=${pageExists}）；`
+        + `孤儿 JSDoc：${orphanJsdocs.join(", ") || "无"}。`
+        + `去处类两种正当修法：①删掉/改写这句注释（它描述的功能——模板导入导出——本身也已在 M2 退场）；`
+        + `②若确实要保留，明写「已退场/已删除」。孤儿 JSDoc 只需保留**紧贴声明的那一块**，其余删掉或并进那一块。`,
+    };
+  }
+
+  // C-10t ── **死导入**：`import` 进来的名字一次都没用到（新角度，且是 Lead 点名的同族）
+  //          「声明与使用脱节」的第三种形态：孤儿 JSDoc（注释挂不上声明）、死路由（按钮没人接）、
+  //          死导入（导入了没人用）。b 清 C44 时留下 `filterTags` 就是这么冒出来的。
+  {
+    const dead = [];
+    const commentOnly = [];
+    for (const f of inp.srcFiles) {
+      if (!/^extension\/src\/.*\.js$/.test(f.rel)) continue;
+      const r = deadImportsIn(f.text);
+      for (const d of r.dead) dead.push(`${f.rel} 从 ${d}`);
+      for (const c of r.commentOnly) commentOnly.push(`${f.rel} 从 ${c}`);
+    }
+    result["C-10t"] = {
+      title: "㊵㊶ **死导入**：`import` 进来的每个本地名都要在文件里真的被用到（与孤儿 JSDoc、死路由同族：**声明与使用脱节**）",
+      ok: dead.length === 0,
+      detail: `死导入 ${dead.length} 处：${dead.join("；") || "无"}`
+        + `；仅在注释里出现（**不判死**，` + "`@type {Foo}` 是合法用法" + `）${commentOnly.length} 处：${commentOnly.join("；") || "无"}`,
+      failDetail: `死导入：${dead.join("；") || "无"}。处置：要么用起来，要么删掉这行 import ——`
+        + `**清一个功能时把它的导入留下**，下一次就会有人以为那条路径还在。`,
+    };
+  }
+
+  return result;
+}
+
+{
+  const srcFiles = readTree(["extension/src", "src"], (rel) => TEXT_EXT.has(path.extname(rel)))
+    .map((rel) => ({ rel, text: readIfExists(rel) || "" }));
+  const distFiles = readTree(["extension/dist"], () => true);
+  const distTexts = distFiles.filter((rel) => TEXT_EXT.has(path.extname(rel)))
+    .map((rel) => ({ rel, text: readIfExists(rel) || "" }));
+  const otherFiles = readTree(["extension/tests", "extension/tools"], (rel) => TEXT_EXT.has(path.extname(rel)))
+    .map((rel) => ({ rel, text: readIfExists(rel) || "" }));
+
+  const baseInputs = () => ({
+    srcFiles,
+    distFiles,
+    distTexts,
+    otherFiles,
+    bgText: readIfExists(EXT("background.js")) || "",
+    popupJs: readIfExists(EXT("popup/popup.js")) || "",
+    popupHtml: readIfExists(EXT("popup/popup.html")) || "",
+    stateJs: readIfExists(EXT("lib/state.js")) || "",
+    manifest: readIfExists(EXT("manifest.json")) || "",
+    buildInfo: (() => {
+      try { return JSON.parse(readIfExists("extension/dist/BUILD-INFO.json") || "null"); } catch { return null; }
+    })(),
+  });
+
+  const real = m2Checks(baseInputs());
+  /* 「树在动」时不许把半写状态说成产品缺陷：与 b 的标记协议一致。
+   * `scope: "dist"` 只放掉读产物的判据；`scope: "extension"`（变异运行中）连源码面也不判。 */
+  const trust = extTrust();
+  const DIST_READING = new Set(["C-10h", "C-10o"]);
+  const unjudged = new Set(trust.trusted
+    ? []
+    : trust.scope === "extension" ? M2_IDS : M2_IDS.filter((id) => DIST_READING.has(id)));
+  if (!trust.trusted) {
+    UNTRUSTED.at = true;
+    UNTRUSTED.why.push(`${trust.why} → 本次**不判**：${[...unjudged].join(", ") || "（无）"}`);
+  }
+  for (const id of M2_IDS) {
+    if (unjudged.has(id)) {
+      skip(`${id}（本次不判）`, real[id].title,
+        `树在动：${trust.why}。**既不算通过也不算失败**；等构建/变异结束再跑本脚本。`);
+      continue;
+    }
+    check(id, real[id].title, real[id].ok, real[id].detail, real[id].failDetail);
+  }
+  if (unjudged.size === M2_IDS.length) {
+    info("C-10·本轮未判", "变异在跑，源码面判据全部未判（不许当绿）", trust.why);
+  }
+
+  /** 变异：只改内存里的文本，绝不落盘。`target: null` = **控制组**（必须保持全绿）。
+   *  ⚠️ 同一个文件在 inputs 里有**两份表示**（顶层字段 + `srcFiles` 里那一项）。
+   *  第一版只改了一份 → `orphan-action` 变异「改了文本但判据没感觉」（判据读的是另一份），
+   *  被 `C-10·M2 变异有效性` 如实抓出来。这里统一**两份一起改**。 */
+  const patchSource = (inp, suffix, fn) => ({
+    ...inp,
+    srcFiles: inp.srcFiles.map((f) => (f.rel.endsWith(suffix) ? { ...f, text: fn(f.text) } : f)),
+    ...(suffix.endsWith("background.js") ? { bgText: fn(inp.bgText) } : {}),
+    ...(suffix.endsWith("popup/popup.js") ? { popupJs: fn(inp.popupJs) } : {}),
+    ...(suffix.endsWith("popup/popup.html") ? { popupHtml: fn(inp.popupHtml) } : {}),
+    ...(suffix.endsWith("lib/state.js") ? { stateJs: fn(inp.stateJs) } : {}),
+    ...(suffix.endsWith("manifest.json") ? { manifest: fn(inp.manifest) } : {}),
+  });
+  const patchSrc = patchSource;
+  /** 自我归零：把「通向已删 options 页的注释」与「孤儿 JSDoc」**两种债都清掉** ——
+   *  C-10s 的两个变异都要靠它拿到一个**绿的参照系**。
+   *  第一版只清了前者，而真源此刻因为后者仍是红的 → 变异又变成「参照系本来就红、证明不了任何事」。 */
+  /** 自我归零：把**现存**的死导入清掉 —— C-10t 变异的绿参照系。 */
+  const cleanDeadImports = (i) => {
+    const fix = (t) => stripDeadImports(t);
+    return {
+      ...i,
+      srcFiles: i.srcFiles.map((f2) => (/^extension\/src\/.*\.js$/.test(f2.rel) ? { ...f2, text: fix(f2.text) } : f2)),
+      popupJs: fix(i.popupJs),
+      bgText: fix(i.bgText),
+      stateJs: fix(i.stateJs),
+    };
+  };  const cleanCommentDebt = (i) => {
+    const fix = (t) => stripOrphanJsdocs(String(t).split("\n").filter((l) => !/插件选项页/.test(l)).join("\n"));
+    return {
+      ...i,
+      srcFiles: i.srcFiles.map((f) => (/^extension\/src\/.*\.js$/.test(f.rel) ? { ...f, text: fix(f.text) } : f)),
+      popupJs: fix(i.popupJs),
+      bgText: fix(i.bgText),
+      stateJs: fix(i.stateJs),
+    };
+  };
+  const M2_MUTATIONS = [
+    {
+      name: "highlight-in-code", target: "C-10f", expect: [],
+      apply: (i) => patchSrc(i, "background.js", (t) => `${t}\nconst legacyHeading = "## 高亮";\n`),
+    },
+    {
+      // 控制组：把同样的词塞进**注释**，判据必须**保持绿** —— 证明「剥注释」是精确的，
+      // 而不是把所有东西都剥掉了（一条恒绿的检查也能通过「代码里塞词」以外的所有检查）。
+      name: "highlight-in-comment（控制组）", target: null, expect: [],
+      apply: (i) => patchSrc(i, "background.js", (t) => `${t}\n// 历史：正文里不再生成 ## 高亮 小节\n`),
+    },
+    {
+      name: "second-menu-item", target: "C-10g", expect: [],
+      apply: (i) => patchSource(i, "background.js", (t) => t.replace("chrome.contextMenus.create({", "chrome.contextMenus.create({\n      id: \"opennote-highlight\",\n      title: \"高亮这段文字\",\n    });\n    chrome.contextMenus.create({")),
+    },
+    {
+      name: "menu-title-typo", target: "C-10g", expect: [],
+      apply: (i) => patchSource(i, "background.js", (t) => t.replace("title: \"剪藏整页正文到 Opennote\"", "title: \"剪藏选中片段\"")),
+    },
+    {
+      name: "dead-module-shipped", target: "C-10h", expect: [],
+      apply: (i) => ({ ...i, distFiles: [...i.distFiles, "extension/dist/lib/highlights.js"] }),
+    },
+    {
+      // 2026-09-30 实测撞到过这个形态：`extension/tools/mutation-check.ps1` 跑完把
+      // `dist/<file>.bak-mutation` 留在**产物目录**里（下次打包就会被发出去）。
+      name: "debris-in-dist", target: "C-10h", expect: [],
+      apply: (i) => ({ ...i, distFiles: [...i.distFiles, "extension/dist/background.js.bak-mutation"] }),
+    },
+    {
+      // 声明集合那一半的独立信号：一个**不是**残留、但 BUILD-INFO 没声明的文件。
+      name: "undeclared-in-dist", target: "C-10h", expect: [],
+      apply: (i) => ({ ...i, distFiles: [...i.distFiles, "extension/dist/leftover-note.js"] }),
+    },
+    {
+      name: "options-ui-back", target: "C-10i", expect: [],
+      apply: (i) => patchSource(i, "manifest.json", (t) => t.replace('"action"', '"options_ui": { "page": "options/options.html" },\n  "action"')),
+    },
+    {
+      name: "third-button-in-row", target: "C-10k", expect: [],
+      apply: (i) => patchSource(i, "popup/popup.html", (t) => t.replace('id="pickRow">', 'id="pickRow">\n      <button type="button" id="hlBtn">高亮这段文字</button>')),
+    },
+    {
+      name: "send-templateId", target: "C-10m", expect: [],
+      apply: (i) => patchSource(i, "popup/popup.js", (t) => t.replace('send({ type: "opennote:preview", mode })', 'send({ type: "opennote:preview", mode, templateId: "t1" })')),
+    },
+    {
+      // ⚠️ 第一版写的是 `/(\n\s*author:\s*)([^\n,]+),/` —— 它命中的是 `composeDelivery()` 里
+      // **预览展示用** 的 `      author: extraction.author || "",`（6 空格缩进，本来就带兜底），
+      // 于是把 `|| ""` 变成了 `|| "" || ""`，而**信封调用点那行没被碰到** → 目标仍绿。
+      // 自检（含下面的「变异有效性」）如实报了出来。这里必须锁定**信封调用点的 4 空格缩进**。
+      name: "source-fallback", target: "C-10n", expect: [],
+      apply: (i) => patchSource(i, "background.js", (t) => t.replace(/(\n {4}author:\s*extraction\.author),/, '$1 || "",')),
+    },
+    {
+      name: "storage-key-back", target: "C-10o", expect: [],
+      apply: (i) => patchSrc(i, "lib/store.js", (t) => `${t}\nconst LEGACY_TEMPLATES_KEY = "opennote.templates.v1";\n`),
+    },
+    {
+      // 删路由只删一半的三种形态：状态机多一个动作、popup 少一个分支、消息发出去没人接。
+      // ⚠️ 这里**追加**而不是替换某一具体行 —— 第一版替换的是 `{ id: "open-options", … }`，
+      //    结果 b 一修好那行就没了，变异「没改到文本」（自检如实报了出来）。
+      //    变异不能依赖「产品当前恰好长这样」。
+      name: "orphan-action（state.js 多一个动作，popup 没有分支）", target: "C-10r", expect: [],
+      apply: (i) => patchSrc(i, "lib/state.js", (t) => `${t}\nplan.actions = [{ id: "manage-templates", label: "管理模板…", primary: false }];\n`),
+    },
+    {
+      name: "drop-case（popup 少一个分支，动作 id 还在）", target: "C-10r", expect: [],
+      apply: (i) => patchSource(i, "popup/popup.js", (t) => t.replace('case "queue":', 'case "queue2":')),
+    },
+    {
+      name: "orphan-message（popup 发一个没人接的消息）", target: "C-10r", expect: [],
+      apply: (i) => patchSource(i, "popup/popup.js", (t) => t.replace('type: "opennote:submit"', 'type: "opennote:submit2"')),
+    },
+    {
+      // ⚠️ 变异必须**自带归零**：第一版是「再追加一句过时注释」，可产品当前那行本来就是红的
+      //    → 目标在基线就红，变异证明不了任何事（自检如实报了出来）。
+      //    改成「先把现存那行删掉（归零）→ 再注入一句过时注释（弄坏）」，于是无论产品
+      //    此刻是干净还是脏的，它都必须翻红。
+      name: "stale-options-comment（先归零再注入：注释把已删的选项页当去处）", target: "C-10s", expect: [],
+      pre: (i) => cleanCommentDebt(i),
+      apply: (i) => patchSource(cleanCommentDebt(i), "popup/popup.js", (t) => `${t}\n// 模板的导入/导出搬到插件选项页（C06「管理模板…」）。\n`),
+    },
+    {
+      // 控制组：**同样提到已删的选项页，但写明了它已退场** —— 判据必须保持绿，
+      // 否则它就是在「记录退场」的文本上判「退场没做」（同 C-10f 的教训）。同样先归零。
+      name: "retired-comment-in-comment（控制组：写明已退场）", target: null, expect: [],
+      pre: (i) => cleanCommentDebt(i),
+      apply: (i) => patchSource(cleanCommentDebt(i), "popup/popup.js", (t) => `${t}\n// 选项页已随模板一起退场（M2）；这里只留一句史话。\n`),
+    },
+    {
+      // 死导入（与孤儿 JSDoc 同族的第三种形态）：import 了一个没人用的名字。
+      name: "dead-import（先归零再注入：导入了没人用的符号）", target: "C-10t", expect: [],
+      pre: (i) => cleanDeadImports(i),
+      apply: (i) => patchSource(cleanDeadImports(i), "popup/popup.js", (t) => `${t}\nimport { filterTags } from "../lib/envelope.js";\n`),
+    },
+    {
+      // 孤儿 JSDoc 那半边的独立信号：一串两块，只有紧贴声明的那块挂得上。
+      name: "orphan-jsdoc（一串相邻 JSDoc，前面那块挂不上任何声明）", target: "C-10s", expect: [],
+      pre: (i) => cleanCommentDebt(i),
+      apply: (i) => patchSource(cleanCommentDebt(i), "popup/popup.js", (t) => `${t}\n/** 退役的模板选择器（㉘㉙）。 */\n/** 预览（模板 + 手改 + 高亮）。 */\nfunction selftestOrphan() { return 1; }\n`),
+    },
+  ];
+  const log = [];
+  let mutationsOk = true;
+  /* 基线要先算一次：**牵连必须是「增量」**。
+   * `C-10p` 在真源上本来就是红的（M2 漏删的路由），如果按「绝对态」统计牵连，
+   * 每个变异都会背上一个 `C-10p` —— 那不是牵连，是**基线里就有的红**。
+   * 这与 a-defects 的「`NO_EFFECT` 不能算 `MISSED`」同族：比较的对象必须是**基线**，不是绝对零。 */
+  const m2Base = baseInputs();
+  const m2BaseJson = JSON.stringify(m2Base);
+  const m2BaseVerdict = m2Checks(m2Base);
+  const baseRed = M2_IDS.filter((id) => m2BaseVerdict[id].ok === false);
+  for (const m of M2_MUTATIONS) {
+    const mutated = m.apply(m2Base);
+    /* 参照系：默认是「真源」。自归一型变异（先修好再弄坏）可以声明 `pre` ——
+     * 那时它要对比的是**修好后的状态**，而不是恰好此刻是脏的真源。
+     * 否则「产品当前正好是坏的」会把一个有效的变异判成「证明不了任何事」。 */
+    const refVerdict = m.pre ? m2Checks(m.pre(m2Base)) : m2BaseVerdict;
+    const refJson = m.pre ? JSON.stringify(m.pre(m2Base)) : m2BaseJson;
+    const changed = JSON.stringify(mutated) !== refJson;
+    const verdict = m2Checks(mutated);
+    const newlyRed = M2_IDS.filter((id) => refVerdict[id].ok === true && verdict[id].ok === false);
+    let fine;
+    let why = "";
+    if (m.target === null) {
+      // 控制组：**改到了文本**、且**没有任何检查新增变红**
+      fine = changed && newlyRed.length === 0;
+      why = [
+        changed ? "" : "**变异没改到文本**",
+        newlyRed.length ? `控制组不该让任何检查变红，实际新增红 ${newlyRed.join(",")}` : "",
+      ].filter(Boolean).join("；");
+      log.push(`${m.name}→保持全绿 ${fine ? "✓" : `✗（${why}）`}`);
+    } else {
+      const targetFlipped = refVerdict[m.target].ok === true && verdict[m.target].ok === false;
+      const collateral = newlyRed.filter((id) => id !== m.target).sort();
+      const collateralOk = collateral.join(",") === [...m.expect].sort().join(",");
+      fine = changed && targetFlipped && collateralOk;
+      if (!fine) mutationsOk = false;
+      why = [
+        changed ? "" : "**变异没改到文本**",
+        refVerdict[m.target].ok === false ? "目标在参照系里就是红的（该变异证明不了任何事）" : "",
+        targetFlipped ? "" : "目标没有翻红",
+        collateralOk ? "" : `牵连与声明不符（实际 ${collateral.join(",") || "无"} / 声明 ${m.expect.join(",") || "无"}）`,
+      ].filter(Boolean).join("；");
+      log.push(`${m.name}→${m.target} ${fine ? "红✓" : `未红✗（${why}）`}`
+        + `${collateral.length ? `（+牵连 ${collateral.join(",")}）` : ""}`);
+    }
+    if (!fine && m.target === null) mutationsOk = false;
+  }
+  if (baseRed.length) {
+    info("C-10·M2 基线红", "跑变异前真源上已经存在的红（**不计入任何变异的牵连**）",
+      `${baseRed.join(", ")} —— 它们要在「基线」里如实存在，而不是被算成某次变异的副作用`);
+  }
+  check("C-10·变异M2", `㊵㊶ 断言自检：${M2_MUTATIONS.length} 个内存变异（含 1 个控制组）各自生效，且牵连与声明一致`,
+    mutationsOk, log.join("；"), log.join("；"));
+  const MUT_JUDGED = trust.trusted;
+  if (!MUT_JUDGED) {
+    withdrawLast("C-10·变异M2", `${trust.why} —— 变异自检要读真源当基线，树在动时它会给出假红/假绿，**本次不判**。`);
+  }
+  // 变异没改到文本 = 假通过的前身：单独报出来（同 a-defects 的 NO_EFFECT ≠ MISSED）
+  const noEffect = [];
+  for (const m of M2_MUTATIONS.filter((x) => x.target !== null)) {
+    const ref = m.pre ? m2Checks(m.pre(m2Base)) : m2BaseVerdict;
+    const after = m2Checks(m.apply(m2Base))[m.target];
+    if (JSON.stringify(ref[m.target]) === JSON.stringify(after)) noEffect.push(m.name);
+  }
+  if (noEffect.length) {
+    fail("C-10·M2 变异有效性", "有变异**没有改变目标判据的结论**（这类变异若被算作通过，就是假通过）",
+      `无效变异：${noEffect.join(", ")}`);
+  } else {
+    info("C-10·M2 变异有效性", "每个变异都确实改变了目标判据的结论（不是「改了文本但判据没感觉」）",
+      `${M2_MUTATIONS.filter((x) => x.target !== null).length} 个变异全部有效`);
+  }
+  if (!MUT_JUDGED) {
+    withdrawLast("C-10·M2 变异有效性", `${trust.why} —— 同上，本次不判。`);
+  }
+
+  /* ── C-10p 三态自检：三种几何**自己造**，不拿产品当前状态当前提 ───────────────
+   * 第一版写成「现行必须是红」，于是 b 一修好，自检自己就红了 —— 那说明这条自检
+   * 依赖的是**产品此刻是坏的**，而不是判据本身能分辨好坏。改成自己注入：
+   *   ① 注入一条悬挂路由（有路由、无声明页）→ 必须红；
+   *   ② 真源（无论修没修）→ 按判据如实给；
+   *   ③ 恢复页面 + 有路由 → 必须绿（证明它不是「一刀禁掉 openOptionsPage」）。 */
+  {
+    const dropRoute = (i) => ({
+      ...i,
+      srcFiles: i.srcFiles.map((f) => {
+        let text = f.text;
+        if (f.rel.endsWith("popup.js")) text = text.replace(/^\s*case "open-options":\n(?:.*\n)*?\s*break;\n/m, "");
+        if (f.rel.endsWith("background.js")) {
+          text = text.replace(/^\s*case "opennote:open-options":\n(?:.*\n)*?\s*return \{ ok: true \};\n/m, "");
+        }
+        if (f.rel.endsWith("lib/state.js")) text = text.replace(/^\s*\{ id: "open-options",[^\n]*\},?\n/m, "");
+        return { ...f, text };
+      }),
+    });
+    const injectRoute = (i) => ({
+      ...i,
+      bgText: `${i.bgText}\n// 自检注入：一条通往 options 页的路由\nasync function selftestRoute() { await chrome.runtime.openOptionsPage(); }\n`,
+      srcFiles: i.srcFiles.map((f) => (f.rel.endsWith("background.js")
+        ? { ...f, text: `${f.text}\n// 自检注入：一条通往 options 页的路由\nasync function selftestRoute() { await chrome.runtime.openOptionsPage(); }\n` }
+        : f)),
+    });
+    const restorePage = (i) => ({
+      ...i,
+      manifest: i.manifest.replace('"action"', '"options_ui": { "page": "options/options.html" },\n  "action"'),
+      srcFiles: [...i.srcFiles, { rel: "extension/src/options/options.html", text: "<html><body>options</body></html>" }],
+    });
+    const dangling = m2Checks(injectRoute(baseInputs()))["C-10p"].ok;            // 期望 false
+    const live = m2Checks(baseInputs())["C-10p"].ok;                             // 真源如实
+    const repaired = m2Checks(restorePage(injectRoute(baseInputs())))["C-10p"].ok; // 期望 true
+    check("C-10p·三态自检",
+      "C-10p 判据三态正确：**注入**一条悬挂路由 → 红；**恢复页面**后同样有路由 → 绿（证明它不是「一刀禁掉 openOptionsPage」）；真源按实给",
+      dangling === false && repaired === true,
+      `注入悬挂路由=${dangling ? "绿" : "红"}（期望红）；恢复页面=${repaired ? "绿" : "红"}（期望绿）；真源现状=${live ? "绿（路由已删净）" : "红（仍有悬挂路由）"}`,
+      `注入悬挂路由=${dangling ? "绿" : "红"}（期望红）恢复页面=${repaired ? "绿" : "红"}（期望绿）真源=${live}`);
+    /* 另有一条独立观察：`dropRoute` 修法在当前树上是否真的可行（不是断言，是情报）。 */
+    info("C-10p·备选修法", "「删掉整条路由」这条修法在当前树上的效果（只作情报，不参与判定）",
+      `把四个位点全删掉后 C-10p=${m2Checks(dropRoute(baseInputs()))["C-10p"].ok ? "绿" : "红"}`
+      + `（本判据对「删路由」与「恢复页面」两种正当修法都放行）`);
+  }
+
+  /* ── 信任门自检：证明这道门不是死代码 ─────────────────────────────────────
+   * 不能靠「真去写一个 `.building` 标记」来测 —— `extension/` 是 b 的工作面，
+   * 我往里塞标记会顺带把 b 自己的门禁判成不可信。所以用注入 + 撤回自检：
+   *   ① 注入 `.mutation-running` → extension 面整体不判；
+   *   ② 注入 `.building` → 只放掉读 dist 的判据；
+   *   ③ `withdrawLast` 机制本身可用（先记一条再撤回成 SKIP，台账不留残渣）。 */
+  {
+    const fakeMut = extTrust({ injectMarker: "extension/.mutation-running" });
+    const fakeBuild = extTrust({ injectMarker: "extension/.building" });
+    pass("__trust-selftest__", "withdrawLast 自检占位（本方不留在台账里）", "占位");
+    withdrawLast("__trust-selftest__", "自检：这条应被撤回");
+    const asSkip = results[results.length - 1];
+    const mechOk = Boolean(asSkip) && asSkip.id === "__trust-selftest__" && asSkip.status === "SKIP";
+    results.pop(); // 自检不留痕：台账恢复原样（否则摘要里会多一条莫名其妙的 SKIP）
+    const noResidue = !results.some((r) => r.id === "__trust-selftest__");
+    check("C-10·信任门自检",
+      "「树在动」门禁三态正确：`.mutation-running` → extension 面整体不判；`.building` → 只放掉读 dist 的判据；`withdrawLast` 能把已记录的结论撤回成 SKIP 且不留残渣",
+      fakeMut.trusted === false && fakeMut.scope === "extension"
+        && fakeBuild.trusted === false && fakeBuild.scope === "dist" && mechOk && noResidue,
+      `注入 .mutation-running→scope=${fakeMut.scope}；注入 .building→scope=${fakeBuild.scope}；`
+        + `withdrawLast=${mechOk ? "把 PASS 撤回成 SKIP ✓" : "失效"}、无残渣=${noResidue}；真源本次=${trust.trusted ? "可信" : trust.why}`,
+      `注入 .mutation-running→scope=${fakeMut.scope}（应为 extension）；注入 .building→scope=${fakeBuild.scope}（应为 dist）；`
+        + `withdrawLast 写成 SKIP=${mechOk}；无残渣=${noResidue}`);
+  }
+
+  /* ── C-10q（INFO，登记不改判）：这条路由的**可达性**与「同名不同行为」────────────
+   * 判「该删还是该改文案」是产品裁定，不是事实问题；但事实必须摆出来。 */
+  {
+    const stateCode = stripCodeComments(readIfExists(EXT("lib/state.js")) || "");
+    const popupCode2 = stripCodeComments(readIfExists(EXT("popup/popup.js")) || "");
+    const bgCode2 = stripCodeComments(readIfExists(EXT("background.js")) || "");
+    const rawPopup = readIfExists(EXT("popup/popup.js")) || "";
+    const rawBg = readIfExists(EXT("background.js")) || "";
+    const restrictedAction = /id:\s*"open-options"/.test(stateCode);
+    const menuHidden = /more\.hidden\s*=[^;]*RESTRICTED_PAGE/.test(popupCode2);
+    const popupCase = /case "open-options":/.test(popupCode2);
+    const bgCase = /case "opennote:open-options":/.test(bgCode2);
+    const openOptions = /openOptionsPage\s*\(/.test(bgCode2);
+    const staleComments = [];
+    if (/模板选择器/.test(rawPopup)) staleComments.push("popup.js 的 case 注释仍说「C06 的落点在**模板选择器**里」");
+    if (/模板管理/.test(rawBg)) staleComments.push("background.js 的 case 注释仍说「**模板管理**走 options 页」");
+    if (restrictedAction || popupCase || bgCase) {      info("C-10q", "那条 options 路由的现状（事实摆出，该删还是该改由 Lead 裁定）",
+        `可达链：<页面受限> → state.js 的 RESTRICTED_PAGE 给一个 label 为「插件设置」的 action \`open-options\``
+        + `（同名 action 在 ⋯ 菜单里是 \`settings\` → **popup 内设置视图**，两者行为不同）`
+        + ` → popup 的 case（${popupCase ? "在" : "无"}）→ background 的 case（${bgCase ? "在" : "无"}）`
+        + ` → \`openOptionsPage()\`（${openOptions ? "在" : "无"}）。`
+        + `同一状态下 ⋯ 菜单被隐藏（\`more.hidden … RESTRICTED_PAGE\`=${menuHidden}），所以那个状态下**只有这一条**「插件设置」。`
+        + `两处注释引用的都是已退场功能：${staleComments.join("；") || "（无）"}。`
+        + `⚠️ **未验证**：无声明 options 页时 \`chrome.runtime.openOptionsPage()\` 在真机上到底打开什么`
+        + `（Chrome 可能退到扩展详情页）—— 本环境没有浏览器，我不猜；上面的断言只咬「路由 vs 声明」不一致这一静态事实。`);
+    }
+  }
+}
+
+/* ==================================================================== §14 */
+/* §14 C-12a…C-12c · 桌面端 IPC 通道配对（新角度）
+ *
+ * 与 `scripts/ipc-safety-check.cjs` 62 条的重叠核对（**先说清，不谎报新覆盖**）：
+ *   · **0 条**做「通道 ⇄ handler」配对 —— 它管的是安全面（fs 授权 / junction 越界 / CSP /
+ *     webPreferences / 关闭握手 / 方法名与 arity）；
+ *   · 部分重叠：「既有 fs / dialog / shell / app 方法名与参数个数不变」（L1150）与
+ *     「新增 API：authorizeRoot / watch / flush 握手齐全」（L1184）断言的是 preload **方法名与 arity**，
+ *     **不是通道**；「onFlushRequest …flushDone 发对频道」（L1194）用 stub 抓 `send` 的频道名，
+ *     只覆盖 flush **一条**频道。
+ *   本组咬的是**两侧集合的配对** —— 正是 `getWorkspaceInfo` 从未传给桥（插件对开着的笔记本报
+ *   `IMP-4007`）、`bridgeStatusPayload()` 静默截断 6 个字段、`newPairCode` handler 残留、
+ *   `token()` 无 handler 那一类形状的护栏。
+ *
+ * 判据只读源码文本（不启动 Electron）；无法解析的通道表达式**不判红**，单列成观察。 */
+function channelConstsOf(text) {
+  const map = new Map();
+  for (const m of String(text).matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*['"]([^'"]+)['"]/g)) {
+    map.set(m[1], m[2]);
+  }
+  return map;
+}
+/** 包装函数的形参名：`function handle(channel, …)` / `const invoke = (channel, …)` 里的 `channel`
+ *  不是「产地」，不能当成通道，也不该报成「解析不了」。 */
+const CHANNEL_PARAMS = new Set(["channel", "ch", "name", "args"]);
+
+/** 整个 `electron/` 目录里的字面通道常量（跨文件解析用：main 从 `./deeplink.cjs`
+ *  取 `DEEPLINK_CHANNEL`，只在本文件里找常量会漏 → 误报「发了没人听」）。 */
+function sharedChannelConsts(files) {
+  const map = new Map();
+  for (const f of files) {
+    for (const [k, v] of channelConstsOf(f.text)) map.set(k, v);
+  }
+  return map;
+}
+
+function channelsAt(text, patterns, shared) {
+  const src = String(text);
+  const consts = channelConstsOf(src);
+  const look = (name) => (consts.has(name) ? consts.get(name) : (shared && shared.has(name) ? shared.get(name) : null));
+  const channels = new Map(); // channel -> 首个出现行
+  const unresolved = [];
+  const params = new Set();
+  for (const re of patterns) {
+    for (const m of src.matchAll(re)) {
+      const raw = String(m[1]).trim();
+      const line = src.slice(0, m.index).split("\n").length;
+      if (/^["']/.test(raw)) {
+        const name = raw.slice(1, -1);
+        if (!channels.has(name)) channels.set(name, line);
+      } else if (/^[A-Za-z_$][\w$]*$/.test(raw)) {
+        const name = look(raw);
+        if (name !== null) {
+          if (!channels.has(name)) channels.set(name, line);
+        } else if (CHANNEL_PARAMS.has(raw)) params.add(raw);
+        else unresolved.push(`${raw}（第 ${line} 行）`);
+      } else {
+        unresolved.push(`${raw}（第 ${line} 行）`);
+      }
+    }
+  }
+  return { channels, unresolved, params: [...params] };
+}
+
+const fmtChannels = (m) => [...m.entries()].map(([c, l]) => `${c}（第 ${l} 行）`).join("、") || "无";
+
+/** 顶层逗号切分（忽略括号与字符串里的逗号）。 */
+function splitTopLevel(s) {
+  const out = [];
+  let depth = 0;
+  let cur = "";
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === "'" || c === '"' || c === "`") {
+      const end = s.indexOf(c, i + 1);
+      cur += s.slice(i, end < 0 ? s.length : end + 1);
+      i = end < 0 ? s.length : end;
+      continue;
+    }
+    if ("([{".includes(c)) depth += 1;
+    if (")]}".includes(c)) depth -= 1;
+    if (c === "," && depth === 0) { out.push(cur); cur = ""; continue; }
+    cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+function resolveChannelExpr(expr, consts, shared) {
+  const e = String(expr).trim();
+  const q = /^['"]([^'"]+)['"]$/.exec(e);
+  if (q) return q[1];
+  if (/^[A-Za-z_$][\w$]*$/.test(e)) {
+    if (consts && consts.has(e)) return consts.get(e);
+    if (shared && shared.has(e)) return shared.get(e);
+  }
+  return null;
+}
+/** 函数体（按花括号配对取），用于识别「包装函数」。 */
+function functionBodies(text) {
+  const src = String(text);
+  const out = [];
+  for (const m of src.matchAll(/function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/g)) {
+    let i = m.index + m[0].length;
+    let depth = 1;
+    while (i < src.length && depth > 0) {
+      if (src[i] === "{") depth += 1;
+      else if (src[i] === "}") depth -= 1;
+      i += 1;
+    }
+    out.push({
+      name: m[1],
+      params: m[2].split(",").map((s) => s.trim()).filter(Boolean),
+      body: src.slice(m.index + m[0].length, i - 1),
+      line: src.slice(0, m.index).split("\n").length,
+    });
+  }
+  return out;
+}
+/** 包装函数解析：`function relayToRenderer(channel, payload) { … webContents.send(channel, …) }`
+ *  的**调用点**才是真正的产地。第一版没做这层 → `import:request` / `import:receipt` 被误报「听了没人发」。 */
+function channelsViaWrappers(text, kind, consts, shared) {
+  const src = String(text);
+  const found = new Map();
+  const unresolved = [];
+  const sendRe = /webContents\.send\(\s*([A-Za-z_$][\w$]*)/;
+  const handleRe = /(?<![.\w])handle\(\s*([A-Za-z_$][\w$]*)/;
+  for (const fn of functionBodies(src)) {
+    const probe = kind === "send" ? sendRe.exec(fn.body) : handleRe.exec(fn.body);
+    if (!probe) continue;
+    const idx = fn.params.indexOf(probe[1]);
+    if (idx < 0) continue;
+    const callRe = new RegExp(`(?<![.\\w])${fn.name}\\(([^)]*)\\)`, "g");
+    for (const call of src.matchAll(callRe)) {
+      const args = splitTopLevel(call[1]);
+      const arg = (args[idx] || "").trim();
+      const name = resolveChannelExpr(arg, consts, shared);
+      const line = src.slice(0, call.index).split("\n").length;
+      if (name === null) { if (arg) unresolved.push(`${arg}（第 ${line} 行，经 ${fn.name}）`); continue; }
+      if (!found.has(name)) found.set(name, line);
+    }
+  }
+  return { channels: found, unresolved };
+}
+/** 三元链求值（保守）：能判定的判定，判不了的两支都算（多算只会让判据更宽，不会假绿）。 */
+function splitTernary(e) {
+  let depth = 0;
+  let q = -1;
+  for (let i = 0; i < e.length; i += 1) {
+    const c = e[i];
+    if (c === "'" || c === '"' || c === "`") { i = e.indexOf(c, i + 1); if (i < 0) return null; continue; }
+    if ("([{".includes(c)) depth += 1;
+    else if (")]}".includes(c)) depth -= 1;
+    else if (c === "?" && depth === 0 && q < 0) q = i;
+    else if (c === ":" && depth === 0 && q >= 0) {
+      return { cond: e.slice(0, q), then: e.slice(q + 1, i), else: e.slice(i + 1) };
+    }
+  }
+  return null;
+}
+function evalTplExpr(expr, param, value) {
+  const e = String(expr).trim();
+  const q = /^['"]([^'"]*)['"]$/.exec(e);
+  if (q) return [q[1]];
+  if (/^[A-Za-z_$][\w$]*$/.test(e)) return e === param ? [value] : [`{${e}}`];
+  const t = splitTernary(e);
+  if (!t) return [`{${e}}`];
+  /* ⚠️ 提取标识符前必须**去掉字符串字面量**：`op === 'recent'` 里的 `recent`
+   * 会被 `[A-Za-z_$][\w$]*` 当成标识符 →条件被误判成「含别的变量」→ 保守展开出
+   * `opennote:inbox:recent` 这类**交叉组合**的假名（第一版就这样误报了一串死 handler）。 */
+  const condNoStrings = t.cond.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+  const otherIdent = [...condNoStrings.matchAll(/[A-Za-z_$][\w$]*/g)].map((m) => m[0]).filter((n) => n !== param);
+  const lits = [...t.cond.matchAll(new RegExp(`${param}\\s*={2,3}\\s*'([^']+)'`, "g"))].map((m) => m[1]);
+  if (otherIdent.length === 0 && lits.length) {
+    return lits.includes(value) ? evalTplExpr(t.then, param, value) : evalTplExpr(t.else, param, value);
+  }
+  return [...evalTplExpr(t.then, param, value), ...evalTplExpr(t.else, param, value)];
+}
+/** 工厂解析：`const F = (p) => handle(\`opennote:${…}\`)` + `F('recent')` → 展开出真实通道名。 */
+function channelsViaFactories(text, consts, shared) {
+  const src = String(text);
+  const found = new Map();
+  const unresolved = [];
+  for (const m of src.matchAll(/const\s+([A-Za-z_$][\w$]*)\s*=\s*\(([A-Za-z_$][\w$]*)\)\s*=>\s*handle\(\s*`([^`]*)`/g)) {
+    const [, fname, param, tpl] = m;
+    const line0 = src.slice(0, m.index).split("\n").length;
+    const callRe = new RegExp(`(?<![.\\w])${fname}\\(\\s*(['"][^'"]*['"])`, "g");
+    let any = false;
+    for (const call of src.matchAll(callRe)) {
+      const value = call[1].slice(1, -1);
+      const line = src.slice(0, call.index).split("\n").length;
+      let candidates = [""];
+      for (const part of tpl.split(/\$\{([^}]*)\}/)) {
+        const isExpr = tpl.split(/\$\{([^}]*)\}/).indexOf(part) % 2 === 1;
+        if (!isExpr) { candidates = candidates.map((c) => c + part); continue; }
+        const vals = evalTplExpr(part, param, value);
+        candidates = candidates.flatMap((c) => vals.map((v) => c + v));
+      }
+      for (const c of candidates) {
+        any = true;
+        if (!found.has(c)) found.set(c, line);
+      }
+    }
+    if (!any) unresolved.push(`${fname}(\`…\`)（第 ${line0} 行，工厂未被静态调用）`);
+  }
+  void consts;
+  void shared;
+  return { channels: found, unresolved };
+}
+/** 已声明的 IPC 例外（**自证**）：注释里写明「保留」+「下线」，且 handler 体内确实抛「已下线」。 */
+function declaredIpcExceptions(text) {
+  const src = String(text);
+  const out = [];
+  for (const m of src.matchAll(/((?:\/\*[\s\S]*?\*\/\s*|\/\/[^\n]*\n\s*)*)handle\(\s*\n?\s*'([^']+)'/g)) {
+    const comment = m[1];
+    const channel = m[2];
+    if (!/保留/.test(comment) || !/下线/.test(comment)) continue;
+    const bodyStart = m.index + m[0].length;
+    const body = src.slice(bodyStart, bodyStart + 900);
+    const throwsFriendly = /throw/.test(body) && /已下线/.test(body);
+    out.push({ channel, throwsFriendly, evidence: "注释写明「保留…下线」且体内确实 throw「已下线」" });
+  }
+  return out;
+}
+function ipcPairChecks(inp) {
+  const P = inp.preload;
+  const M = inp.main;
+  const shared = inp.sharedConsts || new Map();
+  /* ⚠️ 首参可能**换行**在下一行（main 里多数 `handle(` 都是多行写法）。
+   * 第一版的字符类里排除了 `\n` → 31 个 handle 只认出几个 → 误报一串「发了没有接收端」。 */
+  const preOut = channelsAt(P, [/(?<![.\w])(?:invoke|ipcRenderer\.send|ipcRenderer\.sendSync)\(\s*([^,)]+)/g], shared);
+  const preIn = channelsAt(P, [/(?<![.\w])subscribe\(\s*([^,)]+)/g, /ipcRenderer\.on\(\s*([^,)]+)/g], shared);
+  const mainIn = channelsAt(M, [/(?<![.\w])(?:handle|ipcMain\.handle|ipcMain\.on)\(\s*([^,)]+)/g], shared);
+  /* ⚠️ `webContents.send` 前面是 `.`（`window.webContents.send(…)`），
+   * 第一版用 `(?<![.\w])` 一并挡掉了 → 8 个事件通道被误报成「听了没人发」。 */
+  const mainOut = channelsAt(M, [/webContents\.send\(\s*([^,)]+)/g], shared);
+  /* 两类「静态抽取器读不到」的真实注册/发送形态（第一版都误报了）：
+   *  ① 包装函数：`function relayToRenderer(channel, …) { window.webContents.send(channel, …) }`
+   *     → 真正的产地是它的**调用点** `relayToRenderer('opennote:import:request', …)`；
+   *  ② 工厂 + 模板字面量：`const relayHandler = (op) => handle(\`opennote:${…}\`)` + `relayHandler('recent')`
+   *     → 通道名是拼出来的，必须按调用点代入求值。 */
+  const mConsts = channelConstsOf(M);
+  for (const [name, line] of channelsViaWrappers(M, "handle", mConsts, shared).channels) {
+    if (!mainIn.channels.has(name)) mainIn.channels.set(name, line);
+  }
+  for (const [name, line] of channelsViaFactories(M, mConsts, shared).channels) {
+    if (!mainIn.channels.has(name)) mainIn.channels.set(name, line);
+  }
+  for (const [name, line] of channelsViaWrappers(M, "send", mConsts, shared).channels) {
+    if (!mainOut.channels.has(name)) mainOut.channels.set(name, line);
+  }
+  const dynUnresolved = [
+    ...channelsViaFactories(M, mConsts, shared).unresolved,
+    ...channelsViaWrappers(M, "send", mConsts, shared).unresolved,
+  ];
+
+  const diff = (a, b) => [...a.keys()].filter((c) => !b.has(c));
+  const noHandler = diff(preOut.channels, mainIn.channels);
+  const deadHandlerRaw = diff(mainIn.channels, preOut.channels);
+  /* **已声明的例外必须自证**：主进程可以保留一个不可达的 handler，但注释要写明「保留…下线」，
+   * 而且体内必须**确实**抛出「已下线」（说了就得是真的）。证不出来就照旧算红。 */
+  const declared = declaredIpcExceptions(M).filter((e) => e.throwsFriendly);
+  const declaredNames = new Set(declared.map((e) => e.channel));
+  const deadHandler = deadHandlerRaw.filter((c) => !declaredNames.has(c));
+  const deadHandlerDeclared = deadHandlerRaw.filter((c) => declaredNames.has(c));
+  const orphanEvent = diff(mainOut.channels, preIn.channels);
+  const deadListener = diff(preIn.channels, mainOut.channels);
+  const unresolvedAll = [
+    ...preOut.unresolved.map((u) => `preload 发出 ${u}`),
+    ...mainIn.unresolved.map((u) => `main 接收 ${u}`),
+    ...orphanEventUnresolvedFix(mainOut.unresolved, "main 发出"),
+    ...preIn.unresolved.map((u) => `preload 接收 ${u}`),
+    ...dynUnresolved.map((u) => `main 动态构造 ${u}`),
+  ];
+  return {
+    "C-12a": {
+      ok: noHandler.length === 0,
+      title: "IPC 配对① preload 能 `invoke`/`send` 的每个通道，main 都必须有接收端（否则调用必 `No handler registered`）",
+      detail: `preload 发出 ${preOut.channels.size} 个通道，main 接收端 ${mainIn.channels.size} 个，全部配对 ✅`,
+      failDetail: `preload 发了但没有接收端的通道：${noHandler.map((c) => `${c}（preload 第 ${preOut.channels.get(c)} 行）`).join("、") || "无"}`,
+    },
+    "C-12b": {
+      ok: deadHandler.length === 0,
+      title: "IPC 配对② main 的每个接收端都必须能从 preload 调到（否则是**死 handler** —— 与死路由/死导入同族）；例外必须**自证**",
+      detail: `main 接收端 ${mainIn.channels.size} 个，全部在 preload 有调用点 ✅`
+        + (deadHandlerDeclared.length
+          ? `；**已声明的例外 ${deadHandlerDeclared.length} 个**（注释写明「保留…下线」且体内确实 throw「已下线」）：${deadHandlerDeclared.join("、")}`
+          : ""),
+      failDetail: `没人能调到的 handler：${deadHandler.map((c) => `${c}（main 第 ${mainIn.channels.get(c)} 行）`).join("、") || "无"}。`
+        + `处置：删掉它，或在**它上方的注释里**写明「保留」+「下线」并真的抛出「已下线」错误（要豁免就得自证）。`,
+    },
+    "C-12c": {
+      ok: orphanEvent.length === 0 && deadListener.length === 0,
+      title: "IPC 配对③ 主进程 `webContents.send` 的事件通道 ⇄ preload `subscribe`/`on` 的订阅，**两个方向都要咬**",
+      detail: `main 发出 ${mainOut.channels.size} 个事件通道，preload 订阅 ${preIn.channels.size} 个，双向配对 ✅`,
+      failDetail: `发了没人听：${orphanEvent.map((c) => `${c}（main 第 ${mainOut.channels.get(c)} 行）`).join("、") || "无"}；`
+        + `听了没人发：${deadListener.map((c) => `${c}（preload 第 ${preIn.channels.get(c)} 行）`).join("、") || "无"}`,
+    },
+    _meta: { preOut, preIn, mainIn, mainOut, unresolvedAll },
+  };
+}
+/** 只是给观察列表去掉一个无用形参（保持列表构造可读）。 */
+function orphanEventUnresolvedFix(list, label) {
+  return list.map((u) => `${label} ${u}`);
+}
+
+{
+  group("§14 桌面端 IPC 通道配对（C-12a…C-12c）");
+  const electronDir = path.join(ROOT, "electron");
+  const readElectron = (name) => {
+    try { return fs.readFileSync(path.join(electronDir, name), "utf8"); } catch { return ""; }
+  };
+  const ipcInp = {
+    preload: readElectron("preload.cjs"),
+    main: readElectron("main.cjs"),
+    /* 跨文件常量表：main 从 `./deeplink.cjs` 取 `DEEPLINK_CHANNEL`，
+     * 只在本文件里找常量会把它当成「解析不了」→ 误报「发了没人听」。 */
+    sharedConsts: sharedChannelConsts(
+      fs.readdirSync(electronDir).filter((f) => f.endsWith(".cjs")).map((f) => ({ rel: f, text: readElectron(f) })),
+    ),
+  };
+  const verdicts = ipcPairChecks(ipcInp);
+  for (const id of ["C-12a", "C-12b", "C-12c"]) {
+    const v = verdicts[id];
+    check(id, v.title, v.ok, v.detail, v.failDetail);
+  }
+  const meta = verdicts._meta;
+  info("C-12·覆盖面", "三组判据各看到多少通道 / 有多少表达式解析不了（解析不了的不判红，摆出来）",
+    `preload 发出 ${meta.preOut.channels.size}（${fmtChannels(meta.preOut.channels)}）｜main 接收 ${meta.mainIn.channels.size}`
+    + `｜main 发出 ${meta.mainOut.channels.size}｜preload 订阅 ${meta.preIn.channels.size}`
+    + `｜包装函数形参跳过：${[...meta.preOut.params, ...meta.mainIn.params].join("/") || "无"}`
+    + `｜解析不了：${meta.unresolvedAll.join("；") || "无"}`);
+  info("C-12·重叠核对", "与 `ipc-safety-check`（62 条）的重叠：**0 条做通道配对**；部分重叠仅两处",
+    "「既有 fs/dialog/shell/app 方法名与参数个数不变」与「新增 API…握手齐全」断言 preload 的**方法名与 arity**（不是通道）；"
+    + "「onFlushRequest …flushDone 发对频道」只覆盖 flush **一条**频道。本组咬的是**两侧集合的配对**，属新覆盖。");
+
+  /* ── 变异自检：5 个目标变异 + 1 个控制组，全在内存里改文本 ───────────────
+   * ⚠️ 参照系：C-12c 在**真实树**上就是红的（下面那 2 处真缺陷）。拿一个红的基线去
+   * 做变异证明不了任何事，所以这两个变异先用 `pre` 把它规范化到「修好态」（把那两个
+   * 没人发的订阅去掉），再注入探针 —— 判据分辨的是增减，不是「产品此刻正好是坏的」。 */
+  const healed = (i) => ({
+    ...i,
+    preload: i.preload
+      /* 只把「订阅动作」拆掉，常量定义留着（别牵动别的判据）。 */
+      .replace("ipcRenderer.on(MENU_CHANNEL, listener)", "void MENU_CHANNEL")
+      .replace("subscribe(IMPORT_NOTICE_CHANNEL, callback)", "void IMPORT_NOTICE_CHANNEL"),
+  });
+  const mut = [
+    { name: "orphan-invoke（preload 调一个 main 没有的通道）", target: "C-12a",
+      apply: (i) => ({ ...i, preload: `${i.preload}\nconst probe = () => invoke('opennote:probe:missing')\n` }) },
+    { name: "drop-handler（main 少一个接收端）", target: "C-12a",
+      /* ⚠️ 第一版写的是 `handle('opennote:fs:list'` —— 但 main 里注册是**多行**的
+       * （`handle(\n  'opennote:fs:list',`），replace 匹配不上 → 没改到文本 → 自己被抓出来。 */
+      apply: (i) => ({ ...i, main: i.main.replace("'opennote:fs:list'", "'opennote:fs:list2'") }) },
+    { name: "dead-handler（main 多一个没人调的接收端）", target: "C-12b",
+      apply: (i) => ({ ...i, main: `${i.main}\nhandle('opennote:dead:probe', async () => ({}))\n` }) },
+    { name: "orphan-event（main 发一个 preload 没订阅的事件）", target: "C-12c", pre: healed,
+      apply: (i) => ({ ...i, main: `${i.main}\nwin.webContents.send('opennote:probe:event', {})\n` }) },
+    { name: "dead-listener（preload 订阅一个没人发的事件）", target: "C-12c（听了没人发）", pre: healed,
+      apply: (i) => ({ ...i, preload: `${i.preload}\nsubscribe('opennote:probe:never', () => {})\n` }) },
+    { name: "comment-only（控制组：只在注释里提通道）", target: null,
+      apply: (i) => ({ ...i, preload: `${i.preload}\n// 历史：曾经有 'opennote:fs:list2' 这个通道\n`, main: `${i.main}\n// 历史：曾经有 'opennote:dead:probe' 这个 handler\n` }) },
+  ];
+  const failures12 = [];
+  const baseAll = ipcPairChecks(ipcInp);
+  for (const m of mut) {
+    const ref = m.pre ? m.pre(ipcInp) : ipcInp;
+    const base = m.pre ? ipcPairChecks(ref) : baseAll;
+    const after = ipcPairChecks(m.apply(ref));
+    if (m.target === null) {
+      const newlyRed = ["C-12a", "C-12b", "C-12c"].filter((id) => base[id].ok && !after[id].ok);
+      if (newlyRed.length) failures12.push(`${m.name}：控制组不该让任何检查变红，实际 ${newlyRed.join(",")}`);
+      continue;
+    }
+    const key = m.target.startsWith("C-12c") ? "C-12c" : m.target;
+    if (base[key].ok !== true) { failures12.push(`${m.name}：目标 ${key} 在基线就是红的（证明不了任何事）`); continue; }
+    if (after[key].ok !== false) failures12.push(`${m.name}：目标 ${key} 没有翻红`);
+  }
+  check("C-12·变异自检", "5 个目标变异各自能让对应判据翻红、控制组保持全绿（证明这三条不是恒绿）",
+    failures12.length === 0,
+    `6 个内存变异（含 1 控制组）全部按声明生效：orphan-invoke→C-12a 红；drop-handler→C-12a 红；`
+    + `dead-handler→C-12b 红；orphan-event→C-12c 红；dead-listener→C-12c 红；comment-only（控制组）→保持全绿`,
+    `不成立的变异：${failures12.join("；")}`);
+}
 
 (async () => {
   try {
@@ -2084,12 +3484,25 @@ function bridgeStatusChecks(tsText, mainText) {
   }, {});
   const failures = results.filter((r) => r.status === "FAIL");
   const skips = results.filter((r) => r.status === "SKIP");
+  /* 收尾再查一次「树在不在动」：跑到一半有人开始 build / 跑变异，这一轮的结论就不算数。
+   * 这不是第四种「通过」，是**中止**：既不能当绿，也不能当失败清单。 */
+  const trustEnd = extTrust();
+  const untrusted = UNTRUSTED.at || !trustEnd.trusted;
 
   if (WANT_JSON) {
-    console.log(JSON.stringify({ baseline: BASELINE, changed: PRODUCT_CHANGED, counts, results }, null, 2));
+    console.log(JSON.stringify({ baseline: BASELINE, changed: PRODUCT_CHANGED, counts, untrusted, results }, null, 2));
   } else {
+    if (untrusted) {
+      console.log("\n" + "!".repeat(72));
+      console.log("!! 本次运行【不可信】—— 不得当作通过，也不得当作失败清单");
+      for (const why of UNTRUSTED.why) console.log(`!!   · ${why}`);
+      if (!UNTRUSTED.at && !trustEnd.trusted) console.log(`!!   · 收尾复查：${trustEnd.why}`);
+      console.log("!!   处理：等构建/变异结束（或删掉遗留标记）后重跑本脚本。");
+      console.log("!".repeat(72));
+    }
     console.log("\n=== 契约验证摘要 ===");
-    console.log(`PASS ${counts.PASS || 0} / FAIL ${failures.length} / SKIP ${counts.SKIP || 0} / INFO ${counts.INFO || 0}`);
+    console.log(`PASS ${counts.PASS || 0} / FAIL ${failures.length} / SKIP ${counts.SKIP || 0} / INFO ${counts.INFO || 0}`
+      + `${untrusted ? "  【不可信】" : ""}`);
     console.log(`基线 ${BASELINE}；本次产品改动面 ${PRODUCT_CHANGED.length} 个文件`);
     if (failures.length) {
       console.log("\n--- 失败清单（必须修） ---");
@@ -2101,5 +3514,7 @@ function bridgeStatusChecks(tsText, mainText) {
     }
   }
 
-  process.exit(failures.length ? 1 : 0);
+  /* 退出码：0 = 全通过；1 = 有 FAIL（打印失败清单）；2 = **本次不可信**（树在动），
+   * 与 b 的 `.building` / `.mutation-running` 约定一致（不可信 ≠ 失败，也 ≠ 通过）。 */
+  process.exit(untrusted ? 2 : failures.length ? 1 : 0);
 })();

@@ -36,6 +36,32 @@ const { pathToFileURL } = require("url");
 const ROOT = path.resolve(__dirname, "..");
 const require2 = createRequire(path.join(ROOT, "package.json"));
 
+/** 「树在动」标记 —— 与 b 的 `extension/.gitignore` 约定对齐（`.building` = build.mjs 正在重写
+ *  `extension/dist`；`.mutation-running` = `tools/mutation-check.ps1` 正在**故意改坏** `extension/src`）。
+ *  本脚本会 `ssrLoadModule` 插件源码，所以这两种窗口里跑出来的结论一律**不可信**（exit 2 = 中止）。 */
+const EXT_MARKERS = ["extension/.building", "extension/.mutation-running"];
+function extMarkersActive() {
+  return EXT_MARKERS.filter((rel) => fs.existsSync(path.join(ROOT, rel)));
+}
+/** 判定「树在不在动」。返回 false = 不可信（调用方负责 exit 2）。
+ *  `injected` 传数组 = 用注入的标记列表判定（自检用，不碰 extension/ 目录）；
+ *  不传 = 查真源。`quiet` 只用于自检，免得刷屏。 */
+function treeTrusted(when, injected, quiet = false) {
+  const on = injected !== undefined ? injected : extMarkersActive();
+  if (!on.length) return true;
+  if (!quiet) {
+    console.log("\n" + "!".repeat(72));
+    console.log(`!! ${when}发现「树在动」标记：${on.join(", ")}`);
+    console.log("!! 此时 extension/src 或 extension/dist 正在被写（甚至被故意改坏），本脚本会读到半成品。");
+    console.log("!! 本次【不跑】：exit 2 = 中止（既不是通过，也不是失败清单）。等构建/变异结束再跑。");
+    console.log("!".repeat(72));
+  }
+  return false;
+}
+const abortIfTreeMoving = (when) => {
+  if (!treeTrusted(when)) process.exit(2);
+};
+
 /* ------------------------------------------------------------------ 报告 */
 
 const results = [];
@@ -313,6 +339,7 @@ function envelope(overrides) {
 /* ------------------------------------------------------------------ 场景 */
 
 async function main() {
+  abortIfTreeMoving("开跑前");
   console.log("Opennote 0.2.0 · 端到端 6 场景验证（Verifier 独立复跑）");
   console.log("真实度：真 HTTP + 真接收端 + 真磁盘；仅 Electron IPC 边界打桩。");
 
@@ -1942,10 +1969,10 @@ async function scenario7b(env) {
       // 标题**逐条列出**这 5 个键，而不是说「全部可选字段」（Lead 2026-09-30 裁定）：
       // 「全部」是个**没人能验证的总量断言** —— 契约以后加字段，它会**静默变成错的**；
       // 而列清单只会在「契约加了、清单没加」时**保持不变**（可接受，且一眼看得出来）。
-      // 清单出处：`src/desktop/bridge.ts` 的 `BridgeStatus`（L148–173）。
-      // ⚠️ 我核过：这 5 个字段在 `docs/import/02` 里**一处都没有**（`lastRejectedOrigin` 在 02 里 0 命中），
-      // 所以「出处」只能写代码里的类型，不能假引一个文档章节 —— 见 C-11 INFO 的文档缺口登记。
-      pass("S7B.1", "真实桥：`bridgeStatusPayload()` 带着 address / error / lastRejectedOrigin / startPort / portRange（`BridgeStatus`，src/desktop/bridge.ts）",
+      // 清单出处：`02 §5.2.11 桥状态字段清单`（d-contract 2026-09-30 补入）
+      //          + `src/desktop/bridge.ts` 的 `BridgeStatus`（L148–173）。两者由 `C-11d` 双向咬合。
+      // 历史：补入之前这 5 个字段在 `02` 里 0 命中（我当时核过），出处只能写代码 —— 现在文档有了。
+      pass("S7B.1", "真实桥：`bridgeStatusPayload()` 带着 address / error / lastRejectedOrigin / startPort / portRange（清单出处：`02 §5.2.11` ↔ `BridgeStatus`，src/desktop/bridge.ts）",
         `键数=${Object.keys(status).length}；address=${JSON.stringify(status.address)} startPort=${JSON.stringify(status.startPort)} portRange=${JSON.stringify(status.portRange)}`);
     } else {
       fail("S7B.1", "真实桥：`BridgeStatus` 声明的那几个字段被重建逻辑吃掉",
@@ -2781,6 +2808,27 @@ async function scenario10Body(env) {
 
 /* ------------------------------------------------------------------ 汇总 */
 function finish() {
+  /* ① 先做「信任门自检」并**在打印摘要之前**记进台账 —— 否则这条断言会落在摘要后面，
+   *    红了也不出现在失败清单里（本轮真踩过：`check` 不存在 → ReferenceError，
+   *    摘要照印 PASS 105/FAIL 0 而退出码是 1，摘要与退出码各说各话）。
+   *    自检不去真写标记文件（`extension/` 是 b 的工作面），而是注入判定 + 静默模式。 */
+  {
+    const injected = treeTrusted("自检（静默）", ["extension/.mutation-running"], true);
+    const empty = treeTrusted("自检（静默）", [], true);
+    const live = extMarkersActive();
+    const title = "「树在动」门禁双向正确：注入标记 → 判不可信（false）；注入空列表 → 判可信（true）";
+    const detail = `注入 ["extension/.mutation-running"] → ${injected}（期望 false）；注入 [] → ${empty}（期望 true）；`
+      + `真源现状=${live.length ? live.join(", ") : "无标记"}`;
+    if (injected === false && empty === true) pass("E2E·信任门自检", title, detail);
+    else fail("E2E·信任门自检", title, detail);
+  }
+
+  /* ② 收尾复查「树在不在动」：本轮中途有人开始 build / 跑变异 → 这一轮**不可信**，此时
+   *    **连摘要都不该印**（印了就会被当成一次正常运行的结果读）。
+   *    本脚本会 `ssrLoadModule` 插件源码（L245/246、L1169），变异在改坏它们时结论无意义。
+   *    exit 2 = 中止，与 b 的标记协议一致。 */
+  if (!treeTrusted("收尾")) process.exit(2);
+
   const counts = results.reduce((acc, r) => {
     acc[r.status] = (acc[r.status] || 0) + 1;
     return acc;
@@ -2813,6 +2861,7 @@ function finish() {
     }
   }
 
+  /* 信任门自检与收尾复查都已在 `finish()` 开头完成（必须在摘要之前 —— 见那里的注释）。 */
   process.exit(failures.length ? 1 : 0);
 }
 

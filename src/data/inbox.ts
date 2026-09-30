@@ -979,6 +979,13 @@ async function resolveReceiver(): Promise<InboxReceiver> {
  * `folderOverride`（`00` §6.14㉜）非 `undefined` 时**覆盖**信封的 `target.folder`：
  * 用户在收件箱里选的「保存到」以选中值为准。值已经在 `resolveInboxFolder()` 里规范化过，
  * 这里只负责写进信封——接收端与后端仍会各自再校验一遍（落点层不得信任上一层，`02` §7.3）。
+ *
+ * **附件的 `file` 必须在这里就地解析掉，绝不能原样转交接收端**：同一个字段在两处有
+ * **两种基准**——收件箱按「条目目录」解释它（`assets/<hash>-<name>`），接收端的
+ * `resolveAssetBytes()` 按「工作区根」解释它（`backend.readBytes(asset.file)`）。
+ * 越界或读不到时若把原对象转交过去，接收端就会拿条目里的相对路径去工作区根读
+ * （跨读到别的文件，或 ENOENT）——所以这里**一律就地转成 `dataBase64`**，解析不了就
+ * **如实抛 `IMP-4012`**（附件无法导入），绝不让一个语义含糊的 `file` 流到下游。
  */
 async function envelopeForReceiver(
   target: FileSystemBackend,
@@ -999,20 +1006,25 @@ async function envelopeForReceiver(
   if (envelope.body === null || envelope.body === undefined) envelope.body = "";
   const assets: NonNullable<ImportEnvelope["assets"]> = [];
   for (const asset of envelope.assets ?? []) {
-    if (!asset || typeof asset !== "object") continue;
+    // 畸形的附件不再静默丢弃：丢了图但笔记照进，用户只会看到一篇断图的笔记。
+    if (!asset || typeof asset !== "object") {
+      throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+    }
     if (typeof asset.dataBase64 === "string" && asset.dataBase64) {
       assets.push(asset);
       continue;
     }
     if (typeof asset.file === "string" && asset.file) {
       const path = safeJoinWithin(dirName, asset.file);
+      // `safeJoinWithin` 为 null = 越界（`..`/绝对路径/保留字符）→ 如实拒，不转交。
       const bytes = path ? await target.readBytes(path).catch(() => null) : null;
-      if (bytes) {
-        assets.push({ name: asset.name, mime: asset.mime, dataBase64: encodeBase64(bytes) });
-        continue;
-      }
+      if (!bytes) throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+      // 只留 `name`/`mime`/`dataBase64`——`file` 到此为止，下游看不到它。
+      assets.push({ name: asset.name, mime: asset.mime, dataBase64: encodeBase64(bytes) });
+      continue;
     }
-    assets.push(asset);
+    // 既没有内联数据也没有可解析的 `file`：同样如实拒（对应接收端的 `no-payload`）。
+    throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
   }
   envelope.assets = assets;
   return JSON.stringify(envelope);
@@ -1160,6 +1172,11 @@ async function runCommit(
     committedPath: settled === "committed" ? result.path ?? null : previousPath,
     updatedAt: Date.now(),
   });
+  // 资产已经跟着笔记落到最终落点（接收端写 `<noteDir>/<noteName>.assets/`）：
+  // 条目里的**暂存副本**立刻删掉，别留孤儿/双份字节；重试或重复提交也就不会二次搬迁。
+  if (settled === "committed") {
+    await target.remove(joinPath(entryDirPath(found.dirName), ASSETS_DIR), { recursive: true }).catch(() => undefined);
+  }
   // 入库后界面必须 3 秒内可见：重扫工作区 + 重读收件箱。
   await rescanWorkspace();
   await refreshInbox();

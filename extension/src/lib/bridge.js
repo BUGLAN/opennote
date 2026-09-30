@@ -11,7 +11,9 @@
  * `tools/mock-bridge.mjs` 起一个真的回环服务端跑集成测试。
  */
 
-import { SPEC, CLIENT_NAME, CLIENT_VERSION, errorCodeOf, isRetryable } from "./errors.js";
+// `CLIENT_NAME` / `CLIENT_VERSION` 不在这里用：它们在 `lib/envelope.js` 里承担信封的
+// `client: { name, version }`（以及 `client.name` 的校验）—— 名字在**别的文件**里有用，不是死代码。
+import { SPEC, errorCodeOf, isRetryable } from "./errors.js";
 
 /** 02 §5.2.1：端口范围 8787–8796（共 10 个），默认从 8787 起顺序尝试。 */
 export const BRIDGE_PORTS = Object.freeze([

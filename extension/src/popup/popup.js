@@ -8,7 +8,6 @@
  */
 
 import { maskTokenTail } from "../lib/bridge.js";
-import { filterTags } from "../lib/envelope.js";
 import { userMessage } from "../lib/errors.js";
 // task-21：四因文案与后台**同一份来源**（不再各写一套、也不再统一伪装成「页面类型不支持」）
 import { PICK_FAIL_COPY } from "../lib/pick.js";
@@ -68,15 +67,34 @@ let lastPreview = null;
 
 /* ─────────────────────────── 基础设施 ─────────────────────────── */
 
-function send(message) {
+/**
+ * 给后台发一条消息。**必须有超时**：popup 是一次性界面，后台要是永不回（例如注入挂住），
+ * 这里不设时限就等于永久白屏 —— 用户实测撞到过（停在「正在读取页面…」）。
+ * 超时返回 `{ ok: false, timedOut: true }`，调用方必须给出**用户可见的出口**（不许静默 return）。
+ */
+const SEND_TIMEOUT_MS = 10000;
+
+function send(message, timeoutMs = SEND_TIMEOUT_MS) {
   return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok: false, timedOut: true });
+    }, timeoutMs);
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value == null ? null : value);
+    };
     try {
       chrome.runtime.sendMessage(message, (reply) => {
         void chrome.runtime.lastError;
-        resolve(reply == null ? null : reply);
+        done(reply);
       });
     } catch {
-      resolve(null);
+      done(null);
     }
   });
 }
@@ -205,10 +223,6 @@ function previewNode() {
   if (mode === "element" && snapshot && snapshot.pickedElement && snapshot.pickedElement.isIframe) {
     box.appendChild(el("p", "clip__hint", "这块是嵌入的内容，只能剪到它的外框，里面的内容读不到。"));
   }
-  // C23 / S13：本页有高亮时，正文区给一行说明（高亮是 body 的一部分，不改 source.selection）
-  if ((highlights || []).length) {
-    box.appendChild(el("p", "clip__merged", "高亮会一起写进正文，出处在「高亮」区里可以再看。"));
-  }
   return box;
 }
 
@@ -297,9 +311,14 @@ function currentPlan() {
     const failed = planForState(snapshot.stateId || STATE.CHECKING);
     failed.block = null;
     failed.rows = false;
-    failed.empty = { title: "没能读到正文。", text: PICK_FAIL_COPY.extraction_failed };
+    // 注入失败（超时）与抽取失败各有各的真话：用后台给的原因，取不到才退到通用那句
+    failed.empty = {
+      title: "没能读到正文。",
+      text: PICK_FAIL_COPY[snapshot.pickFailReason] || PICK_FAIL_COPY.extraction_failed,
+    };
     failed.primary = { label: "剪藏到 Opennote", disabled: true, busy: false };
-    failed.actions = [];
+    // 出口：用户必须能重试一次（此前这里是空数组 = 死路）
+    failed.actions = [{ id: "retry", label: "重试", primary: true }];
     return failed;
   }
   if (snapshot.restricted) return planForState(STATE.RESTRICTED_PAGE);
@@ -406,25 +425,7 @@ function render(planInput) {
   more.hidden = Boolean(plan.ok) || plan.state === STATE.RESTRICTED_PAGE;
 }
 
-/** 三区切换（保留用户在各区里已经填/选的内容，切区不丢数据）。 */
-/** 正文区的来源开关（原来的分段控件降级而来）。 */
-/**
- * 来源三选一（00 §6.15㉝；03 §UI-01 C64）：
- * - `元素选择`：仅 http(s)；已选过元素时才是默认项（S26），没选过则空态（S27，C67）
- * - `整页正文`：http(s) 可用
- * - `当前选区`：**只有页面上真有非空选区时**才可用，否则禁用 + C75 的 title（便捷项，不再是主路径）
- */
-/** L2 元素入口的四种文案（03 §UI-01 C66/C68/C71、UI-16 C02–C05）。 */
-/** 已选元素后的次行（C65）；来源不是元素选择时隐藏。 */
-/** 模板选择器（㉘㉙）：自动匹配 + 手动切换 + 「不使用模板」。 */
-/**
- * 高亮区（00 §6.14 ㉚；文案逐字 03 §UI-01 C24–C30 / §UI-14 S14–S17）。
- * 每条：`> 摘录`（2 行截断）+ 批注（`— ` 前缀）+ 时间 + `清除`；
- * 批注编辑态：`.field`（占位 `写一句批注（可不填）`）+ 两个底色 swatch + `保存`/`取消`。
- */
-/** 批注编辑态（S16）：真控件、Tab 可达；保存后写回 `note`/`color`。 */
-/** 批量清除（03 §UI-01 C30 / S17）：先确认，确认后才真的清。 */
-/** 预览（模板 + 手改 + 高亮）——与真正提交共用 background 的同一条合成路径。 */
+/** 预览：与真正提交共用 background 的同一条合成路径（来源 = 页面自动提取）。 */
 function schedulePreview() {
   if (previewTimer) clearTimeout(previewTimer);
   previewTimer = setTimeout(() => void refreshPreview(), 140);
@@ -435,7 +436,11 @@ async function refreshPreview() {
   // M1：popup 不再发 templateId / props / dirty（模板与属性区已退场）；
   // 来源信息（标题/网址/站点/作者/发布时间）由页面自动提取，后台按「null 则省略整行」生成 front-matter。
   const response = await send({ type: "opennote:preview", mode });
-  if (!response || !response.ok || !response.preview) return;
+  if (!response || !response.ok || !response.preview) {
+    // 出口（不许静默 return）：预览拿不到 = 用户看不到正文，必须**看得见**并能重试。
+    renderUnreadableBody(snapshot && snapshot.pickFailReason);
+    return;
+  }
   const preview = response.preview;
   lastPreview = preview;
   const props = preview.props || {};
@@ -445,9 +450,7 @@ async function refreshPreview() {
   if (inlineTitle) inlineTitle.textContent = titleValue || "未命名笔记";
 }
 
-/** C38：被改动过的字段右侧出现「按模板更新」；点了就交回模板（清掉 touched）。 */
-/** C37：标题计数 `{n}/200`。 */
-/** L5 与属性区是**同一个 state 的两个视图**：任一处输入立即同步另一处，touched 一起置 1。 */
+/** 顶部提示条：显示一句话后自动消失（不做「按模板更新」「标题计数」那些已退场的属性区行为）。 */
 function notify(text) {
   notice = text;
   if (noticeTimer) clearTimeout(noticeTimer);
@@ -534,9 +537,6 @@ function showManualCopy(text, okText) {
   }, 0);
 }
 
-/** 模板的导入/导出搬到插件选项页（03 §UI-01 C06「管理模板…」），popup 里不再重复一份。 */
-
-/** 属性面板的 8 个字段（㉘）+ 追加落点，一起发给 background 合成。 */
 /**
  * 本地预检（03 §UI-01 S21 / C39–C43）：不通过就**停在这里、不发请求**。
  * 文案逐字用 03 的清单；服务端仍会独立校验（同一句 `IMP-4008` 的 userMessage）。
@@ -553,7 +553,6 @@ function precheck() {
   return [];
 }
 
-/** C44：标签被本地过滤时如实提示（不静默丢）。 */
 /** L6（C46/C47/C48）：交付方式**如实显示**，不替用户承诺，也不做假开关。 */
 function updateDeliveryHint() {
   if (!deliveryHint) return;
@@ -588,6 +587,10 @@ async function submit() {
     mode: payload.mode,
     title: payload.title,
     importId: payload.importId,
+    // task-29 ②「所见即所剪」：把**界面上那一份**正文一起发出去 —— 用户在预览里改过的正文
+    // 必须原样进信封，而不是剪藏时又用回原始抽取结果（改了不生效是最糟的一种假开关）。
+    // 没改过时它就是抽取结果本身，行为与 M2 一致。
+    body: payload.body,
   });
   busy = false;
   if (!response || !response.reply) {
@@ -675,6 +678,26 @@ function applyReply(reply) {
   renderBlockReply(reply);
 }
 
+/**
+ * 「读不到页面」的统一出口：**看得见的说明 + 重试**。
+ * 用在两处：`opennote:load` 失败/超时、`opennote:preview` 拿不到预览。
+ * 芯片保持 CHECKING 的原文（我们不谎报连接状态：此刻并不知道桥是好是坏）；
+ * 契约里没有「读取超时」这个状态，加新状态要走 03 —— 所以这里只把**正文区**变成可执行的出口。
+ */
+function renderUnreadableBody(reason) {
+  const plan = planForState(STATE.CHECKING);
+  plan.skeleton = false;
+  plan.preview = false;
+  plan.rows = false;
+  plan.empty = {
+    title: "没能读到页面。",
+    text: PICK_FAIL_COPY[reason] || PICK_FAIL_COPY.extraction_failed,
+  };
+  plan.actions = [{ id: "retry", label: "重试", primary: true }];
+  plan.primary = { label: "剪藏到 Opennote", disabled: true, busy: false };
+  render(plan);
+}
+
 function renderBlockReply(reply) {
   const code = reply.code || null;
   const stateId = reply.state || STATE.CONNECTED;
@@ -745,12 +768,20 @@ async function connectToken(token, fromStart) {
     settingsOpen = false;
     tokenInput.value = "";
     await load(true);
-    notify("令牌已保存。"); // C74（2.4 秒后消失由 notify 的计时器负责）
+    // 探测本身失败（超时/抛错）不影响「令牌已保存」，但必须如实说出来：否则用户以为连上了。
+    if (reply.probeFailed === "timeout") notify("令牌已保存。本地接口这次没在时限内回话，稍后会自动重试。");
+    else if (reply.probeFailed) notify("令牌已保存。本地接口这次没能探测成功，稍后会自动重试。");
+    else notify("令牌已保存。"); // C74（2.4 秒后消失由 notify 的计时器负责）
     return;
   }
   if (fromStart) render(planForState(STATE.TOKEN_INVALID, { code: "IMP-2002" }));
   else {
-    tokenError.textContent = (reply && reply.label) || userMessage("IMP-2002");
+    // 可读原因：后台说得出原因就用它的原话；说不出来（超时/没回）也必须给一句人话 —— 绝不静默。
+    tokenError.textContent =
+      (reply && reply.label) ||
+      (response && response.timedOut
+        ? "本地接口没有在规定时间内回话。请再点一次「连接」。"
+        : userMessage("IMP-2002"));
     tokenError.hidden = false;
   }
 }
@@ -790,11 +821,6 @@ async function runAction(id, action) {
     case "open-settings":
     case "open-opennote":
       await send({ type: "opennote:open-settings" });
-      window.close();
-      break;
-    case "open-options":
-      // C06 的落点在模板选择器里；这里保留同一动作，供 ⋯ 菜单的「插件设置」之后的扩展入口
-      await send({ type: "opennote:open-options" });
       window.close();
       break;
     case "settings":
@@ -912,7 +938,10 @@ async function load(force = false) {
   render(planForState(STATE.CHECKING));
   const response = await send({ type: force ? "opennote:retry" : "opennote:load" });
   if (!response || !response.ok) {
+    // 出口：后台没回、回了失败、或**超时**（`timedOut`）—— 都进同一个可重试的错误态，
+    // 绝不留在「正在读取页面…」（用户实测的卡死）。
     renderBlockReply({ status: "error", code: "IMP-4014", label: userMessage("IMP-4014") });
+    renderUnreadableBody(null);
     return;
   }
   snapshot = response;

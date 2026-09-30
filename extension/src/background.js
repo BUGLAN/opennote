@@ -14,7 +14,6 @@ import {
   buildEnvelope,
   envelopeProblems,
   bodyByteLength,
-  filterTags,
   newImportId,
   toLocalIso,
   MAX_BODY_BYTES,
@@ -32,13 +31,27 @@ import { readState, mutate } from "./lib/store.js";
 // 元素选择失败原因（四因分离）的**单一文案来源**，popup 也从这里取（task-21）
 import { pickFailCopy } from "./lib/pick.js";
 import { makeQueueItem, enqueue, removeItem, markAttempt, takeBatch } from "./lib/queue.js";
-import { STATE, decideState, planFor, busyPlan, stateForCode } from "./lib/state.js";
+// 「等待必须有出口」：popup 是一次性界面，永不 settle 的 await = 永久白屏（用户实测撞上过）。
+import { withTimeout, settleWithin, TimeoutError } from "./lib/timeout.js";
+import { STATE, decideState, planFor, stateForCode } from "./lib/state.js";
 import { userMessage } from "./lib/errors.js";
 // M2（task-28）：模板（㉙）与高亮（㉚）整套退场 —— 模板模块、高亮模块、页面采集脚本与选项页
 // 都已删除（连文件一起），这里不再有任何引用，产物里也不该再出现它们的痕迹（见 verify V17）。
 
 /** API-03 只读探测：有效令牌 → 404 IMP-4017（令牌被接受），无效 → 401 IMP-2002。 */
 const AUTH_PROBE_ID = "auth-probe-0000";
+/**
+ * 页面注入的时限。`chrome.scripting.executeScript` **本身没有超时**：一旦它永不 settle，
+ * `loadSnapshot()` 就永不 resolve → popup 永远停在 `正在读取页面…`（用户实测的卡死）。
+ */
+const INJECT_TIMEOUT_MS = 4000;
+/** 整次 load 的时限（比注入时限宽）：到点必须给 popup 一个**可重试**的失败态，绝不无限 pending。 */
+const SNAPSHOT_TIMEOUT_MS = 9000;
+/**
+ * 粘贴令牌时对本地接口的探测时限。真机实测：点「连接」后 15 秒内既没存盘也没提示 ——
+ * 这条链上任何一个「永不回话的端口」都能把它拖死，而同一条路上用户看不到任何原因。
+ */
+const DISCOVER_TIMEOUT_MS = 3000;
 /** 浏览器内部页面：activeTab 也读不到（03 §UI-01/S5、FR-54）。 */
 const RESTRICTED_RE =
   /^(chrome|edge|about|devtools|view-source|chrome-extension|edge-extension|moz-extension|opera|brave|vivaldi|chrome-untrusted|edge-untrusted|data|blob|filesystem):/i;
@@ -206,18 +219,31 @@ async function sendToTab(tabId, message) {
   }
 }
 
+/** 最近一次注入失败的真实原因（timeout / error）+ 原文，供上层如实报错，不吞原因。 */
+let lastInjectFailure = null;
+
 /** 注入抽取脚本（自包含函数，见 content/extract-page.js 顶部注释）。 */
 async function extractFromTab(tabId, rootSelector) {
+  lastInjectFailure = null;
   try {
-    const injection = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: extractPage,
-      args: [{ includeArticle: true, rootSelector: rootSelector || null }],
-    });
+    // `executeScript` 没有超时：它一旦永不 settle，loadSnapshot 就永不 resolve → popup 永久白屏。
+    const injection = await withTimeout(
+      chrome.scripting.executeScript({
+        target: { tabId },
+        func: extractPage,
+        args: [{ includeArticle: true, rootSelector: rootSelector || null }],
+      }),
+      INJECT_TIMEOUT_MS,
+      "页面注入",
+    );
     const result = injection && injection[0] && injection[0].result;
     if (!result || !result.ok) return null;
     return result;
-  } catch {
+  } catch (error) {
+    lastInjectFailure =
+      error instanceof TimeoutError
+        ? { kind: "timeout", detail: `注入超时（${INJECT_TIMEOUT_MS / 1000} 秒未回）` }
+        : { kind: "error", detail: (error && (error.message || error.name)) || String(error) };
     return null;
   }
 }
@@ -254,7 +280,12 @@ function resolveTitle(extraction, mode, userTitle, picked) {
   return (extraction.article && extraction.article.title) || extraction.pageTitle || "未命名剪藏";
 }
 
-function resolveBody(extraction, mode, picked) {
+/**
+ * 正文来源的**唯一**决定点。task-29 ②：「所见即所剪」—— 用户在 popup 里改过的正文
+ * （`bodyOverride`）优先于页面抽取结果；没改过时行为与 M2 完全一致（抽取结果本身）。
+ */
+function resolveBody(extraction, mode, picked, bodyOverride = null) {
+  if (typeof bodyOverride === "string" && bodyOverride.length > 0) return bodyOverride;
   if (mode === "element") return (picked && picked.markdown) || "";
   if (mode === "selection") return extraction.selection.present ? extraction.selection.markdown : "";
   return (extraction.article && extraction.article.markdown) || "";
@@ -287,9 +318,10 @@ function composeDelivery({ extraction, mode, pickedElement = null }) {
   };
 }
 
-function buildClipEnvelope({ extraction, mode, title, folder, tags, importId, version, notePath, conflict, pickedElement = null }) {
-  // 正文就是抽取结果本身（M2 起没有模板 `bodyFormat`、没有「## 高亮」小节）。
-  const body = resolveBody(extraction, mode, pickedElement);
+function buildClipEnvelope({ extraction, mode, title, folder, tags, importId, version, notePath, conflict, pickedElement = null, bodyOverride = null }) {
+  // 正文就是抽取结果本身（M2 起没有模板 `bodyFormat`、没有「## 高亮」小节）；
+  // task-29 ②：用户在 popup 里改过正文时，`bodyOverride` 优先（所见即所剪）。
+  const body = resolveBody(extraction, mode, pickedElement, bodyOverride);
   return buildEnvelope({
     importId: importId || newImportId(),
     title,
@@ -625,6 +657,8 @@ export async function clipActiveTab(input) {
     conflict: composed.conflict,
     pickedElement,
     importId: overrides.importId,
+    // task-29 ②：改过的正文（`overrides.body`）优先于抽取结果 —— 所见即所剪。
+    bodyOverride: overrides.body,
     version: chrome.runtime.getManifest().version,
   });
 
@@ -669,11 +703,21 @@ export async function clipActiveTab(input) {
  */
 async function storeManualToken(token) {
   const value = String(token || "").trim();
+  // 入口先打一条（诊断用，不改变行为）：用它把「popup 被节流、消息根本没到后台」与
+  // 「消息到了后台、但探测挂住」两种形状**当场分开** —— 真机工具抓 popup/SW 的 console。
+  console.warn("[opennote] set-token：收到（尾 %s，长度 %d）", value.slice(-4), value.length);
   if (!isValidToken(value)) {
     return { ok: false, code: "IMP-2002", label: userMessage("IMP-2002"), state: STATE.TOKEN_INVALID };
   }
   const state = await readState();
-  const probe = await discover({ preferredPort: state.port, ports: BRIDGE_PORTS });
+  // 注意：探测**必须有超时**：`discover()` 会对 8787–8796 逐个发请求，只要有一个端口「接受连接但不回话」，
+  // 它就可能挂住 —— 而这条链上用户看到的只是「点了连接，什么都没发生」（真机实测就是这个形状：
+  // 点击事件确实派发了、本地预检也过了，但 15 秒内既没存盘、也没任何提示）。
+  const probed = await settleWithin(discover({ preferredPort: state.port, ports: BRIDGE_PORTS }), DISCOVER_TIMEOUT_MS, "探测本地接口");
+  const probe = probed.ok ? probed.value : { hit: null };
+  if (!probed.ok) {
+    console.warn("[opennote] set-token：探测本地接口%s（%s ms）—— 仍然先保存令牌，端口沿用上次的 %s", probed.reason === "timeout" ? "超时" : "抛错", DISCOVER_TIMEOUT_MS, String(state.port));
+  }
   const port = probe.hit ? probe.hit.port : state.port;
   await mutate(() => ({
     token: value,
@@ -681,7 +725,16 @@ async function storeManualToken(token) {
     endpoint: port ? endpointOf(port, "") : null,
     lastOkAt: new Date().toISOString(),
   }));
-  return { ok: true, code: null, port };
+  // 可观测性（Lead 派单：先把黑箱变成可观测的）：粘贴令牌这条链此前失败时界面无提示、日志无痕。
+  // 这里把**真实结果**打给 popup / service worker 的 console（真机工具会抓它）。
+  console.warn(
+    "[opennote] set-token：已保存（尾 %s），探测命中=%s 端口=%s 探测结果=%s —— 令牌对不对由随后的 auth 探测判定",
+    value.slice(-4),
+    probe.hit ? "是" : "否",
+    String(port),
+    probed.ok ? "正常" : probed.reason,
+  );
+  return { ok: true, code: null, port, probeFailed: probed.ok ? null : probed.reason };
 }
 
 /* ─────────────────────── popup / 页面消息路由 ─────────────────────── */
@@ -708,10 +761,15 @@ async function loadSnapshot() {
         // 0.3.1：popup 打开**不再**往页面里注入任何东西（浮标已删除，㉝）。
         // 元素选择只在用户真的点了「选择页面元素」时才注入覆盖层。
       } else {
-        // 抽取失败 ≠ 页面类型不支持（task-21）：如实标成 extraction_failed，
-        // 面板走「没能从这个页面读到正文…」而不是「只有普通网页支持」。
+        // 抽取失败 ≠ 页面类型不支持（task-21）：如实标成 extraction_failed。
+        // 注入**超时**是另一件事（卡在 executeScript），用 injection_failed 那一句更准确。
         snapshot.extractionFailed = true;
-        snapshot.pickFailReason = snapshot.pickFailReason || "extraction_failed";
+        if (lastInjectFailure && lastInjectFailure.kind === "timeout") {
+          snapshot.pickFailReason = snapshot.pickFailReason || "injection_failed";
+        } else {
+          snapshot.pickFailReason = snapshot.pickFailReason || "extraction_failed";
+        }
+        snapshot.pickFailDetail = lastInjectFailure ? lastInjectFailure.detail : null;
       }
     }
   }
@@ -780,14 +838,30 @@ async function copyViaPage(text) {
 async function handle(message) {
   switch (message && message.type) {
     case "opennote:load":
-      return loadSnapshot();
-    case "opennote:retry":
-      return { ok: true, ...(await loadSnapshot()) };
+    case "opennote:retry": {
+      // 「等待必须有出口」：整次 load 到点必须给 popup 一个**可重试**的失败态，绝不无限 pending。
+      const pending = loadSnapshot().catch((error) => {
+        console.warn("[opennote] loadSnapshot 抛错：%s", (error && error.message) || error);
+        return null;
+      });
+      const settled = await settleWithin(pending, SNAPSHOT_TIMEOUT_MS, "读取页面状态");
+      if (!settled.ok || !settled.value) {
+        console.warn(
+          "[opennote] loadSnapshot 未在 %dms 内返回（%s）：%s",
+          SNAPSHOT_TIMEOUT_MS,
+          settled.ok ? "抛错" : settled.reason,
+          settled.message || "-",
+        );
+        return { ok: false, timedOut: true, code: "IMP-4014" };
+      }
+      return { ok: true, ...settled.value };
+    }
     case "opennote:submit": {
-      // M2：popup 只发 mode / title / importId（模板与属性面板已退场）。
+      // M2：popup 只发 mode / title / importId / body（模板与属性面板已退场）。
+      // task-29 ②：`body` 是「所见即所剪」的那一半 —— 用户在 popup 里改过的正文必须原样进信封。
       const reply = await clipActiveTab({
         mode: message.mode,
-        overrides: { title: message.title, importId: message.importId },
+        overrides: { title: message.title, importId: message.importId, body: message.body },
       });
       return { ok: true, reply };
     }
@@ -928,13 +1002,6 @@ async function handle(message) {
         state: reply.state || null,
       };
     }
-    case "opennote:options":
-      // 「插件设置」打开 popup 内既有的设置视图（令牌块 / 端口）；模板管理走 options 页（C06）。
-      return { ok: true, inline: true };
-    case "opennote:open-options":
-      // 03 §UI-01 C06：模板选择器列表底部的「管理模板…」打开插件选项页（模板管理）。
-      await chrome.runtime.openOptionsPage();
-      return { ok: true };
     default:
       return { ok: false, code: "IMP-3005" };
   }

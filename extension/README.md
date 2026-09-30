@@ -166,8 +166,7 @@ node tools\cdp-pick-check.mjs                                   # 真知乎文�
 - 本机真桥可达：扩展探测真的命中 `127.0.0.1:8787`（真 Opennote），令牌不对时 popup 如实显示
   `IMP-2002`「访问令牌不正确或已失效」，桥自己的 `bridge.log` 同时记 `auth.fail IMP-2002`。
 
-**M2 抓到并修掉的真回归**：`normalizeUrl` 原在已删除的高亮模块里，删掉后元素选择结果会**静默落不了盘**
-（覆盖层照常出现、也能点，但 `picked` 为 null）。静态检查（`node --check`）抓不到，是**真机检查抓到的**；
+**M2 抓到并修掉的真回归**：`normalizeUrl` 原在已删除的高亮模块里，删掉后元素选择结果会**静默落不了盘**（覆盖层照常出现、也能点，但 `picked` 为 null）。静态检查（`node --check`）抓不到，是**真机检查抓到的**；
 修好后 V17 增加成对断言「调用了 `normalizeUrl` 就必须本地定义」，变异④证明它会红。
 
 ## 11. 已知限制与未验证项（诚实清单）
@@ -224,3 +223,33 @@ node tools\cdp-pick-check.mjs                                   # 真知乎文�
 ### 12.3 0.2.0 / BLOCK-1（历史）
 
 信封与契约（`opennote.import/v1`）、落点与去重、离线队列、三级复制降级、收件箱回执文案。
+
+## 13. 真机跑通记录（卡死修复后一轮）
+
+令牌**从盘上自己取**，不在对话里转抄（少一个产地）：
+
+```powershell
+cd extension
+$env:OPENNOTE_PICK_TOKEN = (Get-Content "$env:APPDATA\opennote\bridge.json" -Raw | ConvertFrom-Json).tokenPlaintext
+node tools\cdp-pick-check.mjs
+```
+
+| 次 | 结果 | exit |
+| --- | --- | --- |
+| ① 修 `workerSession` 之前 | 内容断言全 PASS，但工具自己在 `finally` 里抛 `workerSession is not defined` → 中断 | 1 |
+| ②③ 修好之后 | `popup 在 8 秒内离开加载态` PASS、`popup / service worker 没有 Uncaught 或 console.error` PASS、`整页提取` 正文预览 PASS | 1（1 项 FAIL，见下） |
+
+- **新增两条断言**（本轮派单的验收点）：① popup 必须在 **8 秒内离开加载态** —— 用户那个卡死本可被它抓住，此前缺的就是它；② popup **与 service worker** 的 `Runtime.exceptionThrown` / `consoleAPICalled(error)` / `Log.entryAdded(error)` 任一出现即 FAIL。
+- **`整页提取` 的正文预览已解锁**（此前 UNVERIFIED）：对真 8787 跑，预览区出现的是页面正文（`## 中文排版指北 …`），且「预览里出现的就是页面上的正文」PASS。
+- ~~**仍未过的一条：`粘贴令牌 → 连接 → 只读回显` FAIL（原因未定，未修）**~~ → **2026-09-30 定案（见下）**。现场：令牌 47 字符、通过本地预检（`#tokenError` 未出现、无 `aria-invalid`），但 `opennote:set-token` 回来后 `reply.ok` 为假、popup 没进只读回显；同时 `%APPDATA%\opennote\bridge.log` 在这三次运行期间**没有任何新条目**（既无 `auth.fail` 也无 `import.ok`）。同一个桥（06:58:52 启动）在 07:10:59 / 07:24:20 记过扩展的两次 `import.ok`，说明这条链曾经通。
+
+### 13.1 定案：`粘贴令牌 → 连接` 是 **CDP 环境 artifact**，用户侧人工验证可用
+
+**结论（第三种状态）**：
+> 真机 CDP 环境下的 action popup 处于**隐藏/失焦态被节流**，导致工具无法驱动该路径；
+> **用户侧已由用户本人验证可用**。
+
+- 证据：① CDP 真鼠标点击后 `chrome.storage.local` 里 `hasToken:false`、SW console **没有** `set-token：收到`（消息根本没发出）；② 探针打印 popup 的 `document.visibilityState === "hidden"`；③ **用户在真 popup（非 CDP）里粘贴 47 字符令牌 → 点「连接」→ 连上了**。
+- **这条验收的边界**：「粘贴令牌 → 连接」这一步，**扩展侧的自动化验收到此为止** —— 有效证据来自**用户本人的人工验证，不是机器**。它既不是「未验证」，也不是「机器已验证」。
+- 为此留下的东西（不许撤）：`storeManualToken` 的 **`set-token：收到`** 探针与 `visibilityState` 打印 —— 没有它们只能在「产品坏了 / 工具坏了」之间猜；`tools/cdp-pick-check.mjs` 头部的**边界声明**（下一个人不会再追一遍）。
+- 这一轮顺带查实的**真产品缺口**（独立于上面的 artifact）：`storeManualToken` 的 `discover()` **原先完全没有超时** —— 对 8787–8796 逐个请求，任一端口「接受连接但不回话」就能拖死整条链，用户看到的就是「点了连接什么都没发生」。已加 `settleWithin(..., DISCOVER_TIMEOUT_MS=3000)` 并**先保存令牌再探测**（动作的成败不该由旁支决定）。

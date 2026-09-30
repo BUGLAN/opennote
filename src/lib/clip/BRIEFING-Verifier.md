@@ -64,8 +64,100 @@ resetImportLandingPreference(): void                             // 复位成默
 要覆盖 0.3.0 默认路径，需要 Verifier 在对应场景里显式 `setImportChannelContext({ channel: "local-bridge" })`
 （或让桥的 handler 如实声明通道）再加一条「默认设置下 → `pending` + 无新 `.md`」的断言。
 
-## 2. 我**没有**实现什么（如实，别当已做）
+## 1.6 图片随笔记落盘（task-31，Lead 裁定 `foo.assets/`）
 
+**用户原话**：「图片下载，即将图片下载到本地（**从收件箱移动到其他位置时，图片位置也应改变**）」。
+
+**命名（冻结）**：笔记 `<目录>/foo.md` → 图片 `<目录>/foo.assets/`，正文引用是**相对路径** `foo.assets/<文件>`。
+不用公共 `<目录>/assets/`：那种布局只有「整个目录一起搬」才成立，单篇笔记挪走（或从收件箱 `{folder}` 入库到别处）就会断图。
+
+**磁盘表现（扩展侧照这个填 `assets[]`，不改字段名/形状）**
+1. 文件名 = `contentHash8(bytes) + "-" + sanitizeName(name)`，**空白折成 `-`**（空格会截断 Markdown 链接目标）。
+   内容哈希前缀 ⇒ 重试幂等；同名不同内容天然区分。
+2. **不静默覆盖**：目标路径已存在时**先读回来比字节** —— 相同 → 复用（不写）；不同 → 可读化去重 `…-2.png`、`…-3.png`
+   （用 `-2` 不用 ` 2`，同样是为了引用里没有空格）。用户手放的同名文件**逐字节不动**。
+3. **资产名不是路径逃逸入口**，两道闸：`sanitizeName` 先剥掉分隔符/冒号/控制字符；
+   落点再过 `assertSafeRelative()` **且**比对 `parentPath(落点) === 附件目录` —— 后者是硬闸：
+   `joinPath` 会把 `..` 归一化掉，只做词法校验看不出「悄悄写到目录外」。
+4. **撤销（10 秒窗口）时资产与正文一致**：
+   - 撤销「新建」→ 笔记与 `<笔记名>.assets/` **一起**移入 `.opennote/trash/`（不留孤儿目录）；
+   - 撤销「追加/覆盖」→ 前像还回来，**这次新增**的图片跟着删（判据：本次回执里的 `assets[]` **且**还原后的正文不再引用它），
+     **复用的旧图不删**（它被还原后的正文引用着）；目录空了顺手收掉；
+   - 清理失败**如实说明**（消息里带上没能清理的个数与目录），不假装成功。
+5. 收件箱待确认期间资产在条目自己的 `entry/assets/`（C2 落盘）；确认入库时由接收端写最终落点
+   （C2 的 `commitInboxResult` 把条目资产重新内联成 `dataBase64` 后交回接收端 → 只有一条写路径），
+   提交成功后 C2 立刻删掉条目里的暂存副本（`src/data/inbox.ts:1175-1179`）。
+6. **不迁移旧数据**（Lead 裁定）：老笔记的图留在公共 `<目录>/assets/` 里，正文也照旧引用 `./assets/x.png` —— **照样能读**，
+   接收端不改写、不搬运、不删它们；只有**新图**写 `<笔记名>.assets/`。
+   （H1 端到端 + H2 撤销两组用例把这条钉住：老笔记正文与老图**逐字节不变**、公共目录**既不多也不少文件**、
+   撤销时也**不碰**它 —— 这两组各有一条能独立红的断言，见下表。）
+
+**三路统一后请按这四条不变量打**（编辑器粘贴 / 本地导入 / 剪藏 → 都写 `<笔记名>.assets/`；见下方缺口 2 的裁定）：
+1. **落点不变量**：`join(parentPath(notePath), sanitizeName(stripExtension(baseName(notePath))) + ".assets")` —— 三条路必须用**同一个**派生函数（`assetsDirFor`，barrel 已导出）。
+2. **引用可解析不变量**：`join(笔记所在目录, 正文里的引用)` 恰好等于磁盘上的文件（**命名无关**的写法，改命名时这条仍然成立）。
+3. **无孤儿不变量**：永久删除 / 图删除后，`<笔记名>.assets/` **和**公共 `assets/`（若该目录下已无别的笔记在用）两个位置都不留该笔记的图。
+4. **旧数据不迁移不变量**：只在公共 `assets/` 里有图的老笔记，正文引用**一个字符都不变**、图片仍能解析（跑一遍老数据夹具即可）。
+
+**可复跑的端到端**（真 `enqueueInbox` + 真 `commitInboxResult`，只把工作区换成内存盘）：
+
+```text
+$ npx vitest run src/lib/clip/assetsE2E.test.ts        # 6 passed
+  ① 信封 → pending（资产在 .opennote/inbox/<dir>/assets/，工作区里还没有笔记）
+  ② commitInboxResult(id, { folder: "归档" }) → 归档/带图的剪藏.md + 归档/带图的剪藏.assets/×2
+  ③ 断言写成命名无关的不变量：join(笔记所在目录, 正文引用) 恰好等于磁盘上的资产文件
+  ④ 根目录无残留（没有「先落盘再搬」的中间态）；重复确认 → null 且路径快照不变
+  ⑤ discard → 条目目录（含 assets/）整棵消失；保留期 24h 清理 → 条目目录消失、最终落点的图不受影响
+  ⑥ **不迁移旧数据**（H1）：目录里先有「老笔记 + 公共 `归档/assets/`」→ 收件箱入库 / 直接落盘**两条路**都跑一遍，
+     老笔记正文与老图**逐字节不变**、公共目录既不多也不少文件、新图只进 `<新笔记>.assets/`
+```
+
+**七组断言的红/绿都验过**（细节见 §3）：
+
+| # | 回退方式 | 结果 |
+|---|---|---|
+| ① 搬笔记没搬资产 | `writeAssets` 开头直接 `return { paths: [], renames: [] }` | 21 红（`expected [] to have a length of 1`；E2E `引用应该指向 带图的剪藏.assets/：./assets/diagram.png`） |
+| ② 搬了资产但正文没重写 | `rewriteAssetRefs` 开头 `return body` | 14 红（`expected './assets/diagram.png' to match /^测试标题\.assets\//`） |
+| ③ discarded 后资产残留 | 运行时把后端的 `remove` 桩成「留下 `assets/`」（`discardInbox` 是 c2 的文件，我不改） | 1 红（`expected true to be false`） |
+| ④ 资产名含 `../` 逃逸 | `assetFinalName` 去掉 `sanitizeName` | 6 红（`../../../escape.png` 被硬闸拒成 `IMP-4012`：`❯ allocateAssetPath src/lib/clip/landing.ts:141`） |
+| **H1 不迁移旧数据** | `writeAssets` 末尾加一句删除公共 `<笔记目录>/assets/`（模拟「统一时顺手迁移旧数据」） | **2 红，且只有这 2 条红**（其余 4 条 E2E 保持绿）：`AssertionError: 老图的字节被改动了: expected null to deeply equal Uint8Array[…]` |
+| **H2 撤销不误删旧图** | `rollbackImportAssets` 里加同一句（模拟旧实现的破坏性清理） | **1 红，且只有这 1 条红**（其余 36 条保持绿）：`expected null to deeply equal Uint8Array[…]` |
+| **H3 派生边界** | `assetsDirFor` 退回 `joinPath(parentPath(notePath), "assets")` | **13 红**：`expected 'assets' to be 'foo.assets'` / `expected '归档/assets' to be '归档/foo.assets'` … |
+
+**H3 红证明里有一条「没红」，值得单独说清**：`接收端落盘的目录与 assetsDirFor(最终笔记路径) 逐字一致` 在回退后**仍然绿** ——
+它是**自洽性**断言（「写的人和算的人是不是同一个」），不是**命名**断言；回退时两边一起动，所以它照样绿。
+命名本身由那 11 条**字面量**用例钉住（`foo.md` → `foo.assets` …）。**两类断言各证明一件不同的事，不能互相替代。**
+
+⚠️ **写测试夹具的坑（Verifier 一定会踩）**：想在「已导入的笔记」上造追加场景时，**不要直接改磁盘上的正文**
+再投第二封 —— 接收端会识别成「外部改动」并给出 `IMP-W004 目标笔记有外部改动，已另存为新文件以免覆盖。`，
+结果是另存 ` 2.md`（`appended` 变 `created`）。正确做法：**让第一次导入就写出那份正文**
+（想造「老笔记 + 公共 `assets/`」的夹具，就先 `seedBytes` 那张图，再让第一封导入的信封正文引用 `./assets/x.png` ——
+未声明的引用会带 `IMP-W002` 原样保留，正好就是「不迁移」的语义）。
+
+⚠️ **③ 的红证明是「模拟回归」**：`discardInbox` 在 `src/data/inbox.ts`（c2 的写入范围），我**没有**改它；
+我用运行时桩模拟了它「删不干净」的回归，证明**断言本身对残留敏感**；生产路径的真清理由 E2E 绿证明。
+
+⚠️ **两个跨模块缺口 —— Lead 已裁定（2026 本轮）**：
+1. **删除/搬迁必须连带 `<笔记名>.assets/` —— 要修，但 `src/data/library.ts` 是 Lead-only 热点，我不动。**
+   现状：`library.ts` 只认公共 `ASSETS_DIR`（`:1145-1146`、`:1197-1208`、`:2017-2029`）→ 永久删除一篇落盘笔记
+   会留下 `<笔记名>.assets/` **孤儿目录**（用户看得见、会累积）。`trashNote` 那侧我在撤销路径里补了
+   （`runUndo` → `trashAssetsDir`），**删除笔记**走 library，由 Lead 接线。
+   **修的时候必须在两个可能的位置都查**（见裁定 ②）。
+2. **Lead 裁定：统一到 `<笔记名>.assets/`，公共 `assets/` 那一套判为「本身是错的」**（同一缺陷的另一半：
+   单独移动一篇笔记，用编辑器贴的图一样会断）。
+   - **新图一律写 `<笔记名>.assets/`**：编辑器粘贴/拖拽、本地文件夹导入、剪藏三条路统一
+     （涉及 `src/data/assets.ts`、`src/editor/media.ts`、`src/lib/import.ts` —— **都是 Lead 派单的热点文件，我不动**）；
+   - **不迁移旧数据**：老笔记的图留在 `assets/` 里，路径已经写在 Markdown 里，照样能读（迁移风险 > 收益）；
+   - **删除/搬迁要同时处理两种情况**（旧公共目录 + 新按笔记目录），与裁定 ① 合并；
+   - 文案同步（`welcome.ts:17/26/83-86`、`Sidebar.tsx:751/772`、`AppDialogs.tsx:342/413` 仍写 `assets/`）也由 Lead 派。
+   - **三路统一时请复用本模块的派生函数，不要各写一份**：`assetsDirFor(notePath)` 已从 barrel 导出
+     （`src/lib/clip/index.ts:119`），语义 = `joinPath(parentPath(notePath), sanitizeName(stripExtension(baseName(notePath)), "未命名") + ".assets")`，
+     **入参必须是最终笔记路径**（撞名去重后的 `foo 2.md` → `foo 2.assets/`），不是标题。
+
+⚠️ **引用里的空格**：笔记名本身带空格（如撞名后的 `测试标题 2.md`）时，引用会是 `测试标题 2.assets/x.png` ——
+**资产文件名**已经不含空格，但**笔记名**带来的空格仍在引用里。严格 CommonMark 需要 `%20` 或 `<>`；
+当前应用没有自己的图片解析器，实际渲染器（Obsidian/预览）接受字面空格，所以保留字面路径。**这是有意的，不是漏改。**
+
+## 2. 我**没有**实现什么（如实，别当已做）
 1. **S10 批量模式未做**：没有 batch 接口、没有 `assets` 追加接口、没有并发多封入队的编排。任务只要求单封信封的 L2 接收端。
 2. **`overwrite` 实际上永远走不到**：桥侧 `electron/bridge.cjs` 的 `getAdvancedOverwrite()` 恒 `false`（0.2.0 没做高级覆盖开关），
    所以 `conflict:"overwrite"` 到渲染层之前就被降级成 `new` + `IMP-4011`。**我的四道闸门代码是真的、也有测试**，
@@ -87,31 +179,33 @@ $ npx tsc --noEmit
 （无输出）exit 0
 
 $ npx vitest run src/lib/clip/
-Test Files  5 passed (5)
-     Tests  134 passed (134)          ← 0.3.0 落点偏好 +11、错误码表护栏 +3
+Test Files  7 passed (7)
+     Tests  177 passed (177)          ← task-31 图片：assets 37 + assetsE2E 6（含 H1/H2/H3）
+
+$ pnpm typecheck
+（无输出）exit 0
 
 $ pnpm test
-Test Files  30 passed | 1 skipped (31)
-     Tests  541 passed | 2 skipped (543)
+Test Files  32 passed | 1 skipped (33)
+     Tests  592 passed | 2 skipped (594) / 0 failed
+
+$ node scripts/ipc-safety-check.cjs
+PASS 62 / FAIL 0 / SKIP 2                  exit 0
 
 $ node scripts/verify-contract.cjs
-PASS 68 / FAIL 1 / SKIP 1 / INFO 13        exit 1
-  唯一的 FAIL 是 [C-6f]，**只剩 extension 侧**（`IMP-2001`/`IMP-3001` @ ext-errors / ext-dist）；
-  `C-6f·覆盖` 显示 `envelope: 键位 17 个码／取到文案 17 个`，失败明细里已没有 `@ envelope`。
-  修前同一项的明细第一句是：`IMP-4008 @ envelope: 文档「…不能使用 ..…」≠ 实现「…不能使用 \`..\`…」`。
+PASS 107 / FAIL 1 / SKIP 2 / INFO 18        exit 1
+  唯一的 FAIL 是 [C-12c]（main `webContents.send` ⇄ preload 订阅，IPC 配对③）—— **不在接收端**，
+  IPC 配对那组护栏是 Verifier 新加的，Lead 在派修（`C-12a`/`C-12b`/`C-10t` 已消）。我这边全绿：
+  [C-6c] PASS、**`[C-6f]` PASS（6 个产地：bridge/main/envelope/inbox/ext-errors/ext-dist）**、
+  [C-6f·覆盖] `envelope: 键位 17 个码／取到文案 17 个`。
 
 $ node scripts/verify-e2e.cjs
-PASS 67 / FAIL 1 / UNVERIFIED 3 / INFO 3    exit 1
-  FAIL 的唯一一项 [S7.1] 不是接收端的：
-    TypeError: app.requestSingleInstanceLock is not a function
-      at Object.<anonymous> (electron/main.cjs:1816:28)
-  ← `electron/main.cjs`（C3）新加了单实例锁（契约 02:1118），而 E2E 的 Electron 打桩没实现这个方法。
-    接收端相关场景（S1.x 字节模板/S2.x duplicate/S5.x 收件箱/S8.x 保留期）全 PASS。
-  其中：S1.4/S1.5 字节模板与 8 键顺序、S2.x duplicate 零写入、S3.x ` 2` 后缀、
-        S4.x 前像逐字节 + 10 秒窗口、S5.2 pending + inboxId 目录名、S5.8c 两种 id 写法、S8.2 收件箱满 IMP-4013
+PASS 106 / FAIL 0 / UNVERIFIED 3 / INFO 5    exit 0
+  （S7.1 的单实例锁打桩问题已被 C3/Verifier 消化；UNVERIFIED 3 条是「真实窗口肉眼可见」类，
+    需要真机跑，不是断言失败。）
 ```
 
-单测分布：`receive.test.ts` 72（含落点偏好 11）· `envelope.test.ts` 38 · `errorTable.test.ts` 3 · `frontmatter.test.ts` 14 · `hash.test.ts` 7 · `importLog.test.ts` 22。
+单测分布：`receive.test.ts` 72（含落点偏好 11）· `envelope.test.ts` 38 · **`assets.test.ts` 37** · `frontmatter.test.ts` 14 · `hash.test.ts` 7 · `errorTable.test.ts` 3 · **`assetsE2E.test.ts` 6** · `importLog.test.ts` 22。
 关键断言都用「能独立红」的方式验过（把实现临时回退 → 对应用例红 → 恢复 → 全绿）：
 - 域错误透传 3 红 / `inboxId` 目录名 1 红 / `IMP-4013` 文案 1 红（0.2.0 那一轮）；
 - **0.3.0 落点偏好 5 红**（`expected 'created' to be 'pending'` 等），同一轮里 4 条控制组
@@ -120,7 +214,9 @@ PASS 67 / FAIL 1 / UNVERIFIED 3 / INFO 3    exit 1
 - 收件箱幂等预判 1 红（`expected 'pending' to be 'deduped'`，第二次投递会假报又入队）；
 - ㉗ 文案 1 红（旧文案 `Opennote 里还没有打开笔记本，请先打开一个文件夹（或新建浏览器笔记本）。`）；
 - **`IMP-4008` 的反引号 2 红**（`errorTable.test.ts`：与桥逐字比对红 + 全表扫描报出
-  `IMP-4008.userMessage: 目标目录不合法：不能使用 \`..\`、…`），同轮第 3 条（警告文案）保持绿。
+  `IMP-4008.userMessage: 目标目录不合法：不能使用 \`..\`、…`），同轮第 3 条（警告文案）保持绿；
+- **task-31 图片 7 组红**（①21 红 ②14 红 ③1 红 ④6 红 + **H1 2 红 / H2 1 红 / H3 13 红**，逐条见 §1.6 的表；
+  H1/H2 的红**只有目标那几条**、控制组保持绿，H3 的回退还额外暴露了「自洽性断言 ≠ 命名断言」，见下表后面的说明）。
 
 **错误码表的三边对齐**（`errorTable.test.ts`，`scripts/verify-contract.cjs` 的 `C-6f` 单元版）：
 同一个码的 `userMessage` 有多个产地（接收端 / 桥 / 收件箱 / 扩展），`02` 附录 A.3 表格里的反引号是

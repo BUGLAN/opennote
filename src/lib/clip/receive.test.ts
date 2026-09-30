@@ -105,6 +105,23 @@ function notePaths(): string[] {
   return testBackend.paths().filter((path) => path.endsWith(".md") && !path.startsWith(".opennote/"));
 }
 
+/**
+ * 「图片跟笔记走」的**命名无关**不变量：像 Markdown 查看器那样解析正文里的相对引用，
+ * `join(笔记所在目录, ref)` 必须**恰好等于**磁盘上的资产路径（`join` 用测试自己写的一版，
+ * 不借生产代码，免得两处同时错还互相印证）。
+ */
+function resolveRef(notePath: string, ref: string): string {
+  const segments = notePath.split("/").slice(0, -1);
+  for (const segment of ref.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") segments.pop();
+    else segments.push(segment);
+  }
+  return segments.join("/");
+}
+
+/** 正文里的图片引用（`![alt](ref)` 的 `ref`），用来做上面那条不变量。 */
+
 beforeEach(async () => {
   testBackend = new MemoryBackend();
   resetImportIndexCache();
@@ -546,17 +563,20 @@ describe("L2 接收端 · 不丢字与外部改动（D08 / 00 号 §6.3）", () 
 describe("L2 接收端 · 附件（契约 §3.4）", () => {
   const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-  it("落盘到笔记同级 assets/<hash8>-<name>，正文引用被改写", async () => {
+  it("落盘到笔记同级的 `<笔记名>.assets/<hash8>-<name>`，正文引用被改写成相对路径", async () => {
     const body = "看图：\n\n![图](./assets/diagram.png)\n";
     const receipt = await receiveEnvelope(
       raw({ importId: ID1, title: "带图", body, assets: [{ name: "diagram.png", mime: "image/png", dataBase64: encodeBase64(png) }] }),
     );
     expect(receipt.assets).toHaveLength(1);
-    expect(receipt.assets[0]).toMatch(/^assets\/[0-9a-f]{8}-diagram\.png$/);
+    // 目录**按笔记名派生**（`带图.md` → `带图.assets/`），图片跟笔记走。
+    expect(receipt.assets[0]).toMatch(/^带图\.assets\/[0-9a-f]{8}-diagram\.png$/);
     expect(testBackend.bytes(receipt.assets[0])).toEqual(png);
     const text = testBackend.text(receipt.path!)!;
-    expect(text).toContain(`![图](./assets/${receipt.assets[0].split("/")[1]})`);
+    const ref = receipt.assets[0].slice("带图.assets/".length);
+    expect(text).toContain(`![图](带图.assets/${ref})`);
     expect(receipt.warnings).toEqual([]);
+    expect(resolveRef(receipt.path!, `带图.assets/${ref}`)).toBe(receipt.assets[0]);
   });
 
   it("重试不产生「 2」垃圾：同名附件命中同一内容哈希路径", async () => {
@@ -573,7 +593,7 @@ describe("L2 接收端 · 附件（契约 §3.4）", () => {
     );
     expect(b.status).toBe("appended");
     expect(b.assets[0]).toBe(a.assets[0]);
-    expect(testBackend.paths().filter((path) => path.startsWith("assets/"))).toHaveLength(1);
+    expect(testBackend.paths().filter((path) => path.includes(".assets/"))).toHaveLength(1);
   });
 
   it("附件失败时把已写入的路径放在 partial 里（IMP-4012）", async () => {

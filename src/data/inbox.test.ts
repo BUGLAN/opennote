@@ -107,7 +107,12 @@ class MemoryBackend implements FileSystemBackend {
     return typeof value === "string" ? value : new TextDecoder().decode(value);
   }
   async readBytes(path: string): Promise<Uint8Array> {
-    return new TextEncoder().encode(await this.readText(path));
+    this.calls.push(`read:${path}`);
+    const value = this.files.get(path);
+    if (value === undefined) throw new Error(`ENOENT ${path}`);
+    // 二进制必须**逐字节**往返：早先这里写成 `encode(await readText())`，0x89 这种
+    // 非法 UTF-8 单字节会被解码成 U+FFFD 再编码回 3 字节 —— 图片就被悄悄改坏了。
+    return typeof value === "string" ? new TextEncoder().encode(value) : value;
   }
   async writeText(path: string, text: string): Promise<void> {
     this.calls.push(`write:${path}`);
@@ -748,6 +753,192 @@ describe("commitInboxResult(id, { folder })：入库前选落点", () => {
     const result = await commitInboxResult(entry.id, { folder: "速记" });
     expect(result).toMatchObject({ status: "created", importId: ENVELOPE.importId, path: "速记/中文排版指北.md" });
     expect(calls).toHaveLength(1);
+  });
+});
+
+/* ------------------ 资产随笔记一起入库（task-31：图片跟笔记走） ------------------ */
+
+/**
+ * 设计（Lead 冻结，用户确认）：笔记在 `<目录>/foo.md` → 图片在 `<目录>/foo.assets/`，
+ * 正文里的引用是**相对路径**；从收件箱确认入库到 `{folder}` 时，资产必须**跟着笔记走**。
+ *
+ * 端到端断言咬的是**性质**而不是散落的字面量：
+ * ① `资产目录 = 笔记同目录下、由笔记名派生的 <noteName>.assets/`；
+ * ② `正文里的相对引用 join(笔记目录, ref)` **恰好等于**那个资产文件。
+ * 这两条正是「图片跟笔记走」的定义 —— 「没搬资产」「搬了资产但正文没重写」「退回公共
+ * `assets/`」三种情况都会红。落盘目录名由 C1 的 `landing.ts` 决定，字面断言在那边。
+ */
+describe("资产随笔记一起入库（task-31）", () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x2a, 0x2b, 0x2c, 0x2d]);
+  const PNG_BASE64 = Buffer.from(PNG).toString("base64");
+  const ASSET_NAME = "diagram.png";
+
+  function assetEnvelope(patch: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      ...ENVELOPE,
+      title: "带图笔记",
+      body: "看图：\n\n![图](./assets/diagram.png)\n",
+      source: { ...ENVELOPE.source, url: "https://example.com/with-image" },
+      target: { folder: null, notePath: null },
+      assets: [{ name: ASSET_NAME, mime: "image/png", dataBase64: PNG_BASE64 }],
+      ...patch,
+    });
+  }
+  const assetMeta = () => ({
+    ...META,
+    title: "带图笔记",
+    sourceUrl: "https://example.com/with-image",
+    bodyHash: "sha256:with-image",
+  });
+
+  /** 正文里的第一个图片引用（`![…](ref)`）。 */
+  const firstImageRef = (body: string) => /!\[[^\]]*\]\(([^)]+)\)/.exec(body)?.[1] ?? "";
+  const bytesAt = (path: string) => new Uint8Array(testBackend.files.get(path) as Uint8Array);
+
+  it("端到端：入到 {folder} → 笔记与资产都在最终目录，正文相对引用指得准（① ②）", async () => {
+    const entry = await enqueueInbox(assetEnvelope(), assetMeta());
+    const dirName = await firstDirName();
+    // 待确认期间：资产在条目自己的 `assets/` 下，`entry.json` 的 `assets[].file` 是条目相对路径。
+    expect(testBackend.pathsUnder(`${INBOX_DIR}/${dirName}/assets`)).toHaveLength(1);
+    setInboxReceiver(null); // C1 的真实接收端
+
+    const result = await commitInboxResult(entry.id, { folder: "剪藏/技术" });
+    const notePath = result?.path ?? "";
+
+    expect(notePath).toBe("剪藏/技术/带图笔记.md");
+    // ① 资产跟着笔记搬到了**最终目录**（不是留在收件箱，也不是旧目录），字节原样。
+    expect(result?.assets).toHaveLength(1);
+    const assetPath = result!.assets[0];
+    // 冻结命名（Lead 裁定）：资产目录 = 笔记同目录下、由**笔记名**派生的 `<noteName>.assets/`。
+    // 断言从 `notePath` 派生而不是写死字面量 —— 「图片跟笔记走」这条性质本身才是要咬的东西：
+    // 公共 `<目录>/assets/` 会让这条红（那种布局下单篇笔记挪走就断图）。
+    const noteDir = parentPath(notePath);
+    const assetsDir = parentPath(assetPath);
+    expect(assetsDir).toBe(`${noteDir}/${baseName(notePath).replace(/\.md$/, "")}.assets`);
+    expect(assetsDir.startsWith(`${noteDir}/`)).toBe(true);
+    expect(bytesAt(assetPath)).toEqual(PNG);
+    // ② 正文里的引用是相对路径，且 join(笔记目录, 引用) 恰好等于那个资产文件。
+    const ref = firstImageRef(String(testBackend.files.get(notePath)));
+    expect(ref).not.toBe("");
+    expect(ref.startsWith("/")).toBe(false);
+    expect(ref).not.toContain("..");
+    expect(joinPath(noteDir, ref.replace(/^\.\//, ""))).toBe(assetPath);
+    // 源目录无残留：条目里的**暂存副本**已删（条目本身按 24h 保留期留着当记录）。
+    expect(testBackend.dirs.has(`${INBOX_DIR}/${dirName}/assets`)).toBe(false);
+    expect(testBackend.pathsUnder(`${INBOX_DIR}/${dirName}/assets`)).toEqual([]);
+    // 没落到信封的旧落点，也没落到工作区根。
+    expect(testBackend.files.has("读书笔记/带图笔记.md")).toBe(false);
+    expect(testBackend.files.has("带图笔记.md")).toBe(false);
+  });
+
+  it("② 的敏感性：正文引用一个不存在的资产名 → 引用指不到真实文件（该断言会红）", async () => {
+    const entry = await enqueueInbox(
+      assetEnvelope({ body: "看图：\n\n![图](./assets/wrong-name.png)\n" }),
+      assetMeta(),
+    );
+    setInboxReceiver(null);
+    const result = await commitInboxResult(entry.id, { folder: "剪藏/技术" });
+    const notePath = result!.path!;
+    const ref = firstImageRef(String(testBackend.files.get(notePath)));
+    const resolved = joinPath(parentPath(notePath), ref.replace(/^\.\//, ""));
+
+    expect(resolved).not.toBe(result!.assets[0]);
+    expect(testBackend.files.has(resolved)).toBe(false); // 断图 —— 正是 ② 要盖住的东西
+  });
+
+  it("幂等：重复提交不重复搬、不留第二份资产、不留孤儿目录", async () => {
+    const entry = await enqueueInbox(assetEnvelope(), assetMeta());
+    setInboxReceiver(null);
+    const first = await commitInboxResult(entry.id, { folder: "剪藏/技术" });
+    const assetPath = first!.assets[0];
+    const treeBefore = testBackend.pathsUnder("剪藏").sort();
+    const mark = testBackend.calls.length;
+
+    const second = await commitInboxResult(entry.id, { folder: "剪藏/技术" });
+
+    expect(second).toBeNull(); // 已入库 → 幂等返回，不重复写盘
+    expect(testBackend.pathsUnder("剪藏").sort()).toEqual(treeBefore); // 没有第二份、没有 ` 2`
+    expect(bytesAt(assetPath)).toEqual(PNG);
+    expect(testBackend.calls.slice(mark).filter((call) => call.startsWith("write:"))).toEqual([]);
+  });
+
+  it("③ discarded：资产随条目立即删除，不进回收站", async () => {
+    const entry = await enqueueInbox(assetEnvelope(), assetMeta());
+    const dirName = await firstDirName();
+    expect(testBackend.pathsUnder(`${INBOX_DIR}/${dirName}/assets`)).toHaveLength(1);
+
+    await discardInbox(entry.id);
+
+    expect(testBackend.pathsUnder(INBOX_DIR)).toEqual([]);
+    expect([...testBackend.dirs, ...testBackend.files.keys()].filter((path) => path.startsWith(".opennote/trash"))).toEqual([]);
+    expect(testBackend.calls.filter((call) => call.includes(".opennote/trash"))).toEqual([]);
+  });
+
+  it("③b 已入库的条目被丢弃：只删条目记录，笔记与资产都留着", async () => {
+    const entry = await enqueueInbox(assetEnvelope(), assetMeta());
+    setInboxReceiver(null);
+    const result = await commitInboxResult(entry.id, { folder: "剪藏/技术" });
+    const notePath = result!.path!;
+    const assetPath = result!.assets[0];
+
+    await discardInbox(entry.id);
+
+    expect(testBackend.pathsUnder(INBOX_DIR)).toEqual([]); // 记录没了
+    expect(testBackend.files.has(notePath)).toBe(true); // 笔记还在
+    expect(testBackend.files.has(assetPath)).toBe(true); // 资产跟着笔记走，不跟着记录走
+  });
+
+  it("④ 资产路径逃逸（`../`、绝对路径）：就地 IMP-4012 如实拒，接收端一次都不调", async () => {
+    for (const file of ["../逃逸.png", "assets/../../逃逸.png", "/etc/逃逸.png", "C:/逃逸.png"]) {
+      const entry = await enqueueInbox(assetEnvelope(), assetMeta());
+      const dirName = await firstDirName();
+      // 手工写坏 entry.json（真实投递路径会经过 validateEnvelope，这里模拟被改坏的条目）。
+      const entryPath = `${INBOX_DIR}/${dirName}/entry.json`;
+      const envelope = JSON.parse(String(testBackend.files.get(entryPath))) as Record<string, unknown>;
+      envelope.assets = [{ name: ASSET_NAME, mime: "image/png", file }];
+      testBackend.files.set(entryPath, JSON.stringify(envelope));
+      const receiverCalls = installReceiver();
+      const mark = testBackend.calls.length;
+
+      await expect(commitInboxResult(entry.id), file).rejects.toMatchObject({ code: "IMP-4012" });
+
+      // 下游一次都没被调用：那个语义含糊的 `file` 没有流到接收端。
+      expect(receiverCalls, file).toHaveLength(0);
+      // 也绝没有把条目相对路径当成**工作区根**路径去读（`resolveAssetBytes` 的基准差异）。
+      expect(testBackend.calls.slice(mark).filter((call) => call.includes("..")), file).toEqual([]);
+      // 如实失败：状态、错误码、中文文案都对得上，不是静默成功。
+      const after = (await readInboxEntry(entry.id))!;
+      expect(after.status, file).toBe("failed");
+      expect(after.lastError, file).toBe("IMP-4012");
+      expect(after.message, file).toBe("有一个附件无法导入（格式不支持或太大）。");
+      await discardInbox(entry.id);
+    }
+  });
+
+  it("④b 资产文件缺失（file 指向条目里不存在的文件）→ 同样 IMP-4012 如实失败", async () => {
+    const entry = await enqueueInbox(assetEnvelope(), assetMeta());
+    const dirName = await firstDirName();
+    const entryPath = `${INBOX_DIR}/${dirName}/entry.json`;
+    const envelope = JSON.parse(String(testBackend.files.get(entryPath))) as Record<string, unknown>;
+    envelope.assets = [{ name: ASSET_NAME, mime: "image/png", file: "assets/不存在.png" }];
+    testBackend.files.set(entryPath, JSON.stringify(envelope));
+    const receiverCalls = installReceiver();
+
+    await expect(commitInboxResult(entry.id)).rejects.toMatchObject({ code: "IMP-4012" });
+
+    expect(receiverCalls).toHaveLength(0);
+    const after = (await readInboxEntry(entry.id))!;
+    expect(after.status).toBe("failed");
+    expect(after.lastError).toBe("IMP-4012");
+    // 暂存资产还在 → 用户修好之后可以重试。
+    expect(testBackend.pathsUnder(`${INBOX_DIR}/${dirName}/assets`)).toHaveLength(1);
+  });
+
+  it("面板：有附件时如实显示数量（不画点不动的按钮）", async () => {
+    await enqueueInbox(assetEnvelope(), assetMeta());
+    const html = await renderPanel();
+    expect(html).toContain("附件 · 1");
+    expect(html).toContain(ASSET_NAME);
   });
 });
 

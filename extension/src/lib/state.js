@@ -300,7 +300,6 @@ export function planFor(state, ctx = {}) {
         text: "换个普通网页再试。",
       };
       plan.actions = [
-        { id: "open-options", label: "插件设置", primary: false },
         { id: "open-opennote", label: "打开 Opennote", primary: false },
       ];
       plan.primary = null;
@@ -347,7 +346,6 @@ export function planFor(state, ctx = {}) {
   // C 三区（00 §6.14 ㉘：「正文 / 高亮 / 属性」）——哪些区可用由状态决定，
   // 例如受限页面与成功态整块隐藏。
   plan.templatePicker = plan.segments;
-  plan.highlightsAvailable = plan.segments;
   plan.sourceSwitch = plan.segments;
   plan.propertyPanel = plan.segments;
 

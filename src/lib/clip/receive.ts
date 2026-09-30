@@ -17,9 +17,16 @@
  * - `undoImport(receipt)`：撤销。
  */
 
-import { baseName, stripExtension } from "../../fs/paths";
+import { TRASH_DIR, baseName, joinPath, stripExtension } from "../../fs/paths";
 import type { FileSystemBackend } from "../../fs/types";
-import { currentBackend, flushAll, libraryStore, rescanWorkspace, trashNote } from "../../data/library";
+import {
+  currentBackend,
+  flushAll,
+  libraryStore,
+  rescanWorkspace,
+  resolveAvailablePath,
+  trashNote,
+} from "../../data/library";
 import {
   forgetImport,
   lookupImportById,
@@ -1103,9 +1110,18 @@ async function runUndo(receipt: ImportReceipt): Promise<ImportUndoResult> {
     if (bytes) {
       try {
         await backend.writeBytes(path, bytes);
+        // 正文回到导入前了，**这次新增的图片也必须跟着回退**：还原后的正文不再引用它们，
+        // 留着就是孤儿（用户看不到、磁盘上却在）。复用的旧图片不动（见 `rollbackImportAssets`）。
+        const leftover = await rollbackImportAssets(backend, path, receipt, decodeUtf8(bytes));
         await markImportUndone(receipt.importId).catch(() => false);
         await rescanWorkspace();
-        return { ok: true, mode: "preimage", message: `已还原《${title}》到导入前的版本。` };
+        return {
+          ok: true,
+          mode: "preimage",
+          message: leftover
+            ? `已还原《${title}》到导入前的版本；但这次新增的 ${leftover} 个图片文件没能清理，请手动删除 ${assetsDirFor(path)}。`
+            : `已还原《${title}》到导入前的版本。`,
+        };
       } catch (error) {
         console.warn("[opennote] 前像还原失败，降级为移入回收站", error);
       }
@@ -1114,17 +1130,71 @@ async function runUndo(receipt: ImportReceipt): Promise<ImportUndoResult> {
 
   try {
     await rescanWorkspace();
+    const assetsDir = assetsDirFor(path);
+    const hasAssets = await backend.exists(assetsDir);
     await trashNote(path);
+    // 笔记进了回收站，图片目录必须**一起**进去：图片跟笔记走，撤了笔记却留下 `foo.assets/`
+    // 就是孤儿目录（下一篇同名笔记还会撞上它）。
+    const assetsTrashed = hasAssets ? await trashAssetsDir(backend, assetsDir) : true;
     await markImportUndone(receipt.importId).catch(() => false);
     const removed = libraryStore.get().notes[path] === undefined;
+    const suffix = hasAssets && !assetsTrashed ? `；但图片目录 ${assetsDir} 没能一起移入回收站，请手动处理。` : "";
     return {
       ok: removed,
       mode: "trash",
-      message: removed ? `已把《${title}》移入回收站，可以再找回来。` : "撤销失败，请在回收站里手动处理。",
+      message: removed ? `已把《${title}》移入回收站，可以再找回来。${suffix}` : "撤销失败，请在回收站里手动处理。",
     };
   } catch (error) {
     console.warn("[opennote] 撤销失败", error);
     return { ok: false, mode: "none", message: "撤销失败，请在回收站里手动处理。" };
+  }
+}
+
+/**
+ * 撤销「追加/覆盖」时清理**这次新增**的附件。
+ *
+ * 只删两种都成立的文件：①本次导入写过（`receipt.assets`）；②**还原后的正文不再引用它**。
+ * ②是「复用」的护栏 —— 内容哈希命中的旧图片本来就被导入前的正文引用着，删掉会毁掉别人的图。
+ * 返回**没删掉的个数**（如实报，不假装成功）；目录空了顺手收掉，不留空壳。
+ */
+async function rollbackImportAssets(
+  backend: FileSystemBackend,
+  notePath: string,
+  receipt: ImportReceipt,
+  restoredBody: string,
+): Promise<number> {
+  const dir = assetsDirFor(notePath);
+  if (!receipt.assets.length || !(await backend.exists(dir))) return 0;
+  let failed = 0;
+  for (const file of receipt.assets) {
+    if (restoredBody.includes(baseName(file))) continue;
+    try {
+      await backend.remove(file);
+    } catch (error) {
+      console.warn("[opennote] 撤销：附件清理失败", file, error);
+      failed += 1;
+    }
+  }
+  try {
+    const left = await backend.list(dir);
+    if (!left.length) await backend.remove(dir);
+  } catch {
+    // 目录已经被删/从来不存在：不是失败。
+  }
+  return failed;
+}
+
+/** 把附件目录整体移入回收站（`.opennote/trash/<附件目录>`），与 `trashNote` 同一套去重规则。 */
+async function trashAssetsDir(backend: FileSystemBackend, assetsDir: string): Promise<boolean> {
+  try {
+    const taken = new Set(Object.keys(libraryStore.get().trash));
+    const requested = joinPath(TRASH_DIR, assetsDir);
+    const destination = await resolveAvailablePath(backend, requested, taken, assetsDir);
+    await backend.move(assetsDir, destination);
+    return true;
+  } catch (error) {
+    console.warn("[opennote] 撤销：附件目录移入回收站失败", assetsDir, error);
+    return false;
   }
 }
 

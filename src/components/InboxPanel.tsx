@@ -656,9 +656,9 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
                       {selected.assets.map((asset) => (
                         <div key={asset.file || asset.name}>
                           <dt />
-                          <dd>
-                            {asset.name} · {formatBytes(asset.size)}
-                          </dd>
+                          {/* 已入库的条目里暂存副本已被清掉（`size` 读不到 = 0）：只报名字，
+                              不报一个会误导人的 `0 B`。 */}
+                          <dd>{asset.size > 0 ? `${asset.name} · ${formatBytes(asset.size)}` : asset.name}</dd>
                         </div>
                       ))}
                     </dl>

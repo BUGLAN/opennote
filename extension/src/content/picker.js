@@ -33,8 +33,8 @@
   const style = document.createElement("style");
   style.textContent = `${TOKENS_CSS}
 :host{position:fixed;inset:0;pointer-events:none;z-index:2147483647}
-.op-mask{position:fixed;inset:0;background:var(--sel);pointer-events:none}
-.op-box{position:fixed;display:none;outline:2px solid var(--accent);box-shadow:0 0 0 1px var(--paper);border-radius:2px;pointer-events:none;transition:none}
+.op-mask{position:fixed;inset:0;background:color-mix(in srgb, var(--paper) 22%, transparent);pointer-events:none}
+.op-box{position:fixed;display:none;outline:2px solid var(--accent);box-shadow:0 0 0 1px var(--paper),0 0 0 100vmax color-mix(in srgb, var(--paper) 56%, transparent);border-radius:2px;pointer-events:none;transition:none}
 .op-tag{position:fixed;display:none;background:var(--ink);color:var(--paper);border-radius:var(--radius-sm);font-family:var(--font-ui);font-size:var(--fs-xs);padding:var(--s1) var(--s2);box-shadow:var(--shadow-2);pointer-events:none;white-space:nowrap;font-variant-numeric:tabular-nums;transition:none}
 .op-toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:var(--paper);border-radius:var(--radius);font-family:var(--font-ui);font-size:var(--fs-sm);padding:var(--s2) var(--s3);box-shadow:var(--shadow-2);pointer-events:auto;display:none;gap:var(--s3);align-items:center}
 .op-toast button{background:none;border:none;color:var(--accent-soft);font:inherit;cursor:pointer;padding:0}

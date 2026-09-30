@@ -20,6 +20,8 @@
  *  V13–V18 见下文各段
  *  V19 产物一致性（M2 收尾）：dist 全量指纹必须等于 BUILD-INFO 记的那个 —— 读一个写了一半的
  *      产物**不许**被当成绿；构建进行中由 `.building` 标记挡成退出码 2（与 `.mutation-running` 同构）
+ *  V20 自由变量（no-undef 的静态版）：删模块留下的孤儿（`normalizeUrl` / `highlights`）必须在此报红
+ *      —— `node --check` 对运行时 ReferenceError 是盲的，而它已经让 popup 卡死过一次
  */
 
 import { createHash } from "node:crypto";
@@ -28,7 +30,9 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // 产物指纹算法与构建脚本**同一份实现**（tools/dist-guard.mjs）；BUILD_MARKER 也取自那里。
-import { BUILD_MARKER, DistUnstableError, fingerprintDist, readBuildInfo } from "./tools/dist-guard.mjs";
+import { BUILD_MARKER, DistUnstableError, fingerprintDist, readBuildInfo, walkFiles } from "./tools/dist-guard.mjs";
+// 自由变量检查（no-undef 的静态版）与 V20 是**同一份实现**，测试也 import 它做变异红证明。
+import { scanTree } from "./tools/no-undef-check.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DIST = join(HERE, "dist");
@@ -145,6 +149,10 @@ if (manifest.minimum_chrome_version && Number(manifest.minimum_chrome_version) <
 
 /* ── V2 manifest 引用文件存在 ─────────────────────────────────────── */
 
+// 注意：V2 里「options 页与通往它的路由必须成对不存在」是一条**状态快照**，不是普适判据 ——
+// 它记录的是 C-10p 那次裁定（死按钮必须删干净）。如果 options 页**合法回归**，这条会先红，
+// 那时该做的是**改这条（连同 03 的裁定）**，而不是把它当 bug 去查。
+
 const GROUP_V2 = "V2 引用完整性";
 const referenced = [];
 if (manifest.background && manifest.background.service_worker) referenced.push(manifest.background.service_worker);
@@ -178,6 +186,26 @@ if (manifest.options_ui) {
   fail(GROUP_V2, "options_ui 已在 M2 退场（options 页只为模板存在），manifest 里不该再有它");
 } else {
   pass("manifest 没有 options_ui（模板管理页随模板整套退场）");
+}
+
+// C-10p（verifier 在 HEAD 上抓到）：上面那半边守的是**目标**，还有**路由**那半边 ——
+// 删了 options 页，但 `open-options` 动作 / `opennote:open-options` 消息 / `openOptionsPage()`
+// 还留着 →「插件设置」是个点了没反应的死按钮（受限页面里它还是唯一的设置入口）。
+// 判据：**路由与目标必须成对存在** —— 目标不在，路由也必须不在。
+const deadRouteHits = [];
+for (const [label, base] of [["src", SRC], ["dist", DIST]]) {
+  for (const rel of walkFiles(base, base)) {
+    if (!rel.endsWith(".js") && !rel.endsWith(".html") && !rel.endsWith(".json")) continue;
+    const text = readFileSync(join(base, rel), "utf8");
+    const hit = /openOptionsPage|opennote:open-options|["']open-options["']/.exec(text);
+    if (hit) deadRouteHits.push(`${label}/${rel.replaceAll(sep, "/")}（${hit[0]}）`);
+  }
+}
+if (existsSync(join(SRC, "options"))) deadRouteHits.push("src/options/（目录已随 M2 删除）");
+if (deadRouteHits.length) {
+  fail(GROUP_V2, `options 页已删除，但通往它的路由还在（死按钮 C-10p）：${deadRouteHits.join("、")}`);
+} else {
+  pass("options 路由与目标成对不存在（没有通往已删页面的死按钮）");
 }
 
 // service worker 的静态导入图
@@ -367,16 +395,16 @@ const requiredCopy = [
   "高亮",
   "属性",
   "模板",
-      "管理模板…",
-  "不使用模板",
-                "写一句批注（可不填）",
         "保存",
   "取消",
     "留下",
     "按模板更新",
           "部分标签不符合规则，已忽略。",
-    "高亮会一起写进正文，出处在「高亮」区里可以再看。",
     "改标题",
+  // M2（task-28）已删除的功能的三句文案从这里**移除**（不是放宽判据，是判据对象已不存在）：
+  //   「不使用模板」「写一句批注（可不填）」「高亮会一起写进正文，出处在「高亮」区里可以再看。」
+  // 它们原本只由**死代码与孤儿 JSDoc 注释**满足 —— 也就是说 V7 曾经靠注释变绿（假绿）。
+  // 清掉孤儿注释与死代码（C-10s / 用户实测卡死的根因）之后，这三句在交付物里真的不存在了。
   // 元素选择（UI-16，0.3.1 取代 UI-02 的浮标；00 §6.15㉝ 逐字）
   "选择页面元素",
   "重新选择",
@@ -818,6 +846,22 @@ try {
   else throw error;
 }
 
+/* ── V20 自由变量（no-undef 的静态版：删模块留下的孤儿） ──────────────── */
+
+// 两个真实事故，同一个类：
+//  ① M2 删 `lib/highlights.js` → `background.js` 的 `normalizeUrl` 成了自由变量（元素选择静默失败）；
+//  ② 同一批删除 → `popup.js` 的 `highlights` 成了自由变量 → `render()` 抛 ReferenceError →
+//     **popup 永远停在「正在读取页面…」，界面完全不可用**（用户实测）。
+// `node --check` 对这类问题是**盲的**（运行时 ReferenceError，不是语法错误）—— 所以这里补上。
+const GROUP_V20 = "V20 自由变量";
+const srcFileCount = walkFiles(SRC, SRC).filter((f) => f.endsWith(".js")).length;
+const freeHits = scanTree(SRC);
+if (freeHits.length) {
+  for (const hit of freeHits) fail(GROUP_V20, `src/${hit.file} 里有自由变量（没声明 / 没 import / 不在白名单）：${hit.free.join(", ")}`);
+} else {
+  pass(`${srcFileCount} 个 src/*.js 全部无自由变量（声明过 / import 过 / 在白名单里）`);
+}
+
 /* ── V13 用户可见文案不得含反引号 ────────────────────────────────── */
 
 // Lead 0.3.1 裁定 ①：02 号契约表格里的 `` `..` `` 是 **Markdown 内联代码标记**，不是文案本身。
@@ -870,4 +914,4 @@ if (failures.length > 0) {
   for (const item of failures) console.error(`  ${item}`);
   process.exit(1);
 }
-console.log("\n✓ 19 组验收全部通过（V1–V19）");
+console.log("\n✓ 20 组验收全部通过（V1–V20）");
