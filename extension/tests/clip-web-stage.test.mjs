@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -316,6 +317,47 @@ test("A①：真回环 —— 接口没回 openUrl 时，扩展侧取到的是 n
     assert.equal(openUrlOf(call.result), null, "没有 openUrl 就必须是 null —— 打开一个坏页面比失败更糟");
   } finally {
     await bridge.close();
+  }
+});
+
+test("A①：**真桥**（electron/bridge.cjs）—— 02 §5.9.2 的**顶层成功体**必须被客户端认出来", async () => {
+  /*
+   * 这条是**跨模块集成**，不是替身：起的是仓库里真的 `electron/bridge.cjs`，
+   * 打的是扩展里真的 `postClipStage()`。
+   *
+   * 为什么必须有它（真机实测踩过）：真桥的成功体是**顶层字段**
+   * `{ok:true, stageId, expiresAt, openUrl}`（02 §5.9.2 冻结），
+   * 而 `normalizeCall()` 只认 `{ok:true, result:{…}}` ⇒ 这条 200 被判成
+   * 「2xx 但没有 result」→ `codeFromHttp(200)` → `IMP-4014`
+   * ⇒ 用户点入口按钮看到「导入时出现了内部错误，已记录日志。请重试一次。」，**而桥其实成功了**。
+   *
+   * 为什么原来的门禁全绿：mock 桥当时按**客户端的期待**发 `{ok,result}` —— 替身照期待写，
+   * 就永远测不出形状对不上。现在 mock 已改成契约形状，这条再直接咬真桥。
+   */
+  const requireCjs = createRequire(import.meta.url);
+  const { createBridge } = requireCjs("../../electron/bridge.cjs");
+  const dataDir = mkdtempSync(join(tmpdir(), "opennote-ext-real-bridge-"));
+  const bridge = createBridge({
+    dataDir,
+    log: () => undefined,
+    getWindow: () => ({ id: 1 }),
+    isEnabled: () => true,
+    getWorkspaceInfo: () => ({ open: true, name: "临时笔记本" }),
+    getFolders: () => ["归档"],
+    getInboxEnabled: () => true,
+    onEnvelope: async () => ({ ok: true, result: { status: "created", path: "x.md" } }),
+  });
+  bridge.regenerateToken();
+  await bridge.start();
+  try {
+    const { request } = buildStageRequest({ url: "https://example.com/p", title: "t", body: "b" });
+    const call = await postClipStage(bridge.getListeningPort(), bridge.getSessionPlaintext(), request);
+    assert.equal(call.kind, "ok", `真桥的成功体必须被认出来，实际 ${call.kind} ${call.code || ""}`);
+    assert.ok(call.result, "必须归一出 result");
+    assert.match(call.result.openUrl, /^http:\/\/127\.0\.0\.1:\d+\/clip\//, "openUrl 必须来自接口");
+    assert.ok(call.result.stageId, "stageId 必须来自接口");
+  } finally {
+    await bridge.stop().catch(() => undefined);
   }
 });
 

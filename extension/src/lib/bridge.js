@@ -241,6 +241,17 @@ export function maskTokenTail(tail) {
  * `openUrl`。请求体形状**冻结**（交接文档 §四-A）：`{ spec, url, title, body, selection, tags[],
  * source{site,author,publishedAt}, assets[] }`；`openUrl` 由接口返回，扩展**绝不自己拼**
  * （端口是 8787–8796 里选出来的、`stageId` 是接口的不透明 id）。
+ *
+ * 成功体是**顶层字段**（`02` §5.9.2 冻结，与交接文档 §四-A 逐字一致）：
+ *   `{ ok:true, stageId, expiresAt, openUrl }`
+ * —— **不是**其它端点的 `{ok:true, result:{…}}` 包裹形状。
+ *
+ * 这里踩过一次真机：`normalizeCall()` 只认 `result`，于是这条 200 被它判成
+ * 「2xx 但没有 result」→ `codeFromHttp(200)` → **`IMP-4014`**，
+ * 用户点「在新标签页里编辑后保存」看到的是「导入时出现了内部错误，已记录日志。请重试一次。」，
+ * 而桥那边其实**成功**了。两条门禁都没抓住，因为 mock 桥当时按**客户端的期待**发了 `{ok,result}`
+ * ——替身照着自己的期待写，就永远测不出形状对不上。现在 mock 也改成契约形状（`tools/mock-bridge.mjs`），
+ * 并补了一条「真桥 + 真客户端」的集成用例。
  */
 export async function postClipStage(port, token, payload, options = {}) {
   const { timeoutMs = REQUEST_TIMEOUT_MS, fetchImpl } = options;
@@ -251,7 +262,33 @@ export async function postClipStage(port, token, payload, options = {}) {
     timeoutMs,
     fetchImpl,
   });
-  return normalizeCall(raw, codeFromHttp);
+  const call = normalizeCall(raw, codeFromHttp);
+  /*
+   * 顶层成功体：归一成 `result`，让调用方只读一种形状（两种都认，写出去的一律是契约那种）。
+   *
+   * 判据用 **`ok === true` 且（`openUrl` 或 `stageId` 是字符串）**，不只看 `openUrl`：
+   * 契约里成功体的三个键是 `stageId` / `expiresAt` / `openUrl`，但「接口成功却没给 openUrl」
+   * 是**必须能表达**的一种结果 —— 那时调用方要拿到 `kind:"ok"` + `openUrl === null`，
+   * 才能如实说「接口没有返回可打开的页面地址」，而不是把它误报成内部错误。
+   */
+  const topLevel = raw.json && raw.json.ok === true ? raw.json : null;
+  const hasStageShape = topLevel && (typeof topLevel.openUrl === "string" || typeof topLevel.stageId === "string");
+  if (hasStageShape) {
+    return {
+      kind: "ok",
+      code: null,
+      http: raw.http,
+      result: {
+        stageId: topLevel.stageId ?? null,
+        expiresAt: topLevel.expiresAt ?? null,
+        openUrl: typeof topLevel.openUrl === "string" ? topLevel.openUrl : null,
+      },
+      serverMessage: null,
+      retryable: false,
+      retryAfter: null,
+    };
+  }
+  return call;
 }
 
 /** `GET /v1/imports/{importId}`（API-03）：收件箱模式下的轮询。 */

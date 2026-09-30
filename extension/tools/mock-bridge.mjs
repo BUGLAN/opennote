@@ -410,7 +410,11 @@ export function startMockBridge(options = {}) {
         if (mode !== "stage-no-open-url") {
           result.openUrl = `http://127.0.0.1:${state.port}/clip/${stageId}?k=${createHash("sha256").update(`${token}:${stageId}`).digest("hex").slice(0, 16)}`;
         }
-        send(200, { ok: true, result });
+        // **契约形状（02 §5.9.2）：顶层字段，不是 `{ok,result}` 包裹**。
+        // 这里原来发的是 `{ ok:true, result }` —— 照**客户端的期待**写的替身，
+        // 于是「真桥回顶层字段、客户端只认 result」这个缝，扩展侧的门禁永远测不出来
+        // （真机踩过：点入口按钮弹 IMP-4014，而桥其实成功了）。替身必须照**契约**写。
+        send(200, { ok: true, ...result });
         return;
       }
 
