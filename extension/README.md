@@ -26,7 +26,7 @@
 | --- | --- | --- |
 | `node build.mjs` | 拷贝 `src/` → `dist/`、tokens 逐字注入（3 处 `:root`→`:host`；**25 处根属性选择器 → `:host(...)`**，夜版覆盖层靠它）、生成 PNG 图标、写 `BUILD-INFO.json`、`verifyManifest()` | `[build] dist 就绪：24 个文件` |
 | `node verify.mjs` | 静态验收 **V1–V20**：清单/权限/引用完整性/**产物正面清单（V2b：逐个列出该在的与必须不在的）**/零远程主机/零 eval+内联处理器/tokens 逐字同源/0 新令牌/逐字文案/契约硬约束/无 emoji/极简形态（两按钮 + 无死元素 + 来源允许空值）/反引号禁用/元素选择纪律/去配对+令牌格式/四因分离/令牌回显/**产物一致性**/**V17A：A 接通 + ⑤ 选中态 + ③ 图片开关** | `✓ 20 组验收全部通过（V1–V20）`（退出码 0） |
-| `node tools/run-tests.mjs` | **跑测试的唯一入口**：136 条单测（信封、状态、队列、桥（真 HTTP）、自包含性、判定链、四因分离、极简形态、令牌回显、产物守卫、**A 接通/资产形状/图片降级（真回环）**）；失败自动落 `.test-failure.log` | `通过：136 条（node --test 退出码 0）` |
+| `node tools/run-tests.mjs` | **跑测试的唯一入口**：144 条单测（信封、状态、队列、桥（真 HTTP）、自包含性、判定链、四因分离、极简形态、令牌回显、产物守卫、**A 接通/资产形状/图片降级（真回环）**）；失败自动落 `.test-failure.log` | `通过：144 条（node --test 退出码 0）` |
 | `node tools/dist-race-probe.mjs --seconds 25 --builds 40` | **诊断工具**（不是门禁，永远 exit 0）：量化「构建进行中读产物」的窗口有多大 | 半写窗口命中的采样数（见 §1.1） |
 | `node tools/cdp-pick-check.mjs` | 真机：真 Chrome + 真扩展 + 两个按钮 + ㉝ 全链（**诊断工具，不是门禁**） | `元素选择真机验证：全部 PASS` |
 | `node tools/mutation-stage-assets.mjs` | **反向验证**（7 个：资产形状退回 `{url,alt}`、`CLIP_WEB_READY` 退回 false、openUrl 自己拼、stage 退回旧 clip.html、图片开关默认改成开、产物清单多一个/少一个）：每个变异先打印**命中处数 + 前后 sha256**，没落地就 `NO_EFFECT` + `exit 2` | 7/7 命中期望文案后 `verify exit=0` / tests 0 fail |
@@ -78,7 +78,7 @@ extension/
 │  ├─ content/{extract-page,picker,clipboard}.js
 │  ├─ popup/{popup.html,popup.css,popup.js}
 │  └─ styles/tokens.css        # 设计令牌唯一来源（构建期逐字注入影子根）
-├─ tests/                      # 136 条单测（`node tools/run-tests.mjs`）
+├─ tests/                      # 144 条单测（`node tools/run-tests.mjs`）
 ├─ tools/{cdp-pick-check,mock-bridge,mutation-check,mutation-stage-assets,dist-guard,dist-race-probe,popup-shot,real-bridge-stage-probe,run-tests,no-undef-check}
 ├─ verify.mjs                  # V1–V20（V2b 产物正面清单、V17A A 接通/⑤/③）
 ├─ .gitignore                  # 两个门禁标记（.building / .mutation-running）+ .shots/ 不进版本库
@@ -240,6 +240,31 @@ HTTP 非 2xx / 太大 / 非图片）→ **这一条不进 `assets[]`**、正文�
 V7 逐字文案 76 → 92 条；`verify.mjs` 顶部 V1–V20 不变。新增反向验证工具
 `tools/mutation-stage-assets.mjs`（7 个变异，每个先证明落地：命中处数 + 前后 sha256，没落地 `NO_EFFECT` + exit 2）。
 
+### 12.0.1 0.3.3（真机验收轮：两栏换位 + 图片开关 + 删说明句）
+
+用户真机验收提的两批界面意见，落成两件（同一轮的上下半场）：
+
+**上半场（`00` §6.16（53），上一个提交）**：网页版剪藏页**两栏换位**（左预览、右编辑；换的是 DOM
+顺序而不是 CSS `order`，视觉顺序与 Tab 键顺序一致）；popup 的「图片一起保存」从卡片挪到**工具条那一行**。
+
+**下半场（`00` §6.16（54），本条）**：用户对着真机截图**画了两个红框**，逐条落成：
+
+- **红框里的说明文字删除**，两处：`选择模式进行中` 的那两句（`03` `UI-01/C68`+`C69`）与图片开关
+  下面那三条状态说明（`C89`/`C90`/`C95`）。`verify.mjs` 的 V7 逐字清单同步**移除 6 条条目**
+  （92 → 86）——判据对象不存在了就移除条目，不是放宽判据。
+- **`#pickNote` 不许跟着一起删**：它还是**点选失败的出口**（四因分离文案 + `#pickDetail` 的真实原文）。
+  删掉它就是把「点了一下没进选择模式」变成静默失败。V17A 新增一条反向断言卡住这一点。
+- **图片开关「始终」与两个按钮同一行**：上一轮只把它挂进 `#pickRow` 还不够 —— `#pickNote` 是
+  `flex-basis:100%` 的**整行子项**，**排在它后面的兄弟一定被挤到下一行**：只要那一行有话说
+  （点选失败 / 等待点选），开关就掉到第三行（用户第二张截图里的现场）。做法：`mountImageSwitch()`
+  改用 `insertBefore(imageSwitch(), pickNote)`，位置与「那一行有没有说明句」解耦；CSS 加 `flex:none`
+  （不许被压缩成「同一行」的样子）。判据盯**兄弟顺序**：`verify.mjs` V17A 两条 + 单测一条。
+- **依旧不破 ㊶**：㊶ 冻结的是工具条上的**动作**只有两个；删的是句子、挪的是复选框，动作数量没变。
+
+**做法与验证**：`node build.mjs` → `node verify.mjs`（V1–V20 全绿，V7 = 86 条）→
+`node tools/run-tests.mjs`（144 条全绿）；视觉证据是用**新镜头** `card-pickfail` 出的图（见 §14）——
+它专门把「工具条那一行多出一句失败说明」这个最容易被挤下去的状态拍下来。
+
 ### 12.1 0.3.2（M1 极简 + M2 清死代码）
 
 **M1（task-24，用户可见）**：界面只剩 `选择当前元素` + `整页提取` 两个按钮；三区分段、模板选择器、
@@ -324,6 +349,20 @@ node tools\cdp-pick-check.mjs
 | `.shots/picker-before-night.png` | ① 修复**前**、夜读：覆盖层仍用**亮色纸**（深色页面上蒙一层灰白）＝ 缺陷现场 | 20994 | `dc7f1a725906a9b6` |
 | `.shots/picker-paper.png` | ① 修复**后**、亮色：与修复前**逐字节相同**（`5fc17dd3a2f49686`）⇒ 修复没碰亮色那条路 | 20850 | `5fc17dd3a2f49686` |
 | `.shots/picker-night.png` | ① 修复**后**、夜读：覆盖层改用夜版纸色（「洞」比四周亮、跟随之标签转为浅色墨） | 21267 | `68d79a4a4134b7d6` |
+
+**0.3.3 重出的一轮（`00` §6.16（54）：删说明句 + 图片开关「始终」与两个按钮同一行）**：
+上面表里 `card-page` / `card-element` 两行是 **v5 那一轮**的现场（字节/sha 属于那一轮的版本，留着用于那一轮的对比）；
+本轮重出后的三帧如下 ——
+
+| 文件 | 是什么 | 字节 | sha256（前 16） |
+| --- | --- | --- | --- |
+| `.shots/card-page.png` | 0.3.3：工具条那一行 = `选择当前元素` + `整页提取` + `图片一起保存`（靠右）；开关下面**没有**说明行 | 36181 | `bcd5ffbe6d1d4886` |
+| `.shots/card-element.png` | 同上，来源 = 已选元素（`重新选择` 处于选中态，来源行 `已选择 article`） | 24194 | `908e68bdb9ba11f2` |
+| `.shots/card-pickfail.png` | **新镜头**：点选失败 ⇒ 工具条那一行多出一句失败说明（`#pickNote`），开关**仍**在第一行 —— 用户 0.3.3 第二张截图里它正是被这一行挤到了第三行 | 40661 | `d60edb655190181c` |
+
+三帧出自同一批命令：`node tools/popup-shot.mjs --shots=card-page,card-element,card-pickfail`。
+它们证明的是**静态排版**（开关与两个按钮同排、说明行只剩「点选失败」这一条路径），
+不是真机点击路径（`T-11` 仍归人工）。
 
 **怎么读这张表（可证伪的签名，不是「看着不一样」）**：
 - 同一个主题下「修复前 vs 修复后」：**亮色两帧字节完全相同**（20850 B / `5fc17dd3…`），

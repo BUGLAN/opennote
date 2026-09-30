@@ -13,9 +13,12 @@
  * **它不是 action popup 的截图**，这一点写在这里，免得被当成「真机验过了」。
  *
  * 用法：`node tools/popup-shot.mjs [--shots=名字,名字]`
- *   可用镜头：card-page / card-element / card-page-night / card-element-night / card-warn
+ *   可用镜头：card-page / card-element / card-page-night / card-element-night / card-warn / card-pickfail
  *             card-before-page / card-before-element
  *             picker-paper / picker-night / picker-before-paper / picker-before-night
+ *
+ * `card-pickfail`（0.3.3）：点 `选择当前元素` 后接口回一份 `injection_failed` ⇒ 工具条那一行出现
+ * 失败说明（`#pickNote`）。用它证明「图片开关**始终**与两个按钮同一行」——这个状态下它最容易被挤下去。
  *
  * `*-before-*` 镜头要用「改动前的那一版代码」，它躺在 `.shots/before/`（gitignore 内，不进版本库）。
  * 重新生成它的命令（**不要手工抄文件**）：
@@ -82,7 +85,7 @@ const ARTICLE = [
 const PICKED = ["## 只剪这一段", "", "被点中的那块正文，与整页提取不是同一份内容。"].join("\n");
 
 /** popup 的 `chrome` 替身 + 固定快照（必须**在模块之前**以经典脚本运行）。 */
-function popupStub(mode, theme, stage, click) {
+function popupStub(mode, theme, stage, click, pickfail) {
   const snapshot = `
     const extraction = {
       url: "https://example.com/posts/local-first",
@@ -140,6 +143,17 @@ function popupStub(mode, theme, stage, click) {
               ? { ok: true, openUrl: "http://127.0.0.1:8787/clip/stage-1?k=k1", warnings: ["图片没能下载（没有权限、跨站限制或网络不可达），正文里保留原始网址：https://cdn.example.com/b.png"] }
               : { ok: true, openUrl: "http://127.0.0.1:8787/clip/stage-1?k=k1", warnings: [] } };
             break;
+          case "opennote:pick":
+            /*
+             * 点选失败（诊断镜头 card-pickfail 用）：popup 会把四因分离的文案写进 #pickNote、把
+             * chrome.scripting 的原文写进 #pickDetail —— 这是**唯一**还能让工具条那一行多出一行的状态
+             * （这段注释在模板字符串里，所以不写反引号）。0.3.3 的「图片开关始终与两个按钮同一行」
+             * 必须在这个状态下也成立（用户第二张真机截图就是这个现场）。
+             */
+            reply = { ok: true, reply: ${JSON.stringify(pickfail)}
+              ? { ok: false, reason: ${JSON.stringify(pickfail)} === "all" ? "injection_failed" : ${JSON.stringify(pickfail)}, detail: "Error: Cannot access contents of the page. Extension manifest must request permission to access this host." }
+              : { ok: true } };
+            break;
           default:
             reply = { ok: true, reply: { ok: true } };
         }
@@ -154,6 +168,12 @@ function popupStub(mode, theme, stage, click) {
       if (button) button.click();
     }, 300);
   }
+  if (${JSON.stringify(click)} === "pick") {
+    setTimeout(() => {
+      const button = document.getElementById("pick");
+      if (button) button.click();
+    }, 300);
+  }
 })();
 </script>`;
 }
@@ -164,6 +184,7 @@ function popupDocument(query) {
   const theme = query.get("theme") || "paper";
   const stage = query.get("stage") || "ok";
   const click = query.get("click") || "";
+  const pickfail = query.get("pickfail") || "";
   const before = query.get("variant") === "before";
   const html = readFileSync(before ? join(BEFORE, "popup", "popup.html") : join(DIST, "popup", "popup.html"), "utf8");
   const base = before ? "/before" : "/dist";
@@ -172,7 +193,7 @@ function popupDocument(query) {
     .replace('href="popup.css"', `href="${base}/popup/popup.css"`)
     .replace(
       '<script type="module" src="popup.js"></script>',
-      `${popupStub(mode, theme, stage, click)}<script type="module" src="${base}/popup/popup.js"></script>`,
+      `${popupStub(mode, theme, stage, click, pickfail)}<script type="module" src="${base}/popup/popup.js"></script>`,
     )
     .replace("<html lang=\"zh-CN\" data-theme=\"paper\" data-accent=\"seal\">", `<html lang="zh-CN" data-theme="${theme}" data-accent="seal">`);
 }
@@ -274,6 +295,9 @@ const SHOT_LIST = [  { name: "card-page", url: "/popup-harness.html?mode=page", 
   { name: "card-page-night", url: "/popup-harness.html?mode=page&theme=night", window: "360,700" },
   { name: "card-element-night", url: "/popup-harness.html?mode=element&theme=night", window: "360,700" },
   { name: "card-warn", url: "/popup-harness.html?mode=page&stage=warn&click=open", window: "360,700" },
+  // 0.3.3：点选失败 → 工具条那一行多出一句失败说明（`#pickNote`）。这是「图片开关**始终**与两个按钮
+  // 同一行」最容易被挤下去的现场（用户第二张真机截图就是这个），所以专门拍一帧。
+  { name: "card-pickfail", url: "/popup-harness.html?mode=page&pickfail=injection_failed&click=pick", window: "360,700" },
   { name: "card-before-page", url: "/popup-harness.html?mode=page&variant=before", window: "360,700" },
   { name: "card-before-element", url: "/popup-harness.html?mode=element&variant=before", window: "360,700" },
   { name: "card-before-page-night", url: "/popup-harness.html?mode=page&theme=night&variant=before", window: "360,700" },

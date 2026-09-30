@@ -96,6 +96,9 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__pick{display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s3) 0;flex-wrap:wrap}
 .clip__pick .btn[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent);font-weight:600}
 .clip__pick .btn[aria-pressed="true"]:hover{background:var(--accent-soft)}
+/* `#pickNote`：工具条那一行的**整行子项**。0.3.3 起它只剩一个用途 —— **点选失败的出口**
+   （「等待你点选」的说明句已按用户要求删除）。仍是 `flex-basis:100%`：失败句自己占一行，
+   上面的按钮行与图片开关不受影响（图片开关插在它**之前**，见 `.clip__assets-sw`）。 */
 .clip__pick-note{flex-basis:100%;font-size:var(--fs-xs);color:var(--ink-2);line-height:1.7}
 .clip__pick-note[hidden]{display:none}
 
@@ -147,14 +150,18 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__doc .doc-hr{border:none;border-top:1px solid var(--rule);margin:.9em 0}
 .clip__doc .doc-note{margin:.7em 0 0;font-family:var(--font-ui);font-size:var(--fs-xs);color:var(--ink-3)}
 
-/* ③ 图片下载开关（默认关）：**与两个按钮同一行**（用户明确要求），靠右对齐。
+/* ③ 图片下载开关（默认关）：**与两个按钮始终同一行**（用户明确要求），靠右对齐。
    它不占第三个按钮位：`00` §6.14 ㊶ 冻结的是「工具条上的**动作**只有两个」，而这是一个选项（复选框）。
-   说明句是工具条那一行的整行子项（`flex-basis:100%`，与 `#pickNote` 同款）——
-   嵌在一个 shrink-to-fit 的 wrapper 里，`flex-basis:100%` 会失去意义。 */
-.clip__assets-sw{margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-xs);color:var(--ink-2);cursor:pointer;white-space:nowrap}
+   `flex:none`：360px 宽下这三个东西同排本来就放得下（两个按钮 + 这个开关），但**不许它被压缩** ——
+   压缩只会让「图片一起保存」几个字被挤没，那不叫「同一行」。
+   **位置由 DOM 顺序保证**（`mountImageSwitch()` 把它插在 `#pickNote` 之前）：`#pickNote` 是
+   `flex-basis:100%` 的整行子项，排在它后面的兄弟一定被挤到下一行 —— 那样只要点选失败有话说，
+   开关就掉到第三行了（用户 0.3.3 的真机截图就是这个）。
+   开关下面那三条状态说明句**已按用户要求删除**（0.3.3 红框内的说明文字）⇒ 这里不再有 `.clip__assets-note`;
+   那件事（图片没下下来时正文里保留原始网址）在真的发生时由 `warnings[]` 逐条说出来，不是不说了。 */
+.clip__assets-sw{margin-left:auto;flex:none;display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-xs);color:var(--ink-2);cursor:pointer;white-space:nowrap}
 .clip__assets-sw:hover{color:var(--ink)}
 .clip__assets-sw input{width:13px;height:13px;margin:0;accent-color:var(--accent)}
-.clip__assets-note{flex-basis:100%;margin:0;font-size:var(--fs-xs);color:var(--ink-3);line-height:1.7}
 
 /* ── 模板选择器（00 §6.14 ㉘㉙） ─────────────────────────────────────── */
 .clip__tmpl{display:flex;align-items:center;gap:var(--s2);padding:8px var(--s3) 0}

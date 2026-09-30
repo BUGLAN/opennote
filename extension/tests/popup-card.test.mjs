@@ -125,28 +125,49 @@ test("② 渲染器认识的块级语法，CSS 里都有对应规则（写了不
 
 /* ── ③ 图片开关（DOM 那一半） ─────────────────────────────────────────── */
 
-test("③ 图片开关是卡片上的复选框、默认关、且说明随状态改口", () => {
+test("③ 图片开关是工具条上的复选框、默认关；开关下面那三条说明句已按用户要求删除", () => {
   assert.match(code, /let imageDownload = IMAGE_DOWNLOAD_DEFAULT;/, "默认值只有一个产地");
   assert.match(code, /input\.type = "checkbox";/);
   assert.match(code, /input\.id = "imgDownload";/);
   assert.match(code, /"图片一起保存"/, "开关的文字标签");
-  assert.match(code, /关：正文里保留图片的原始网址。/, "关着时说明后果");
-  assert.match(code, /会尝试下载这 \$\{count\} 张图片随笔记一起保存；下载失败的，正文里保留原始网址。/, "开着时说明会尝试下载（不是承诺成功）");
-  assert.match(code, /这一页没找到可以下载的图片，正文里保留原始网址。/, "0 张图时也要说清楚");
+  /*
+   * 0.3.3（用户真机截图的两个红框之一）：开关下面那三条状态说明（关 / 开 / 这一页没图）**整段删除**。
+   * 判据盯**删除本身**，而且扫**原文**（不剥注释）—— 注释也是标签，留一句「已删除」的原句
+   * 会让这条判据变成空话（同 ④ 的做法）：
+   * 实现里只要还有人写回这句话（哪怕是帮助文案、哪怕是注释里的引用），这条就红。
+   * 删的是说明句，**不是「不许静默」**：图片真的没下下来时，`warnings[]` 照样逐条说出来。
+   */
+  for (const gone of ["imageNote", "imgDownloadNote", "正文里保留图片的原始网址"]) {
+    assert.ok(!JS.includes(gone), `已删除的说明句/接线不许留在 popup.js 里：${gone}`);
+  }
   // 工具条仍是两个按钮：开关不在工具条里（M1 冻结决定不破）
   assert.doesNotMatch(BARE, /id="imgDownload"/, "开关是渲染出来的，不写死在 popup.html 的工具条里");
 });
 
-test("③ 图片开关与两个按钮**同一行**（用户要求）：挂进 #pickRow，不再挂在卡片里", () => {
+test("③ 图片开关与两个按钮**始终**同一行：插在 #pickNote 之前（用户 0.3.3 真机截图）", () => {
   /*
-   * 位置这件事踩过一次：它原来在卡片里（`previewNode()` 尾部），理由是「工具条恰好两个按钮」。
-   * 用户看过真机截图后要求挪到工具条那一行。**这没有破 ㊶**：㊶ 冻结的是「工具条上的**动作**
-   * 只有两个」（不许再加一个能点出结果的按钮），而这是一个复选框（一个选项）。
-   * 判据必须盯**位置本身**，不能只盯「元素存在」—— 元素一直在，位置错了用户照样不满意。
+   * 位置这件事踩过两次，判据必须把两次都钉住：
+   * ① 它原来在卡片里（`previewNode()` 尾部），理由是「工具条恰好两个按钮」。用户看过真机截图后
+   *    要求挪到工具条那一行 —— **这没破 ㊶**：㊶ 冻结的是「工具条上的**动作**只有两个」
+   *    （不许再加一个能点出结果的按钮），而这是一个复选框（一个选项）。
+   * ② 挪进来之后它排在 `#pickNote` **后面**，而 `#pickNote` 是 `flex-basis:100%` 的整行子项 ——
+   *    于是只要那一行有话说（点选失败 / 等待点选），开关就被挤到**第三行**（用户 0.3.3 的第二张截图
+   *    就是这个：按钮一行、说明句一行、开关单独一行）。用户要的是「**始终**和两个按钮同一行」，
+   *    所以判据不能只盯「元素还在」或「挂在 #pickRow 里」，必须盯**兄弟顺序**：
+   *    写在整行子项之后的位置一律不算同一行，无论它当时看起来在不在那一行上。
    */
   assert.match(code, /const pickRow = \$\("pickRow"\);/, "必须真的拿到工具条那一行");
-  assert.match(code, /pickRow\.appendChild\(imageSwitch\(\)\);/, "开关必须挂进工具条那一行");
-  assert.match(code, /pickRow\.appendChild\(imageNote\(\)\);/, "说明句也要挂进工具条（整行子项 flex-basis:100%）");
+  assert.match(
+    code,
+    /pickRow\.insertBefore\(imageSwitch\(\), pickNote\);/,
+    "开关必须插在两个按钮之后、#pickNote 之前（appendChild 会被整行子项挤到下一行）",
+  );
+  assert.doesNotMatch(code, /pickRow\.appendChild\(imageSwitch\(\)\)/, "排在整行子项后面的位置不算「同一行」");
+  // 说明句整段退场：连带它的 CSS 规则一起删（写了不生效 = 缺陷）。
+  // 查的是**规则**（`.clip__assets-note{`）而不是「某个注释里提过这个类名」——
+  // 注释里的墓碑不算规则，但留在 CSS 里的规则一定算。
+  assert.doesNotMatch(CSS, /\.clip__assets-note\s*\{/, "已删除的说明句规则必须从 popup.css 删掉");
+  assert.match(CSS, /\.clip__assets-sw\{margin-left:auto;/, "开关靠右，与按钮同一行");
   /*
    * **必须断言调用点，不能只断言函数体。**
    *
@@ -168,7 +189,6 @@ test("③ 图片开关与两个按钮**同一行**（用户要求）：挂进 #p
   assert.ok(!CSS.includes(".clip__assets{"), "旧的 .clip__assets wrapper 规则必须删掉（写了不生效 = 缺陷）");
   // 工具条仍是「两个按钮」：开关不是按钮（㊶ 冻结的是动作数量，不是选项数量）
   assert.equal((BARE.match(/<button[^>]*id="(pick|extractPage)"/g) || []).length, 2, "工具条恰好两个按钮");
-  assert.match(CSS, /\.clip__assets-sw\{margin-left:auto;/, "开关靠右，与按钮同一行");
 });
 
 /* ── ④ popup 外壳三项（task-7，用户真机截图提的） ─────────────────────── */

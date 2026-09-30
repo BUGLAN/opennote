@@ -395,18 +395,24 @@ function renderDoc(markdown) {
 }
 
 /**
- * ③ 图片开关（默认关）：**与「选择当前元素 / 整页提取」同一行**（用户明确要求）。
+ * ③ 图片开关（默认关）：**与「选择当前元素 / 整页提取」始终同一行**（用户明确要求）。
  *
- * 位置这件事踩过一次：它原来在卡片里（`previewNode()` 的尾部），理由是「工具条恰好两个按钮」
- * （M1 冻结，`00` §6.14 ㊶）。用户看过真机截图后要求把它挪到工具条那一行。
+ * 位置这件事踩过**两次**：
+ * ① 它原来在卡片里（`previewNode()` 的尾部），理由是「工具条恰好两个按钮」（M1 冻结，`00` §6.14 ㊶）。
+ *    用户看过真机截图后要求把它挪到工具条那一行（0.3.3）。
+ * ② 挪进工具条之后它排在 `#pickNote` **后面**，而 `#pickNote` 是 `flex-basis:100%` 的整行子项 ——
+ *    于是**只要那一行有话说**（点选失败 / 选择模式进行中），开关就被挤到第三行（用户 0.3.3 的第二张
+ *    真机截图就是这个现场）。修法见 `mountImageSwitch()`：把它插在**两个按钮之后、`#pickNote` 之前**。
+ *    位置从此不取决于「那一行有没有说明句」——「始终」两个字必须落到兄弟顺序上，不能靠碰运气。
+ *
  * **这没有破 ㊶**：㊶ 冻结的是「工具条**不许加第三个按钮**」（工具条上的**动作**只有两个），
  * 而这是一个**复选框**（一个选项），不是动作按钮；㊶ 要防的是「又来一个能点出结果的入口」。
- * 判据（`tests/popup-card.test.mjs`）已按新位置重写，并保留「它必须是 JS 渲染的、
- * 不许写死在 popup.html 里」那一条 —— 说明句与计数依赖状态，写死就必然漂移。
+ * 判据（`tests/popup-card.test.mjs`）盯**位置与兄弟顺序本身**，并保留「它必须是 JS 渲染的、
+ * 不许写死在 popup.html 里」那一条。
  *
- * 返回**两个节点**（开关 + 说明句），由 `mountImageSwitch()` 分别挂进 `#pickRow`：
- * 说明句要当工具条那一行的整行子项（`flex-basis:100%`，与 `#pickNote` 同款），
- * 嵌在一个 shrink-to-fit 的 wrapper 里会让 `flex-basis:100%` 失去意义。
+ * **开关下面那三条状态说明句已按用户要求整段删除**（0.3.3 红框内的说明文字）：界面上不再有第二行，
+ * 它说的那件事（图片没下下来时正文里保留原始网址）在真的发生时由 `warnings[]` 逐条说出来
+ * （主按钮变「打开编辑页」，先说明再打开）——**删的是说明句，不是「不静默」那条纪律**。
  */
 function imageSwitch() {
   const label = el("label", "clip__assets-sw");
@@ -415,7 +421,6 @@ function imageSwitch() {
   input.type = "checkbox";
   input.id = "imgDownload";
   input.checked = imageDownload;
-  input.setAttribute("aria-describedby", "imgDownloadNote");
   input.addEventListener("change", () => {
     imageDownload = input.checked;
     render();
@@ -426,29 +431,21 @@ function imageSwitch() {
   return label;
 }
 
-function imageNote() {
-  const info = (lastPreview && lastPreview.images) || (extraction() && extraction().images) || null;
-  const count = info && Array.isArray(info.items) ? info.items.length : 0;
-  const note = el("p", "clip__assets-note", "");
-  note.id = "imgDownloadNote";
-  if (!imageDownload) note.textContent = "关：正文里保留图片的原始网址。";
-  else if (count === 0) note.textContent = "这一页没找到可以下载的图片，正文里保留原始网址。";
-  else note.textContent = `开：会尝试下载这 ${count} 张图片随笔记一起保存；下载失败的，正文里保留原始网址。`;
-  return note;
-}
-
 /**
- * 把开关挂进工具条那一行；每次 `render()` 重建（计数与说明句都依赖状态）。
+ * 把开关挂进工具条那一行；每次 `render()` 重建（开关状态以 `imageDownload` 为唯一真源）。
+ *
+ * **必须 `insertBefore(…, pickNote)`，不许 `appendChild`**：`#pickNote` 是整行子项，
+ * 排在它后面的兄弟**一定**被挤到下一行（用户截图里的第三行就是这么来的）。
+ * 插在它前面，开关就永远和两个按钮同排，无论那一行有没有话说。
  *
  * `visible=false` 时**一个节点都不挂**（并把上一轮挂的摘掉）：受限页面（`chrome://` 等）
  * 连正文都读不到，那里放一个改不了任何结果的复选框就是**死元素** ——
  * `popup.html` 顶部写着「界面上不留任何死元素」，这条对它同样成立。
  */
 function mountImageSwitch(visible) {
-  for (const node of pickRow.querySelectorAll(".clip__assets-sw, .clip__assets-note")) node.remove();
+  for (const node of pickRow.querySelectorAll(".clip__assets-sw")) node.remove();
   if (!visible) return;
-  pickRow.appendChild(imageSwitch());
-  pickRow.appendChild(imageNote());
+  pickRow.insertBefore(imageSwitch(), pickNote);
 }
 
 function previewNode() {
@@ -703,13 +700,18 @@ function settingsPlan() {
 }
 
 /**
- * L2 那一行（M1 / task-24）：只有两个按钮，但原来说的话一句不少 ——
+ * L2 那一行（M1 / task-24）：只有两个按钮 ——
  * - 没选过元素 → `选择当前元素`；已选过 → `重新选择`（C66）
- * - 选择模式正在页面上等待点选（`snapshot.pickArmed`）→ `正在页面上等待你点选…` + `在页面上点一下要剪的部分；按 Esc 取消。`（C68/C69）
+ *
+ * 「选择模式进行中」的那两句说明（`03` `UI-01/C68`+`C69`）**已按用户要求删除**（0.3.3 红框内的说明文字）：
+ * 这一行不再为「等待点选」说话。`snapshot.pickArmed` 因此不再参与渲染 —— 但它仍在快照里
+ * （后台是唯一真源，popup 不读不等于要删字段）。
+ *
+ * **`#pickNote` 保留**：它还是**点选失败的出口**（`startPick()` 里按四因分离的 `reason` 写文案，
+ * 并把后台的真实原文写进 `#pickDetail`）。删掉它就是让「点了一下没进选择模式」变成静默失败。
  */
 function syncPickRow() {
   const picked = snapshot && snapshot.pickedElement;
-  const armed = Boolean(snapshot && snapshot.pickArmed);
   pickButton.textContent = picked && picked.tagName ? "重新选择" : "选择当前元素";
   // ⑤ 两个按钮的选中态（用户报过「看不出选的是元素还是整页」）：
   // **视觉与读屏一次解决** —— `aria-pressed` 既是可访问性状态，也是 CSS 的选中态选择器
@@ -717,12 +719,9 @@ function syncPickRow() {
   // 「谁后点谁生效」：默认整页提取选中（03 §UI-01「两个按钮」表）。
   pickButton.setAttribute("aria-pressed", mode === "element" ? "true" : "false");
   extractPageButton.setAttribute("aria-pressed", mode === "page" ? "true" : "false");
-  if (armed) {
-    pickNote.textContent = "正在页面上等待你点选…在页面上点一下要剪的部分；按 Esc 取消。";
-    pickNote.hidden = false;
-  } else if (pickNote.dataset.keep !== "1") {
-    pickNote.hidden = true;
-  }
+  // 说明句退场后这一行只剩失败出口：每次 render 先收起（失败时 `startPick()` 再打开）。
+  // 原先那个 `pickNote.dataset.keep !== "1"` 的例外是**死条件** —— 全仓没有任何地方写过 `keep`。
+  pickNote.hidden = true;
 }
 
 function render(planInput) {
@@ -740,6 +739,7 @@ function render(planInput) {
   updateDeliveryHint();
   syncPickRow();
   // ③ 图片开关挂在工具条那一行（用户要求），与 `syncPickRow()` 同一批「每次 render 都要刷新」的东西。
+  // 它插在 `#pickNote` 之前 ⇒ **始终**与两个按钮同排（那一行有没有说明句都掉不下去）。
   // 受限页面不挂：那里连正文都读不到，放一个改不了结果的复选框就是死元素。
   mountImageSwitch(plan.state !== STATE.RESTRICTED_PAGE);
   const flowLike = Boolean(notice || plan.skeleton || plan.empty || plan.ok || plan.block);
