@@ -13,6 +13,11 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// 读 dist 一律走守卫：`build.mjs` 先删 dist 再逐文件重写（有半写窗口），
+// 而 extension/** 是共享工作树 —— 别的 agent 的构建也会让「读到一半」变成可能。
+// 守卫把这种情况判成**不可信**（DistUnstableError），不会让门禁拿半写产物下结论。
+import { readStableDist } from "../tools/dist-guard.mjs";
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 
@@ -74,7 +79,8 @@ test("元素选择脚本：占位符在 src 里、已替换在 dist 里，且令
   if (!existsSync(distFile)) {
     assert.fail("dist 还没构建：先跑 `node build.mjs`");
   }
-  const built = readFileSync(distFile, "utf8");
+  // 守卫：构建进行中（`.building`）或指纹对不上 → 抛 DistUnstableError（结果不可信，不是断言失败）。
+  const built = readStableDist("content/picker.js");
   assert.ok(!built.includes('"__OPENNOTE_TOKENS_CSS__"'), "dist 里占位符未被替换");
   assert.ok(built.includes(":host{"), "dist 里应注入 :host 作用域的令牌");
   assert.ok(built.includes("--paper:"), "dist 里应包含令牌定义");

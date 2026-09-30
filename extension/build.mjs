@@ -20,9 +20,18 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// 产物指纹算法与读取守卫**同一份实现**（tools/dist-guard.mjs）——不许这里一套、门禁一套。
+import { fingerprintOf, walkFiles as walkDistFiles } from "./tools/dist-guard.mjs";
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, "src");
 const DIST = join(HERE, "dist");
+/**
+ * 开工标记（与 `.mutation-running` 同构）：dist 是「先删再逐个文件重写」，存在半写窗口；
+ * 别的进程（另一个 agent 的 verify、测试、CDP 工具）读 dist 前会看这个标记，看到就判
+ * 「结果不可信」而不是把半写产物当绿。见 tools/dist-guard.mjs 顶部说明。
+ */
+const BUILD_MARKER = join(HERE, ".building");
 const TOKENS_SOURCE = join(HERE, "..", "src", "styles", "tokens.css");
 const ICON_SIZES = [16, 32, 48, 128];
 const FLOAT_PLACEHOLDER = '"__OPENNOTE_TOKENS_CSS__"';
@@ -245,6 +254,23 @@ function copyTree() {
 let TOKENS_SNAPSHOT = null;
 
 function main() {
+  // 先立标记再动任何文件：任何在构建期间读 dist 的门禁都会看到「不可信」，而不是读到半写产物。
+  writeFileSync(BUILD_MARKER, `${JSON.stringify({ pid: process.pid, at: new Date().toISOString() }, null, 2)}\n`);
+  process.on("exit", () => {
+    try {
+      rmSync(BUILD_MARKER, { force: true });
+    } catch {
+      /* 退出清理失败也不能影响构建结果 */
+    }
+  });
+  try {
+    buildAll();
+  } finally {
+    rmSync(BUILD_MARKER, { force: true });
+  }
+}
+
+function buildAll() {
   if (existsSync(DIST)) rmSync(DIST, { recursive: true, force: true });
   mkdirSync(DIST, { recursive: true });
 
@@ -255,9 +281,15 @@ function main() {
   const tokenNames = Array.from(TOKENS_SNAPSHOT.css.matchAll(/(--[a-z0-9-]+)\s*:/gi)).map((m) => m[1]);
   const uniqueTokens = Array.from(new Set(tokenNames));
 
+  // 指纹：dist 全部文件（除 BUILD-INFO.json 自己）的内容哈希 —— 任何半写/事后改动都逃不掉。
+  const fingerprint = fingerprintOf(
+    walkDistFiles(DIST).map((path) => ({ path, bytes: readFileSync(join(DIST, path)) })),
+  );
+
   const info = {
     builtAt: new Date().toISOString(),
     product: "opennote-clip-extension",
+    fingerprint,
     version: JSON.parse(readFileSync(join(SRC, "manifest.json"), "utf8")).version,
     tokens: {
       source: relative(HERE, TOKENS_SOURCE).split(sep).join("/"),
@@ -273,6 +305,7 @@ function main() {
 
   const distFiles = walk(DIST).map((f) => relative(DIST, f).split(sep).join("/"));
   log(`[build] dist 就绪：${distFiles.length} 个文件`);
+  log(`[build] dist 指纹=${fingerprint.slice(0, 16)}…（verify V19 与读产物的测试都会核对它）`);
   log(`[build] tokens.css sha256=${TOKENS_SNAPSHOT.hash.slice(0, 16)}… bytes=${TOKENS_SNAPSHOT.bytes} 令牌数=${uniqueTokens.length}`);
   log(`[build] 图标：${ICON_SIZES.join("/")}px（--accent 来自 tokens.css，无手抄色值）`);
   for (const line of files.filter((f) => f.note)) log(`[build] ${line.path}：${line.note}`);

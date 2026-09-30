@@ -16,13 +16,19 @@
  *  原 V10 模板白名单（00 §6.14 ㉙）：变量/过滤器/触发器/behavior 白名单、priority 降序、内置 3 个、
  *      条件只认一层 {{#if}}（`{{#each}}`/`{{else}}`/嵌套一律**原样输出**并在这里报错）
  *  原 V11 高亮形态（00 §6.14 ㉚）：键名、`## 高亮` 小节形态、空高亮不生成、按 URL 分组
- *  V12 三区（00 §6.14 ㉘）：正文/高亮/属性都在交付物里，且 ⋯ 菜单里没有「剪藏到收件箱」
+ *  V12 三区（00 §6.14 ㉘）：正文/高亮/属性都在交付物里，且 ⋯ 菜单里没有「剪藏到收件箱」（M1 起只剩极简形态）
+ *  V13–V18 见下文各段
+ *  V19 产物一致性（M2 收尾）：dist 全量指纹必须等于 BUILD-INFO 记的那个 —— 读一个写了一半的
+ *      产物**不许**被当成绿；构建进行中由 `.building` 标记挡成退出码 2（与 `.mutation-running` 同构）
  */
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+// 产物指纹算法与构建脚本**同一份实现**（tools/dist-guard.mjs）；BUILD_MARKER 也取自那里。
+import { BUILD_MARKER, DistUnstableError, fingerprintDist, readBuildInfo } from "./tools/dist-guard.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DIST = join(HERE, "dist");
@@ -38,6 +44,22 @@ const MUTATION_MARKER = join(HERE, ".mutation-running");
 if (existsSync(MUTATION_MARKER) && process.env.OPENNOTE_MUTATION_SELF !== "1") {
   console.error("有变异正在运行（extension/.mutation-running 存在）：本次 verify 结果不可信，已中止（退出码 2）。");
   console.error("等 tools/mutation-check.ps1 跑完（它会自己摘掉标记）再跑 verify。");
+  process.exit(2);
+}
+
+// 同一族问题（Lead 复现的那条 flake）：`build.mjs` 是「先删 dist 再逐个文件重写」，存在半写窗口，
+// 而 extension/** 是共享工作树（别的 agent 也可能正在跑 build）。读 dist 的门禁看到开工标记就
+// **以退出码 2 中止** —— 与 `.mutation-running` 完全同构：不把不可信说成绿，也不把不可信说成红。
+if (existsSync(BUILD_MARKER)) {
+  let detail = "";
+  try {
+    const marker = JSON.parse(readFileSync(BUILD_MARKER, "utf8"));
+    detail = `（pid=${marker.pid} 开始于 ${marker.at}）`;
+  } catch {
+    detail = "（标记内容读不出来）";
+  }
+  console.error(`有构建正在运行（extension/.building 存在${detail}）：此刻 dist 可能只写了一半，本次 verify 结果不可信，已中止（退出码 2）。`);
+  console.error("等 `node build.mjs` 跑完再验；若确认没有构建在跑，删掉 extension/.building。");
   process.exit(2);
 }
 
@@ -772,6 +794,30 @@ if (!failures.some((item) => item.includes(GROUP_V18))) {
   pass("令牌只读回显的尾 4 位来自唯一真源，且没有 ???? 假尾号");
 }
 
+/* ── V19 产物一致性（M2 收尾：Lead 复现的那条 flake 的修复） ──────────────
+ * `build.mjs` 先 `rmSync(dist)` 再逐个文件重写 → 存在半写窗口；读 dist 的门禁可能读到中间态。
+ * 判据：**现场重算** dist 全量指纹（除 BUILD-INFO.json 自己），必须等于 BUILD-INFO 里记的那个。
+ * 算法与构建共用 `tools/dist-guard.mjs` 一份实现，所以任何来源的半写/事后改动都会红：
+ * 被 kill 的构建、别的 agent 的构建、手改产物。构建**进行中**由 `.building` 挡成退出码 2（上面）。
+ */
+
+const GROUP_V19 = "V19 产物一致性";
+try {
+  const buildInfo = readBuildInfo(DIST);
+  const liveFingerprint = fingerprintDist(DIST);
+  if (buildInfo.fingerprint !== liveFingerprint) {
+    fail(
+      GROUP_V19,
+      `产物指纹对不上：BUILD-INFO=${String(buildInfo.fingerprint).slice(0, 16)}… 现场=${liveFingerprint.slice(0, 16)}…（dist 在构建之后被改过，或构建写了一半）`,
+    );
+  } else {
+    pass(`dist 全量指纹与 BUILD-INFO 一致（${liveFingerprint.slice(0, 16)}…，${distFiles.length} 个文件）`);
+  }
+} catch (error) {
+  if (error instanceof DistUnstableError) fail(GROUP_V19, error.message);
+  else throw error;
+}
+
 /* ── V13 用户可见文案不得含反引号 ────────────────────────────────── */
 
 // Lead 0.3.1 裁定 ①：02 号契约表格里的 `` `..` `` 是 **Markdown 内联代码标记**，不是文案本身。
@@ -824,4 +870,4 @@ if (failures.length > 0) {
   for (const item of failures) console.error(`  ${item}`);
   process.exit(1);
 }
-console.log("\n✓ 18 组验收全部通过（V1–V18）");
+console.log("\n✓ 19 组验收全部通过（V1–V19）");

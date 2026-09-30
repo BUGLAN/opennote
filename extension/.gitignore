@@ -1,0 +1,6 @@
+# 门禁期间的「结果不可信」标记（瞬时文件，与 tools/dist-guard.mjs 配套）：
+#   .building        = node build.mjs 正在写 dist（读 dist 的门禁必须判不可信，退出码 2）
+#   .mutation-running = tools/mutation-check.ps1 正在故意改坏 src/dist（同上）
+# 两个标记都不该进版本库：留在盘上只说明上次构建/变异被 kill 了。
+.building
+.mutation-running

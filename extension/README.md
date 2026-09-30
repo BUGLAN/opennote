@@ -25,15 +25,43 @@
 | 命令 | 覆盖什么 | 期望 |
 | --- | --- | --- |
 | `node build.mjs` | 拷贝 `src/` → `dist/`、tokens 逐字注入（3 处 `:root`→`:host`）、生成 PNG 图标、写 `BUILD-INFO.json`、`verifyManifest()` | `[build] dist 就绪：21 个文件` |
-| `node verify.mjs` | 静态验收 **V1–V18**：清单/权限/引用完整性/零远程主机/零 eval+内联处理器/tokens 逐字同源/0 新令牌/逐字文案/契约硬约束/无 emoji/极简形态（两按钮 + 无死元素 + 来源允许空值）/反引号禁用/元素选择纪律/去配对+令牌格式/四因分离/令牌回显 | `✓ 18 组验收全部通过（V1–V18）`（退出码 0） |
-| `node --test "tests/**/*.test.mjs"` | 80 条单测：信封、状态、队列、桥（真 HTTP）、自包含性、判定链（真接收端）、元素选择四因、极简形态、令牌回显 | `# tests 80 / # pass 80 / # fail 0` |
+| `node verify.mjs` | 静态验收 **V1–V19**：清单/权限/引用完整性/零远程主机/零 eval+内联处理器/tokens 逐字同源/0 新令牌/逐字文案/契约硬约束/无 emoji/极简形态（两按钮 + 无死元素 + 来源允许空值）/反引号禁用/元素选择纪律/去配对+令牌格式/四因分离/令牌回显/**产物一致性** | `✓ 19 组验收全部通过（V1–V19）`（退出码 0） |
+| `node --test "tests/**/*.test.mjs"` | 86 条单测：信封、状态、队列、桥（真 HTTP）、自包含性、判定链（真接收端）、元素选择四因、极简形态、令牌回显、产物守卫 | `# tests 86 / # pass 86 / # fail 0` |
+| `node tools/dist-race-probe.mjs --seconds 25 --builds 40` | **诊断工具**（不是门禁）：量化「构建进行中读产物」的窗口有多大 | 半写窗口命中的采样数（见 §1.1） |
 | `node tools/cdp-pick-check.mjs` | 真机：真 Chrome + 真扩展 + 两个按钮 + ㉝ 全链 | `元素选择真机验证：全部 PASS` |
 | `pwsh -File tools/mutation-check.ps1` | 8 个变异**必须变红**且命中期望文案（反向验证门禁本身有效） | 8/8 命中后 `verify exit=0`、tests 0 fail |
 | `node tools/mock-bridge.mjs --mode healthy --port 8795 --token "opn_…" --inbox` | 本地假桥（真 HTTP），用来跑 §4 的六态 | 见 §4 |
 
-**两种退出码要分清**：`0` = 通过；`1` = 可信且失败；**`2` = 本次结果不可信**（例如
-`extension/.mutation-running` 存在，说明有变异正在跑 —— 这时既不算红也不算绿）。
-变异脚本自己的 verify 用 `OPENNOTE_MUTATION_SELF=1` 声明身份才会看到真实红，其它进程没有这个变量。
+**两种退出码要分清**：`0` = 通过；`1` = 可信且失败；**`2` = 本次结果不可信**（这时既不算红也不算绿）：
+- `extension/.mutation-running` 存在 → 有变异正在跑（变异脚本自己的 verify 用 `OPENNOTE_MUTATION_SELF=1` 声明身份才会看到真实红）；
+- `extension/.building` 存在 → **有构建正在写 dist**（`build.mjs` 先 `rmSync(dist)` 再逐文件重写，存在半写窗口）。
+
+### 1.1 「门禁不许读一个正在被写的产物」（M2 收尾）
+
+同族问题在团队里出现过三次：`.mutation-running` 让变异脚本自己的 verify 恒为 exit 2（假通过）、
+`verify-e2e` 读到别人正在写的脚本、以及扩展这边一次「刚跑完 `build.mjs` 就 `node --test`」的 79/80 假红。
+形制统一为**标记 + 指纹**（`tools/dist-guard.mjs`，构建与门禁**共用一份实现**）：
+
+| 机制 | 谁做 | 作用 |
+| --- | --- | --- |
+| `.building` 标记 | `build.mjs` 开工写、收工摘（`finally` + `process.on("exit")`） | 读 dist 的门禁（`verify.mjs`）看到就以**退出码 2** 中止；测试看到就抛 `DistUnstableError` |
+| `dist` 全量指纹 | `build.mjs` 写进 `BUILD-INFO.json`；`verify.mjs` **V19** 现场重算比对 | 任何来源的半写/事后改动都会红：被 kill 的构建、别的 agent 的构建、手改产物 |
+| `readStableDist()` | `tests/self-contained.test.mjs` 读 dist 的唯一入口 | 读产物前先过守卫，绕过它会被 `tests/build-guard.test.mjs` 的接线断言抓住 |
+| `tools/dist-race-probe.mjs` | 诊断工具（**不是门禁**，永远退出 0） | 一边跑构建风暴一边高频采样，量化半写窗口有多大 |
+
+**窗口是真实存在的（实测）**：`node tools/dist-race-probe.mjs --seconds 25 --builds 40` →
+4292 次采样里 **645 次**撞到 `.building`、**6 次**撞到指纹对不上；同一批采样按**修复前**的读法
+（直接 `readFileSync`）会有 **1241 次读到缺文件**、**260 次读到不完整的文件树**。
+即：修复前约 **15%** 的「构建中采样」会被门禁当成真产物。
+
+**真实门禁下也复现了**：一边跑 40 轮构建风暴一边跑 `node --test`，套件立刻给出
+`DistUnstableError: 读 dist 算指纹时产物变了（ENOENT … dist/BUILD-INFO.json）—— 构建正在写这个目录。结果不可信。`
+—— 修复前，这种时刻只会表现为某个用例莫名其妙的单条失败（就是那条 79/80 的形状）。
+
+**诚实记一笔**：我按原样重跑了 30 次 `build + node --test`、5 次构建风暴下跑测试、6 次 4 路 CPU 负载下跑测试，
+**都没能复现**那一次 79/80。所以这个修复针对的是**这一类**（已量化的窗口 + 已证实的判定路径），
+而不是某一个被证实的实例。另外守卫的第一版自己就有洞：竞争发生时 `fingerprintDist` 会抛裸 ENOENT 崩掉 ——
+是本探针第一次跑就撞出来的，现已把「读的过程中文件消失」也归到 `DistUnstableError`。
 
 ## 2. 目录结构（当前）
 
@@ -46,9 +74,10 @@ extension/
 │  ├─ content/{extract-page,picker,clipboard}.js
 │  ├─ popup/{popup.html,popup.css,popup.js}
 │  └─ styles/tokens.css        # 设计令牌唯一来源（构建期逐字注入影子根）
-├─ tests/                      # 80 条单测
-├─ tools/{cdp-pick-check,mock-bridge,mutation-check}
-├─ verify.mjs                  # V1–V18
+├─ tests/                      # 86 条单测（含「产物守卫」6 条）
+├─ tools/{cdp-pick-check,mock-bridge,mutation-check,dist-guard,dist-race-probe}
+├─ verify.mjs                  # V1–V19
+├─ .gitignore                  # 两个门禁标记（.building / .mutation-running）不进版本库
 └─ README.md
 ```
 
@@ -176,6 +205,12 @@ node tools\cdp-pick-check.mjs                                   # 真知乎文�
 
 **顺带修掉两个真缺陷**：① 粘贴令牌后只读回显尾 4 位显示 `????`；② 元素模式剪藏没把已选元素交给
 `buildClipEnvelope`（会提交空正文）—— 现在与预览走同一条取法 `currentPicked()`。
+
+**M2 收尾（门禁可信度）**：修掉「门禁读一个正在被写的产物」这一族问题 —— `build.mjs` 立 `.building`
+开工标记 + 写 dist 全量指纹；`verify.mjs` 见标记即退出码 2，并新增 **V19 产物一致性**；
+`tests/build-guard.test.mjs` 6 条把守卫的两种判定（标记 / 指纹）与**接线**都钉住；
+新增诊断工具 `tools/dist-race-probe.mjs` 量化窗口（实测构建期 15% 采样会读到半写产物）。
+详见 §1.1。
 
 ### 12.2 0.3.1（元素选择 + 去配对）
 
