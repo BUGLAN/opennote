@@ -14,9 +14,12 @@
  *     （主进程写正文会被 rescanWorkspace() 起始的 flushAll() 覆盖）。
  *   - 唯一可由主进程写的内容是 .opennote/inbox/<entry>/state.json，且原子写（tmp + rename）。
  *   - 只提供导入，不提供读取/删除/移动/任意 mkdir；绝不接受信封里的绝对路径。
- *   - 令牌服务端只存 sha256，明文只在 generateToken() 的那一刻返回一次。
- *   - **令牌是唯一凭据且长期有效**（0.3.1 ㉞）：任何能读到扩展 storage 或剪贴板的程序
- *     都能拿到明文并获得**导入**能力（不等于读笔记能力）。这条代价已写进设置面板说明句。
+ *   - 令牌明文与 sha256 / last4 并列存在 userData/bridge.json 里（0.3.1 ㊴，用户知情选择
+ *     「可随时复制」）；明文**绝不进日志、绝不进错误体、绝不进 status() 返回值**，也绝不
+ *     写进工作区。
+ *   - **令牌是唯一凭据且长期有效**：任何能读到 bridge.json、扩展 storage 或剪贴板的程序
+ *     都能拿到明文并获得**导入**能力（不等于读笔记能力）。这条代价已如实写进设置面板
+ *     的说明句（逐字 = ImportApiPanel.tsx 的 TOKEN_COST_HINT，由 bridge-smoke 咬住）。
  *
  * 来源（第 2 道校验）在 0.3.1 改为**按类型**：扩展 `chrome-extension://` / `moz-extension://`、
  * 本机回环 `http://127.0.0.1[:port]`、`file://` 放行；`Origin: null`、空串与任何普通网页
@@ -110,7 +113,7 @@ const ERROR_TABLE = {
   'IMP-2001': { http: 401, retryable: false, message: '缺少访问令牌', userMessage: '这个客户端还没有配置访问令牌。请在 Opennote 的「导入与接口」里复制令牌，粘贴到客户端。' },
   'IMP-2002': { http: 401, retryable: false, message: '令牌格式错误或哈希不匹配', userMessage: '访问令牌不正确或已失效。重新生成令牌后，请在客户端里更新。' },
   'IMP-2003': { http: 429, retryable: true, message: '鉴权失败次数过多', userMessage: '尝试次数过多，请稍后再试。' },
-  // ⚠️ 已作废（0.3.1 ㉞）：配对码整体删除，本码**不再产出**；保留码号以免与历史日志/文档冲突，不得复用给别的语义。
+  // 注意：已作废（0.3.1 ㉞）：配对码整体删除，本码**不再产出**；保留码号以免与历史日志/文档冲突，不得复用给别的语义。
   'IMP-2004': { http: 401, retryable: false, message: '配对码错误、过期或已使用', userMessage: '配对码不正确或已过期，请在 Opennote 里重新生成。' },
   // 0.3.1：Origin 判据改为按类型（扩展 / 本机回环 / file://），不再是「信任列表 + 配对」。
   'IMP-3001': { http: 403, retryable: false, message: 'Origin 类型不被接受', userMessage: '来源未被允许。本地接口只接受浏览器扩展与本机程序发来的请求。' },
@@ -282,6 +285,9 @@ function windowRetryAfter(window, now = Date.now()) {
 /**
  * @param {object} options 见文件头注释（冻结接口 + 可选扩展）。
  * @returns {{start: Function, stop: Function, status: Function, regenerateToken: Function, generateToken: Function, getSessionPlaintext: Function, writeInboxState: Function, readAllowedOrigins: Function, addAllowedOrigin: Function, removeAllowedOrigin: Function}}
+ *
+ * `stop()` 默认只停监听（退出应用 / 窗口关闭用它，**不动**用户偏好）；面板上「关闭接口」
+ * 这种用户显式关闭传 `stop({ disable: true })`（清掉偏好，下次启动不自动恢复）。见 `state.enabled`。
  */
 function createBridge(options = {}) {
   const hasGetWindow = typeof options.getWindow === 'function'
@@ -303,10 +309,27 @@ function createBridge(options = {}) {
   const state = {
     /** disabled | stopped | starting | running | port-busy | failed */
     status: persisted.enabled ? 'stopped' : 'disabled',
+    /**
+     * 注意：**`bridge.json` 里的 `enabled` = 用户偏好（他想不想让它开着）**，
+     * 与 `status().enabled`（= 现在有没有在监听，取自 `running`）是**两件事**。
+     *
+     * 0.3.1 第一版把这两件事合并了：`persist()` 写的是「`state.status` 是不是 running/starting/
+     * port-busy/failed」，而 `stop()` 会先把 `state.status` 设成 `'stopped'` 再 `persist()` ——
+     * 于是**每次退出应用（`before-quit` → `stop()`）都把「用户上次开着」这个偏好清成 false**，
+     * 下次启动读到 `disabled`，不自动恢复监听。用户实测原话：「我打开了本地接口，每次关了
+     * 都需要重新打开，按理来说应该记住选项的」。
+     *
+     * 规矩（别再合并回去）：**只有用户显式开启才置 true，只有用户显式关闭才置 false**
+     * （`stop({ disable: true })`）；生命周期停止（退出应用 / 窗口关闭）走**纯 `stop()`**，
+     * 一律不动它。「现在在不在监听」只由 `state.status` 表达。
+     */
+    enabled: persisted.enabled === true,
     port: null,
     error: null,
     tokenHash: persisted.tokenHash,
     tokenLast4: persisted.tokenLast4,
+    /** ㊴：明文从磁盘读回（不再是内存态）。旧版 bridge.json 没有它 → null。 */
+    tokenPlaintext: persisted.tokenPlaintext,
     tls: null,
   }
 
@@ -332,19 +355,27 @@ function createBridge(options = {}) {
   const authFailWindow = newSlidingWindow(limits.authFailLimit, limits.authFailWindowMs)
 
   /**
-   * ㊲（00 号 §6.15）**本会话保留的令牌明文**：`bridge.json` 仍然只存 sha256 + 后 4 位
-   * （明文**绝不落盘**），但明文在本进程内存里留到「应用退出」或「用户重新生成」为止，
-   * 于是面板可以在本次会话内反复复制同一串明文。
+   * ㊴（`00` §6.15，用户原话「还有访问令牌，可随时复制」）**令牌明文落盘**。
    *
-   * 为什么值得留：令牌是长期有效的**唯一凭据**，而用户拿到它的唯一途径就是这串明文。
-   * 只允许「显示一次」会把「长期有效」变成自相矛盾的承诺 —— 误关一次面板就只能重新生成，
-   * 而每次重新生成都会让此前所有已配置的客户端失效。内存保留是「能用」与「不落盘」之间
-   * 唯一站得住的折中。
+   * 这条**推翻了 ㊲**（㊲ 要求明文只留内存、绝不落盘）。用户在最简单的方案上做了知情选择：
+   * 明文与 `sha256` / `last4` 并列写进 `bridge.json`，于是**任何时候都能复制** —— 重启、
+   * 换窗、几个月后再来都一样，不再有「令牌已不可见，需要时请重新生成」这种状态。
    *
-   * 绝不出现在 `status()` 的返回值里（只通过 `tokenVisible` 报「还在不在」），
-   * 也绝不写进日志、错误体或 `bridge.json`。
+   * 注意：**代价必须如实说给用户**（这是本次改动的第一要求，比代码本身重要）：明文从此
+   * **落在磁盘上**，任何能读到 `bridge.json`、剪贴板或本机扩展存储的程序都能拿到它并获得
+   * 导入能力。面板的代价披露句逐字写在 `ImportApiPanel.tsx` 的 `TOKEN_COST_HINT` 里，
+   * `bridge-smoke` 的 ㊴/㊸ 会咬住它 —— **用户选了简单方案，不等于我们可以少说一句代价**。
+   *
+   * 仍然不放松的红线：明文**绝不进日志、绝不进错误体、绝不进 `status()` 返回值**，
+   * 也绝不写进工作区（只写 `userData` 下的 `bridge.json`）。
+   *
+   * 形状校验直接复用模块级的 `TOKEN_PATTERN`（一个事实只有一个产地）。
+   * **教训**：这里原本新定义了一个 `const TOKEN_PLAINTEXT_SHAPE = /^opn_…$/`，而
+   * `readPersisted()` 是在本函数更靠前的地方被调用的 —— 模块级 `const` 在 `createBridge()`
+   * 里是**暂时性死区**，`.test()` 抛 ReferenceError，又被 `readPersisted()` 的 catch 吞成
+   * 「空状态」，于是**整个令牌被读丢了**（smoke 当场红了 4 条）。凡是「读盘要用」的东西，
+   * 一律放模块级；catch 里吞掉的异常也值得再想一遍要不要吞。
    */
-  let sessionPlaintext = null
 
   /** 唯一导入队列：全局 1 并发。 */
   let importQueueActive = 0
@@ -358,34 +389,47 @@ function createBridge(options = {}) {
   // -------------------------------------------------------------------------
 
   function readPersisted() {
-    const empty = { tokenHash: null, tokenLast4: null, allowedOrigins: [], enabled: false }
+    const empty = { tokenHash: null, tokenLast4: null, tokenPlaintext: null, allowedOrigins: [], enabled: false }
     if (!bridgeFile) return empty
     try {
       const parsed = JSON.parse(fs.readFileSync(bridgeFile, 'utf8'))
       if (!parsed || typeof parsed !== 'object') return empty
       const hash = typeof parsed.tokenHash === 'string' && /^[a-f0-9]{64}$/.test(parsed.tokenHash) ? parsed.tokenHash : null
       const last4 = typeof parsed.tokenLast4 === 'string' && /^[A-Za-z0-9_-]{4}$/.test(parsed.tokenLast4) ? parsed.tokenLast4 : null
+      // ㊴：明文与哈希并列存在磁盘上（旧版文件没有这个键 → null，面板会如实说明是旧令牌）。
+      const plaintext =
+        typeof parsed.tokenPlaintext === 'string' && TOKEN_PATTERN.test(parsed.tokenPlaintext)
+          ? parsed.tokenPlaintext
+          : null
       const origins = Array.isArray(parsed.allowedOrigins)
         ? parsed.allowedOrigins.filter((item) => typeof item === 'string' && item !== '' && item !== 'null')
         : []
-      return { tokenHash: hash, tokenLast4: last4, allowedOrigins: [...new Set(origins)], enabled: parsed.enabled === true }
+      return {
+        tokenHash: hash,
+        tokenLast4: last4,
+        tokenPlaintext: plaintext,
+        allowedOrigins: [...new Set(origins)],
+        enabled: parsed.enabled === true,
+      }
     } catch {
       /* 文件不存在或损坏：当作空状态，不阻塞启动 */
     }
     return empty
   }
 
-  /** 原子写 bridge.json（tmp + rename）。绝不含令牌明文。 */
+  /** 原子写 bridge.json（tmp + rename）。㊴ 起**含令牌明文**（这是用户知情选择的代价）。 */
   function persist() {
     if (!bridgeFile) return
     try {
       fs.mkdirSync(path.dirname(bridgeFile), { recursive: true })
       const payload = {
-        version: 1,
+        version: 2,
         tokenHash: state.tokenHash,
         tokenLast4: state.tokenLast4,
+        tokenPlaintext: state.tokenPlaintext,
         allowedOrigins: [...allowedOrigins],
-        enabled: state.status === 'running' || state.status === 'starting' || state.status === 'port-busy' || state.status === 'failed',
+        // 用户偏好，**不从 state.status 推导** —— 推导就会让「退出应用」把偏好清掉（task-27）。
+        enabled: state.enabled === true,
         updatedAt: new Date().toISOString(),
       }
       const tmp = `${bridgeFile}.tmp`
@@ -1164,9 +1208,20 @@ function createBridge(options = {}) {
     })
   }
 
+  /**
+   * 开启监听（用户显式开启，或启动时按偏好自动恢复）。
+   *
+   * `state.enabled`（用户偏好）在这里置 true 并落盘 —— **只要用户点过「开启」就算数**，
+   * 哪怕这次没监听成功（端口占满）：那是「他的意愿」，不是「当前状态」。
+   */
   async function start() {
     if (state.status === 'running' && server) {
       return { port: listeningPort }
+    }
+    // 用户想让接口开着（偏好），与这次能不能开起来是两件事。
+    if (!state.enabled) {
+      state.enabled = true
+      persist()
     }
     if (!state.tokenHash) {
       // 未设置令牌时桥不允许开启（否则等于开了一个无鉴权的写入端口）。
@@ -1214,8 +1269,19 @@ function createBridge(options = {}) {
     return { port: null, error: state.error, code: lastCode === 'EADDRINUSE' ? 'IMP-1003' : 'IMP-1002' }
   }
 
-  /** 关闭 = server.close() + 立刻断开全部 keep-alive 连接。 */
-  async function stop() {
+  /**
+   * 关闭监听。**默认只停监听，不动用户偏好** —— `main.cjs` 的 `before-quit` / 窗口关闭
+   * 走的就是这条路径：退出应用不代表用户想关掉这个功能，下次开应用要按偏好自动恢复。
+   *
+   * 面板上「关闭接口」那种**用户显式关闭**要传 `stop({ disable: true })`：它把偏好置 false
+   * 并落盘，下次启动就是 `disabled`、不自动恢复。两者必须分开，否则就回到 task-27 那个
+   * 「一个字段两个语义」的 bug。
+   *
+   * 注：这里**不**把 `state.status` 改成 `'disabled'` —— 用户可见的状态串（已停止 / 未开启）
+   * 按 `03` 的既有规定不动，偏好只体现在**下次启动**的初始状态上。
+   */
+  async function stop(options) {
+    const disable = Boolean(options && options.disable === true)
     const active = server
     server = null
     listeningPort = null
@@ -1243,6 +1309,8 @@ function createBridge(options = {}) {
 
     state.status = 'stopped'
     state.error = null
+    // 只有**用户显式关闭**才改偏好；纯 stop()（退出应用 / 窗口关闭）保持原样（task-27）。
+    if (disable) state.enabled = false
     persist()
   }
 
@@ -1251,42 +1319,42 @@ function createBridge(options = {}) {
   // -------------------------------------------------------------------------
 
   /**
-   * 生成/轮换令牌：立刻作废旧令牌，返回新明文，并把它**留在本会话内存里**（㊲）。
-   * 服务端只持久化 sha256 + last4 —— 明文进不了 `bridge.json`。
+   * 生成/轮换令牌：立刻作废旧令牌，返回新明文，并把明文与哈希一起**写进 `bridge.json`**（㊴）。
+   * 于是**任何时候都能复制** —— 重启、换窗、几个月后再来都一样。
    *
-   * `status().tokenVisible` 因此为 `true`：面板可以在本次会话内反复复制同一串明文，
-   * 直到应用退出或用户再点一次「重新生成」。
+   * `status().tokenVisible` 因此恒为 `true`（只要生成过一次）。
    */
   function regenerateToken() {
     const token = generateToken()
     state.tokenHash = sha256Hex(token)
     state.tokenLast4 = token.slice(-4)
-    sessionPlaintext = token
+    state.tokenPlaintext = token
     persist()
     return token
   }
 
   /**
-   * ㊲③ **只读**取回本会话的令牌明文：仍持有就返回它，否则返回 `null`。
+   * ㊴ **只读**取回令牌明文：**从磁盘状态读回**（不再是 ㊲ 的内存态），拿不到就返回 `null`。
    *
-   * **调用它绝不轮换令牌、绝不写盘、绝不改任何状态** —— 这是它与 `newToken()` 的本质区别：
-   * `newToken()` = 「重新生成」（旧令牌立刻作废），这里只是把内存里那串**已经有效**的明文
+   * **调用它绝不轮换令牌、绝不写盘、绝不改任何状态** —— 这是它与 `regenerateToken()` 的本质区别：
+   * `regenerateToken()` = 「重新生成」（旧令牌立刻作废），这里只是把那串**已经有效**的明文
    * 再交出来一次。IPC 层（`opennote:bridge:token`）用它解决「整窗重载后界面拿不到明文，
-   * 于是「复制令牌」变成点不动的按钮」—— 那正是本项目一路在打的假开关 / 死按钮缺陷。
+   * 于是『复制』变成点不动的按钮」—— 那正是本项目一路在打的假开关 / 死按钮缺陷。
    *
-   * 返回 `null` 只代表「本会话不再持有明文」（应用重启过 / 被 `setTokenHash` 丢弃），
-   * **不代表令牌失效**：令牌仍然长期有效，只是要重新生成一次才能再看到明文。
+   * `null` 只剩一个可达场景：`bridge.json` 是**旧版本**（㊲ 之前或 ㊲ 期间）写的 —— 它只有
+   * `sha256` + `last4`，明文不可能凭空长出来；或外部用 `setTokenHash()` 塞了一个哈希。
+   * **两种情况都不代表令牌失效**：令牌仍然长期有效，只是要重新生成一次才有明文。
    */
   function getSessionPlaintext() {
-    return typeof sessionPlaintext === 'string' && sessionPlaintext !== '' ? sessionPlaintext : null
+    return typeof state.tokenPlaintext === 'string' && state.tokenPlaintext !== '' ? state.tokenPlaintext : null
   }
 
   function setTokenHash(hash, last4) {
     if (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)) return false
     state.tokenHash = hash
     state.tokenLast4 = typeof last4 === 'string' ? last4.slice(-4) : null
-    // 外部改写了哈希 → 内存里那串明文已经不对应了，必须丢掉（否则面板会复制一串已失效的令牌）。
-    sessionPlaintext = null
+    // 外部改写了哈希 → 盘上那串明文已经不对应了，必须丢掉（否则面板会复制一串已失效的令牌）。
+    state.tokenPlaintext = null
     persist()
     return true
   }
@@ -1336,6 +1404,10 @@ function createBridge(options = {}) {
     const current = effectiveStatus()
     const running = current === 'running' && server != null
     return {
+      /**
+       * 面板的开关读它 = 「**现在**有没有在监听」。与 `bridge.json` 里的 `enabled`
+       * （= 用户偏好，见 `state.enabled`）是**两件事**，别再把它们当同一个。
+       */
       enabled: running,
       state: current,
       stateLabel: STATE_NAMES[current],
@@ -1352,12 +1424,14 @@ function createBridge(options = {}) {
        */
       tokenPersisted: Boolean(state.tokenHash && bridgeFile),
       /**
-       * ㊲：本会话是否仍持有令牌明文（= 面板能不能反复复制）。
-       * `false` 只代表「明文不在内存里了」（应用重启过 / 刚 `setTokenHash` 读回旧哈希），
-       * **不代表令牌失效** —— 令牌仍然长期有效，只是要重新生成一次才能再看到明文。
-       * 面板必须据此**如实降级**成一句说明，而不是留一个点了没反应的按钮。
+       * ㊴：**明文是否真的握在手里（在盘上）**，也就是「复制」能不能用。
+       *
+       * 它**不是** `tokenSet` 的重复产地：`tokenSet` 说「有没有令牌」，这里说「有没有明文」。
+       * 两者唯一不等的场景是**旧版 `bridge.json`**（只有 `sha256` + `last4`，明文不可能凭空
+       * 长出来）或外部 `setTokenHash()` 塞进来的哈希 —— 那时面板必须如实说明是旧令牌，
+       * 而不是画一个永远点不动的复制按钮（本项目一路在打的死按钮缺陷）。
        */
-      tokenVisible: typeof sessionPlaintext === 'string' && sessionPlaintext !== '',
+      tokenVisible: typeof state.tokenPlaintext === 'string' && state.tokenPlaintext !== '',
       origins: [...allowedOrigins],
       allowedOrigins: [...allowedOrigins],
       lastRejectedOrigin,
@@ -1381,7 +1455,7 @@ function createBridge(options = {}) {
     stop,
     status,
     regenerateToken,
-    /** ㊲③ 只读取回本会话明文（IPC `opennote:bridge:token` 用；绝不轮换、绝不写盘）。 */
+    /** ㊴ 只读取回明文（IPC `opennote:bridge:token` 用；从磁盘状态读，绝不轮换、绝不写盘）。 */
     getSessionPlaintext,
     /** 与 start/stop 同源的别名，供 IPC 层直接调用。 */
     startWithPort(port) {

@@ -1270,7 +1270,9 @@ function ensureBridge() {
   if (!module || typeof module.createBridge !== 'function') return null
 
   bridgeController = module.createBridge({
-    // 契约要求 userData/bridge.json（只存 sha256 + last4）与 userData/bridge.log。
+    // 契约要求 userData/bridge.json 与 userData/bridge.log。
+    // ㊴ 起 bridge.json **同时存令牌明文**（与 sha256 / last4 并列，用户知情选择的取舍），
+    // 所以不再写「只存 sha256」—— 注释里的旧事实也是「同一个事实的第二个产地」。
     dataDir: app.getPath('userData'),
     getWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
     /**
@@ -1364,7 +1366,14 @@ async function registerImportHandlers() {
   handle(
     'opennote:bridge:stop',
     async () => {
-      await stopBridgeQuietly()
+      // task-27：这里是**用户在面板上显式关闭**接口 —— 必须同时把「用户偏好」置 false，
+      // 否则下次启动会被自动恢复，变成反方向的 bug（「我明明关了它还自己开」）。
+      // 生命周期停止（before-quit / 窗口关闭）走 stopBridgeQuietly() → 纯 stop()，**不动偏好**。
+      // 即：`enabled` 只表示「用户想不想开着」，不表示「现在在不在监听」。
+      const controller = ensureBridge()
+      if (controller) {
+        await Promise.resolve(controller.stop({ disable: true })).catch(() => {})
+      }
       return bridgeStatusPayload()
     },
     '停止本地接口失败',

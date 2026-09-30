@@ -47,6 +47,37 @@ const REQUIRED = ['getWorkspaceInfo', 'getAppVersion', 'getInboxEnabled', 'getDe
 const KNOWN_UNWIRED = ['getRecentImports', 'getImportRecord', 'getTags']
 
 /**
+ * **不是工厂挂钩**的名字：桥内部某个函数的参数，读到了不算「未交代」。
+ *
+ * 为什么需要这份名单：本脚本是**文本扫描**，分不清 `createBridge(options)` 的 `options`
+ * 与 `stop(options)` 的 `options` —— 同名不同作用域。（task-27 引入 `stop({disable:true})`
+ * 后 `options.disable` 被误报成「未交代：disable」。）
+ *
+ * **每条豁免都必须自证**：`evidence` 必须真的能在 `bridge.cjs` 里匹配到，否则 FAIL。
+ * 否则这份名单会退化成「任何漏接的挂钩都能往里塞」的后门 —— 那比误报更糟。
+ * 正解是让扫描器懂作用域；在做到之前，用「可自证的豁免」把误报和漏报分开。
+ */
+const NON_FACTORY_PARAMS = [
+  {
+    name: 'disable',
+    from: 'stop(options) 的参数（用户显式关闭；不是 createBridge 的挂钩）',
+    evidence: /stop\(\s*options\s*\)/,
+  },
+]
+
+/** 豁免清单逐条自证：evidence 匹配不到就说明这条豁免已过期。 */
+function exemptNames(source) {
+  const ok = NON_FACTORY_PARAMS.filter((entry) => entry.evidence.test(source))
+  return new Set(ok.map((entry) => entry.name))
+}
+
+const BRIDGE_SOURCE = fs.readFileSync(
+  require('node:path').join(__dirname, '..', 'electron', 'bridge.cjs'),
+  'utf8',
+)
+const EXEMPT = exemptNames(BRIDGE_SOURCE)
+
+/**
  * **设计上就该用桥的默认值**的可选挂钩，没有装配不是缺陷。每条都要写清为什么。
  *   isEnabled        —— 桥的运行与否由主进程用 start()/stop() 控制，不靠这个开关
  *   limits           —— 限流/体积上限走桥的内置默认值，本轮没有产品需求要覆盖
@@ -223,7 +254,17 @@ for (const name of REQUIRED) {
 // 2) 桥读的每个挂钩都得有交代：装配了，或已归类（KNOWN_UNWIRED / OPTIONAL_BY_DESIGN）。
 const unwired = [...read].filter((name) => !passed.names.has(name)).sort()
 const undeclared = unwired.filter(
-  (name) => !KNOWN_UNWIRED.includes(name) && !OPTIONAL_BY_DESIGN.includes(name),
+  (name) =>
+    !KNOWN_UNWIRED.includes(name) &&
+    !OPTIONAL_BY_DESIGN.includes(name) &&
+    !EXEMPT.has(name),
+)
+
+// 豁免清单自己也要被守：声明了豁免却找不到证据 → FAIL（过期豁免 = 后门）。
+check(
+  NON_FACTORY_PARAMS.every((entry) => entry.evidence.test(BRIDGE_SOURCE)),
+  '豁免清单里的每一条都在 bridge.cjs 里自证（过期豁免会变成后门）',
+  NON_FACTORY_PARAMS.map((entry) => `${entry.name}:${entry.evidence.test(BRIDGE_SOURCE)}`).join(' '),
 )
 check(
   undeclared.length === 0,

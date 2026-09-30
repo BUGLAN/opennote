@@ -27,31 +27,31 @@ export interface BridgeStatusView extends BridgeStatus {
   /** 是否正在监听（等价于 `state === "running"`）。 */
   running?: boolean;
   /**
-   * ㊲：本会话桥的内存里是否还持有令牌明文（= 能不能反复复制）。
-   * `undefined` 一律按 `false` 处理 —— 主进程没给这个字段时面板照「不可见」降级，
+   * ㊴：**明文是否真的在手里（在盘上）**，也就是「复制」能不能用。
+   * 它**不是** `tokenSet` 的重复产地：`tokenSet` 说「有没有令牌」，这里说「有没有明文」——
+   * 两者唯一不等的场景是**旧版 `bridge.json`**（只有 `sha256` + `last4`，明文长不出来）。
+   * `undefined` 一律按 `false` 处理：主进程没给这个字段时面板照「旧令牌」如实说明，
    * 绝不假装按钮可用。注意 `false` **不等于令牌失效**：令牌仍长期有效。
    */
   tokenVisible?: boolean;
 }
 
 /**
- * ㊲（00 号 §6.15）本会话的令牌明文缓存。
+ * ㊴（`00` §6.15，用户原话「还有访问令牌，可随时复制」）令牌明文缓存。
  *
- * 令牌是长期有效的**唯一凭据**，用户拿到它的唯一途径就是明文。只允许「显示一次」会把
- * 「长期有效」变成自相矛盾的承诺（误关一次面板就只能重新生成，而重新生成会让此前
- * 所有已配置的客户端失效）。所以明文在**本会话**里留在这个模块变量中：
- * 渲染进程内存，不写 localStorage、不落盘；面板重新挂载后仍能复制同一串。
- *
- * 应用重启后这里与桥的内存同时清空 —— 面板据 `status().tokenVisible` 如实降级。
+ * 明文现在**与哈希一起落在 `userData/bridge.json`**（`main.cjs` 读盘后经只读频道交出来），
+ * 所以「随时能复制」不再依赖这个模块变量，它只是**避免每次重挂载都走一次 IPC** 的缓存：
+ * 不写 localStorage、不进工作区；取不到就去问桥（`fetchSessionToken()`），而不是假装不可用。
+ * 旧版文件（只有哈希）取不到明文时，面板渲染「旧版本生成的令牌」那句如实说明。
  */
 let sessionToken: string | null = null;
 
-/** 记住 / 清除本会话明文（只在 `newToken` 成功后写入，或明确丢弃时传 `null`）。 */
+/** 记住 / 清除明文（`newToken` 成功后、或只读频道取回后写入；明确丢弃时传 `null`）。 */
 export function rememberBridgeToken(token: string | null): void {
   sessionToken = typeof token === "string" && token !== "" ? token : null;
 }
 
-/** 本会话是否还拿得到明文（与 `status().tokenVisible` 一起决定按钮状态）。 */
+/** 本会话缓存里的明文（与 `status().tokenVisible` 一起决定按钮状态）。 */
 export function peekBridgeToken(): string | null {
   return sessionToken;
 }
@@ -73,7 +73,7 @@ export const BRIDGE_PORT_MAX = 65535;
 /** 地址行在未运行时的占位（UI-04/R3b 逐字「—」）。 */
 export const BRIDGE_ADDRESS_PLACEHOLDER = "—";
 
-/** `opn_••••••••••••1234`：只显示后 4 位，应用自己也拿不到明文。 */
+/** `opn_••••••••••••1234`：没有明文时显示后 4 位，让用户知道自己看的是**哪一个**令牌。 */
 export function maskToken(last4: string | null | undefined): string {
   if (!last4) return "opn_••••••••••••••••";
   return `opn_••••••••••••${last4}`;
@@ -162,15 +162,16 @@ export function removeBridgeOrigin(origin: string): Promise<BridgeStatusView | n
 }
 
 /**
- * ㊲③ 向主进程**只读**要回本会话的令牌明文；拿不到返回 `null`。
+ * ㊴ 向主进程**只读**要回令牌明文（主进程从 `bridge.json` 读，绝不轮换）；拿不到返回 `null`。
  *
  * 频道（Lead 冻结）：`bridge.token()` —— arity 0，返回 `{ token: string | null }`。
  * **绝不轮换令牌** —— 这是它与 `regenerateBridgeToken()`（重新生成、旧令牌立刻作废）
- * 的本质区别。用途：整窗重载后主进程还持有明文、而界面手里没有，
- * 于是「复制令牌」会变成一个点不动的按钮（假开关 / 死按钮）。
+ * 的本质区别。用途：面板重新挂载后界面手里没有明文，只读要回来就不会让「复制」变成
+ * 一个点不动的按钮（假开关 / 死按钮）。
  *
- * 返回 `null` 的两种情况都按同一套降级处理：本会话确实不再持有明文（应用重启过），
- * 或 preload 还没接上这条频道（类型是新的、跑起来的进程可能是旧的）。
+ * 返回 `null` 的两种情况都按同一套降级处理：盘上确实没有明文（**旧版** `bridge.json`
+ * 只有哈希，或外部塞进来的哈希），或 preload 还没接上这条频道（类型是新的、跑起来的
+ * 进程可能是旧的）—— 两种情况面板都说「这个令牌是旧版本生成的」，绝不假装可复制。
  */
 export async function fetchSessionToken(): Promise<string | null> {
   const api = bridgeApi();

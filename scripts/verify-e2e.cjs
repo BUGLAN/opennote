@@ -337,15 +337,16 @@ async function main() {
   }
 
   try {
-    await scenario1(env);
-    await scenario2(env);
-    await scenario3(env);
-    await scenario4(env);
-    await scenario4b(env);
-    await scenario5(env);
-    await scenario6(env);
-    await scenario7(env);
-    await scenario8(env);
+    // 逐族上覆盖守卫（`S7`/`S9`/`S10` 的守卫在它们自己的函数里，这里不重复包）。
+    await withCoverageGuard("S1", EXPECTED_S1, () => scenario1(env));
+    await withCoverageGuard("S2", EXPECTED_S2, () => scenario2(env));
+    await withCoverageGuard("S3", EXPECTED_S3, () => scenario3(env));
+    await withCoverageGuard("S4", EXPECTED_S4, () => scenario4(env));
+    await withCoverageGuard("S4B", EXPECTED_S4B, () => scenario4b(env));
+    await withCoverageGuard("S5", EXPECTED_S5, () => scenario5(env));
+    await withCoverageGuard("S6", EXPECTED_S6, () => scenario6(env));
+    await scenario7(env); // 内含 S7 与 S7B 两条守卫（S7B 的守卫在 scenario7Body 里包住那次调用）
+    await withCoverageGuard("S8", EXPECTED_S8, () => scenario8(env));
     await scenario9(env);
     await scenario10(env);
   } catch (error) {
@@ -355,6 +356,26 @@ async function main() {
       await env.server.close();
     } catch {
       /* ignore */
+    }
+  }
+
+  /* ── 全局对账（兜底）：各族的守卫只能证明「那个族跑完时报告齐了」───────────────
+   * 如果某个场景抛异常冲出上面的 try，**后面所有族的守卫根本不会执行** ——
+   * 那一大片检查会静默消失，而摘要里只会「少几行」。这条兜底把「整族没跑」变成红。 */
+  {
+    const allExpected = [
+      ...EXPECTED_S1, ...EXPECTED_S2, ...EXPECTED_S3, ...EXPECTED_S4, ...EXPECTED_S4B,
+      ...EXPECTED_S5, ...EXPECTED_S6, ...EXPECTED_S7, ...EXPECTED_S7B, ...EXPECTED_S8,
+      ...EXPECTED_S9, ...EXPECTED_S10,
+    ];
+    const reported = new Set(results.map((r) => r.id));
+    const missingAll = allExpected.filter((id) => !reported.has(id));
+    if (missingAll.length) {
+      fail("COVERAGE-ALL", `全局对账：${missingAll.length} 条检查整轮都没被报告（**不是通过**）`,
+        `缺失：${missingAll.join(", ")}（共登记 ${allExpected.length} 条）`);
+    } else {
+      pass("COVERAGE-ALL", `全局对账：登记的 ${allExpected.length} 条检查全部报告过（PASS/FAIL/UNVERIFIED 都算「报告过」）`,
+        `实际报告 ${reported.size} 条 id（含 S0/守卫自身等）`);
     }
   }
 
@@ -406,9 +427,18 @@ async function scenario1(env) {
     pass("S1.4", "front-matter 字节模板正确", JSON.stringify(text.slice(0, 120)) + " …");
     const keys = match[1].split("\n").map((line) => line.split(":")[0]);
     const EXPECTED = ["source", "source_title", "source_site", "author", "published_at", "captured_at", "tags", "opennote_import_id"];
-    const orderOk = keys.length === EXPECTED.length && keys.every((k, i) => k === EXPECTED[i]);
-    if (orderOk) pass("S1.5", "8 键顺序逐字", keys.join(" → "));
-    else fail("S1.5", "8 键顺序逐字", `实际 ${keys.join(" → ")}（${keys.length} 键）`);
+    // ㊶（`00` §6.15）：提取不到的字段**整行省略**（沿用「null 则省略整行」的既有规则），
+    // **不得**为了凑满 8 键填占位值。所以判据从「必须有 8 键」改成
+    // 「**出现**的键必须是 EXPECTED 的**子序列**」——少键合法、乱序或未知键非法。
+    const idx = keys.map((k) => EXPECTED.indexOf(k));
+    const knownOk = idx.every((i) => i >= 0);
+    const orderOk = knownOk && idx.every((v, i) => i === 0 || v > idx[i - 1]);
+    if (orderOk && keys.length <= EXPECTED.length) {
+      pass("S1.5", `front-matter 键序符合契约（本次 ${keys.length}/${EXPECTED.length} 键；缺值整行省略是允许的）`, keys.join(" → "));
+    } else {
+      fail("S1.5", "front-matter 键序符合契约（允许省略，但出现即须按契约顺序、且不得有未知键）",
+        `实际 ${keys.join(" → ")}（${keys.length} 键；未知键=${keys.filter((k) => !EXPECTED.includes(k)).join(",") || "无"}）`);
+    }
 
     const tagsLine = (match[1].match(/^tags:.*$/m) || [""])[0];
     const tagsOk = /^tags: \[[^\]]*\]$/.test(tagsLine);
@@ -423,6 +453,34 @@ async function scenario1(env) {
   const tailOk = text.endsWith("\n") && !text.endsWith("\n\n");
   if (tailOk) pass("S1.8", "文件末尾恰好一个换行", JSON.stringify(text.slice(-12)));
   else fail("S1.8", "文件末尾恰好一个换行", JSON.stringify(text.slice(-12)));
+
+  /* ── S1.5b（㊶）「提取不到的字段整行省略，不得填占位值」───────────────
+     静态判据只能看到「契约允许省略」，看不到「实现真的会省略」。
+     所以这里再投一封**缺 author / publishedAt** 的信封（模拟页面里提取不到），
+     断言这两行**整行不存在**（而不是 `author: ""` / `author: null`），
+     同时 `tags` 与 `opennote_import_id` 仍在 —— 省略的是**没值的**，不是该有的。 */
+  const sparseEnvelope = envelope({
+    title: "稀疏来源标题",
+    source: { ...envelope({}).source, url: "https://example.com/verify-sparse", author: null, publishedAt: null },
+  });
+  delete sparseEnvelope.source.author;
+  delete sparseEnvelope.source.publishedAt;
+  const sparseCall = await env.plugin.postImport(status.port, token, sparseEnvelope);
+  const sparseReceipt = sparseCall.kind === "ok" ? sparseCall.result : null;
+  const sparseBytes = sparseReceipt && sparseReceipt.path ? readWorkspaceFile(root, sparseReceipt.path) : null;
+  const sparseText = sparseBytes ? sparseBytes.toString("utf8") : "";
+  const sparseFm = /^---\n([\s\S]*?)\n---\n\n# /.exec(sparseText);
+  const sparseKeys = sparseFm ? sparseFm[1].split("\n").map((line) => line.split(":")[0]) : [];
+  const invented = sparseKeys.filter((k) => k === "author" || k === "published_at");
+  const kept = ["tags", "opennote_import_id"].filter((k) => sparseKeys.includes(k));
+  if (sparseFm && invented.length === 0 && kept.length === 2) {
+    pass("S1.5b", "（㊶）提取不到的字段整行省略、不填占位值（缺 author/publishedAt → 两行都不出现）",
+      `${sparseReceipt.path} 的键：${sparseKeys.join(" → ")}`);
+  } else {
+    fail("S1.5b", "缺值字段应整行省略且不得填占位值",
+      `path=${sparseReceipt && sparseReceipt.path} 实际键=${sparseKeys.join(" → ") || "(未取到)"}`
+      + ` 多出的占位行=${invented.join(",") || "无"} 该有的键=${kept.join(",") || "无"}`);
+  }
 
   const noCr = !text.includes("\r");
   if (noCr) pass("S1.9", "全文无 CR（LF only）", "0 处 \\r");
@@ -1383,6 +1441,24 @@ async function withCoverageGuard(label, expectedIds, body) {
   }
 }
 
+/* ── 各场景族的「应该报告哪些检查」清单（Lead 2026-09-30：守卫装到所有族）──────────
+ * 为什么必须**逐族**都要有：`S10` 曾经因为 `port2 === undefined` → `http.request` 默认连 80
+ * → `ECONNREFUSED` → 场景中断，`S10.7`–`S10.11` **五条检查静默消失**，而整轮看起来只是「少了几行」。
+ * 覆盖守卫把它变成红。**「没报」和「报了且通过」必须区分** —— 与 a-defects 的四态判定
+ * （`CRASHED`/`NO_EFFECT` 绝不降级成 `MISSED`）是同一条原则。
+ *
+ * 清单是**静态枚举**出来的（脚本扫出每个族里出现过的 id），不是从运行结果倒推的 ——
+ * 从运行结果倒推等于「跑出什么就期望什么」，守卫永远绿，等于没有。 */
+const EXPECTED_S1 = ["S1.1", "S1.2", "S1.3", "S1.4", "S1.5", "S1.5b", "S1.6", "S1.7", "S1.8", "S1.9", "S1.10", "S1.11"];
+const EXPECTED_S2 = ["S2.1", "S2.2", "S2.3", "S2.4", "S2.5", "S2.6", "S2.7", "S2.8"];
+const EXPECTED_S3 = ["S3.1", "S3.2", "S3.3", "S3.4"];
+const EXPECTED_S4 = ["S4.1", "S4.2", "S4.3", "S4.4", "S4.5", "S4.6", "S4.7", "S4.8", "S4.9", "S4.10", "S4.11", "S4.12", "S4.13", "S4.14"];
+const EXPECTED_S4B = ["S4B.1", "S4B.4", "S4B.5", "S4B.6"];
+const EXPECTED_S5 = ["S5.1", "S5.2", "S5.3", "S5.4", "S5.5", "S5.6", "S5.7", "S5.8", "S5.8b", "S5.8c", "S5.9", "S5.10", "S5.11", "S5.12"];
+const EXPECTED_S6 = ["S6.1", "S6.2", "S6.3", "S6.4", "S6.5", "S6.6", "S6.7", "S6.8"];
+const EXPECTED_S7B = ["S7B.1", "S7B.1b", "S7B.2", "S7B.3", "S7B.4", "S7B.5", "S7B.6"];
+const EXPECTED_S8 = ["S8.1", "S8.2", "S8.3", "S8.4", "S8.5", "S8.6"];
+
 /**
  * 接线侧真源断言（V5 新增）：**读真实文件** `src/App.tsx`，而不是在探针里复刻它。
  *
@@ -1739,7 +1815,8 @@ async function scenario7Body(env) {
     fail("S7.8", "③ 窗口销毁路径", error && error.message ? error.message : String(error));
   }
 
-  await scenario7b(env);
+  // S7B 单独一段守卫：它整段抛异常时，S7 的守卫**看不到**它的 7 条检查（族是分开的）。
+  await withCoverageGuard("S7B", EXPECTED_S7B, () => scenario7b(env));
 
   try {
     await harness.invoke("opennote:bridge:stop");
@@ -1822,10 +1899,17 @@ async function scenario7b(env) {
     // `inboxWatch` / `logPath` 也在契约里，但与本次「配对删除」无关，仍单独断言在 S7B.2。
     const pairingLeft = PAIRING_KEYS.filter((k) => k in status);
     if (!missing.length) {
-      pass("S7B.1", "真实桥：`bridgeStatusPayload()` 带着全部可选字段",
+      // 标题**逐条列出**这 5 个键，而不是说「全部可选字段」（Lead 2026-09-30 裁定）：
+      // 「全部」是个**没人能验证的总量断言** —— 契约以后加字段，它会**静默变成错的**；
+      // 而列清单只会在「契约加了、清单没加」时**保持不变**（可接受，且一眼看得出来）。
+      // 清单出处：`src/desktop/bridge.ts` 的 `BridgeStatus`（L148–173）。
+      // ⚠️ 我核过：这 5 个字段在 `docs/import/02` 里**一处都没有**（`lastRejectedOrigin` 在 02 里 0 命中），
+      // 所以「出处」只能写代码里的类型，不能假引一个文档章节 —— 见 C-11 INFO 的文档缺口登记。
+      pass("S7B.1", "真实桥：`bridgeStatusPayload()` 带着 address / error / lastRejectedOrigin / startPort / portRange（`BridgeStatus`，src/desktop/bridge.ts）",
         `键数=${Object.keys(status).length}；address=${JSON.stringify(status.address)} startPort=${JSON.stringify(status.startPort)} portRange=${JSON.stringify(status.portRange)}`);
     } else {
-      fail("S7B.1", "真实桥：可选字段被重建逻辑吃掉", `缺少 ${missing.join(", ")}；实有键=${Object.keys(status).join(", ")}`);
+      fail("S7B.1", "真实桥：`BridgeStatus` 声明的那几个字段被重建逻辑吃掉",
+        `缺少 ${missing.join(", ")}（清单：${REAL_KEYS.join(" / ")}）；实有键=${Object.keys(status).join(", ")}`);
     }
     if (pairingLeft.length === 0) {
       pass("S7B.1b", "0.3.1（㉞）配对删除彻底：桥状态里没有任何配对字段",
@@ -2365,7 +2449,10 @@ async function scenario10Body(env) {
     pass("S10.1", "普通网页 Origin（`https://evil.example`）+ **合法令牌** → 403 `IMP-3001`，且不写任何 .md",
       `http=${evil.status} code=${codeOf(evil)} 新增 .md=${mdAfterEvil.length}（令牌是有效的，被拦的确实是来源这一道）body=${JSON.stringify(evil.json).slice(0, 150)}`);
   } else {
-    fail("S10.1", "普通网页 Origin 必须被拒（去掉配对后唯一网络面防线）",
+    // 标题不再声称「唯一防线」（Lead 2026-09-30 裁定）：**令牌闸门**（S10.4 证）、
+    // **Origin 按类型**（本条 + S10.2）、**Host**、**Content-Type** 都是闸门。
+    // 修辞上的过度声称会让读者**低估**其它防线的存在 —— 和事实错误一样有害。
+    fail("S10.1", "普通网页 Origin 必须被拒（四道闸门里的「来源类型」这一道：令牌 / Origin / Host / Content-Type）",
       `http=${evil.status} code=${codeOf(evil)} 新增 .md=${mdAfterEvil.length}（期望 403/IMP-3001/0）body=${JSON.stringify(evil.json).slice(0, 200)}`);
   }
 
@@ -2443,7 +2530,12 @@ async function scenario10Body(env) {
       `http=${pair.status} code=${codeOf(pair)} userMessage=「${pairMsg}」 含配对=${pairMsg.includes("配对")} 含令牌=${pairMsg.includes("令牌")} 凭据泄漏=${pairLeak} allowedOrigins ${originsBeforePair} → ${originsAfterPair}`);
   }
 
-  /* ── S10.6 令牌长期有效：重启桥（新实例、同一 dataDir、只读 bridge.json）后同一令牌仍可用 ── */
+  /* ── S10.6 令牌长期有效 + ㊴ 明文落盘（`00` §6.15㊴ 推翻 ㊲ 的「绝不落盘」）────────
+     **这条断言曾被裁定推翻**：旧版写的是「bridge.json 只有 sha256 + 后 4 位、**无明文**」，
+     而 ㊴ 明确要求 `userData/bridge.json` **同时存明文**（用户知情选择，换来「任何时候都能复制」）。
+     若保留旧断言，它会在 ㊴ 落地后把**正确实现**判成红 —— 这正是一个「断言了一个已被推翻的事实」的例子。
+     新判据：① sha256 仍是 64hex、last4 仍对得上；② 明文**确实**在 bridge.json 里且等于生效令牌；
+     ③ 明文**不得**出现在工作区（工作区的 .md/.json 里搜不到它）；④ 重启后同一令牌仍可用、另一个令牌 401。 */
   await bridge.controller.stop();
   const persisted = (() => {
     try {
@@ -2461,7 +2553,14 @@ async function scenario10Body(env) {
   })();
   const hashInFile = persistedJson && typeof persistedJson.tokenHash === "string" ? persistedJson.tokenHash : "";
   const last4InFile = persistedJson ? String(persistedJson.tokenLast4 || "") : "";
-  const plaintextLeak = persisted.includes(token);
+  const plaintextInFile = persistedJson && typeof persistedJson.tokenPlaintext === "string" ? persistedJson.tokenPlaintext : "";
+  const plaintextMatchesToken = plaintextInFile === token; // ㊴：盘上明文就是当前生效令牌
+  // 工作区里**不得**出现令牌明文（明文只该在 userData 的 bridge.json 里）。
+  const workspaceFiles = listWorkspace(root).filter((f) => /\.(md|json|txt)$/i.test(f));
+  const workspaceLeak = workspaceFiles.filter((f) => {
+    const b = readWorkspaceFile(root, f);
+    return b ? b.toString("utf8").includes(token) : false;
+  });
   const restarted = bootBridgeWith(env.bridgeModule, {
     dataDir: bridge.dataDir,
     token,
@@ -2471,7 +2570,7 @@ async function scenario10Body(env) {
   });
   // 注意：这里**不改** `bridge.getToken()` 的取值路径，用的是**重启前生成的那个**令牌。
   const started2 = await restarted.controller.start();
-  const port2 = started2 && started2.port;
+  const port2 = started2 && started2.port ? started2.port : null; // null 时不发请求（旧版拿 undefined 去连 → 默认 80 → ECONNREFUSED 把整段场景打崩）
   const afterRestart = port2
     ? await httpCall(port2, { origin: EXT, token, body: envelope({ source: { ...envelope({}).source, url: "https://example.com/s10-after-restart" } }) })
     : { status: 0, json: null };
@@ -2481,14 +2580,19 @@ async function scenario10Body(env) {
     : { status: 0, json: null };
   const okAfterRestart = afterRestart.status === 200 || afterRestart.status === 201 || afterRestart.status === 202;
   const otherRejected = afterRestartOther.status === 401 && codeOf(afterRestartOther) === "IMP-2002";
-  if (okAfterRestart && otherRejected && /^[0-9a-f]{64}$/.test(hashInFile) && last4InFile === token.slice(-4) && !plaintextLeak) {
-    pass("S10.6", "令牌长期有效：重启桥（新实例、同一 dataDir）后**同一令牌仍可用**；另一个令牌 401；bridge.json 只有 sha256 + 后 4 位、无明文",
+  if (okAfterRestart && otherRejected && /^[0-9a-f]{64}$/.test(hashInFile) && last4InFile === token.slice(-4)
+      && plaintextMatchesToken && workspaceLeak.length === 0) {
+    pass("S10.6", "令牌长期有效：重启桥（新实例、同一 dataDir）后**同一令牌仍可用**；另一个令牌 401；"
+      + "㊴ 明文与 sha256/last4 并列落盘且**只**在工作区之外",
       `重启后 http=${afterRestart.status}（同一令牌）／http=${afterRestartOther.status}/${codeOf(afterRestartOther)}（另一个令牌）`
-      + ` bridge.json: tokenHash=${hashInFile.slice(0, 12)}…(64hex=${/^[0-9a-f]{64}$/.test(hashInFile)}) tokenLast4=${last4InFile} 含明文令牌=${plaintextLeak}`);
+      + ` bridge.json: tokenHash=${hashInFile.slice(0, 12)}…(64hex=true) tokenLast4=${last4InFile}`
+      + ` tokenPlaintext 命中当前令牌=${plaintextMatchesToken} 工作区泄漏=${workspaceLeak.length}`);
   } else {
-    fail("S10.6", "令牌应长期有效且 bridge.json 不得存明文",
-      `重启后同一令牌 http=${afterRestart.status} code=${codeOf(afterRestart)}（期望 2xx）、另一个令牌 http=${afterRestartOther.status}/${codeOf(afterRestartOther)}（期望 401/IMP-2002）`
-      + ` tokenHash 64hex=${/^[0-9a-f]{64}$/.test(hashInFile)} tokenLast4=${last4InFile}（期望 ${token.slice(-4)}）含明文=${plaintextLeak}`);
+    fail("S10.6", "重启后同一令牌应可用；且按 ㊴ 明文应落在 bridge.json 而不在工作区",
+      `started2=${JSON.stringify(started2)} 重启后同一令牌 http=${afterRestart.status} code=${codeOf(afterRestart)}（期望 2xx）`
+      + `、另一个令牌 http=${afterRestartOther.status}/${codeOf(afterRestartOther)}（期望 401/IMP-2002）`
+      + ` tokenHash 64hex=${/^[0-9a-f]{64}$/.test(hashInFile)} tokenLast4=${last4InFile}（期望 ${token.slice(-4)}）`
+      + ` 明文命中=${plaintextMatchesToken}（㊴ 要求 true，旧版文件只有 sha256 时为 false）工作区泄漏=${workspaceLeak.length}${workspaceLeak.length ? "：" + workspaceLeak.join(",") : ""}`);
   }
 
   /* ── S10.7 历史遗留白名单**不再**用于放行；且不发放 CORS 头 ───────────────── */
@@ -2634,10 +2738,16 @@ async function scenario10Body(env) {
   const hasUi = /"IMP-1006"[\s\S]{0,260}?ui:\s*"[^"]+"[\s\S]{0,120}?uiSource:/.test(extErrors);
   restrictedEvidence.push(`extension/src/lib/errors.js 的 IMP-1006 带 ui 文案与 uiSource 出处=${hasUi}`);
   const pickerFiles = [];
-  for (const rel of ["content/picker.js", "content/float.js", "lib/picker.js", "content/select-element.js"]) {
+  // 候选清单按 0.3.1 的现状收敛：㉝ 已删除 `content/float.js`（选区浮标），㊵ 又整体移除了高亮
+  // （`content/highlight.js` / `lib/highlights.js`），所以这里**不再**把已删文件列进候选，
+  // 否则「发现清单」会永远显示一个不存在的文件名，看起来像「实现文件还在」。
+  for (const rel of ["content/picker.js", "lib/picker.js", "content/select-element.js"]) {
     if (fs.existsSync(path.join(ROOT, "extension", "src", rel))) pickerFiles.push(rel);
   }
+  const removedByRuling = ["content/float.js", "content/highlight.js", "lib/highlights.js"]
+    .filter((rel) => !fs.existsSync(path.join(ROOT, "extension", "src", rel)));
   restrictedEvidence.push(`元素选择实现文件：${pickerFiles.length ? pickerFiles.join(", ") : "**尚未存在**（0.3.1 ㉝ 未落地）"}`);
+  restrictedEvidence.push(`㉝/㊵ 要求删除且已确认不存在：${removedByRuling.join(", ") || "(无)"}`);
   record("INFO", "S10.11", "受限页面（chrome:// / 扩展商店 / PDF）的**如实提示**：只做了静态取证，真机交互未验证",
     restrictedEvidence.join(" | "));
 

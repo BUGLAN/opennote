@@ -196,32 +196,48 @@ const R4_HINT =
   "令牌长期有效，只在你在 Opennote 里点「重新生成」时才失效。令牌只在本机使用，Opennote 不会把它上传到任何地方。";
 
 /**
- * ㊞ 要求的**代价披露句**（逐字，不得因为合并 R4b 而丢）：去掉配对后令牌是唯一凭据，
- * 能读到剪贴板/扩展存储的程序就能拿到它 —— 但同时要说清「拿到它不等于能读笔记」，
- * 否则用户会低估或高估风险。
+ * ㊴ 要求的**代价披露句**（逐字；Lead 已同步到 `02`/`03`）。
+ *
+ * 注意：这句在 ㊴ 之前写的是「任何能读到**剪贴板或扩展存储**的程序都能拿到这串令牌」——
+ * 那时明文只在内存里，所以没提磁盘。㊴ 把明文**写进了 `bridge.json`**：暴露面**多了一个
+ * 文件**，于是原句**变成了假话**（它会让用户以为明文不落盘）。改法按 Lead 的要求：
+ *   ① 先说清**好处**（用户正是为「随时能复制」选的这个方案）→
+ *   ② 明说**文件位置**（不含糊说「本机」）→
+ *   ③ 把**新增的暴露面**（那个文件本身）说出来 →
+ *   ④ 保留「拿到它不等于能读笔记」那一半，否则用户会高估风险。
+ * **用户选了简单方案，不等于我们可以少说一句代价。**
  */
 const TOKEN_COST_HINT =
-  "在新客户端里粘贴一次即可，长期有效、不用再配对。任何能读到剪贴板或扩展存储的程序都能拿到这串令牌并获得导入能力，但桥只提供导入，不提供读取和删除。";
+  "在新客户端里粘贴一次即可，长期有效、不用再配对。令牌明文就保存在本机 Opennote 数据目录的 bridge.json 里，所以任何时候都能复制。任何能读到这个文件、剪贴板或扩展存储的程序，都能拿到这串令牌并获得导入能力；桥只提供导入，不提供读取和删除。";
 
 /**
- * ㊲ 明文不可见时的**唯一**状态句（Lead 裁定，逐字）。
- * 必须**说出来**：应用重启后内存明文没了，令牌却仍然有效 ——
- * 面板要如实解释「为什么现在复制不了」，而不是留一个点了没反应的按钮。
+ * 没有数据目录时（`status.tokenPersisted === false`，只可能出现在纯内存的自测/宿主场景：
+ * 生产里 `main.cjs` 一定给 `userData`）：**上面那句就不成立了** —— 明文没落盘，
+ * 关掉应用令牌就没了，客户端还得重新配置。宁可换一句真话，也不让界面说谎。
  */
-const R4_INVISIBLE = "令牌已不可见，需要时请重新生成";
+const TOKEN_NO_DISK_HINT =
+  "本次运行没有可写的本机数据目录，令牌只留在内存里：关掉 Opennote 之后令牌就没了，客户端需要重新配置。任何能读到剪贴板或扩展存储的程序都能拿到这串令牌并获得导入能力；桥只提供导入，不提供读取和删除。";
 
 /**
- * ㊲③ 明文在桥的内存里、但这个界面手里没有（整窗重载过且只读频道也没取回来）。
- * 如实说明 + 给出可执行的下一步，既不假装可用、也不谎称失效。
+ * ㊴ 状态句 A（**有令牌、明文在盘上**）：用户要的就是「随时能复制」，所以就这么说，不绕弯。
  */
-const R4_RELOADED =
-  "本会话的令牌明文还在（令牌没有失效），但界面拿不到它。需要明文时点上面的「重新生成」拿一串新的。";
+const R4_READY = "明文保存在本机，任何时候都能复制。";
 
 /**
- * 有明文时的唯一状态句。与 `R4_INVISIBLE` **互斥**：
- * 面板同一时刻只会渲染其中一条 —— 这就是「一个事实只有一个产地」在 UI 上的落点。
+ * ㊴ 状态句 B（**还没有令牌**）：引导到那一个动作上。
  */
-const R4_VISIBLE = "这串明文在本会话内可以反复复制；应用重启后明文不再可见，需要时重新生成。";
+const R4_NO_TOKEN = "还没有访问令牌。点「重新生成」生成一个，再复制到客户端。";
+
+/**
+ * ㊴ 状态句 C（**只剩这一种「复制」拿不到明文的情况**）：`bridge.json` 是**旧版本**写的
+ * （只有 `sha256` + `last4`，明文不可能凭空长出来），或外部塞了个哈希进来。
+ *
+ * ㊲ 时代有三态（重启过 / 界面没取到 / 桥还持有），㊴ 把前两种**删掉了**：明文落盘后重启
+ * 不影响复制。保留这一态是因为它**仍然可达**，而且不写它就只能画一个点不动的复制按钮 ——
+ * 那正是本项目一路在打的死按钮缺陷。它**不含**「已不可见」「本会话内」，讲的是原因与出路。
+ */
+const R4_LEGACY =
+  "这个令牌是旧版本生成的，明文没有保存在本机。需要明文请点「重新生成」拿一串新的。";
 
 const FIREWALL_NOTE = "首次开启时系统可能会弹出防火墙提示，允许本机访问即可。";
 
@@ -283,10 +299,10 @@ export function ImportApiPanel({
     let alive = true;
     void (async () => {
       const next = await refresh();
-      // ㊲③ 整窗重载后主进程仍持有明文，而界面手里没有 —— 只读要回来（绝不轮换），
-      // 否则「复制令牌」会变成一个点不动的按钮。
-      // 桥说「还持有」时再试一次（IPC 刚就绪可能空响应一次）；确实取不到就交给
-      // 既有的「不可见」降级 —— 绝不留一个点了没反应的按钮。
+      // ㊴ 明文与哈希一起落在 userData/bridge.json 里，所以「复制」**任何时候**都该能取到明文；
+      // 取不到只剩一种可能：bridge.json 是旧版本写的（只有哈希，没有明文）。
+      // 桥说「明文在」时再试一次（IPC 刚就绪可能空响应一次），确实取不到就走旧令牌那句如实说明
+      // —— 绝不留一个点了没反应的按钮。
       const attempts = next?.tokenVisible === true ? 2 : 1;
       for (let i = 0; i < attempts; i += 1) {
         const plain = await fetchSessionToken();
@@ -362,7 +378,7 @@ export function ImportApiPanel({
         setStatus(next);
         setPortText(String(next.portRange?.[0] ?? next.startPort ?? port ?? BRIDGE_DEFAULT_PORT));
         if (next.state === "running") {
-          // ㊲：开启接口**不再丢弃明文** —— 本会话内随时可以再复制一次。
+          // ㊴：开启接口**不再丢弃明文** —— 明文就在 bridge.json 里，任何时候都能再复制一次。
           return true;
         }
         setErrorText(next.error || null);
@@ -400,7 +416,7 @@ export function ImportApiPanel({
         return;
       }
       const requested = parsePort(portText) ?? status?.startPort ?? BRIDGE_DEFAULT_PORT;
-      // 首次开启：先确认风险，再生成令牌（㊲：明文在本会话内保留、可反复复制），最后才监听。
+      // 首次开启：先确认风险，再生成令牌（㊴：明文与哈希一起落盘、随时可复制），最后才监听。
       if (!status?.tokenSet) {
         if (!(await askEnable(requested))) return;
         setWorking("token");
@@ -641,7 +657,7 @@ export function ImportApiPanel({
       </SettingRow>
 
       {/*
-        唯一的令牌区块（task-22 合并 R4 + R4b）。
+        唯一的令牌区块（task-22 合并 R4 + R4b；㊴ 起明文落盘、随时可复制）。
         合并前这里是两块：R4「访问令牌」与 R4b「复制令牌」，各有一个掩码框和一个复制按钮 ——
         于是同一时刻会出现两个相反的结论（R4 说「可以反复复制」，R4b 说「令牌已不可见」）。
         **一个事实只有一个产地**：下面这三条状态句互斥，同一份 HTML 里只会出现一条。
@@ -655,7 +671,11 @@ export function ImportApiPanel({
             type="button"
             className="btn"
             disabled={!copyable || busy}
-            title={copyable ? "复制后粘贴到客户端即可；本会话内可以反复复制。" : "明文在本会话里已不可见，需要时点「重新生成」"}
+            title={
+              copyable
+                ? "复制后粘贴到客户端即可；明文保存在本机，任何时候都能复制。"
+                : "明文没有保存在本机（这个令牌是旧版本生成的），需要明文请点「重新生成」"
+            }
             onClick={() => void handleCopy("token", copyable)}
           >
             <Icon name="copy" size={14} />
@@ -666,9 +686,13 @@ export function ImportApiPanel({
             重新生成
           </button>
         </div>
-        {copyable ? <p style={{ ...ERROR, color: "var(--ink)" }}>{R4_VISIBLE}</p> : null}
-        {!copyable && status?.tokenVisible === true ? <p style={HINT}>{R4_RELOADED}</p> : null}
-        {!copyable && status?.tokenVisible !== true ? <p style={HINT}>{R4_INVISIBLE}</p> : null}
+        {/*
+          ㊴ 只剩两态（+ 一种「旧版文件」的可达降级）：有明文 = 随时可复制；没令牌 = 去生成。
+          ㊲ 的「重启后不可见」「界面没取到」两种已经删掉 —— 明文落盘后它们不可能发生。
+        */}
+        {copyable ? <p style={{ ...ERROR, color: "var(--ink)" }}>{R4_READY}</p> : null}
+        {!copyable && status?.tokenSet === true ? <p style={HINT}>{R4_LEGACY}</p> : null}
+        {!copyable && status?.tokenSet !== true ? <p style={HINT}>{R4_NO_TOKEN}</p> : null}
         {copyable && !running ? (
           <div style={{ ...ROW, marginTop: "var(--s2)" }}>
             <button type="button" className="btn btn--primary" disabled={busy} onClick={() => void doStart(parsePort(portText) ?? undefined)}>
@@ -683,7 +707,8 @@ export function ImportApiPanel({
           </p>
         ) : null}
         <p style={HINT}>{R4_HINT}</p>
-        <p style={HINT}>{TOKEN_COST_HINT}</p>
+        {/* 披露句必须与事实同时变化：没有数据目录时那句「保存在 bridge.json 里」就不成立。 */}
+        <p style={HINT}>{status?.tokenPersisted === false ? TOKEN_NO_DISK_HINT : TOKEN_COST_HINT}</p>
       </SettingRow>
 
       {/*

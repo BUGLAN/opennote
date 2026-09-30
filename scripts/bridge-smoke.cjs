@@ -533,20 +533,22 @@ async function main() {
       return JSON.parse(literal[0])
     }
     const cost = constString('TOKEN_COST_HINT')
-    assert.equal(cost.includes('任何能读到剪贴板或扩展存储的程序都能拿到这串令牌并获得导入能力'), true, '代价披露句被改过了')
+    // ㊴：披露句换了新版，这里只做「有没有被掏空」的最低限度自检（逐字冻结在 ㊴④ 那条断言里）。
+    assert.equal(cost.includes('令牌明文就保存在本机 Opennote 数据目录的 bridge.json 里'), true, '代价披露句被改过了')
+    assert.equal(cost.includes('不提供读取和删除'), true, '代价披露句被改过了')
     assert.equal(doc.includes(cost), true, `03 缺少代价披露的**完整实现句**：${cost}`)
-    for (const name of ['R4_VISIBLE', 'R4_INVISIBLE', 'R4_RELOADED', 'R4_HINT']) {
+    for (const name of ['R4_READY', 'R4_NO_TOKEN', 'R4_LEGACY', 'R4_HINT']) {
       const text = constString(name)
       assert.equal(doc.includes(text), true, `03 缺少/改动了 ${name} 的逐字文案：${text}`)
     }
-    // 三态必须互斥（同一个事实只有一个产地）：任何两句都不允许同时是另一句的子串。
-    const three = ['R4_VISIBLE', 'R4_INVISIBLE', 'R4_RELOADED'].map(constString)
+    // 三条状态句必须互斥（同一个事实只有一个产地）：任何两句都不允许同时是另一句的子串。
+    const three = ['R4_READY', 'R4_NO_TOKEN', 'R4_LEGACY'].map(constString)
     for (const a of three) {
       for (const b of three) {
         if (a !== b) assert.equal(a.includes(b), false, `状态句不是互斥的：${b} ⊂ ${a}`)
       }
     }
-    return `存档 ${archiveHits.length} 行；活规格 R4b ${liveR4b.length} 处都带「已并入」语境；无「生成并复制新令牌」；披露句 + 四句状态文案逐字一致`
+    return `存档 ${archiveHits.length} 行；活规格 R4b ${liveR4b.length} 处都带「已并入」语境；无「生成并复制新令牌」；㊴ 披露句 + 四句状态文案逐字一致`
   })
 
   await check('㉗ 逐字：IMP-4006「应用没运行」与 IMP-4007「工作区没打开」必须区分且逐字', async () => {
@@ -596,17 +598,29 @@ async function main() {
     return '旧令牌立刻失效'
   })
 
-  await check('bridge.json 只存 sha256 十六进制 + last4，绝不含明文', async () => {
+  await check('㊴ bridge.json 存 sha256 + last4 + **明文**（明文可以落盘，但只能落这里）', async () => {
+    // 注意：这条断言原本写的是「bridge.json **绝不**含明文」—— ㊴（用户知情选择「随时可复制」）
+    // **有意推翻了那个事实**，所以这里必须**换成新事实的守卫**（盘上必须有明文），而不是删掉：
+    // 删掉就等于以后没人守「明文到底有没有落盘」。
+    //
+    // 原则（写给后来者）：**当一条裁定有意推翻某个事实时，所有编码了旧事实的断言必须与裁定
+    // 同轮更新 —— 这不是「让它变绿」，是「换成新事实的守卫」。** 否则下一个人看到红，会以为
+    // 代码错了，跑去改代码而不改断言。
+    // 同一族的另一例：verifier 的 `BR-9` 标题写着「只存 sha256 + last4」——**标题错了、断言
+    // 仍成立**，所以四个脚本全绿也发现不了；这条是**断言本身错了**，所以它会红。区别只在
+    // 「错在哪一层」：一层靠人读，一层靠机制。
     const file = path.join(dataDir, 'bridge.json')
     assert.equal(fs.existsSync(file), true, 'dataDir 给定时应写 bridge.json')
     const raw = fs.readFileSync(file, 'utf8')
-    assert.equal(raw.includes(token), false, 'bridge.json 不得含令牌明文')
     const parsed = JSON.parse(raw)
     assert.match(parsed.tokenHash, /^[a-f0-9]{64}$/, 'tokenHash 必须是 sha256 十六进制')
     assert.equal(parsed.tokenHash, sha256Hex(token), '哈希必须等于 sha256(明文)')
     assert.equal(parsed.tokenLast4, token.slice(-4))
+    // ㊴ 推翻了 0.3.1 第一版的「绝不含明文」：用户知情选择了「随时可复制」。
+    assert.equal(parsed.tokenPlaintext, token, 'bridge.json 必须与哈希并列存明文（面板的披露句就是这么说的）')
+    assert.equal(/^opn_[A-Za-z0-9_-]{43}$/.test(parsed.tokenPlaintext), true, '盘上必须是完整 47 字符明文')
     assert.deepEqual(parsed.allowedOrigins, [], 'allowedOrigins 默认空')
-    return `tokenHash=${parsed.tokenHash.slice(0, 16)}… last4=${parsed.tokenLast4}`
+    return `tokenHash=${parsed.tokenHash.slice(0, 16)}… last4=${parsed.tokenLast4} 明文=盘上（㊴）`
   })
 
   await check('磁盘无 bridge.json.tmp 残留（原子写）', async () => {
@@ -1006,7 +1020,7 @@ async function main() {
     return '重启后同一令牌 201；重新生成后旧令牌 401'
   })
 
-  await check('㊲ 本会话内明文可反复复制：tokenVisible=true，且明文不进 status()', async () => {
+  await check('㊴ 明文随时可复制：tokenVisible=true，且明文不进 status()', async () => {
     const inst = makeBridge({})
     const plain = inst.bridge.regenerateToken()
     const first = inst.bridge.status()
@@ -1014,10 +1028,10 @@ async function main() {
     const json = JSON.stringify(first)
     assert.equal(json.includes(plain), false, 'status() 绝不回显明文')
     assert.equal(/opn_[A-Za-z0-9_-]{20,}/.test(json), false, 'status() 不得出现任何完整令牌')
-    // 关掉接口再开**不是**「应用退出」：明文必须还在，否则面板会在开关一次后突然不能复制。
+    // 关掉接口再开不该影响明文：明文在盘上，面板开关一次后仍然能复制。
     await inst.bridge.startWithPort(privatePortCounter++)
     await inst.bridge.stop()
-    assert.equal(inst.bridge.status().tokenVisible, true, 'stop() 不得清掉本会话明文')
+    assert.equal(inst.bridge.status().tokenVisible, true, 'stop() 不得清掉明文（㊴：明文在盘上，生命周期停止与它无关）')
     const again = await inst.bridge.startWithPort(privatePortCounter++)
     try {
       assert.equal(inst.bridge.status().tokenVisible, true, 'start() 后仍应可复制')
@@ -1029,8 +1043,8 @@ async function main() {
     return 'tokenVisible=true 跨 start/stop 保持；明文不出现在 status()'
   })
 
-  await check('㊲ 重启（新 controller）后 tokenVisible=false，但令牌**没有**失效', async () => {
-    const dir = tempDir('opennote-bridge-tokenvisible-')
+  await check('㊴① 重启（新 controller）后**立刻**能取回明文：明文落盘，不再有「已不可见」', async () => {
+    const dir = tempDir('opennote-bridge-plaintext-')
     const first = makeBridge({ dataDir: dir })
     const plain = first.bridge.regenerateToken()
     const up = await first.bridge.startWithPort(privatePortCounter++)
@@ -1039,28 +1053,54 @@ async function main() {
     } finally {
       await first.bridge.stop()
     }
-    // 应用重启 = 新的 controller：内存明文没了，磁盘上的哈希还在。
+    // 应用重启 = 新的 controller。㊲ 时代这里读回 null（要用户重新生成才能再复制）；
+    // ㊴ 之后**直接就能取回** —— 这正是用户要的「随时能复制」。
     const second = makeBridge({ dataDir: dir })
     const status = second.bridge.status()
-    assert.equal(status.tokenVisible, false, '重启后不得声称还持有明文（否则面板会复制一串拿不到的东西）')
+    assert.equal(second.bridge.getSessionPlaintext(), plain, '㊴：新 controller 必须立刻能取回磁盘上的明文')
+    assert.equal(status.tokenVisible, true, 'tokenVisible 必须为 true —— 面板据此才能给出可点的「复制」')
     assert.equal(status.tokenSet, true, '令牌本身仍然有效')
-    assert.equal(JSON.stringify(status).includes(plain), false)
+    assert.equal(JSON.stringify(status).includes(plain), false, 'status() 绝不回显明文（落盘 ≠ 到处乱放）')
     const again = await second.bridge.startWithPort(privatePortCounter++)
     try {
       assert.equal((await postImport(again.port, plain, validEnvelope())).status, 201, '令牌长期有效：重启不影响')
-      // 重新生成 → 本会话重新持有明文；旧令牌同时作废。
+      // 重新生成 → 盘上的明文同步换成新串；旧令牌同时作废。
       const fresh = second.bridge.regenerateToken()
-      assert.equal(second.bridge.status().tokenVisible, true, '重新生成后本会话重新持有明文')
+      assert.equal(second.bridge.getSessionPlaintext(), fresh, '重新生成后取回的必须是新串')
       assert.notEqual(fresh, plain)
-      const stale = await postImport(again.port, plain, validEnvelope())
-      expectError(stale, 'IMP-2002', 401)
+      expectError(await postImport(again.port, plain, validEnvelope()), 'IMP-2002', 401)
+      const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'bridge.json'), 'utf8'))
+      assert.equal(onDisk.tokenPlaintext, fresh, '重新生成必须同步改写盘上的明文（否则重启后复制到的是废令牌）')
     } finally {
       await second.bridge.stop()
     }
-    return '重启后不可复制但令牌仍有效；重新生成后恢复可复制'
+    return '重启后立刻取回同一串明文且令牌仍 201；重新生成换新、盘上同步、旧令牌 401'
   })
 
-  await check('㊲ setTokenHash 读回外部哈希时必须丢弃内存明文（否则会复制一串不对应的令牌）', async () => {
+  await check('㊴② bridge.json 里确实有明文（与 sha256 / last4 并列），且明文不进日志', async () => {
+    const dir = tempDir('opennote-bridge-plaintextfile-')
+    const inst = makeBridge({ dataDir: dir })
+    const plain = inst.bridge.regenerateToken()
+    await inst.bridge.startWithPort(privatePortCounter++)
+    await inst.bridge.stop()
+    const raw = fs.readFileSync(path.join(dir, 'bridge.json'), 'utf8')
+    const parsed = JSON.parse(raw)
+    // 这条断言就是面板披露句的**事实依据**：句子里说「明文保存在 bridge.json 里」，
+    // 那就必须真的在那里 —— 否则披露句又变成假话（只是假的方向反了过来）。
+    assert.equal(parsed.tokenPlaintext, plain, 'bridge.json 必须与 sha256 / last4 并列存明文')
+    assert.equal(/^opn_[A-Za-z0-9_-]{43}$/.test(parsed.tokenPlaintext), true, '盘上那串必须是完整 47 字符明文，不是掩码')
+    assert.equal(parsed.tokenHash, sha256Hex(plain), '哈希与明文必须对应同一串')
+    assert.equal(parsed.tokenLast4, plain.slice(-4))
+    assert.equal(raw.includes('••'), false, '盘上不得存掩码形态')
+    // 明文只允许落在这一个文件里：日志里出现就等于「到处乱放」。
+    const log = path.join(dir, 'bridge.log')
+    if (fs.existsSync(log)) {
+      assert.equal(fs.readFileSync(log, 'utf8').includes(plain), false, '日志里不得出现令牌明文')
+    }
+    return `bridge.json 含明文 ${plain.length} 字符 + 对应哈希 + 后四位；日志无明文`
+  })
+
+  await check('㊴ setTokenHash 读回外部哈希时必须丢弃盘上明文（否则会复制一串不对应的令牌）', async () => {
     const inst = makeBridge({ noWindow: true })
     inst.bridge.regenerateToken()
     assert.equal(inst.bridge.status().tokenVisible, true)
@@ -1073,7 +1113,7 @@ async function main() {
     return 'setTokenHash → 明文丢弃 / 只读频道 null'
   })
 
-  await check('㊲③ getSessionPlaintext() 与「面板可复制的那串」逐字相同，而且真的能用', async () => {
+  await check('㊴ getSessionPlaintext() 与「面板可复制的那串」逐字相同，而且真的能用', async () => {
     const inst = makeBridge({})
     const plain = inst.bridge.regenerateToken()
     const read = inst.bridge.getSessionPlaintext()
@@ -1093,7 +1133,7 @@ async function main() {
     return `${read.length} 字符、非掩码非哈希；直接用它导入 201`
   })
 
-  await check('㊲③ 只读频道绝不轮换：连调两次同一串，读取前后旧令牌都能导入', async () => {
+  await check('㊴ 只读频道绝不轮换：连调两次同一串，读取前后旧令牌都能导入', async () => {
     const inst = makeBridge({})
     const plain = inst.bridge.regenerateToken()
     const before = inst.bridge.status()
@@ -1113,27 +1153,67 @@ async function main() {
     return '两次同一串；读取前后旧令牌都 201，tokenLast4 不变'
   })
 
-  await check('㊲③ 重启（新 controller）后只读频道返回 null，但令牌本身仍然有效', async () => {
+  await check('㊴ 重启（新 controller）后只读频道返回**同一串**明文，令牌也仍然有效', async () => {
     const dir = tempDir('opennote-bridge-sessiontoken-')
     const first = makeBridge({ dataDir: dir })
     const plain = first.bridge.regenerateToken()
     assert.equal(first.bridge.getSessionPlaintext(), plain)
-    // 应用重启 = 新的 controller：内存明文没了，磁盘上的哈希还在 —— 这两件事必须分开断言。
+    // 应用重启 = 新的 controller。㊴ 之后明文从磁盘读回，所以这里**不是** null。
     const second = makeBridge({ dataDir: dir })
-    assert.equal(second.bridge.getSessionPlaintext(), null, '不可见：内存明文随进程消失')
-    assert.equal(second.bridge.status().tokenVisible, false)
-    assert.equal(second.bridge.status().tokenSet, true, '不可见 ≠ 失效')
+    assert.equal(second.bridge.getSessionPlaintext(), plain, '㊴：读盘后必须拿到同一串（面板要能直接复制）')
+    assert.equal(second.bridge.status().tokenVisible, true)
+    assert.equal(second.bridge.status().tokenSet, true)
     const up = await second.bridge.startWithPort(privatePortCounter++)
     try {
       assert.equal((await postImport(up.port, plain, validEnvelope())).status, 201, '令牌本身仍然有效')
-      assert.equal(second.bridge.getSessionPlaintext(), null, '仍然 null —— 不能因为被用了一次就冒出来')
+      assert.equal(second.bridge.getSessionPlaintext(), plain, '再读一次仍是同一串（只读、无副作用）')
     } finally {
       await second.bridge.stop()
     }
-    return '读回 null 且 tokenSet=true；令牌仍 201'
+    return '重启后读回同一串明文；令牌仍 201'
   })
 
-  await check('㊲③ 明文绝不外溢：status() 的 JSON 里不含 `opn_` 前缀子串', async () => {
+  await check('㊴③ 面板里再没有任何「已不可见 / 本会话内可以反复复制」的用户可见文案', async () => {
+    const panel = fs.readFileSync(PANEL_PATH, 'utf8')
+    // 只看**字符串字面量**：注释里保留这段历史是对的（它记录了 task-22 那个矛盾），
+    // 但**给用户看的字**不能再出现 ㊲ 的措辞 —— 那些话在 ㊴ 之后已经是假话。
+    const literals = (panel.match(/"(?:[^"\\]|\\.)*"/g) || []).map((item) => JSON.parse(item))
+    for (const banned of ['已不可见', '本会话内可以反复复制', '本会话内可反复复制', '绝不落盘', '明文只在生成']) {
+      const hit = literals.find((text) => text.includes(banned))
+      assert.equal(hit === undefined, true, `面板还有用户可见文案在说「${banned}」：${String(hit)}`)
+    }
+    // 也不许再出现 ㊲ 时代的两个常量名（删掉的东西不该留壳）。
+    assert.equal(panel.includes('R4_INVISIBLE'), false, 'R4_INVISIBLE 必须删掉')
+    assert.equal(panel.includes('R4_RELOADED'), false, 'R4_RELOADED 必须删掉')
+    return `${literals.length} 条字面量里没有 ㊲ 措辞；R4_INVISIBLE / R4_RELOADED 已删`
+  })
+
+  await check('㊴④ 披露句逐字 = ㊴ 新版（好处 → 文件位置 → 新增暴露面 → 只提供导入）', async () => {
+    const panel = fs.readFileSync(PANEL_PATH, 'utf8')
+    const pick = (name) => {
+      const at = panel.indexOf(`const ${name} =`)
+      assert.notEqual(at, -1, `面板里找不到 ${name}`)
+      const literal = panel.slice(at).match(/"(?:[^"\\]|\\.)*"/)
+      assert.notEqual(literal, null, `${name} 不是字符串字面量`)
+      return JSON.parse(literal[0])
+    }
+    // 测试自己就是「第二个产地」，所以这里**冻死**期望值：面板改了句子而没改这里的期望，
+    // 或者反过来，都必须红。四个要点一个都不能少。
+    const expected =
+      '在新客户端里粘贴一次即可，长期有效、不用再配对。令牌明文就保存在本机 Opennote 数据目录的 bridge.json 里，所以任何时候都能复制。任何能读到这个文件、剪贴板或扩展存储的程序，都能拿到这串令牌并获得导入能力；桥只提供导入，不提供读取和删除。'
+    assert.equal(pick('TOKEN_COST_HINT'), expected, '披露句必须逐字等于 ㊴ 冻结版（Lead 已同步 02/03）')
+    for (const must of ['bridge.json', '任何时候都能复制', '这个文件、剪贴板或扩展存储', '不提供读取和删除']) {
+      assert.equal(expected.includes(must), true, `披露句必须说清「${must}」`)
+    }
+    // 没有数据目录时那句必须**不**声称「保存在 bridge.json 里」，否则又是一句假话。
+    const noDisk = pick('TOKEN_NO_DISK_HINT')
+    assert.equal(noDisk.includes('bridge.json'), false, '没有数据目录时不得再说「保存在 bridge.json 里」')
+    assert.equal(noDisk.includes('不提供读取和删除'), true, '两种情况都必须保留「只提供导入」这一半')
+    assert.equal(panel.includes('status?.tokenPersisted === false ? TOKEN_NO_DISK_HINT'), true, '披露句必须按事实分支渲染')
+    return '披露句逐字冻结版 + 无数据目录分支；两个分支都保留「只提供导入」'
+  })
+
+  await check('㊴ 明文绝不外溢：status() 的 JSON 里不含 `opn_` 前缀子串', async () => {
     const inst = makeBridge({ noWindow: true })
     const plain = inst.bridge.regenerateToken()
     const json = JSON.stringify(inst.bridge.status())
@@ -1144,7 +1224,7 @@ async function main() {
     return 'status() 无 opn_ 子串、无明文中段、无内存字段名'
   })
 
-  await check('㊲ tokenVisible 要能穿过 IPC：main.cjs 的 bridgeStatusPayload 必须 `...raw` 展开', async () => {
+  await check('㊴ tokenVisible 要能穿过 IPC：main.cjs 的 bridgeStatusPayload 必须 `...raw` 展开', async () => {
     // 第 4 类「假开关」缺陷就是这么来的：桥给了字段，主进程逐字段重建 payload 时静默丢掉。
     const main = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8')
     const start = main.indexOf('function bridgeStatusPayload()')
@@ -1163,7 +1243,7 @@ async function main() {
     return 'payload 展开 ...raw；tokenVisible 可序列化往返'
   })
 
-  await check('㊲③ 只读频道三处接线必须一致（preload arity 0 / main 走只读方法 / 不得挂到轮换）', async () => {
+  await check('㊴ 只读频道三处接线必须一致（preload arity 0 / main 走只读方法 / 不得挂到轮换）', async () => {
     // 「同一个值的多个产地」：频道名、arity、以及 main 到底调用哪个控制器方法，三处都要咬合。
     const preload = fs.readFileSync(path.join(__dirname, '..', 'electron', 'preload.cjs'), 'utf8')
     assert.equal(
@@ -1845,7 +1925,7 @@ async function main() {
     }
   })
 
-  await check('持久化：新实例读回 tokenHash + last4 + allowedOrigins（明文不可恢复）', async () => {
+  await check('㊴ 持久化：新实例读回 tokenHash + last4 + allowedOrigins，**并且明文也能读回**', async () => {
     // 自己播种遗留列表，不依赖前面用例跑过（红的时候不该连坐）。
     assert.equal(bridge.addAllowedOrigin(DEV_ORIGIN), true)
     const reloaded = makeBridge({ dataDir, workspace: true })
@@ -1855,11 +1935,14 @@ async function main() {
     assert.equal(status.tokenPersisted, true)
     assert.ok(status.origins.includes(DEV_ORIGIN), 'allowedOrigins 应被读回')
     assert.equal(JSON.stringify(status).includes(token), false, 'status 不得回显明文')
+    // ㊴：「明文不可恢复」已经作废 —— 新实例必须能直接把它交出来（用户要的就是这个）。
+    assert.equal(reloaded.bridge.getSessionPlaintext(), token, '㊴：新实例必须能从磁盘读回明文')
+    assert.equal(status.tokenVisible, true)
     const started = await reloaded.bridge.startWithPort(privatePortCounter++)
     try {
       const res = await postImport(started.port, token, validEnvelope())
       assert.equal(res.status, 201, `读回的哈希应能验证原令牌，实际 ${res.status}`)
-      return '哈希读回 + 原令牌仍有效'
+      return '哈希 + 明文都能读回；原令牌仍有效'
     } finally {
       await reloaded.bridge.stop()
     }
@@ -1941,6 +2024,105 @@ async function main() {
     } finally {
       agent.destroy()
       await keep.bridge.stop()
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // ⑫ 用户偏好：本地接口开关要记住（task-27，用户实测）
+  // -------------------------------------------------------------------------
+  section('⑫ 用户偏好：本地接口开关要记住（task-27）')
+
+  /** 读 `bridge.json` 里的用户偏好（测试只看这一个产地）。 */
+  const readPref = (dir) => JSON.parse(fs.readFileSync(path.join(dir, 'bridge.json'), 'utf8')).enabled
+
+  await check('task-27① start() 后用户偏好为 true 并写进 bridge.json', async () => {
+    const dir = tempDir('opennote-bridge-pref-')
+    const inst = makeBridge({ dataDir: dir })
+    inst.bridge.regenerateToken()
+    assert.equal(readPref(dir), false, '还没开过 → 偏好 false（未开启）')
+    const up = await inst.bridge.startWithPort(privatePortCounter++)
+    try {
+      assert.equal(up.port !== null, true, '应当监听成功')
+      assert.equal(inst.bridge.status().enabled, true, 'status().enabled = 现在在监听（与偏好同名不同义）')
+      assert.equal(readPref(dir), true, '用户点过开启 → 偏好必须落盘为 true')
+    } finally {
+      await inst.bridge.stop()
+    }
+  })
+
+  await check('task-27② 端到端：开 → stop()（= 退出应用）→ 新 controller → 按偏好自动恢复并可用', async () => {
+    // 这条就是用户实测的复现路径：0.3.1 第一版在第 2 步把偏好写成了 false，于是第 3 步
+    // 读到 disabled、第 4 步永远不恢复（「我打开了本地接口，每次关了都需要重新打开」）。
+    const dir = tempDir('opennote-bridge-pref-e2e-')
+    const first = makeBridge({ dataDir: dir })
+    const plain = first.bridge.regenerateToken()
+    // ① 开
+    const up = await first.bridge.startWithPort(privatePortCounter++)
+    assert.equal((await postImport(up.port, plain, validEnvelope())).status, 201, '① 开启后应能导入')
+    // ② stop() = main.cjs 的 before-quit / 窗口关闭路径
+    await first.bridge.stop()
+    assert.equal(readPref(dir), true, '② 退出应用的 stop() 不得清掉用户偏好（这就是本 bug 的核心断言）')
+    assert.equal(first.bridge.status().state, 'stopped', '停监听 ≠ 关偏好：会话内状态仍是 stopped')
+    // 顺带：别的 persist() 路径也不许顺手改偏好（同一个 bug 的第二张脸）。
+    first.bridge.addAllowedOrigin(DEV_ORIGIN)
+    assert.equal(readPref(dir), true, 'addAllowedOrigin 这类 persist() 不得改偏好')
+    // ③ 新 controller = 重启应用：初始状态必须是 stopped（会恢复），而不是 disabled
+    const second = makeBridge({ dataDir: dir })
+    assert.equal(second.bridge.status().state, 'stopped', '③ 偏好为 true 时初始状态必须是 stopped，不是 disabled')
+    assert.equal(second.bridge.status().enabled, false, '此时确实没在监听（两件事必须能同时成立）')
+    // ④ 按偏好自动恢复（main.cjs 在窗口创建时做的事）
+    const restored = await second.bridge.startWithPort(privatePortCounter++)
+    try {
+      assert.equal(restored.port !== null, true, '④ 自动恢复必须真的监听')
+      assert.equal((await postImport(restored.port, plain, validEnvelope())).status, 201, '④ 恢复后旧令牌仍可用')
+    } finally {
+      await second.bridge.stop()
+    }
+  })
+
+  await check('task-27③ 显式关闭（stop({disable:true})）→ 偏好 false，重启后 disabled 且不自动恢复', async () => {
+    const dir = tempDir('opennote-bridge-pref-off-')
+    const first = makeBridge({ dataDir: dir })
+    first.bridge.regenerateToken()
+    await first.bridge.startWithPort(privatePortCounter++)
+    await first.bridge.stop()
+    assert.equal(readPref(dir), true, '先确认：纯 stop() 之后偏好还是 true')
+    // 用户显式关闭（面板上的「关闭接口」→ main.cjs 的 opennote:bridge:stop）
+    await first.bridge.stop({ disable: true })
+    assert.equal(readPref(dir), false, '用户显式关闭 → 偏好必须落盘为 false')
+    const second = makeBridge({ dataDir: dir })
+    assert.equal(second.bridge.status().state, 'disabled', '重启后是 disabled —— 不自动恢复的依据')
+    assert.equal(second.bridge.status().tokenSet, true, '关掉接口不代表把令牌删了')
+    // 显式关闭不是「上锁」：用户再点一次开启仍然能开，并且偏好回到 true。
+    const again = await second.bridge.startWithPort(privatePortCounter++)
+    try {
+      assert.equal(again.port !== null, true, '再开启必须成功')
+      assert.equal(readPref(dir), true, '再开启后偏好回到 true')
+    } finally {
+      await second.bridge.stop()
+    }
+  })
+
+  await check('task-27④ 偏好只由「用户开/关」决定：起不来（端口占满）也算用户想开着', async () => {
+    // 「他的意愿」与「这次能不能开起来」是两件事：端口占满时偏好照样要记住，
+    // 否则用户遇到一次端口冲突，下次启动就再也不恢复了（另一种「开关不记住」）。
+    const dir = tempDir('opennote-bridge-pref-busy-')
+    const inst = makeBridge({ dataDir: dir })
+    inst.bridge.regenerateToken()
+    const base = privatePortCounter
+    privatePortCounter += 10
+    const releases = []
+    try {
+      for (let p = base; p < base + 10; p += 1) releases.push(await occupy(p))
+      const res = await inst.bridge.startWithPort(base)
+      assert.equal(res.port, null, '这一段端口全被占 → 起不来')
+      assert.equal(res.code, 'IMP-1003')
+      assert.equal(readPref(dir), true, '起不来也要记住「用户想开着」')
+      const restarted = makeBridge({ dataDir: dir })
+      assert.equal(restarted.bridge.status().state, 'stopped', '重启后仍应尝试恢复（stopped）')
+    } finally {
+      for (const release of releases) await release()
+      await inst.bridge.stop()
     }
   })
 

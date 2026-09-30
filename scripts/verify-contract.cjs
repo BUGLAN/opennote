@@ -1009,16 +1009,23 @@ group("§5 本地桥与安全");
 }
 
 // B-9 token 形态与存储
+//
+// ⚠️ **这条的标题曾经撒谎**（Lead 2026-09-30 指出，我的问题）：原标题写「只存 sha256 + last4」，
+// 而 `00` §6.15㊴ 已裁定 **`bridge.json` 同时存明文**（推翻 ㊲ 的「绝不落盘」，用户知情选择）。
+// 断言本身（opn_ 前缀 / 47 字符 / sha256 / last4 四个键位都在）在新口径下仍然成立，于是它**永远绿** ——
+// 标题不做断言，所以事实变了它也不会红；**错的只有标签，而标签会被引述成结论。**
+// 现在的标题只声称它真正断言的东西；「明文落盘且只落在工作区之外」由 `verify-e2e.cjs` 的 `S10.6` 断言。
 {
   const bridgeFiles = allProductFiles.filter((rel) => /bridge|clip|token/i.test(rel));
   const blob = bridgeFiles.map((rel) => readIfExists(rel) || "").join("\n");
-  if (!blob) skip("BR-9", "令牌 opn_ + 43 base64url = 47 字符，服务端只存 sha256 + last4", "未发现桥实现");
+  if (!blob) skip("BR-9", "令牌 opn_ + 43 base64url = 47 字符；存储键 sha256 / last4 齐备（明文是否落盘不由本条断言）", "未发现桥实现");
   else {
     const hasPrefix = /opn_/.test(blob);
     const has47 = /\b47\b/.test(blob);
     const hasSha = /sha256|createHash/i.test(blob);
     const hasLast4 = /last4/i.test(blob);
-    check("BR-9", "令牌 47 字符 + 只存 sha256 + last4", hasPrefix && has47 && hasSha && hasLast4,
+    check("BR-9", "令牌 47 字符 + opn_ 前缀；存储键 sha256 / last4 齐备（明文是否落盘见 e2e 的 S10.6，本条不断言）",
+      hasPrefix && has47 && hasSha && hasLast4,
       `opn_=${hasPrefix} 47=${has47} sha256=${hasSha} last4=${hasLast4}`,
       `opn_=${hasPrefix} 47=${has47} sha256=${hasSha} last4=${hasLast4}`);
   }
@@ -1066,7 +1073,11 @@ group("§5 本地桥与安全");
     }
   }
   const unique = [...new Set(offenders)];
-  check("BR-13", "主进程不写笔记正文（唯一例外 .opennote/inbox/<entry>/state.json）", unique.length === 0,
+  // 标题精度（Lead 2026-09-30 的「同类问题」要求）：㊴ 之后主进程**确实**会写 `userData/bridge.json`
+  // （明文 + sha256 + last4）。本条扫的是**工作区里的正文类目标**，所以「唯一例外」必须限定在
+  // 「工作区内的内容文件」，否则读者会把它当成「主进程总共只写一个文件」——那是错的。
+  check("BR-13", "主进程不写笔记正文（**工作区里**唯一例外是 `.opennote/inbox/<entry>/state.json`；"
+    + "令牌文件 `bridge.json` 在 `userData`，不属于工作区内容）", unique.length === 0,
     "未发现主进程写 .md / 索引 / 前像 / assets", unique.slice(0, 5).join(" | "));
 }
 
@@ -1345,7 +1356,7 @@ group("§8 浏览器插件（manifest v3 / 0 远程 URL / 0 eval / 权限最小�
     for (const [i, t] of [
       "extension/ 存在",
       "manifest_version === 3",
-      "dist 内 0 处远程 URL、0 处 eval",
+      "dist 内 0 处**真的远程引用** + 0 处 eval（判据见下方 EX-6）",
       "权限最小化（列出实际 permissions）",
       "「Opennote 未运行」不显示成「已连接」",
       "降级不静默失败（IMP-4006 / IMP-1001）",
@@ -1381,7 +1392,7 @@ group("§8 浏览器插件（manifest v3 / 0 远程 URL / 0 eval / 权限最小�
     const scanFiles = distFiles.length ? distFiles : srcFiles;
     const scanLabel = distFiles.length ? "extension/dist" : "extension/src（dist 尚未构建）";
     if (!scanFiles.length) {
-      skip("EX-6", "dist 内 0 处远程 URL、0 处 eval", "extension/ 下无可扫描文件");
+      skip("EX-6", "dist 内 0 处**真的远程引用** + 0 处 eval（判据见下）", "extension/ 下无可扫描文件");
     } else {
       /**
        * **判据收窄（Lead 0.3.1 复核：`EX-6` 是误报）**。
@@ -1705,6 +1716,178 @@ info("E2E", "端到端场景", "请运行 `node scripts/verify-e2e.cjs`（独立
     `${rendererChanged.length} 个改动中的渲染层文件已扫，0 处 fetch(`,
     fetchHits.slice(0, 5).map((h) => `${h.file}:${h.line}`).join(" | "));
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * §11 C-10 · ㊷ 左栏「其他」可折叠组（Lead 2026-09-30 指派；写入范围仅本脚本）
+ *
+ * **为什么单独成组**：㊷ 落地（`a5cb883`）之后，两个脚本里**没有任何 check 引用它** ——
+ * 「新增/删除一条 UI 规矩」如果没人看着，下一次重构就会静默回退，而**回退不会红**。
+ * （㊵ 高亮移除 / ㊶ popup 极简**尚未落地**，按 Lead 指示**先不加**：落地前加就是恒红，
+ * 而恒红的断言会被当噪声忽略；M1 落地后由 Lead 通知再加，且**必须是 FAIL 而不是 INFO**。）
+ *
+ * **判据是静态的**（读真源 `src/components/Sidebar.tsx` + `src/styles/app.css`），
+ * 所以它证明的是「代码里确实有这套结构」，**不证明**「真实窗口里点一下真的折叠」——
+ * 后者在 `C-10u` 里如实标 SKIP（不计通过）。真机交互我无法在本环境验证。
+ *
+ * **每条判据都配内存变异**（`C-10·变异`）：变异是唯一能证明「断言不是恒绿」的办法。
+ * 同时要求「变异真的改到了文本」—— 一个什么都没改的变异会让自检**误报为通过**，
+ * 那正是 a-defects 里 `NO_EFFECT` 与 `MISSED` 必须分开的同一条原则。
+ */
+group("§11 左栏「其他」可折叠组（㊷）");
+
+const SIDEBAR_TSX = "src/components/Sidebar.tsx";
+const SIDEBAR_CSS = "src/styles/app.css";
+
+/** 判据函数：源码文本进、结论出。做成纯函数才能在同一份真源上重跑变异。 */
+function othersGroupChecks(tsx, css) {
+  const headMatch = /className="tree__group tree__group--toggle"([\s\S]{0,700}?)\n\s*其他/.exec(tsx);
+  const head = headMatch ? headMatch[0] : "";
+  const childStart = tsx.indexOf("{othersOpen ? (");
+  const childEnd = childStart < 0 ? -1 : tsx.indexOf(") : null}", childStart);
+  const childrenBlock = childStart >= 0 && childEnd > childStart ? tsx.slice(childStart, childEnd) : "";
+  const labels = [...childrenBlock.matchAll(/label="([^"]+)"/g)].map((m) => m[1]);
+  const depths = [...childrenBlock.matchAll(/depth=\{(\d+)\}/g)].map((m) => Number(m[1]));
+  // 缩进公式必须落在 **ScopeRow 自己** 的函数体里（只在文件里随便找一处是不够的 ——
+  // 变异自检第一次跑就抓住了这个漏洞：非全局替换只删掉三处中的一处，断言照样绿）。
+  const scopeRowStart = tsx.indexOf("function ScopeRow(");
+  // 注意：`ScopeRow` 的**参数类型注解**里就有 `\n}`（`}): ReactNode {`），所以不能直接找第一个 `\n}`：
+  // 那样切出来的「函数体」在签名处就结束了，缩进公式落在窗口之外 —— 变异自检第一次跑就抓到了这个 bug。
+  const scopeSigEnd = scopeRowStart < 0 ? -1 : tsx.indexOf("): ReactNode {", scopeRowStart);
+  const scopeRowEnd = scopeSigEnd < 0 ? -1 : tsx.indexOf("\n}", scopeSigEnd);
+  const scopeRowBlock = scopeRowStart >= 0 && scopeRowEnd > scopeRowStart ? tsx.slice(scopeRowStart, scopeRowEnd) : "";
+  const scopeIndentOk = /paddingLeft:\s*6 \+ depth \* 13/.test(scopeRowBlock);
+  const formulaCount = (tsx.match(/6 \+ depth \* 13/g) || []).length;
+  const defaultOpen = /const \[othersOpen, setOthersOpen\] = useState\(true\)/.test(tsx);
+  const cssToggle = /\.tree__group--toggle\s*\{/.test(css);
+  const cssCaret = /\.tree__caret\.is-open\s*\{/.test(css);
+  const ariaOk = /aria-expanded=\{othersOpen\}/.test(head);
+  const toggleOk = /setOthersOpen\(\(open\) => !open\)/.test(head);
+  const caretOk = /tree__caret/.test(head);
+
+  return {
+    "C-10a": {
+      title: "「其他」是可折叠按钮：`tree__group--toggle` + `aria-expanded` + 点击切换 + `tree__caret`（CSS 三件套齐）",
+      ok: head !== "" && ariaOk && toggleOk && caretOk && cssToggle && cssCaret,
+      detail: `按钮块=${head !== ""} aria-expanded=${ariaOk} 点击切换=${toggleOk} caret=${caretOk}`
+        + ` CSS .tree__group--toggle=${cssToggle} .tree__caret.is-open=${cssCaret}`,
+    },
+    "C-10b": {
+      title: "「其他」的子项缩进一级（3 个子项全部 `depth={1}`），与文件夹子项同一公式 `6 + depth * 13`",
+      ok: depths.length === 3 && depths.every((d) => d === 1) && scopeIndentOk && formulaCount >= 2,
+      detail: `子项 depth=${JSON.stringify(depths)}（期望 [1,1,1]）ScopeRow 内有缩进公式=${scopeIndentOk}`
+        + ` 全文件出现次数=${formulaCount}（与文件夹行共用同一写法）depth=1 → ${6 + 1 * 13}px`,
+    },
+    "C-10c": {
+      title: "默认展开（`useState(true)`），且子项只在展开时渲染（同一状态驱动 `aria-expanded` 与渲染条件）",
+      ok: defaultOpen && childrenBlock !== "",
+      detail: `默认展开=${defaultOpen} 子项位于 othersOpen 条件块内=${childrenBlock !== ""}`,
+    },
+    "C-10d": {
+      title: "左栏条目文案是「收件箱」（不再叫「导入收件箱」）——**只限左栏**，面板仍叫「导入收件箱」是另一件事",
+      ok: labels.includes("收件箱") && !/label="导入收件箱"/.test(tsx),
+      detail: `子项文案=${JSON.stringify(labels)}`,
+    },
+    "C-10e": {
+      title: "子项成员与顺序固定：星标笔记 → 回收站 → 收件箱",
+      ok: JSON.stringify(labels) === JSON.stringify(["星标笔记", "回收站", "收件箱"]),
+      detail: `实际=${JSON.stringify(labels)}`,
+    },
+  };
+}
+
+const sidebarTsx = readIfExists(SIDEBAR_TSX);
+const sidebarCss = readIfExists(SIDEBAR_CSS);
+const C10_IDS = ["C-10a", "C-10b", "C-10c", "C-10d", "C-10e"];
+if (sidebarTsx === null || sidebarCss === null) {
+  for (const id of C10_IDS) skip(id, "㊷ 左栏「其他」可折叠组", `${SIDEBAR_TSX} 或 ${SIDEBAR_CSS} 读不到`);
+} else {
+  const real = othersGroupChecks(sidebarTsx, sidebarCss);
+  for (const id of C10_IDS) check(id, real[id].title, real[id].ok, real[id].detail, real[id].detail);
+
+  /* ── C-10·变异：8 个内存变异，各自让**对应**检查翻红，且不牵连其它检查 ── */
+  const swapChildRows = (source) => {
+    const start = source.indexOf("{othersOpen ? (");
+    const end = start < 0 ? -1 : source.indexOf(") : null}", start);
+    if (start < 0 || end < 0) return source;
+    const block = source.slice(start, end);
+    const rows = block.match(/<ScopeRow[\s\S]*?\/>/g) || [];
+    if (rows.length !== 3) return source;
+    let i = rows.length;
+    const swapped = block.replace(/<ScopeRow[\s\S]*?\/>/g, () => rows[--i]);
+    return source.slice(0, start) + swapped + source.slice(end);
+  };
+  const C10_MUTATIONS = [
+    { name: "no-aria", target: "C-10a", expect: [], apply: (s) => s.replace(/\n\s*aria-expanded=\{othersOpen\}/, "") },
+    { name: "no-caret", target: "C-10a", expect: [], apply: (s) => s.replace(/<span className=\{cn\("tree__caret", othersOpen && "is-open"\)\}>[\s\S]*?<\/span>/, "") },
+    { name: "no-css-toggle", target: "C-10a", expect: [], apply: (s, c) => [s, c.replace(/\.tree__group--toggle\s*\{[\s\S]*?\}/, "")] },
+    { name: "flat-depth", target: "C-10b", expect: [], apply: (s) => s.replace(/depth=\{1\}/g, "depth={0}") },
+    { name: "indent-formula", target: "C-10b", expect: [], apply: (s) => s.replace(/paddingLeft:\s*6 \+ depth \* 13/g, "paddingLeft: 0") },
+    { name: "collapse-default", target: "C-10c", expect: [], apply: (s) => s.replace("const [othersOpen, setOthersOpen] = useState(true)", "const [othersOpen, setOthersOpen] = useState(false)") },
+    // 「总是渲染」会把 `{othersOpen ? (` 这个**取词锚点**一起拿掉，于是 C-10b/d/e 的取词范围也空了。
+    // 这是**已知且可接受**的牵连（方向是安全的：它们红/缺失，不会假绿），所以显式声明，
+    // 而不是把「无牵连」这条判据放松 —— 放松之后自检就再也抓不住真正的假通过了。
+    { name: "always-render", target: "C-10c", expect: ["C-10b", "C-10d", "C-10e"], apply: (s) => s.replace("{othersOpen ? (", "{true ? (") },
+    // 改文案同时就是改「子项成员」，C-10e 必然跟着红 —— 同样是可预期的牵连。
+    { name: "old-label", target: "C-10d", expect: ["C-10e"], apply: (s) => s.replace('label="收件箱"', 'label="导入收件箱"') },
+    { name: "swap-children", target: "C-10e", expect: [], apply: (s) => swapChildRows(s) },
+  ];
+  const mutationLog = [];
+  let mutationsOk = true;
+  for (const m of C10_MUTATIONS) {
+    let mutTsx = sidebarTsx;
+    let mutCss = sidebarCss;
+    const applied = m.apply(mutTsx, mutCss);
+    if (Array.isArray(applied)) [mutTsx, mutCss] = applied;
+    else mutTsx = applied;
+    // 「变异真的改到了文本」必须单独判：什么都没改的变异会让自检**假通过**。
+    const changed = mutTsx !== sidebarTsx || mutCss !== sidebarCss;
+    const verdict = othersGroupChecks(mutTsx, mutCss);
+    const targetRed = verdict[m.target].ok === false;
+    const collateral = C10_IDS.filter((id) => id !== m.target && verdict[id].ok === false).sort();
+    const expect = [...m.expect].sort();
+    const collateralOk = collateral.join(",") === expect.join(",");
+    const ok = changed && targetRed && collateralOk;
+    if (!ok) mutationsOk = false;
+    const why = [
+      changed ? "" : "**变异没改到文本**",
+      targetRed ? "" : "目标仍绿",
+      collateralOk ? "" : `牵连与声明不符（实际 ${collateral.join(",") || "无"} / 声明 ${expect.join(",") || "无"}）`,
+    ].filter(Boolean).join("；");
+    mutationLog.push(`${m.name}→${m.target} ${ok ? "红✓" : `未红✗（${why}）`}`
+      + `${collateral.length ? `（+牵连 ${collateral.join(",")}）` : ""}`);
+  }
+  check("C-10·变异", `㊷ 断言自检：${C10_MUTATIONS.length} 个内存变异各自让对应检查翻红，且牵连与声明一致（证明这 5 条不是恒绿）`,
+    mutationsOk, mutationLog.join("；"), mutationLog.join("；"));
+
+  skip("C-10u", "真实窗口里点「其他」能折叠/展开、caret 旋转、子项缩进肉眼对齐",
+    "本环境无 Electron 窗口与浏览器。静态判据见 C-10a…C-10e（已过）；复现：`pnpm dev:electron` → 左栏点「其他」→ 目视 3 个子项收起/展开、缩进一级。**SKIP 不计通过。**");
+  info("C-10·范围", "同一批文案在其它界面上的现状（㊷ 只裁定左栏，故仅登记不改判）",
+    "`src/components/InboxPanel.tsx` 标题与 `aria-label` 仍是「导入收件箱」，`StatusBar`/命令面板仍是「打开导入收件箱」——"
+    + "若 Lead 想把它们一并改名，应另立一条裁定，本条不替它做主。");
+}
+
+/* ── C-11 契约文档缺口登记（INFO，不改判）───────────────────────────────────
+ * 起因：给 `S7B.1` 的清单找「出处」时我差点写下一个**假引用**（`02 §3.2` 其实是
+ * 「H1 与 front-matter 的拼装顺序」）。核完才发现：这 5 个桥状态字段在 `02` 里根本没有清单。
+ * 我把它登记成一条**可复算的 INFO**（不假装它是通过），因为「断言引用了不存在的出处」
+ * 和「标签撒谎」是同一类问题 —— 只是这次还没撒出去就被抓住了。 */
+{
+  const doc02 = readIfExists("docs/import/02-接口契约-导入信封与通道.md");
+  const statusKeys = ["address", "error", "lastRejectedOrigin", "startPort", "portRange"];
+  if (doc02 === null) info("C-11", "桥状态字段清单的文档出处", "读不到 02 契约文件，无法统计");
+  else {
+    const counts = statusKeys.map((k) => `${k}=${doc02.split(k).length - 1}`);
+    // 只对**有辨识度**的字段下结论：`address` / `error` 是通用词，会命中 `server.address()` 这类无关文本。
+    const distinctive = ["lastRejectedOrigin", "startPort", "portRange"];
+    const distinctiveHits = distinctive.filter((k) => doc02.includes(k));
+    info("C-11", "`BridgeStatus` 字段清单在 02 号契约里没有出处（文档缺口，登记不改判）",
+      `02 内出现次数：${counts.join(", ")}；其中**有辨识度的** 3 个（${distinctive.join(" / ")}）命中 ${distinctiveHits.length}/3`
+      + `（address/error 是通用词，可能只是 `+ "`server.address()`" + ` 这类无关文本）`
+      + `。权威出处目前只有 src/desktop/bridge.ts 的 BridgeStatus。`
+      + (distinctiveHits.length === 0 ? "→ S7B.1 的清单只能引代码，不能引文档；若契约应当列这些字段，请派 d-contract 补一段。" : ""));
+  }
+}
+
 
 
 
