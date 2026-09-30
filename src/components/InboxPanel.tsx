@@ -23,6 +23,12 @@
  * 三条硬约束：**没有「恢复」入口**（`discarded` 不进回收站、不可恢复）；错误句与状态文字
  * 一律 `--fs-sm` + `--ink`（`--ink-3` 对比度不足）；成功 toast 由 C1 的 `announce()` 负责
  * （避免 UI-05 出现两份实现），面板只弹**失败** toast。
+ *
+ * 0.3.3（用户真机验收轮，`00` §6.16（55））四条界面意见落在这里：
+ * ① 筛选只剩 `全部` / `待确认`，默认停在 `待确认`（`failed` 条目仍能在「全部」里重试或丢弃）；
+ * ② 「目录」单行截断 + `title` 悬浮给全值；
+ * ③ `跳过这次` = 确认后丢弃这一条（面板不关闭），不再是「关掉面板、条目留在收件箱」；
+ * ④ 面板高度固定（`.dialog--tall`，与设置面板同高），切筛选/切条目不再改尺寸、不再闪。
  */
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icons";
@@ -52,15 +58,24 @@ import { cn, formatBytes, formatDateTime, formatRelativeTime } from "../lib/util
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * 筛选只有两栏（0.3.3 用户要求 #1）：`失败` 那一栏删掉，默认停在 `待确认`。
+ * `failed` 条目不是不见了 —— 它们仍留在「全部」里，带原因、`还有 n 天` 与「丢弃」按钮
+ * （`03` UI-03/S5：失败条目必须能在原地重试或丢弃）。
+ */
 const FILTERS = [
   { id: "all", label: "全部" },
   { id: "pending", label: "待确认" },
-  { id: "failed", label: "失败" },
 ] as const;
 
-type FilterId = (typeof FILTERS)[number]["id"];
+export type FilterId = (typeof FILTERS)[number]["id"];
 
-const FILTER_LABELS: Record<FilterId, string> = { all: "全部", pending: "待确认", failed: "失败" };
+const FILTER_LABELS: Record<FilterId, string> = { all: "全部", pending: "待确认" };
+
+/** 「待确认」= 还没入库的条目（`pending` / `committing`）；`committed` / `failed` 不在这一栏。 */
+function needsReview(status: InboxEntry["status"]): boolean {
+  return status === "pending" || status === "committing";
+}
 
 const NO_URL = "（没有网址）";
 
@@ -69,6 +84,14 @@ export interface InboxPanelProps {
   onClose: () => void;
   /** 打开一条已入库的笔记（`committed` 条目的「查看」）。 */
   onOpenNote?: (path: string) => void;
+  /**
+   * 初始筛选，默认 `pending`（「待确认」）。打开后怎么切仍是用户的事，这个入参不接管。
+   *
+   * 它存在的原因只有一个：**首屏文案护栏要能进「全部」视图**。`src/data/inbox.test.ts`
+   * 用 `react-dom/server` 渲染面板（effect 不跑、点击模拟不了），失败条目与已入库条目的
+   * 逐字文案（`修复方式` / `丢弃` / `稍后处理` / `查看`）只有在「全部」里才看得到。
+   */
+  initialFilter?: FilterId;
 }
 
 /** 列表标题：空标题显示占位符（mockup 297 行）。 */
@@ -150,13 +173,22 @@ function findPreviousCapture(
   return null;
 }
 
-export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): ReactNode {
+export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPanelProps): ReactNode {
   const details = useInboxDetails();
   const loaded = useInboxLoaded();
   const library = useLibrary();
-  const [filter, setFilter] = useState<FilterId>("all");
+  const [filter, setFilter] = useState<FilterId>(initialFilter ?? "pending");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [preview, setPreview] = useState<{ id: string; text: string } | null>(null);
+  /**
+   * 正文预览按**条目 id** 缓存（不是单个 `{id, text}`）。
+   *
+   * 单槽位那版每换一次条目都会先把预览清空、等 `readInboxDetail()` 回来再填上：
+   * 一帧没有「正文预览」这一块 → 详情栏高度跳一下，看起来就是「点一下闪一下」。
+   * 外置正文（`body.md`）是收件箱的常态（`entry.json` 里的 `body` 被置空），所以这不是
+   * 罕见路径，而是每次点条目都会走。缓存之后：看过的条目瞬时出预览，没看过的只影响
+   * 详情栏内部（面板本身固定高度，见 `app.css` 的 `.dialog--tall`）。
+   */
+  const [previews, setPreviews] = useState<ReadonlyMap<string, string>>(() => new Map());
   const [busy, setBusy] = useState(false);
   /** 「保存到」的选择（`00` §6.14㉜）：只对当前条目生效，`folder: null` = 工作区根。 */
   const [folderPick, setFolderPick] = useState<{ id: string; folder: string | null } | null>(null);
@@ -170,21 +202,16 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
 
   const counts = useMemo(() => {
     let pending = 0;
-    let failed = 0;
     for (const detail of details) {
-      if (detail.entry.status === "pending" || detail.entry.status === "committing") pending += 1;
-      else if (detail.entry.status === "failed") failed += 1;
+      if (needsReview(detail.entry.status)) pending += 1;
     }
-    return { all: details.length, pending, failed } as Record<FilterId, number>;
+    return { all: details.length, pending } as Record<FilterId, number>;
   }, [details]);
 
-  const visible = useMemo(() => {
-    if (filter === "pending") {
-      return details.filter((detail) => detail.entry.status === "pending" || detail.entry.status === "committing");
-    }
-    if (filter === "failed") return details.filter((detail) => detail.entry.status === "failed");
-    return details;
-  }, [details, filter]);
+  const visible = useMemo(
+    () => (filter === "pending" ? details.filter((detail) => needsReview(detail.entry.status)) : details),
+    [details, filter],
+  );
 
   const selected = useMemo(() => {
     if (!visible.length) return null;
@@ -265,22 +292,27 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
     };
   }, [open]);
 
-  // 选中项变化 → 读正文预览（正文外置在 body.md，列表阶段不读）。
+  // 选中项变化 → 读正文预览（正文外置在 body.md，列表阶段不读）。读到的按条目 id 留下。
   useEffect(() => {
     if (!open || !selected) return;
     const id = selected.entry.id;
-    if (selected.bodyPreview) {
-      setPreview({ id, text: selected.bodyPreview });
-      return;
-    }
+    // 已经有预览（缓存里，哪怕缓存的是空串）或详情自带预览 → 不再读盘。
+    if (previews.has(id) || selected.bodyPreview) return;
     let alive = true;
     void readInboxDetail(id).then((detail) => {
-      if (alive && detail) setPreview({ id, text: detail.bodyPreview });
+      if (!alive || !detail) return;
+      const text = detail.bodyPreview;
+      setPreviews((current) => {
+        if (current.get(id) === text) return current;
+        const next = new Map(current);
+        next.set(id, text);
+        return next;
+      });
     });
     return () => {
       alive = false;
     };
-  }, [open, selected?.entry.id]);
+  }, [open, selected?.entry.id, selected?.bodyPreview, previews]);
 
   // 打开时焦点落在左列表第一个条目上（mockup 520 行）。
   useEffect(() => {
@@ -310,6 +342,13 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
     [folderPick],
   );
 
+  /**
+   * 丢弃（`丢弃` 与 0.3.3 之后的 `跳过这次` 共用）：问一句确认 → `rm -r` 条目目录
+   * （`00` §6.12②：不进回收站、不可恢复）→ **面板留在原地**，选中落到下一条。
+   *
+   * 「跳过这次」以前只是 `onClose()`：点一下面板就关了，条目还躺在收件箱里，
+   * 下次打开又从头看见它。用户的预期是「点它 = 这条我不要了，从收件箱删掉」。
+   */
   const runDiscard = useCallback(async (target: InboxEntry) => {
     const ok = await askConfirm({
       title: "丢弃这条导入？",
@@ -321,6 +360,7 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
     if (!ok) return;
     try {
       await discardInbox(target.id);
+      // 清掉选中：`selected` 会回落到新列表的第一条（一条不剩时进空态）。
       setSelectedId(null);
     } catch (error) {
       notify(errorMessage(error) || "丢弃失败，请重试。", { kind: "danger" });
@@ -340,14 +380,28 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
 
   const select = useCallback((id: string) => setSelectedId(id), []);
 
+  /**
+   * 切筛选。**当前条目能留下来就不动选中**（mockup 522 行只说「被筛掉则落到第一条」）：
+   * 原来无条件 `setSelectedId(null)`，于是「全部 → 待确认」时哪怕第一条是同一个条目，
+   * 详情栏也要重排一次 —— 那正是用户看到的「闪」。
+   */
+  const switchFilter = useCallback(
+    (next: FilterId) => {
+      setFilter(next);
+      const nextVisible = next === "pending" ? details.filter((detail) => needsReview(detail.entry.status)) : details;
+      setSelectedId((current) =>
+        current && nextVisible.some((detail) => detail.entry.id === current) ? current : null,
+      );
+    },
+    [details],
+  );
+
   const onFilterKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     const index = FILTERS.findIndex((item) => item.id === filter);
     const step = event.key === "ArrowRight" ? 1 : -1;
-    const next = FILTERS[(index + step + FILTERS.length) % FILTERS.length];
-    setFilter(next.id);
-    setSelectedId(null);
+    switchFilter(FILTERS[(index + step + FILTERS.length) % FILTERS.length].id);
   };
 
   const onListKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -402,10 +456,13 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
 
   if (!open) return null;
 
-  const previewText = preview && entry && preview.id === entry.id ? preview.text : "";
+  // 正文预览：缓存优先（切回来瞬时出），其次详情自带的（内联正文的条目）。
+  const previewText = entry ? previews.get(entry.id) ?? selected?.bodyPreview ?? "" : "";
   // 正文是否为空只在正文读出来后判定（读盘期间不误禁用主按钮）。
-  const previewLoaded = Boolean(entry && preview && preview.id === entry.id);
+  const previewLoaded = Boolean(entry) && (previews.has(entry!.id) || Boolean(selected?.bodyPreview));
   const bodyEmpty = Boolean(entry) && !entry!.title.trim() && previewLoaded && !previewText.trim();
+  /** 「目录」一栏的完整值（值可能很深，界面上截断显示，`title` 里给全）。 */
+  const folderLabel = effectiveFolder ?? INBOX_ROOT_LABEL;
   const isFailed = status === "failed";
   const isCommitted = status === "committed";
   const canViewNote = isCommitted && Boolean(entry?.notePath) && typeof onOpenNote === "function";
@@ -436,7 +493,9 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
       <div className="scrim" onMouseDown={onClose} />
       <div
         ref={dialogRef}
-        className={cn("dialog", showList && "dialog--wide")}
+        // 宽度仍随「有没有列表」走；高度固定（`.dialog--tall`，与设置面板同高）——
+        // 切筛选、切条目、筛选后无结果都不再改面板尺寸（0.3.3 用户要求 #4）。
+        className={cn("dialog", "dialog--tall", showList && "dialog--wide")}
         role="dialog"
         aria-modal="true"
         aria-label="导入收件箱"
@@ -459,10 +518,7 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
                   role="radio"
                   aria-checked={filter === item.id}
                   className={cn(filter === item.id && "is-active")}
-                  onClick={() => {
-                    setFilter(item.id);
-                    setSelectedId(null);
-                  }}
+                  onClick={() => switchFilter(item.id)}
                 >
                   {item.label} {counts[item.id]}
                 </button>
@@ -534,7 +590,11 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
                 })}
               </div>
 
-              <div className="inbox__detail">
+              {/*
+                `key` 绑条目 id：详情栏是**自己的滚动容器**（固定高度面板），换条目要连带把
+                滚动位置归零，否则从上一条的滚动位置看新条目——那是「闪」的第二个来源。
+              */}
+              <div className="inbox__detail" key={entry?.id ?? "none"}>
                 <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
                   <h3 style={{ flex: 1, fontFamily: "var(--font-serif)", fontSize: "var(--fs-lg)", fontWeight: 600 }}>
                     {entry ? displayTitle(entry) : ""}
@@ -577,7 +637,11 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
                 <dl className="inbox__dl">
                   <div>
                     <dt>目录</dt>
-                    <dd>{effectiveFolder ?? INBOX_ROOT_LABEL}</dd>
+                    {/* 落点可能是很深的路径：`.inbox__trunc` 单行截断（`max-width`）+ 悬浮用
+                        `title` 给完整值，免得一条长目录把详情栏撑成两三行。 */}
+                    <dd className="inbox__trunc" title={folderLabel}>
+                      {folderLabel}
+                    </dd>
                   </div>
                   <div>
                     <dt>文件名</dt>
@@ -702,9 +766,16 @@ export function InboxPanel({ open, onClose, onOpenNote }: InboxPanelProps): Reac
               </button>
             ) : null}
             <div className="spacer" />
-            {isCommitted ? null : (
+            {isCommitted ? null : isFailed ? (
+              // 失败条目：`稍后处理` 仍然是「先关掉面板」，条目留在收件箱里等 7 天保留期。
               <button type="button" className="btn" disabled={committing} onClick={onClose}>
-                {isFailed ? "稍后处理" : "跳过这次"}
+                稍后处理
+              </button>
+            ) : (
+              // 未入库的条目（0.3.3 用户要求 #3）：`跳过这次` = 丢弃这一条（确认后删除、
+              // 面板不关闭），不再只是把面板关掉、条目原封不动留在收件箱里。
+              <button type="button" className="btn" disabled={committing} onClick={() => void runDiscard(entry)}>
+                跳过这次
               </button>
             )}
             <button

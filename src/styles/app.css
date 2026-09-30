@@ -1002,6 +1002,47 @@ mark.hit {
   width: min(900px, calc(100vw - 32px));
 }
 
+/*
+ * 固定高度的对话框：设置面板与 UI-03 收件箱**共用同一个高度**（0.3.3 用户要求 #4）。
+ * 高度只写在这一处，两个面板就不会各自漂移；`calc(100vh - 96px)` 保证矮窗口下也装得下。
+ * 有了它，切分类、切筛选、切条目、筛选后无结果都不会再改面板尺寸 —— 页面不跳，也就不闪。
+ */
+.dialog--tall {
+  height: min(600px, calc(100vh - 96px));
+}
+
+/* 正文区改成一条 flex 列：里面唯一的块撑满这个固定高度，滚动交给块自己的内部容器。 */
+.dialog--tall .dialog__body {
+  display: flex;
+  flex-direction: column;
+}
+
+/*
+ * 设置（两栏）：**只有右侧内容区滚，左侧分类栏固定**。
+ *
+ * 别让正文区整块滚（`.dialog__body` 是滚动容器时，`.settings` 里的分类栏会跟内容一起滚上去，
+ * 用户看到的就是「往下滑、左边选项也不见了」）。做法：`.settings` 撑满固定高度、行高由面板
+ * 决定（`minmax(0, 1fr)`），分类栏与内容区一起被拉伸到行高，滚动只发生在 `.settings__pane`。
+ *
+ * 只作用于 >720px 的两栏布局：≤720px 时 `.settings` 是单栏（分类栏在上、内容区在下），
+ * 沿用既有的「内容区自己限高滚动」，不在这里改。
+ */
+@media (min-width: 721px) {
+  .dialog--tall .settings {
+    flex: 1 1 auto;
+    min-height: 0;
+    align-items: stretch;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .dialog--tall .settings__pane {
+    /* 高度已经由面板兜住，这里不再二次设限；滚动留给这一栏自己。 */
+    max-height: none;
+    min-height: 0;
+    overflow-y: auto;
+  }
+}
+
 .dialog__head {
   display: flex;
   align-items: center;
@@ -1583,14 +1624,20 @@ mark.hit {
 .inbox {
   display: grid;
   grid-template-columns: 200px minmax(0, 1fr);
+  /*
+   * 行高由**固定高度的对话框**决定（`.dialog--tall`），不再由最长的那一栏决定：
+   * 两栏各自滚动，切筛选、切条目都不会把面板撑大或缩小（0.3.3 用户要求 #4）。
+   */
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--s4);
-  min-height: 340px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .inbox__list {
   border-right: 1px solid var(--rule);
   padding-right: var(--s3);
-  max-height: 400px;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -1668,6 +1715,9 @@ mark.hit {
 
 .inbox__detail {
   min-width: 0;
+  min-height: 0;
+  /* 详情栏自己滚：换条目只带动这一栏的滚动位置（配合组件的 `key={entry.id}`）。 */
+  overflow-y: auto;
 }
 
 .inbox__group {
@@ -1721,6 +1771,17 @@ mark.hit {
   font-size: var(--fs-xs);
 }
 
+/*
+ * 「目录」一栏（0.3.3 用户要求 #2）：落点可能是很深的路径，给一个最高宽度、单行截断，
+ * 完整值挂在元素的 `title` 上悬浮显示 —— 既不会把详情栏撑成两三行，也不会丢信息。
+ */
+.inbox__trunc {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .inbox__preview {
   margin-top: var(--s3);
   padding: var(--s3);
@@ -1749,6 +1810,12 @@ mark.hit {
 }
 
 .inbox__empty {
+  /* 固定高度的面板里，空态居中而不是贴着顶（不然 600px 高只有顶上三行字）。 */
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   padding: var(--s6) var(--s3);
   text-align: center;
 }

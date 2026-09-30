@@ -80,6 +80,7 @@ export function SettingsDialog({
     <Modal
       title="设置"
       settings
+      tall
       onClose={onClose}
       footer={
         <>

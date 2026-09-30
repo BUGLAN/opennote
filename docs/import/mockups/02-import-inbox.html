@@ -261,7 +261,7 @@ a{color:var(--accent)}
   <section class="mk-spec">
     <div class="mk-spec__id">UI-03 / S1 · 默认</div>
     <div class="mk-spec__t">有哪些待确认、每条从哪来、会落到哪</div>
-    <div class="mk-spec__n">左列表 ↑/↓ 移动时右详情即时更新（不等 Enter）。失败条目左侧 2px 强调色竖边 + 原因文字，不用红底。</div>
+    <div class="mk-spec__n">左列表 ↑/↓ 移动时右详情即时更新（不等 Enter）。失败条目左侧 2px 强调色竖边 + 原因文字，不用红底。<b>0.3.3：筛选只剩「全部 / 待确认」，默认停在「待确认」，所以这一屏的左列表只有待确认条目</b>（失败条目在「全部」里，见 S5）。</div>
     <div class="overlay">
       <div class="dialog" role="dialog" aria-modal="true" aria-label="导入收件箱">
         <header class="dialog__head">
@@ -269,13 +269,13 @@ a{color:var(--accent)}
           <button class="icon-btn" aria-label="关闭">×</button>
         </header>
         <div class="inbox__bar">
-          <div class="segmented"><button class="is-active">全部 4</button><button>待确认 3</button><button>失败 1</button></div>
+          <div class="segmented"><button>全部 4</button><button class="is-active">待确认 3</button></div>
           <div class="spacer" style="flex:1"></div>
           <span class="dialog__note" style="margin:0">收件箱在 .opennote/inbox/</span>
         </div>
         <div class="dialog__body">
           <div class="inbox">
-            <div class="inbox__list" role="list" aria-label="收件箱条目，共 4 条">
+            <div class="inbox__list" role="list" aria-label="收件箱条目，共 3 条">
               <button class="inbox__item is-active" role="listitem" aria-current="true">
                 <div style="flex:1;min-width:0">
                   <div class="inbox__row"><span class="inbox__title">中文排版指北</span><span class="inbox__kind">插件</span></div>
@@ -292,12 +292,6 @@ a{color:var(--accent)}
                 <div style="flex:1;min-width:0">
                   <div class="inbox__row"><span class="inbox__title">中文排版指北</span><span class="inbox__kind">插件</span></div>
                   <span class="inbox__sub">example.com · 3 小时前 · 同网址</span>
-                </div>
-              </button>
-              <button class="inbox__item is-error" role="listitem">
-                <div style="flex:1;min-width:0">
-                  <div class="inbox__row"><span class="inbox__title">（没有标题）</span><span class="inbox__kind">命令行</span></div>
-                  <span class="inbox__sub">正文为空，无法入库</span>
                 </div>
               </button>
             </div>
@@ -358,7 +352,7 @@ a{color:var(--accent)}
   <section class="mk-spec">
     <div class="mk-spec__id">UI-03 / S5 · 错误条目</div>
     <div class="mk-spec__t">单条入库失败：不关闭对话框，就地换策略重试</div>
-    <div class="mk-spec__n">错误文案逐字取自 PRD 冻结清单第 5 条。主按钮在失败条目上禁用，并给出唯一可执行的下一步。</div>
+    <div class="mk-spec__n">错误文案逐字取自 PRD 冻结清单第 5 条。主按钮在失败条目上禁用，并给出唯一可执行的下一步。<b>0.3.3：失败条目只在「全部」里看（没有「失败」筛栏）</b>。</div>
     <div class="overlay">
       <div class="dialog dialog--narrow" role="dialog" aria-modal="true" aria-label="导入收件箱">
         <header class="dialog__head">
@@ -366,7 +360,7 @@ a{color:var(--accent)}
           <button class="icon-btn" aria-label="关闭">×</button>
         </header>
         <div class="inbox__bar">
-          <div class="segmented"><button>全部 4</button><button class="is-active">失败 1</button><button>待确认 3</button></div>
+          <div class="segmented"><button class="is-active">全部 4</button><button>待确认 3</button></div>
         </div>
         <div class="dialog__body">
           <div class="inbox" style="grid-template-columns:180px minmax(0,1fr);min-height:220px">
@@ -427,10 +421,10 @@ a{color:var(--accent)}
           <button class="icon-btn" aria-label="关闭">×</button>
         </header>
         <div class="inbox__bar">
-          <div class="segmented"><button>全部 4</button><button class="is-active">失败 0</button><button>待确认 4</button></div>
+          <div class="segmented"><button>全部 4</button><button class="is-active">待确认 0</button></div>
         </div>
         <div class="dialog__body">
-          <p class="tree__empty">没有「失败」的条目。</p>
+          <p class="tree__empty">没有「待确认」的条目。</p>
         </div>
       </div>
     </div>
@@ -448,7 +442,7 @@ a{color:var(--accent)}
           <button class="icon-btn" aria-label="关闭">×</button>
         </header>
         <div class="inbox__bar">
-          <div class="segmented"><button class="is-active">全部 4</button><button>待确认 3</button><button>失败 1</button></div>
+          <div class="segmented"><button class="is-active">全部 4</button><button>待确认 3</button></div>
           <div class="spacer" style="flex:1"></div>
           <label class="switch"><input type="checkbox" checked>批量选择</label>
         </div>
@@ -505,7 +499,9 @@ a{color:var(--accent)}
       <div class="mk-kv"><b>S4 入库中</b>主按钮变「正在入库…」+ 12px 旋转环；条目右侧「写入中…」；Esc 仍可关闭，入库在后台继续。</div>
       <div class="mk-kv"><b>S6 落点目录不存在</b>落点行变 --accent-line 边框 + 「目标目录「{目录}」不存在，入库时会存到根目录。」主按钮文案改为「入库到根目录」。</div>
       <div class="mk-kv"><b>S9 目标笔记正在编辑</b>主按钮变「追加到正在编辑的笔记」并保持可用；若会导致覆盖则禁用 + 「这篇笔记正在编辑，不能覆盖；可以追加或另存为新笔记。」</div>
-      <div class="mk-kv"><b>丢弃确认</b>标题「丢弃这条导入？」正文「「{标题}」还没入库，丢弃后不会进入回收站。」确认「丢弃」（btn--danger），取消「留下」。按 FR-29 冻结语义：丢弃只删待确认条目，回收站条目数不变——所以确认框必须如实说明不可恢复，不能写「可以再找回来」。</div>
+      <div class="mk-kv"><b>丢弃确认</b>标题「丢弃这条导入？」正文「「{标题}」还没入库，丢弃后不会进入回收站。」确认「丢弃」（btn--danger），取消「留下」。按 FR-29 冻结语义：丢弃只删待确认条目，回收站条目数不变——所以确认框必须如实说明不可恢复，不能写「可以再找回来」。<b>0.3.3：「跳过这次」走的就是这一条</b>——确认后删除，面板留在原地、选中落到下一条；失败条目的「稍后处理」仍是先关掉面板。</div>
+      <div class="mk-kv"><b>面板尺寸（0.3.3）</b>固定高度 <code>.dialog--tall</code> = min(600px, calc(100vh - 96px))，<b>与设置面板同一个值</b>；两栏各自滚动，换条目时详情栏滚动归零。切筛选、切条目、筛选后无结果都不改面板尺寸。</div>
+      <div class="mk-kv"><b>「目录」一栏（0.3.3）</b>单行截断（max-width: 320px + 省略号），完整路径挂在元素 title 上悬浮显示；截的是显示，不是数据。</div>
       <div class="mk-kv"><b>条目的 5 个状态</b>pending（左侧 2px 强调色竖条）/ committing（「正在写入…」+ 旋转环，两个按钮都禁用）/ committed（「已入库 · {相对时间}」，保留 24 小时，这期间撤销仍有意义）/ failed（code 的中文文案 + 「还有 {n} 天」，保留 7 天）/ discarded（「已丢弃」，无「恢复」）。</div>
       <div class="mk-kv"><b>条目的字段</b>客户端（插件 / 命令行 / AI 助手 / 分享 / 手动放入，取 entry.client.name + version）、落点（entry.target.folder 为空时显示「笔记本根目录」）、附件数与合计大小、冲突建议（只渲染 new / append / skip，不渲染 overwrite）、attempts 与 updatedAt。</div>
       <div class="mk-kv"><b>外部投递标记</b>投递方不是应用时，标题右侧加一个 --fs-xs --ink-3 的「外部」小字（不加重色边框），让用户知道这条不是自己在应用里点的。</div>
@@ -519,7 +515,7 @@ a{color:var(--accent)}
     <div class="mk-note">
       <div class="mk-kv"><b>打开时</b>焦点落在左列表第一个条目（不是对话框本身）；aria-label="导入收件箱"。</div>
       <div class="mk-kv"><b>列表</b>↑/↓ 移动，Home/End 到首尾，Enter = 入库当前条目，Esc 关闭（Modal 已实现）。</div>
-      <div class="mk-kv"><b>筛选</b>role="radiogroup" + role="radio"，←/→ 切换；切换后焦点回到当前条目，被筛掉则落到第一条。</div>
+      <div class="mk-kv"><b>筛选</b>只有 <code>全部</code> / <code>待确认</code> 两栏，<b>默认停在「待确认」</b>（0.3.3）；role="radiogroup" + role="radio"，←/→ 切换；切换后焦点回到当前条目，<b>当前条目还在筛选结果里就保持选中</b>，被筛掉才落到第一条。</div>
       <div class="mk-kv"><b>屏幕阅读器</b>列表容器 aria-label="收件箱条目，共 {n} 条"；当前条目 aria-current="true"；每条可访问名 = 「{标题}，来自 {站点}，{剪藏时间}，{客户端}」。</div>
       <div class="mk-kv"><b>Destructive 键</b>Backspace / Delete 不绑定任何破坏性操作，避免误删。</div>
       <div class="mk-kv"><b>窄屏 ≤720px</b>切单栏：左列表变成横向可滚动的条目条（每条 min-width 180px），详情在下方，底部动作区 sticky。再窄则改为「条目 → 点开详情」两级。</div>

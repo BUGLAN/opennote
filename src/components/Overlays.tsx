@@ -99,6 +99,7 @@ export function Modal({
   onClose,
   wide = false,
   settings = false,
+  tall = false,
 }: {
   title: ReactNode;
   children: ReactNode;
@@ -106,6 +107,11 @@ export function Modal({
   onClose: () => void;
   wide?: boolean;
   settings?: boolean;
+  /**
+   * 固定高度（`app.css` 的 `.dialog--tall`）：设置面板与 UI-03 收件箱用同一个高度，
+   * 切换分类/筛选或内容长短变化时面板不再伸缩。
+   */
+  tall?: boolean;
 }): ReactNode {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -122,7 +128,7 @@ export function Modal({
     <div className="overlay-root">
       <div className="scrim" onMouseDown={onClose} />
       <div
-        className={cn("dialog", settings ? "dialog--settings" : wide && "dialog--wide")}
+        className={cn("dialog", settings ? "dialog--settings" : wide && "dialog--wide", tall && "dialog--tall")}
         role="dialog"
         aria-modal="true"
         aria-label={typeof title === "string" ? title : undefined}

@@ -1272,26 +1272,34 @@ describe("外部投递（Verifier 的手工场景）", () => {
 /**
  * `InboxPanel` 在 node 环境下用 `react-dom/server` 渲染：
  * `src/lib/store.ts` 的 `useStore` 传了 `getServerSnapshot`，所以这里能拿到**真实 DOM 字符串**
- * 逐字核对文案（`effect` 不跑，因此只覆盖首屏分支）。
+ * 逐字核对文案（`effect` 不跑、点击模拟不了，因此只覆盖首屏分支）。
+ *
+ * `filter` 走面板的 `initialFilter`：默认「待确认」（0.3.3 用户要求 #1），失败条目与已入库
+ * 条目只出现在「全部」栏里 —— 没有这个入参，那两条分支的首屏文案就一条也盖不到。
  */
-async function renderPanel(): Promise<string> {
+async function renderPanel(filter?: "all" | "pending"): Promise<string> {
   const [{ createElement }, { renderToStaticMarkup }, { InboxPanel }] = await Promise.all([
     import("react"),
     import("react-dom/server"),
     import("../components/InboxPanel"),
   ]);
-  return renderToStaticMarkup(createElement(InboxPanel, { open: true, onClose: () => undefined }));
+  return renderToStaticMarkup(
+    createElement(InboxPanel, { open: true, onClose: () => undefined, initialFilter: filter }),
+  );
 }
 
 describe("InboxPanel 首屏（逐字文案冻结）", () => {
-  it("有待确认条目：工具行计数、列表、落点、动作文案", async () => {
+  it("默认停在「待确认」：筛选只剩两栏，条目、落点、动作都在", async () => {
     await enqueueInbox(JSON.stringify(ENVELOPE), META);
     const html = await renderPanel();
 
     expect(html).toContain("导入收件箱");
     expect(html).toContain("全部 1");
     expect(html).toContain("待确认 1");
-    expect(html).toContain("失败 0");
+    // 0.3.3：`失败` 那一栏删掉，筛选只有 全部 / 待确认 两个 role="radio"，且默认选中待确认。
+    expect(html.match(/role="radio"/g) ?? []).toHaveLength(2);
+    expect(html).not.toContain("失败 0");
+    expect(html).toMatch(/<button type="button" role="radio" aria-checked="true"[^>]*>待确认 1<\/button>/);
     expect(html).toContain("中文排版指北");
     expect(html).toContain("插件");
     expect(html).toContain("收件箱在 .opennote/inbox/");
@@ -1309,6 +1317,19 @@ describe("InboxPanel 首屏（逐字文案冻结）", () => {
     // 丢弃是销毁动作：面板里不得出现任何「恢复」入口。
     expect(html).not.toContain("恢复");
     expect(html).not.toMatch(/30\s*天/);
+  });
+
+  it("目录：最高宽度单行截断，完整值挂在 title 上（0.3.3 #2）", async () => {
+    testBackend.seed("读书笔记/技术/排版/深路径/占位.md", "# 占位\n");
+    await openWorkspace(record, { silent: true });
+    await enqueueInbox(
+      JSON.stringify({ ...ENVELOPE, target: { folder: "读书笔记/技术/排版/深路径", notePath: null } }),
+      META,
+    );
+    const html = await renderPanel();
+
+    // 值仍然是完整路径（不截数据），截断与悬浮都交给 `.inbox__trunc` + `title`。
+    expect(html).toContain('class="inbox__trunc" title="读书笔记/技术/排版/深路径"');
   });
 
   it("保存到：候选来自既有文件夹树（folderPathLabel 写法）", async () => {
@@ -1388,10 +1409,26 @@ describe("InboxPanel 首屏（逐字文案冻结）", () => {
     expect(html).toContain("知道了");
   });
 
-  it("失败条目：code 的中文文案 + 「还有 {n} 天」，主按钮禁用", async () => {
+  it("默认「待确认」只收待确认条目：失败条目不在这一栏，只在「全部」里（0.3.3 #1）", async () => {
     const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
     await setInboxStatus(entry.id, "failed", { lastError: "IMP-4013" });
-    const html = await renderPanel();
+
+    const pending = await renderPanel();
+    expect(pending).toContain("全部 1");
+    expect(pending).toContain("待确认 0");
+    expect(pending).toContain("没有「待确认」的条目。");
+    expect(pending).not.toContain("中文排版指北");
+
+    // 条目没有消失：切到「全部」就能看到它、重试或丢弃（03 UI-03/S5）。
+    const all = await renderPanel("all");
+    expect(all).toContain("中文排版指北");
+    expect(all).toContain('class="inbox__item is-active is-error"');
+  });
+
+  it("失败条目（全部视图）：code 的中文文案 + 「还有 {n} 天」，主按钮禁用", async () => {
+    const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    await setInboxStatus(entry.id, "failed", { lastError: "IMP-4013" });
+    const html = await renderPanel("all");
     expect(html).toContain("附件太多或太大，请减少后用重新剪藏。");
     expect(html).toContain("还有 7 天");
     expect(html).toContain("稍后处理");
@@ -1408,15 +1445,16 @@ describe("InboxPanel 首屏（逐字文案冻结）", () => {
     expect(html).toMatch(/<button[^>]*btn btn--primary[^>]*disabled/);
   });
 
-  it("已入库：次级文字「已入库 · {相对时间}」，主按钮改成「查看」", async () => {
+  it("已入库（全部视图）：次级文字「已入库 · {相对时间}」，主按钮改成「查看」", async () => {
     const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
     setInboxReceiver(async () => importResult());
     await commitInbox(entry.id);
-    const html = await renderPanel();
+    const html = await renderPanel("all");
     expect(html).toContain("已入库 · ");
     expect(html).toContain("查看");
     // 已入库条目不再提供「丢弃」，免得被读成「删掉这篇笔记」。
     expect(html).not.toContain("跳过这次");
+    expect(html).not.toContain("稍后处理");
   });
 });
 
