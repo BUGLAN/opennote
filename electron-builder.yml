@@ -1,10 +1,11 @@
 # Opennote 桌面端打包配置（electron-builder 26.x）
 #
-# 关于 win.target = zip（这是刻意的，不要改成默认的 nsis）：
-#   本轮交付只产出免安装的绿色压缩包：解压即用、不写注册表、不需要管理员权限，
-#   也避免打包机上的签名/安装器依赖。将来需要安装包时，把下面的 win 段改成：
+# 交付形态：Windows 免安装绿色压缩包（解压即用、不写注册表、不需要管理员权限）。
+# 这是刻意的选择，不要随手改成 nsis：zip 的代价只是「没有安装器」，换来的是
+# 打包机上不需要签名/安装器依赖。将来要出安装包时，把下面的 win 段改成：
 #
 #     win:
+#       icon: build/icon.ico
 #       target:
 #         - target: nsis
 #           arch:
@@ -14,11 +15,24 @@
 #       #   perMachine: false
 #       #   allowToChangeInstallationDirectory: true
 #
-#   换成 nsis 后若要有自定义图标，再把图标放进 buildResources 目录（默认 build/），
-#   并补上 win.icon: build/icon.ico。
+# 图标：build/icon.ico 由 `pnpm icons`（scripts/make_icons.py）生成，与界面左上角的
+#      朱砂印章同源；下面 win.icon 引用的就是它。
 #
-# 注意：当前仓库还没有 build/ 目录，所以本文件刻意不写任何 icon 字段，
-#       electron-builder 会使用 Electron 默认图标。
+# 关于体积（改动前实测，别再退回去）：
+#   排除 node_modules 之前，resources/app.asar = 203.6 MB，其中 194.3 MB 是
+#   node_modules（光 mermaid 的源码就 118.8 MB）—— 这些依赖只在 Vite 构建期用，
+#   渲染层已经把要用的代码打进 dist/ 了。主进程的 require 只有 electron 与
+#   node: 内置模块（见 electron/*.cjs），运行时不需要任何第三方包。
+#   因此下面 files 里显式排除 node_modules。
+#   ⚠️ 若将来主进程真的要 require 第三方包，必须在这里放开对应路径，
+#      否则打包后会以「Cannot find module」的形式在启动时炸掉。
+#
+# 打包卡在 "building target=zip" 并报
+#   TypeError: Cannot read properties of undefined (reading 'ReadWrite')
+# 时，那是 electron-builder 26.x 取 7zip 工具链的已知问题。可用环境变量指定本地 7z：
+#   PowerShell:  $env:ELECTRON_BUILDER_7ZIP_PATH="C:\Program Files\7-Zip\7z.exe"
+#   bash:        export ELECTRON_BUILDER_7ZIP_PATH=/usr/bin/7z
+# 或者只产出 release/win-unpacked/（`electron-builder --dir`）后自己压缩该目录。
 
 appId: com.opennote.app
 productName: Opennote
@@ -27,14 +41,6 @@ productName: Opennote
 # 再下载一份：同一台机器上 `pnpm install` 已经装过，且这样能避开它在部分
 # Windows + Node 24 环境下的缓存模式报错（Cannot read properties of undefined）。
 electronDist: node_modules/electron/dist
-
-# Windows 上如果打包卡在 "building target=zip" 并报
-#   TypeError: Cannot read properties of undefined (reading 'ReadWrite')
-# 那是 electron-builder 26.x 下载 7zip 工具链时的已知问题。它支持用环境变量
-# 指定本地 7z，跳过下载：
-#   PowerShell:  $env:ELECTRON_BUILDER_7ZIP_PATH="C:\Program Files\7-Zip\7z.exe"
-#   bash:        export ELECTRON_BUILDER_7ZIP_PATH=/usr/bin/7z
-# 或者改用 `electron-builder --dir` 只产出 release/win-unpacked/，自己压缩这个目录。
 
 directories:
   output: release
@@ -48,6 +54,8 @@ files:
   - dist-clip/**/*
   - electron/**/*
   - package.json
+  # 见文件头「关于体积」：这些依赖只在构建期用，运行时不需要。
+  - '!node_modules/**/*'
 
 asar: true
 compression: normal
@@ -55,13 +63,14 @@ artifactName: '${productName}-${version}-${os}-${arch}.${ext}'
 npmRebuild: false
 
 win:
-  # 与界面左上角印章一致的「記」图标（scripts/make_icons.py 生成多尺寸 ico）
   icon: build/icon.ico
   target:
     - target: zip
       arch:
         - x64
 
+# 下面两个目标目前是「声明了但未交付」：没有签名/公证配置，也没有进发布流水线。
+# 真要发布时先读 RELEASING.md 的「平台与签名」一节。
 mac:
   target: dmg
   category: public.app-category.productivity

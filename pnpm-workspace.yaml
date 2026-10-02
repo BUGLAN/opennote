@@ -4,3 +4,16 @@
 allowBuilds:
   electron: true
   electron-winstaller: true
+
+# 上游 bug 的定点修正（2026-10-01 定位，改动前 `pnpm package:desktop` 必失败）：
+#   app-builder-lib@26.15.3 声明依赖 `@electron/get@^3.0.0`，但代码里调用的是只有
+#   5.x 才导出的 `ElectronDownloadCacheMode`（out/util/electronGet.js:69）。
+#   3.0.0 里没有这个导出 → 打包 zip 时抛
+#     TypeError: Cannot read properties of undefined (reading 'ReadWrite')
+#   26.15.3 已是最新版，上游未修；升级 electron-builder 解决不了。
+#   这里把 app-builder-lib 的 @electron/get 钉到 5.1.0 —— 它本来就装在仓库里
+#   （electron 自己的依赖），且 app-builder-lib 用到的两个 API
+#   （downloadArtifact / ElectronDownloadCacheMode）在 5.1.0 里都在。
+#   上游修好后删掉这一段即可。
+overrides:
+  app-builder-lib>@electron/get: 5.1.0
