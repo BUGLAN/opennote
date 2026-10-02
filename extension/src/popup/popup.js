@@ -193,21 +193,68 @@ function okNode(spec) {
   return box;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** 右上箭头 + 方框 = 「在独立页面里打开」。卡片图标与底栏图标共用这一份路径。 */
+const PATH_EXTERNAL = "M6 3h7v7M13 3 6.5 9.5M11 11v2H3V5h2";
+
+/**
+ * 内联 SVG 图标（非 emoji）。一律 `createElementNS` 拼，**不用 innerHTML** ——
+ * 那是 ② 的硬约束，`self-contained.test.mjs` 与 `verify.mjs` 都在查这个字符串。
+ *
+ * `round = false` 保留原始描边端点：`iconExternal()` 是已冻结的视觉，不能因为这次
+ * 抽出公共函数就顺手把它的端点从 butt 改成 round。
+ */
+function svgIcon(paths, { size = 14, round = true } = {}) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const d of paths) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "1.4");
+    if (round) {
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+    }
+    svg.appendChild(path);
+  }
+  return svg;
+}
+
 /** 图标（内联 SVG，非 emoji）：右上箭头 + 方框 = 「在独立页面里打开」。 */
 function iconExternal() {
-  const NS = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", "0 0 16 16");
-  svg.setAttribute("width", "14");
-  svg.setAttribute("height", "14");
-  svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS(NS, "path");
-  path.setAttribute("d", "M6 3h7v7M13 3 6.5 9.5M11 11v2H3V5h2");
-  path.setAttribute("fill", "none");
-  path.setAttribute("stroke", "currentColor");
-  path.setAttribute("stroke-width", "1.4");
-  svg.appendChild(path);
-  return svg;
+  return svgIcon([PATH_EXTERNAL], { round: false });
+}
+
+/**
+ * 底栏动作按钮的图标（0.3.4 用户：「图3这个文字出界，换成图标」）。
+ *
+ * 只有**底栏**那颗按钮用它。错误块里的动作（`重试` / `打开 Opennote 设置`）不动：
+ * 那是一块够宽的容器，文字按钮更好读，而且它是错误态唯一的出口，不该只留一个图标。
+ * 认不出的 id 退到「在独立页面里打开」那一款 —— 宁可图标不够贴切，
+ * 也不能让一颗按钮变成没有形状的空白。
+ */
+function actionIcon(id) {
+  if (id === "again") {
+    // 剪刀 = 「再剪一段」。
+    return svgIcon([
+      "M1.6 4.5a1.9 1.9 0 1 0 3.8 0 1.9 1.9 0 1 0-3.8 0",
+      "M1.6 11.5a1.9 1.9 0 1 0 3.8 0 1.9 1.9 0 1 0-3.8 0",
+      "M5 5.7 13.5 12.5",
+      "M5 10.3 13.5 3.5",
+    ]);
+  }
+  if (id === "retry") {
+    // 回转箭头 = 「重试」。
+    return svgIcon(["M13 8a5 5 0 1 1-1.5-3.6", "M13.2 2.4v3.4h-3.4"]);
+  }
+  return svgIcon([PATH_EXTERNAL]);
 }
 
 /* ─────────────── 预览卡的只读排版（② 「像 Opennote」） ───────────────
@@ -553,7 +600,26 @@ async function openClipWeb(button) {
   await chrome.tabs.create({ url: reply.openUrl });
 }
 
-function actionButton(action) {
+/**
+ * 动作按钮。
+ *
+ * `iconOnly`：**底栏**那一排用定宽图标按钮（0.3.4 用户：「图3这个文字出界，换成图标」）。
+ * 文案一个字都没少 —— `title` 给鼠标悬浮、`aria-label` 给读屏，取的都是计划里那份
+ * **逐字冻结**的 `action.label`（产地是 `state.js`，所以冻结文案表照旧命中）。
+ * 宽度由 CSS 钉死在 30px，与文案长短无关，因此不会再被挤到竖排、溢出外框。
+ */
+function actionButton(action, { iconOnly = false } = {}) {
+  if (iconOnly) {
+    const icon = el("button", "clip__act");
+    icon.type = "button";
+    icon.title = action.label;
+    icon.setAttribute("aria-label", action.label);
+    icon.dataset.action = action.id;
+    if (action.path) icon.dataset.path = action.path;
+    icon.appendChild(actionIcon(action.id));
+    icon.addEventListener("click", () => void runAction(action.id, action));
+    return icon;
+  }
   const button = el("button", action.primary ? "btn btn--primary" : "btn", action.label);
   button.type = "button";
   button.dataset.action = action.id;
@@ -756,7 +822,7 @@ function render(planInput) {
 
   const actionsInFoot = Boolean(plan.empty || plan.ok || !plan.primary);
   footActs.replaceChildren();
-  if (actionsInFoot) for (const action of plan.actions || []) footActs.appendChild(actionButton(action));
+  if (actionsInFoot) for (const action of plan.actions || []) footActs.appendChild(actionButton(action, { iconOnly: true }));
 
   if (plan.primary) {
     const loading = busy || plan.primary.busy;
@@ -771,6 +837,12 @@ function render(planInput) {
     primary.dataset.intent = plan.primary.intent || (plan.primary.label === "暂存在插件里" ? "stage" : "submit");
   } else {
     primary.hidden = true;
+    // 顺手把肚里那份内容清空。真正让它消失的是 CSS 的 `#primary[hidden]{display:none}`
+    // （`.btn{display:inline-flex}` 会盖掉 UA 的 `[hidden]`，见 popup.css 那段注释）；
+    // 这里再清一次，是为了**任何情况下**都不会有一颗隐藏按钮还揣着「正在剪藏…」+ 旋转环，
+    // 被读屏、被快照、被下一次调试当成「还在加载」。
+    primary.replaceChildren();
+    primary.setAttribute("aria-busy", "false");
   }
   more.hidden = Boolean(plan.ok) || plan.state === STATE.RESTRICTED_PAGE;
 }

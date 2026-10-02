@@ -232,3 +232,45 @@ test("④ 交付提示：inbox 那一支不再渲染，被删的那句不许再�
   assert.match(code, /这次会直接写成笔记，可以在 Opennote 里撤销。/, "C47 保留（说的是另一件事）");
   assert.match(code, /交付方式由 Opennote 的设置决定，剪藏完成后会如实显示结果。/, "C48 保留");
 });
+
+/* ── 底栏：`hidden` 的语义 + 图标按钮（0.3.4 用户真机图3） ─────────────────────
+
+   用户原话：「图3这个文字出界，换成图标，然后已经剪藏成功了，还在loading」。
+   两件事是**同一个根因**：作者样式里的 `display` 会盖掉 UA 的 `[hidden]{display:none}`，
+   于是被 `hidden = true` 的节点照样占位 —— `#primary` 揣着上一次的「正在剪藏…」不消失
+   （看起来"还在 loading"），`#more` 也没消失、在底栏挤掉两颗动作按钮的空间
+   （文案被挤成竖排 = "文字出界"）。下面三条分别咬住：根因、残影、图标化。 */
+
+test("④ 底栏的 `hidden` 真的会隐藏：作者 display 会盖掉 UA 的 [hidden]", () => {
+  const hide = (CSS.match(/#primary\[hidden\][^{]*\{[^}]*\}/) || [])[0] || "";
+  assert.ok(hide, "必须有 `#primary[hidden]` 的兜底规则，否则 hidden 只是个写着玩的属性");
+  assert.match(hide, /#more\[hidden\]/, "`#more` 同款问题，必须一起兜");
+  assert.match(hide, /display:none/, "兜底必须是 display:none");
+  // 反面证据：这两颗按钮确实各自带着会盖掉 hidden 的 display —— 判据不是空话。
+  assert.match(CSS, /\.btn\{[^}]*display:inline-flex/, "`.btn` 的 display 是作者样式（这正是根因）");
+  assert.match(CSS, /\.clip__more\{[^}]*display:inline-flex/, "`.clip__more` 同理");
+});
+
+test("④ 成功态不留加载残影：隐藏主按钮时把肚里的内容清空", () => {
+  assert.match(
+    code,
+    /primary\.hidden = true;[\s\S]{0,400}?primary\.replaceChildren\(\)/,
+    "隐藏时必须清空「正在剪藏…」+ 旋转环，任何情况下都不许留成假加载态",
+  );
+  assert.match(code, /primary\.setAttribute\("aria-busy", "false"\);/, "aria-busy 也要跟着收回去");
+});
+
+test("④ 底栏动作是定宽图标按钮，文案逐字留在 title / aria-label 上", () => {
+  assert.match(code, /actionButton\(action, \{ iconOnly: true \}\)/, "底栏动作必须走 iconOnly");
+  assert.match(code, /icon\.title = action\.label;/, "文案逐字进 title（鼠标悬浮）");
+  assert.match(code, /icon\.setAttribute\("aria-label", action\.label\);/, "文案逐字进 aria-label（读屏）");
+  const act = (CSS.match(/\.clip__act\{[^}]*\}/) || [])[0] || "";
+  assert.ok(act, "找不到 .clip__act 规则");
+  assert.match(act, /width:30px/, "定宽 30px ⇒ 与文案长短无关，不会再被挤到竖排");
+  assert.match(act, /flex:none/, "不许被 flex 拉伸成等分宽（那正是出界的成因）");
+  assert.match(act, /display:inline-flex/, ".clip__act 自己也要 display");
+  // 图标一律 createElementNS 拼（`innerHTML` 是 ② 的硬禁令，上面那条已在查 popup.js）。
+  assert.match(code, /function actionIcon/, "图标要有唯一产地");
+  assert.match(code, /function svgIcon/, "SVG 拼装要有唯一产地");
+});
+

@@ -227,6 +227,30 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__acts:empty{display:none}
 .clip__more{width:30px;height:30px;flex:none;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);color:var(--ink-2);background:var(--paper)}
 .clip__more:hover{background:var(--paper-3);color:var(--ink)}
+/* 底部动作按钮：**定宽图标按钮**（30px，与 `#more` 同尺寸、同笔触）。
+   0.3.4 用户报「图3这个文字出界，换成图标」：底栏固定 360px 宽，`打开 Opennote`（7 字符）
+   这类文案在多一颗按钮时会被挤成竖排、连字带框溢出。图标按钮的宽度**与文案长短无关**，
+   所以它不会再出界。文案没有丢：`title`（鼠标悬浮）与 `aria-label`（读屏）都是计划里
+   那一份逐字冻结的 `action.label`。
+   不与 `.btn` 共用：`.clip__foot .btn{flex:1}` 会把按钮拉成等分宽，正好是要避免的事。 */
+.clip__act{width:30px;height:30px;flex:none;display:inline-flex;align-items:center;justify-content:center;padding:0;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);color:var(--ink-2);background:var(--paper)}
+.clip__act:hover{background:var(--paper-3);color:var(--ink)}
+.clip__act:disabled{opacity:.45;cursor:not-allowed}
+/*
+ * 把 `[hidden]` 的语义要回来（作者样式里的 `display` 会盖掉 UA 的 `[hidden]{display:none}`）。
+ *
+ * 本文件里会踩到这个坑的只有底栏那两颗按钮：`#primary` 带 `.btn{display:inline-flex}`、
+ * `#more` 带 `.clip__more{display:inline-flex}` —— 于是 `node.hidden = true` 只是**写了个属性**，
+ * 元素照样占位，里面还留着上一次写进去的文案。后果正是 0.3.4 用户真机报的那两件事：
+ *   · 成功 / 进收件箱时 `plan.primary = null`（`popup.js` 走 `primary.hidden = true`），
+ *     按钮却不消失，肚里还是上一次 busy 的「正在剪藏…」+ 旋转环
+ *     ⇒「已经剪藏成功了，还在 loading」；
+ *   · 同一时刻 `more.hidden = true`（`plan.ok`）同样不生效，底栏凭空多出第三颗按钮，
+ *     把两颗 `flex:1` 的动作按钮挤到文字竖排、溢出外框（同一张截图里的「文字出界」）。
+ * 两件事**同一个根因**，所以一并在这里收口。`.clip__pick-detail[hidden]` 与
+ * `.clip__menu[hidden]` 是同款补丁（见 task-21 那段注释），这里补齐最后两颗。 */
+#primary[hidden],
+#more[hidden]{display:none}
 
 .clip__menu{position:absolute;right:var(--s3);bottom:52px;z-index:10;min-width:190px;padding:4px;border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--paper-2);box-shadow:var(--shadow-2);display:flex;flex-direction:column}
 .clip__menu[hidden]{display:none}
