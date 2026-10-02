@@ -1,6 +1,6 @@
 {
   "name": "opennote",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -25,7 +25,7 @@
   },
   "engines": {
     "node": ">=20.19",
-    "pnpm": ">=9"
+    "pnpm": ">=11"
   },
   "scripts": {
     "dev": "vite",
@@ -38,7 +38,12 @@
     "dev:electron": "node scripts/dev-electron.mjs",
     "build:clip": "vite build --config vite.clip.config.ts",
     "build:desktop": "node scripts/build-desktop.mjs",
-    "package:desktop": "node scripts/build-desktop.mjs && electron-builder --config electron-builder.yml"
+    "package:desktop": "node scripts/build-desktop.mjs && electron-builder --config electron-builder.yml",
+    "pack:extension": "node extension/build.mjs && node scripts/pack-extension.mjs",
+    "checksums": "node scripts/make-checksums.mjs release",
+    "release:check": "node scripts/release-version.mjs check",
+    "release:version": "node scripts/release-version.mjs set",
+    "release:build": "node scripts/build-desktop.mjs && electron-builder --config electron-builder.yml && node extension/build.mjs && node scripts/pack-extension.mjs && node scripts/make-checksums.mjs release"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

@@ -57,9 +57,26 @@ IndexedDB 只在两处出现，都不存笔记内容：一是 Chrome 的文件�
 - **写作语法**：`==高亮==`、任务列表、图片粘贴与拖入（写进 `<笔记目录>/assets/`，正文里是 `./assets/xxx.png` 这样的相对路径，换任何编辑器都能看）。
 - **外观可调**：5 套主题 × 4 种强调色，4 种正文字体预设，字号 / 行高 / 栏宽可调；打字机模式、专注模式，以及打印为 PDF 的样式表。
 
+## 下载与分发
+
+三种形态，同一份数据格式（笔记就是 Markdown 纯文件）：
+
+| 形态 | 拿到它的方式 | 适合谁 |
+| --- | --- | --- |
+| 网页版 | 打开部署地址（PWA，浏览器里可「安装」到桌面） | 想零安装先用起来 |
+| 桌面版 | Releases 里的 `Opennote-<版本>-win-x64.zip`，解压即用、免安装 | 要直接读写本机文件夹 |
+| 剪藏扩展 | Releases 里的 `Opennote-clip-<版本>.zip`，在 `chrome://extensions` 用「开发者模式 → 加载已解压的扩展程序」安装 | 要把网页整块内容剪进收件箱 |
+
+- 每个 Release 都带 `SHA256SUMS`，`sha256sum -c SHA256SUMS` 可验证下载完整性。
+- 桌面版目前只有 **Windows x64 免安装 zip**，且**没有代码签名**：首次运行会出现「Windows 已保护你的电脑」，
+  点「更多信息 → 仍要运行」即可。mac / Linux 的配置在 [`electron-builder.yml`](electron-builder.yml) 里声明了但尚未交付（未签名、未公证）。
+- 桌面版**没有自动更新**：升级就是下载新 zip 解压覆盖；你的笔记在自己的文件夹里，不受影响。
+- 仓库目前是私有的：公开之前 Release 与 Actions 产物只对协作者可见，网页版也还没有可访问的部署地址。
+  打包与分发流程（版本门禁、产物清单、签名与商店路线、已知坑）见 [RELEASING.md](RELEASING.md)。
+
 ## 快速开始
 
-需要 Node 20.19+ 与 pnpm 9+。
+需要 Node 20.19+ 与 pnpm 11+。
 
 ```shell
 pnpm install
@@ -68,6 +85,8 @@ pnpm build          # 类型检查 + 生产构建，产物在 dist/
 pnpm preview        # 本地预览生产构建
 pnpm typecheck
 pnpm test           # Vitest 单测
+pnpm release:check  # 发布门禁：版本号 / CHANGELOG / tag 三者一致
+pnpm release:build  # 一条命令出齐发布产物：桌面 zip + 扩展 zip + SHA256SUMS（在 release/）
 ```
 
 桌面版：
@@ -86,7 +105,7 @@ pnpm package:desktop  # 打包成免安装 zip → release/Opennote-<版本>-win
 - 应用图标与界面左上角的朱砂印章同源：`pnpm icons` 会从同一份绘制代码生成 `public/favicon.svg`、PWA 图标与 `build/icon.ico`（多尺寸），打包时由 `electron-builder.yml` 的 `win.icon` 内嵌进 exe。
 - 安全基线保持默认：`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，所有 IPC 文件操作都必须落在你选定的笔记本目录内（`../../../package.json` 这类路径会被拒绝并报「路径越界」）。
 - preload 只暴露一层薄接口（`window.opennote`），渲染进程拿不到 Node 能力。macOS 上会保留一份只含系统角色的最小菜单（否则 ⌘C/⌘V/⌘Q 不生效），Windows/Linux 直接置空。
-- 打包目标只有免安装 zip（便携、无需安装器）。想要 NSIS 安装包，把 `electron-builder.yml` 里 `win.target` 换成 `nsis` 即可。
+- 打包目标只有免安装 zip（便携、无需安装器）。想要 NSIS 安装包，把 `electron-builder.yml` 里 `win.target` 换成 `nsis` 即可。当前 zip 151 MB（Electron 本体占大头，`app.asar` 只有 11 MB）；发布流程见 [RELEASING.md](RELEASING.md)。
 
 ## 数据与备份
 
@@ -178,7 +197,7 @@ electron/
 ## 质量与验证
 
 - `pnpm typecheck`：TypeScript 严格模式全量检查（`strict` + `noUnusedLocals`）。
-- `pnpm test`：240+ 个 Vitest 单测，覆盖路径规则与安全校验、三种文件系统后端（含大小写不敏感与移动/删除语义）、数据层回归（并发扫描、外部改动写冲突、快照与回收站清空、导入不覆盖同名）、Markdown 扩展语法树（行内/块级公式、`==高亮==`、`[[wiki links]]`、GFM 表格与任务列表及其缩进上下文）、编辑器设置状态、模糊匹配、字数统计。
+- `pnpm test`：700+ 个 Vitest 单测，覆盖路径规则与安全校验、三种文件系统后端（含大小写不敏感与移动/删除语义）、数据层回归（并发扫描、外部改动写冲突、快照与回收站清空、导入不覆盖同名）、Markdown 扩展语法树（行内/块级公式、`==高亮==`、`[[wiki links]]`、GFM 表格与任务列表及其缩进上下文）、编辑器设置状态、模糊匹配、字数统计。
 - `pnpm build`：类型检查 + 生产构建。产物里网页版会注入一份严格 CSP（`script-src` 只有本站与页面内联脚本的 sha256），语言分包与 Mermaid/KaTeX 放在 `assets/lazy/` 里**不进安装期预缓存**，由 Service Worker 首次使用时按需缓存（离线仍可打开整个界面）。
 - 端到端（真实浏览器 + 真实 Electron 进程）实测过：OPFS 笔记本的创建/写入/刷新后仍在、编辑器输入落盘、`.opennote/state.json` 与历史快照生成、Electron 通过 IPC 读写真实文件、`../../../package.json` 被拒绝。
 
@@ -209,6 +228,7 @@ Opennote is a Typora-flavoured Markdown notebook **whose notes are plain files i
 - **Seamless live preview** — syntax marks (`#`, `**`, `[]()`, code fences, `$$`) hide on the lines you are not editing and reappear under the cursor; images, tables, KaTeX formulas and Mermaid diagrams render inline.
 - **Organise** — multiple notebooks, folder tree with drag & drop, tabs, outline, fuzzy command palette, full-text search with snippets, tags, starred notes, a trash folder and per-note version snapshots.
 - **Desktop** — `pnpm dev:electron` for development, `pnpm package:desktop` for a portable zip. Native Chinese menu, `contextIsolation` + `sandbox` on, every path resolved inside the chosen workspace.
+- **Release** — `pnpm release:build` produces the portable desktop zip, the clipper extension zip and `SHA256SUMS`; pushing a `vX.Y.Z` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml) and publishes them to a GitHub Release. Details in [RELEASING.md](RELEASING.md).
 
 ```shell
 pnpm install
@@ -217,6 +237,8 @@ pnpm build           # type-check + production build (dist/)
 pnpm test            # Vitest
 pnpm dev:electron    # desktop development
 pnpm package:desktop # portable desktop zip
+pnpm release:check   # release gate: version / CHANGELOG / tag consistency
+pnpm release:build   # all release artifacts: desktop zip + extension zip + SHA256SUMS
 ```
 
 Licensed under [MIT](LICENSE).

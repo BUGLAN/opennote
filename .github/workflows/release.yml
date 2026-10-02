@@ -1,0 +1,115 @@
+# 发布流水线：打 tag 即出产物 + Release 资产。
+#
+# 触发：
+#   - push tag `v*`（如 v0.3.2）
+#   - 或手动 workflow_dispatch，填一个已存在的 tag
+#
+# 产物（都进 Release 资产，同一目录 + SHA256SUMS）：
+#   Opennote-<版本>-win-x64.zip    桌面版免安装包（解压即用）
+#   Opennote-clip-<版本>.zip       浏览器剪藏扩展（开发者模式加载 / 商店上传同一份）
+#   SHA256SUMS                     GNU coreutils 格式校验和
+#
+# 为什么只有 Windows：mac 需要 Apple 开发者证书 + 公证，Linux 未验证，
+# 都没签名就发等于给用户送「已损坏/已阻止」的包。见 RELEASING.md「平台与签名」。
+#
+# 私有仓库也能跑：Release 与 Actions 产物只有协作者可见；仓库转公开后，
+# 同一批资产自动对公众可见，流水线一个字都不用改。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的 tag（如 v0.4.0）"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # 11：pnpm-workspace.yaml 用了 pnpm ≥10 的 allowBuilds（electron 的安装脚本必须被允许运行，
+          # 否则拿不到 node_modules/electron/dist，打包会失败）；pnpm 9 读该文件会报
+          # `packages field missing or empty`。
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: 门禁：tag / 版本号 / CHANGELOG 三者一致
+        run: node scripts/release-version.mjs check --tag "$env:TAG"
+
+      # 注意：Windows runner 的默认 shell 是 pwsh，多行 run 只检查**最后一条**命令的退出码。
+      # 所以每个检查各占一个 step，别合并成一段。
+      - name: 单测（渲染层）
+        run: pnpm test
+
+      - name: 构建扩展
+        run: node extension/build.mjs
+
+      - name: 单测（扩展）
+        run: pnpm --dir extension test
+
+      - name: 构建桌面资源（相对路径 + 关掉 Service Worker）
+        run: pnpm build:desktop
+
+      - name: 打包 Windows 免安装 zip
+        # 若这里报 TypeError: Cannot read properties of undefined (reading 'ReadWrite')，
+        # 说明有人把 pnpm-workspace.yaml 里那条 app-builder-lib>@electron/get override 删了
+        # （上游 electron-builder 26.15.3 的 bug，详见该文件注释）。
+        run: pnpm exec electron-builder --config electron-builder.yml
+
+      - name: 打包扩展 zip
+        run: node scripts/pack-extension.mjs
+
+      - name: 生成 SHA256SUMS
+        run: node scripts/make-checksums.mjs release
+
+      - name: 存档产物（私有仓库期间靠它分发：Actions 页面可下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: opennote-${{ github.event.inputs.tag || github.ref_name }}
+          path: |
+            release/Opennote-*.zip
+            release/SHA256SUMS
+          if-no-files-found: error
+
+      - name: 发布到 GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release/Opennote-*.zip release/SHA256SUMS)
+          printf '资产：%s\n' "${files[@]}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" --title "Opennote $TAG" --generate-notes
+          fi
