@@ -39,6 +39,7 @@ export type IconName =
   | "note"
   | "layers"
   | "shield"
+  | "move"
   | "print";
 
 const PATHS: Record<IconName, JSX.Element> = {
@@ -197,6 +198,13 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M12 3.5 19 6v5.5c0 4-2.9 7.3-7 8.9-4.1-1.6-7-4.9-7-8.9V6z" />
       <path d="m9 12 2.2 2.2L15.5 10" />
+    </>
+  ),
+  /* 「移动到…」：一个文件夹 + 一支向右的箭头（箭头在文件夹肚子里，笔画与其它图标同粗细）。 */
+  move: (
+    <>
+      <path d="M3.5 7.5a2 2 0 0 1 2-2h3.1a2 2 0 0 1 1.6.8l.9 1.2h7.4a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+      <path d="M9.2 13.2h6m0 0-2.5-2.5M15.2 13.2l-2.5 2.5" />
     </>
   ),
   print: (

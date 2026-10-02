@@ -1311,8 +1311,11 @@ describe("InboxPanel 首屏（逐字文案冻结）", () => {
     expect(html).toContain("跳过这次");
     expect(html).toContain("入库");
     // 「保存到」选择器（0.3.0）：根目录 + 既有文件夹树，最终落点说明句。
+    // 0.3.4 起换成自定义下拉：候选项只在**展开时**才渲染，所以首屏只剩触发器，
+    // 它显示的是**当前值**（这里 = 信封落点「读书笔记」）。候选项本身由
+    // `saveToOptionsFor()` 直接断言（下一条测试）。
     expect(html).toContain("保存到");
-    expect(html).toContain("笔记本根目录");
+    expect(html).toContain('role="combobox"');
     expect(html).toContain("入库到「读书笔记」。");
     // 丢弃是销毁动作：面板里不得出现任何「恢复」入口。
     expect(html).not.toContain("恢复");
@@ -1339,11 +1342,41 @@ describe("InboxPanel 首屏（逐字文案冻结）", () => {
     // 行由 `.inbox__save-to` 提供样式（app.css），组件里不再写行内样式。
     expect(html).toContain('class="inbox__save-to"');
     expect(html).toContain("<span>保存到</span>");
-    // 根目录选项 + 树上每个文件夹一个选项，值是工作区相对路径（标签用 folderPathLabel 的写法）。
-    expect(html).toContain('<option value="">笔记本根目录</option>');
-    expect(html).toContain('<option value="剪藏/技术">剪藏 / 技术</option>');
-    // 当前信封落点预选中。
-    expect(html).toMatch(/<option value="读书笔记"[^>]*>读书笔记<\/option>/);
+
+    // 候选项：根目录 + 树上每个文件夹一个，值是工作区相对路径（标签用 folderPathLabel 的写法）。
+    // 自定义下拉的列表只在展开时渲染（`renderToStaticMarkup` 点不了），所以这里直接喂
+    // 真实文件夹树给产出候选项的纯函数 —— 断言的仍是**同一条逐字契约**。
+    const [{ saveToOptionsFor }, { getLibrary }] = await Promise.all([
+      import("../components/InboxPanel"),
+      import("./library"),
+    ]);
+    const options = saveToOptionsFor(getLibrary().folders, "读书笔记");
+    expect(options[0]).toEqual({ value: "", label: "笔记本根目录" });
+    expect(options).toContainEqual({ value: "剪藏/技术", label: "剪藏 / 技术" });
+    // 当前落点（信封里的「读书笔记」）在候选项里。
+    expect(options.some((option) => option.value === "读书笔记")).toBe(true);
+  });
+
+  it("保存到：信封落点已不在树上时，原样留在候选项里（不吞掉用户的选择）", async () => {
+    testBackend.seed("剪藏/占位.md", "# 占位\n");
+    // 信封落点指着「已删除的目录」：工作区里根本没有这个文件夹（不在磁盘、也不在树上）。
+    await enqueueInbox(
+      JSON.stringify({ ...ENVELOPE, target: { folder: "已删除的目录", notePath: null } }),
+      { ...META, targetFolder: "已删除的目录" },
+    );
+    await renderPanel();
+
+    const [{ saveToOptionsFor }, { getLibrary }] = await Promise.all([
+      import("../components/InboxPanel"),
+      import("./library"),
+    ]);
+    // 这个目录确实不在文件夹表里 —— 悄悄把它从候选项里拿掉，等于把用户的落点改成别的
+    // 目录，而他不会知道。
+    expect(getLibrary().folders["已删除的目录"]).toBeUndefined();
+    const options = saveToOptionsFor(getLibrary().folders, "已删除的目录");
+    expect(options).toContainEqual({ value: "已删除的目录", label: "已删除的目录" });
+    // 根目录项永远在第一位，且值为空串（`INBOX_ROOT_VALUE`）。
+    expect(options[0].value).toBe("");
   });
 
   it("保存到：信封落点是根目录时，说明句写「入库到笔记本根目录。」", async () => {
@@ -1455,6 +1488,24 @@ describe("InboxPanel 首屏（逐字文案冻结）", () => {
     // 已入库条目不再提供「丢弃」，免得被读成「删掉这篇笔记」。
     expect(html).not.toContain("跳过这次");
     expect(html).not.toContain("稍后处理");
+  });
+
+  it("已入库条目：目录/文件名按**实际落盘位置**显示（改过「保存到」也不会说成根目录）", async () => {
+    // 用户真机缺陷：信封落点 = 读书笔记，入库前在「保存到」里改成 剪藏/新目录 →
+    // 笔记确实落在 剪藏/新目录，但面板仍按信封值显示「读书笔记」，并补一句
+    // 「入库时会另存为《… 2》」（其实已经入库完了）。
+    const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    setInboxReceiver(null); // 走 C1 的真实接收端，让 committedPath 就是真实落点
+    await commitInboxResult(entry.id, { folder: "剪藏/新目录" });
+
+    const html = await renderPanel("all");
+    // 实际落点。
+    expect(html).toContain("剪藏/新目录");
+    expect(html).toContain("中文排版指北.md");
+    // 信封里的旧落点与「将来时」说明句都不许再出现。
+    expect(html).not.toContain("读书笔记");
+    expect(html).not.toContain("入库时会另存为");
+    expect(html).not.toContain("入库到");
   });
 });
 

@@ -107,8 +107,10 @@ export default function App(): ReactNode {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const activeId = ui.activeId && library.notes[ui.activeId] ? ui.activeId : null;
-  const activeNote = activeId ? library.notes[activeId] : null;
+  // 回收站里的笔记也可以正常打开、就地编辑（它住在 `library.trash`，路径仍是
+  // `.opennote/trash/…`）—— active 所以要能在两个桶里都找得到。
+  const activeId = ui.activeId && (library.notes[ui.activeId] || library.trash[ui.activeId]) ? ui.activeId : null;
+  const activeNote = activeId ? library.notes[activeId] ?? library.trash[activeId] : null;
   const deferredContent = useDeferredValue(activeNote?.content ?? "");
   const hasWorkspace = Boolean(library.workspace);
   const bridge = useMemo(() => desktopBridge(), []);
@@ -852,7 +854,10 @@ export default function App(): ReactNode {
             onPalette={() => setPalette("all")}
             onContextMenu={(event, id) => {
               event.preventDefault();
-              const note = library.notes[id];
+              // 回收站里打开的笔记没有 `library.notes[id]`：加星标只对普通笔记有意义
+              //（`starredNotes()` 只看 notes），所以那一项只在普通笔记上出现，
+              // 不给一颗点了没反应的死菜单项。
+              const note = library.notes[id] ?? library.trash[id];
               openMenu(event.clientX, event.clientY, [
                 { id: "close", label: "关闭", icon: "close", run: () => closeTab(id) },
                 {
@@ -860,12 +865,16 @@ export default function App(): ReactNode {
                   label: "关闭其他标签",
                   run: () => ui.tabs.filter((tabId) => tabId !== id).forEach((tabId) => closeTab(tabId)),
                 },
-                {
-                  id: "star",
-                  label: note?.starred ? "取消星标" : "加星标",
-                  icon: "star",
-                  run: () => note && setStarred(id, !note.starred),
-                },
+                ...(library.notes[id]
+                  ? [
+                      {
+                        id: "star",
+                        label: note?.starred ? "取消星标" : "加星标",
+                        icon: "star" as const,
+                        run: () => note && setStarred(id, !note.starred),
+                      },
+                    ]
+                  : []),
                 {
                   id: "reveal",
                   label: "在文件夹中显示",

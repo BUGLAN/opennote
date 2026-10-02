@@ -10,6 +10,26 @@ export interface Folder {
   updatedAt: number;
 }
 
+/**
+ * 文件夹树拍平后的一项，给「移动到…」这类**选择器**用。
+ *
+ * 放在 `data/` 而不是组件里：它是**领域形状**（一棵树的线性化），不是某个控件的私有
+ * 类型。这样数据层可以产出它（`folderChoiceList()`），界面层只负责画 —— 反过来的话，
+ * 数据层就得认识一个界面模块，依赖方向会倒过来。
+ */
+export interface FolderChoice {
+  /** 工作区相对路径；`null` = 工作区根目录。 */
+  id: Id | null;
+  /** 单段名字；根项是「笔记本根目录」。 */
+  label: string;
+  /** 工作区相对路径（根项为空串）。悬浮预览给的是它。 */
+  path: string;
+  /** 层级，用于缩进。 */
+  depth: number;
+  /** `true` = 笔记当前所在目录：选中它是空操作，置灰而不是让用户白点一次。 */
+  disabled?: boolean;
+}
+
 export interface Note {
   id: Id;
   folderId: Id | null;

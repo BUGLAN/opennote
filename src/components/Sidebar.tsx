@@ -7,7 +7,10 @@ import {
   descendantFolderIds,
   emptyTrash,
   expandFolder,
+  folderChoiceList,
+  folderPathLabel,
   folderStats,
+  getLibrary,
   moveFolder,
   moveNote,
   notesInFolder,
@@ -23,7 +26,7 @@ import {
 } from "../data/library";
 import type { Folder, Id, Note, UiSettings } from "../data/types";
 import type { WorkspaceRecord } from "../data/workspaces";
-import { askConfirm, askText } from "../lib/dialogs";
+import { askConfirm, askFolder, askText } from "../lib/dialogs";
 import { notify } from "../lib/toast";
 import { cn, excerpt, formatRelativeTime } from "../lib/utils";
 import { Icon, type IconName } from "./Icons";
@@ -98,7 +101,7 @@ export function Sidebar(props: SidebarProps): ReactNode {
     setDropTarget(null);
     if (!payload) return;
     if (payload.kind === "note") {
-      moveNote(payload.id, folderId);
+      void moveNoteWithFeedback(payload.id, folderId);
       return;
     }
     if (folderId === payload.id) return;
@@ -398,7 +401,7 @@ function TreeBody(props: TreeProps): ReactNode {
               setTrashOpen((open) => !open);
             }}
           >
-            <TrashList library={library} />
+            <TrashList library={library} onOpen={props.onOpenNote} />
           </ScopeRow>
           {/* 外部导入的待确认内容在这里，不属于文件树，所以不参与 scope 高亮。 */}
           <ScopeRow
@@ -613,6 +616,70 @@ function folderMenu(folder: Folder, props: SidebarProps): MenuItem[] {
 
 /* =============================== note row =============================== */
 
+/**
+ * 移动一篇笔记并**如实报告结果** —— 右键菜单与拖放共用这一份。
+ *
+ * 图片是这条流程里**唯一可能悄悄出错**的部分：`moveNote()` 会连带把按笔记名派生的
+ * `<笔记名>.assets/` 搬过去（用户原话「从收件箱移动到其他位置时，图片位置也应改变」），
+ * 但目标目录里已经有一个同名 `.assets/` 时它**不覆盖**、把图留在原地。笔记这时候
+ * 已经在新位置了，所以不能只说「移动失败」——那会让用户以为笔记没动。
+ *
+ * `announce` 区分两条调用路径的**既有**行为，而不是让它们变得一样：
+ * - 右键「移动到…」→ `true`：用户是在一个可能有重名单段名的列表里选的，必须回一句
+ *   「移到了完整路径的哪个目录」才算确认，顺便给撤销；
+ * - 拖放 → `false`：笔记在树里当场挪了位置，用户**看得见**结果，再来一条 toast 只是噪音
+ *   （拖放从来不发成功提示，这里不改它）。
+ *
+ * 但**图片告警两条路径都必须发**：那件事在界面上看不见（正文引用已经指空、且不报错），
+ * 只从菜单发就等于「拖放丢图是静默的」。
+ */
+async function moveNoteWithFeedback(
+  id: Id,
+  target: Id | null,
+  options: { announce?: boolean } = {},
+): Promise<void> {
+  // 标题与来源目录都从**数据层现取**，不由调用方传：拖放那条路径（`NoteRow.onDrop`）
+  // 手上只有被拖的 id，让它自己去查一遍等于把「查什么」抄成第二份。
+  const note = getLibrary().notes[id];
+  if (!note) return;
+  const from = note.folderId ?? null;
+  if (from === target) return;
+  const where = target === null ? "笔记本根目录" : folderPathLabel(target);
+  const result = await moveNote(id, target);
+  if (result.assetsWarning) {
+    notify(`「${note.title}」已移动到「${where}」，但图片没跟上：${result.assetsWarning}`, { kind: "danger" });
+    return;
+  }
+  if (!result.path || !options.announce) return;
+  const moved = result.path;
+  notify(`「${note.title}」已移动到「${where}」`, {
+    // 撤销走**同一个**入口（`announce: false`）：搬回去的时候图同样可能搬不动
+    // （目标位置的 `.assets/` 被别人占了），那条告警不能因为「这是撤销」就不报。
+    action: { label: "撤销", run: () => void moveNoteWithFeedback(moved, from) },
+  });
+}
+
+/**
+ * 「移动到…」：选一个目标目录 → 移动 → 如实报告。
+ *
+ * 选择器里只有单段名，深层目录会重名（`读书笔记/技术` 与 `工作/技术` 都叫「技术」），
+ * 所以提示语由 `moveNoteWithFeedback` 给**完整路径**，用户才能确认自己移到了哪。
+ */
+async function pickMoveTarget(note: Note): Promise<void> {
+  const from = note.folderId ?? null;
+  const choice = await askFolder({
+    title: "移动到…",
+    message: `把「${note.title}」移到哪个文件夹？`,
+    choices: folderChoiceList(from),
+    value: from,
+    confirmLabel: "移动",
+    note: "笔记里的图片会跟着一起移动。",
+  });
+  // `null` = 取消（不是「移到根目录」——根目录是候选项里那个 `id: null` 的项）。
+  if (!choice) return;
+  await moveNoteWithFeedback(note.id, choice.id, { announce: true });
+}
+
 interface NoteRowProps {
   note: Note;
   depth: number;
@@ -653,6 +720,12 @@ function NoteRow({
           });
           if (name) renameNote(note.id, name);
         },
+      },
+      {
+        id: "move",
+        label: "移动到…",
+        icon: "move",
+        run: () => void pickMoveTarget(note),
       },
       {
         id: "trash",
@@ -701,7 +774,11 @@ function NoteRow({
       onDrop={(event) => {
         event.preventDefault();
         event.stopPropagation();
-        if (dragPayload?.kind === "note" && dragPayload.id !== note.id) moveNote(dragPayload.id, note.folderId);
+        // 拖到另一篇笔记上 = 拖进它所在的那个目录。走**同一个**带反馈的入口，
+        // 否则同一次移动从菜单走会报「图没跟上」、从拖放走就静默丢图。
+        if (dragPayload?.kind === "note" && dragPayload.id !== note.id) {
+          void moveNoteWithFeedback(dragPayload.id, note.folderId);
+        }
         dragPayload = null;
         setDropTarget?.(null);
       }}
@@ -815,7 +892,7 @@ function StarredNotes({
   );
 }
 
-function TrashList({ library }: { library: LibraryState }): ReactNode {
+function TrashList({ library, onOpen }: { library: LibraryState; onOpen: (id: Id) => void }): ReactNode {
   const notes = Object.values(library.trash).sort((a, b) => (b.trashedAt ?? 0) - (a.trashedAt ?? 0));
   if (!notes.length) {
     return (
@@ -827,7 +904,22 @@ function TrashList({ library }: { library: LibraryState }): ReactNode {
   return (
     <>
       {notes.map((note) => (
-        <div key={note.id} className="tree__row" style={{ paddingLeft: nestedIndent() }} title={note.title}>
+        <div
+          key={note.id}
+          role="button"
+          tabIndex={0}
+          className="tree__row"
+          style={{ paddingLeft: nestedIndent() }}
+          title={note.title}
+          onClick={() => onOpen(note.id)}
+          onKeyDown={(event) => {
+            // The row itself owns Enter/Space; the inner buttons own their own keys.
+            if (event.target !== event.currentTarget) return;
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            onOpen(note.id);
+          }}
+        >
           <span className="tree__caret" />
           <span className="tree__icon">
             <Icon name="note" size={14} />
@@ -839,7 +931,9 @@ function TrashList({ library }: { library: LibraryState }): ReactNode {
               className="icon-btn"
               style={{ width: 20, height: 20 }}
               title="恢复"
-              onClick={() => {
+              onClick={(event) => {
+                // 行本身可点（在编辑器里打开），动作按钮不许把这一下也带上。
+                event.stopPropagation();
                 restoreNote(note.id);
                 notify("已恢复");
               }}
@@ -851,10 +945,12 @@ function TrashList({ library }: { library: LibraryState }): ReactNode {
               className="icon-btn"
               style={{ width: 20, height: 20 }}
               title="彻底删除"
-              onClick={async () => {
+              onClick={async (event) => {
+                event.stopPropagation();
                 const ok = await askConfirm({
                   title: `彻底删除「${note.title}」？`,
-                  message: "此操作不可撤销：笔记、它的历史快照，以及跟笔记走的附件目录（<笔记名>.assets/）都会被删除。",
+                  message:
+                    "此操作不可撤销：笔记、它的历史快照，以及跟笔记走的附件目录（<笔记名>.assets/）都会被删除。",
                   confirmLabel: "彻底删除",
                   danger: true,
                 });

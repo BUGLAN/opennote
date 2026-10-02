@@ -218,6 +218,129 @@
   color: var(--ink-2);
 }
 
+/*
+ * 「保存到」自定义下拉（`InboxPanel.tsx` 的 `SaveToPicker`）。
+ *
+ * 为什么不是原生 `<select>`：落点是**深路径**，原生 `<option>` 的 `title` 在 Windows 上
+ * 根本不显示（列表由操作系统画，DOM 属性够不着），而 200px 宽的下拉里
+ * `读书笔记 / 技术 / 排版 / 深路径` 早就截断了 —— 用户看不到自己要选哪个。
+ * 用户要求「鼠标悬浮上去有预览」，原生控件做不到，所以自己画一个。
+ */
+.save-to {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 触发器：外观与 `.field` 一致（复用同一个类），只补「两端对齐 + 收起箭头」。 */
+.save-to__trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+}
+
+.save-to__trigger.is-open {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.save-to__caret {
+  flex: none;
+  margin-left: auto;
+  color: var(--ink-3);
+  transition: rotate var(--dur-fast) var(--ease);
+}
+
+.save-to__trigger.is-open .save-to__caret {
+  rotate: 180deg;
+}
+
+/* 下拉浮层：`fixed` + 视口坐标（由组件按触发器实测位置给出）。 */
+.save-to__popup {
+  position: fixed;
+  z-index: 70;
+}
+
+/*
+ * 触发器下方空间不够时向上展开（组件算好 `top` 后由这里收上去）。
+ * 预览与列表是同一个 `.save-to__popup` 的子节点，所以整体一起翻，不会脱节。
+ */
+.save-to__popup.is-flipped {
+  translate: 0 -100%;
+}
+
+.save-to__list {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--paper-2);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+  animation: pop var(--dur-fast) var(--ease-out) both;
+}
+
+.save-to__item {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+  text-align: left;
+}
+
+.save-to__item:hover {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+/* 高亮态与 hover 分开：↑/↓ 移动时要看得出高亮在哪一行。 */
+.save-to__item.is-active {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.save-to__item.is-active svg {
+  color: var(--accent);
+}
+
+.save-to__item svg {
+  flex: none;
+  margin-left: auto;
+}
+
+/*
+ * 悬浮预览：完整路径（`--font-mono`，与「目录」一栏同款）。
+ *
+ * 放在列表**下方**而不是覆盖列表项：覆盖会让鼠标底下的那一行消失，用户刚看到的内容
+ * 被自己触发的浮层挡住 —— 悬浮预览必须让**被预览的那一项仍然可见**。
+ *
+ * **它自己不许再截一次**（0.3.4 用户报「悬浮的文字被截断，看不到全部的」）：
+ * 原来这里是 `nowrap + overflow: hidden + text-overflow: ellipsis`，于是「完整路径」
+ * 又被省略号砍了一刀 —— 一个专门用来显示完整值的控件把自己截断了，等于没做。
+ * 现在的规矩：宽度按内容走（`max-content`，上限由组件按「到窗口右边还剩多少」给），
+ * 实在放不下就**换行**，绝不隐藏任何一个字符。
+ */
+.save-to__preview {
+  width: max-content;
+  margin-top: 4px;
+  padding: 5px 8px;
+  background: var(--paper-2);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
 .choice:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -1088,6 +1211,34 @@ mark.hit {
   margin-top: var(--s2);
   font-size: var(--fs-sm);
   color: var(--ink-3);
+}
+
+/*
+ * 「移动到…」目标文件夹选择器（`Overlays.tsx` 的 `FolderDialog`）。
+ *
+ * 0.3.4 用户：「样式我期望能和首页文件夹样式相同」⇒ 行、caret、图标、高亮**直接复用
+ * 左栏的 `.tree__*`**（同一套令牌、同一套交互：点行选中并翻转折叠、点 caret 只折叠），
+ * 可折叠这件事也因此与左栏同一个说法。这里只剩**容器**这一层 —— 弹窗里的树要有
+ * 滚动上限，文件夹多了对话框也不会长过屏幕。新增令牌 0。
+ */
+.folder-picker {
+  max-height: min(46vh, 340px);
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+
+/* 置灰的「当前」目录：为什么点不动写在行内（`tree__meta` 的「当前」两个字），
+   悬浮不再给「可以点」的反馈 —— 否则看起来能选、点了却没反应。 */
+.folder-picker .tree__row.is-dim {
+  cursor: default;
+}
+
+.folder-picker .tree__row.is-dim:hover {
+  background: transparent;
+  color: var(--ink-2);
 }
 
 /* ------------------------------- settings ------------------------------ */

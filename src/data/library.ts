@@ -25,7 +25,7 @@ import { countText, deriveTags, deriveTitle, normalizeEol, splitFrontMatter, str
 import { assetsDirFor, markdownRef } from "../lib/clip/landing";
 import { desktopBridge } from "../desktop/bridge";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
-import type { Folder, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
+import type { Folder, FolderChoice, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
 import { getUi, patchUi } from "./ui";
 import { activeWorkspaceRecord, resolveBackend, setActiveWorkspace, type WorkspaceRecord } from "./workspaces";
 
@@ -800,7 +800,8 @@ async function flushNote(id: Id): Promise<void> {
   // exactly how an existing file used to get emptied (D03).
   const gate = createGuards.get(id);
   if (gate) await gate.catch(() => undefined);
-  const note = libraryStore.get().notes[id];
+  // 回收站里的笔记就地编辑：落盘路径相同（`.opennote/trash/…`），只是条目住在另一个桶。
+  const note = libraryStore.get().notes[id] ?? libraryStore.get().trash[id];
   const target = backend;
   if (!note || !target) {
     await pendingWrites.get(id);
@@ -828,7 +829,7 @@ async function flushNote(id: Id): Promise<void> {
   pendingWrites.set(id, write);
   try {
     await write;
-    if (backend === target && libraryStore.get().notes[id]?.content === note.content) markClean(id);
+    if (backend === target && (libraryStore.get().notes[id] ?? libraryStore.get().trash[id])?.content === note.content) markClean(id);
   } catch (error) {
     reportError(error, "写入笔记失败");
     throw error;
@@ -971,11 +972,16 @@ function replaceExpandedId(oldId: Id, newId: Id): void {
 }
 
 export function updateNoteContent(id: Id, content: string, options: { immediate?: boolean } = {}): void {
-  const previous = libraryStore.get().notes[id];
+  const state = libraryStore.get();
+  // 回收站里的笔记就地编辑：内容写回**它自己的桶**（文件仍在 `.opennote/trash/…`），
+  // 恢复时照旧只是把文件搬回去 —— 编辑不会因为「在回收站里」而丢。
+  const inTrash = Boolean(state.trash[id]);
+  const previous = state.notes[id] ?? state.trash[id];
   if (!previous || previous.content === normalizeEol(content)) return;
   const next = refresh(previous, content);
   next.updatedAt = Date.now();
-  patchNotes((notes) => ({ ...notes, [id]: next }));
+  if (inTrash) setState((prev) => ({ ...prev, trash: { ...prev.trash, [id]: next } }));
+  else patchNotes((notes) => ({ ...notes, [id]: next }));
   markDirty(id);
   invalidateSearchCache(id);
   if (options.immediate) void flushNote(id).catch(() => undefined);
@@ -1085,10 +1091,27 @@ export function setSidebarTab(tab: SidebarTab): void {
   scheduleMeta();
 }
 
-export async function moveNote(id: Id, folderId: Id | null): Promise<void> {
+/**
+ * `moveNote()` 的结果。
+ *
+ * 为什么不是 `void`：搬一篇笔记有**两件事**可能各自成败 —— 笔记文件搬没搬成，以及
+ * 按笔记名派生的附件目录有没有跟着搬。第二件失败时笔记已经在新位置了，正文里的
+ * `./笔记名.assets/x.png` 会指到别处（或者指空），**而界面上没有任何东西说这件事**。
+ * 所以把结果交回调用方，由它决定说什么；拖放那些不看结果的调用方仍然可以忽略它。
+ */
+export interface MoveNoteResult {
+  /** 笔记移动后的实际路径；失败、空操作、或路径其实没变时为 `null`。 */
+  path: Id | null;
+  /** 笔记已就位、但附件目录没能跟过来的原因（有值 = 必须如实告诉用户）。 */
+  assetsWarning: string | null;
+}
+
+const NO_MOVE: MoveNoteResult = { path: null, assetsWarning: null };
+
+export async function moveNote(id: Id, folderId: Id | null): Promise<MoveNoteResult> {
   const note = libraryStore.get().notes[id];
   const target = backend;
-  if (!note || !target || (note.folderId ?? null) === folderId) return;
+  if (!note || !target || (note.folderId ?? null) === folderId) return NO_MOVE;
   const taken = new Set(Object.keys(libraryStore.get().notes));
   taken.delete(id);
   const requested = joinPath(folderId ?? "", baseName(id));
@@ -1096,14 +1119,16 @@ export async function moveNote(id: Id, folderId: Id | null): Promise<void> {
     await flushNote(id);
     const nextPath = await resolveAvailablePath(target, requested, taken, id);
     // Same file, only the folder name differs in casing: it is already there.
-    if (nextPath.toLowerCase() === id.toLowerCase()) return;
+    if (nextPath.toLowerCase() === id.toLowerCase()) return NO_MOVE;
     await target.move(id, nextPath);
     remapIds(id, nextPath);
     await moveHistory(target, id, nextPath);
     // 换目录就是换路径 ⇒ 派生附件目录必须跟着换（否则单篇笔记挪走后正文引用指空）。
-    await moveNoteAssets(target, id, nextPath);
+    const assetsWarning = await moveNoteAssets(target, id, nextPath);
+    return { path: nextPath, assetsWarning };
   } catch (error) {
     reportError(error, "移动笔记失败");
+    return NO_MOVE;
   }
 }
 
@@ -1136,17 +1161,20 @@ export function touchNoteOpened(id: Id): void {
  *   恢复/移动：`assetsDirFor(来源路径)` → `assetsDirFor(目标路径)`
  *
  * 目标已存在 → **绝不静默覆盖**（那是丢图的第二种写法）：如实报告，把原目录留在原地。
+ * 返回值就是那句报告（`null` = 没有异常）；调用方决定它在界面上怎么出现。
  */
-async function moveNoteAssets(target: FileSystemBackend, fromNote: Id, toNote: Id): Promise<void> {
+async function moveNoteAssets(target: FileSystemBackend, fromNote: Id, toNote: Id): Promise<string | null> {
   const from = assetsDirFor(fromNote);
   const to = assetsDirFor(toNote);
-  if (from === to) return;
-  if (!(await target.exists(from))) return;
+  if (from === to) return null;
+  if (!(await target.exists(from))) return null;
   if (await target.exists(to)) {
-    reportError(new Error(`图片目录已存在，未覆盖：${to}`), "图片未随笔记移动");
-    return;
+    const message = `图片目录已存在，未覆盖：${to}`;
+    reportError(new Error(message), "图片未随笔记移动");
+    return message;
   }
   await target.move(from, to);
+  return null;
 }
 
 export async function trashNote(id: Id): Promise<void> {
@@ -1213,6 +1241,16 @@ export async function restoreNote(id: Id): Promise<void> {
       const known = libraryStore.get().folders[ancestor];
       if (!known) patchFolders((folders) => ({ ...folders, [ancestor]: makeFolder(ancestor, Date.now()) }));
       expandFolder(ancestor);
+    }
+    // 这篇笔记正开着时，标签跟着文件走：回收站里打开、恢复后仍停在编辑器里
+    //（条目 id 变了 = 标签里的旧 id 失效，App 会把它当成「没有这篇笔记」而清掉 active）。
+    const ui = getUi();
+    if (ui.tabs.includes(id)) {
+      patchUi({
+        tabs: ui.tabs.map((tab) => (tab === id ? nextPath : tab)),
+        activeId: ui.activeId === id ? nextPath : ui.activeId,
+        lastNoteId: ui.lastNoteId === id ? nextPath : ui.lastNoteId,
+      });
     }
   } catch (error) {
     reportError(error, "恢复失败");
@@ -1517,6 +1555,85 @@ export function folderPathLabel(id: Id | null, folders = libraryStore.get().fold
   return parts.length ? parts.join(" / ") : baseName(id);
 }
 
+/**
+ * 文件夹树的**拍平**形态，给「移动到…」选择器用。
+ *
+ * 顺序与左栏文件树**逐字一致**（深度优先、同层按名字 `localeCompare`）：选择器里第 n 项
+ * 和文件树里第 n 行指向同一个目录。两份各自排序的实现迟早会漂移，用户看到的就是
+ * 「树里在上、选择器里在下」——所以这里复用 `childFolders()`（同一份排序）而不是再排一次。
+ *
+ * `currentFolderId` 那一项标成 `disabled`：把笔记移到它已经在的目录是一次空操作，
+ * 与其让用户白点一次、再由数据层静默 return，不如在界面上就说「你已经在这儿了」。
+ */
+export function folderChoiceList(currentFolderId: Id | null, state = libraryStore.get()): FolderChoice[] {
+  const out: FolderChoice[] = [];
+  const walk = (parentId: Id | null, depth: number): void => {
+    for (const folder of childFolders(state, parentId)) {
+      out.push({
+        id: folder.id,
+        label: folder.name,
+        path: folder.id,
+        depth,
+        disabled: folder.id === currentFolderId,
+      });
+      // 循环父链会让这里无限递归；`folderPath` 有 64 层护栏，这里也按同一个上限截断。
+      if (depth < 64) walk(folder.id, depth + 1);
+    }
+  };
+  walk(null, 0);
+  return [
+    { id: null, label: "笔记本根目录", path: "", depth: 0, disabled: currentFolderId === null },
+    ...out,
+  ];
+}
+
+/**
+ * 「移动到…」选择器树形视图的一个节点：候选项 + 它的孩子。
+ *
+ * 界面层（`Overlays.tsx` 的 `FolderDialog`）拿它画可折叠的树；
+ * 数据层只负责把拍平的候选挂回去，不做任何界面决定。
+ */
+export interface FolderChoiceNode {
+  choice: FolderChoice;
+  children: FolderChoiceNode[];
+}
+
+/**
+ * 把 `folderChoiceList()` 的**拍平 DFS 序**按 `depth` 挂回树形。
+ *
+ * 为什么不从 `folders` 直接重建：候选列表里那些选择器专属的语义（根目录项、
+ * 「置灰当前目录」）唯一的产地是 `folderChoiceList()`，树形只是同一份候选的另一种摆法
+ * —— 从拍平结果重建，两边才不会各长各的。`depth` 在产出侧是逐层 +1 的（见上），
+ * 所以一个按深度弹栈的扫描就足以还原父子。
+ */
+export function folderChoiceTree(choices: FolderChoice[]): FolderChoiceNode[] {
+  const roots: FolderChoiceNode[] = [];
+  const stack: FolderChoiceNode[] = [];
+  for (const choice of choices) {
+    const node: FolderChoiceNode = { choice, children: [] };
+    while (stack.length && stack[stack.length - 1].choice.depth >= choice.depth) stack.pop();
+    (stack.length ? stack[stack.length - 1].children : roots).push(node);
+    stack.push(node);
+  }
+  return roots;
+}
+
+/**
+ * 从根到 `id`（含）的**祖先链**。
+ *
+ * 给选择器在打开时把选中项沿途的分支全部展开：目标藏在收起的分支里，
+ * 用户就看不见「我现在选的到底是哪」。
+ */
+export function folderChoiceTrail(choices: FolderChoice[], id: Id | null): FolderChoice[] {
+  const stack: FolderChoice[] = [];
+  for (const choice of choices) {
+    while (stack.length && stack[stack.length - 1].depth >= choice.depth) stack.pop();
+    stack.push(choice);
+    if (choice.id === id) return [...stack];
+  }
+  return [];
+}
+
 /** Move the keys of an id-keyed map along with a rename/move. */
 function remapKeyed<V>(map: Map<Id, V>, replace: (id: Id) => Id): void {
   for (const [key, value] of [...map]) {
@@ -1626,7 +1743,10 @@ export function toggleFolder(id: Id): void {
 /* ---------------------------------------------------------------------- tabs */
 
 export function openNote(id: Id, options: { activate?: boolean } = {}): void {
-  const note = libraryStore.get().notes[id];
+  // 回收站里的笔记也能「正常打开」（0.3.4 用户：「回收站其实它也只是一个普通的目录，
+  // 就让这个文件正常一样打开就行，也不用给只读」）：它在 `library.trash` 里、
+  // 路径仍是 `.opennote/trash/…`，打开的只是**这个文件**，不是把它恢复成普通笔记。
+  const note = libraryStore.get().notes[id] ?? libraryStore.get().trash[id];
   if (!note) return;
   const ui = getUi();
   const tabs = ui.tabs.includes(id) ? ui.tabs : [...ui.tabs, id];

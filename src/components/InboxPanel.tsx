@@ -20,6 +20,10 @@
  * 0.3.0（`00` §6.14㉜）新增「保存到」选择器：入库前可以改落点，改完仍按同一套优先级
  * 显示最终落点说明句（非法 → 目录不存在 → 正在编辑 → 同网址剪藏过 → 同名另存 → 落点）。
  *
+ * 已入库条目（`committed`）**不走**上面那套说明句：目录与文件名一律以**实际落盘位置**为准
+ * （`state.json` 的 `committedPath`）。用户在「保存到」里改过落点时，信封的 `target.folder`
+ * 还是旧值，照它显示就会出现「写着根目录、笔记其实在子目录」的错话（用户真机报的缺陷）。
+ *
  * 三条硬约束：**没有「恢复」入口**（`discarded` 不进回收站、不可恢复）；错误句与状态文字
  * 一律 `--fs-sm` + `--ink`（`--ink-3` 对比度不足）；成功 toast 由 C1 的 `announce()` 负责
  * （避免 UI-05 出现两份实现），面板只弹**失败** toast。
@@ -30,10 +34,22 @@
  * ③ `跳过这次` = 确认后丢弃这一条（面板不关闭），不再是「关掉面板、条目留在收件箱」；
  * ④ 面板高度固定（`.dialog--tall`，与设置面板同高），切筛选/切条目不再改尺寸、不再闪。
  */
-import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "./Icons";
 import { desktopBridge } from "../desktop/bridge";
 import { folderPathLabel, useLibrary } from "../data/library";
+import type { Folder, Id } from "../data/types";
+import { parentPath } from "../fs/paths";
 import {
   INBOX_FAILED_TTL_MS,
   INBOX_FULL_MESSAGE,
@@ -141,6 +157,35 @@ function safeRequestedPath(folder: string | null, title: string): { path: string
   }
 }
 
+/**
+ * 「保存到」选择器的完整候选项：根目录 + 文件夹树 + **信封里那个可能已不在树上的目录**。
+ *
+ * 最后一项必须留着：`entry.json` 的落点可能指向一个已经被删掉/改名的目录，
+ * 悄悄把它从列表里拿掉等于**吞掉用户的选择**（他会以为落点被改成了别的）。
+ * 值仍是原始字符串，`label` 也照原样显示，用户在界面上看得见「这个目录不在树上了」。
+ *
+ * 抽成纯函数（不是内联在组件里）的唯一原因：原生 `<select>` 换成自定义下拉之后，
+ * 候选项只在**展开时**才渲染，而测试用的是 `renderToStaticMarkup`（首屏、effect 不跑），
+ * 于是「候选项来自文件夹树」这条**逐字契约**再也盖不到。让它可以被直接喂数据来断言，
+ * 比为了测试而把列表默认展开（那会改掉真实交互）要诚实。
+ */
+export function saveToOptionsFor(
+  folders: Record<Id, Folder>,
+  effectiveFolder: string | null,
+): { value: string; label: string }[] {
+  const tree = Object.values(folders)
+    .map((folder) => ({ path: folder.id, label: folderPathLabel(folder.id, folders) }))
+    .sort((left, right) => left.path.localeCompare(right.path, "zh-Hans-CN"));
+  const list = [
+    { value: INBOX_ROOT_VALUE, label: INBOX_ROOT_LABEL },
+    ...tree.map((option) => ({ value: option.path, label: option.label })),
+  ];
+  if (effectiveFolder && !tree.some((option) => option.path === effectiveFolder)) {
+    list.push({ value: effectiveFolder, label: effectiveFolder });
+  }
+  return list;
+}
+
 /** 一条外部剪藏笔记的前像：正文 front-matter 里的 `source` / `captured_at`。 */interface PreviousCapture {
   path: string;
   title: string;
@@ -171,6 +216,233 @@ function findPreviousCapture(
     return { path: note.id, title: note.title, capturedAt: Number.isFinite(parsed) ? parsed : null };
   }
   return null;
+}
+
+/**
+ * 「保存到」选择器：**自定义下拉**，不是原生 `<select>`。
+ *
+ * 为什么不用原生：原生 `<option>` 的 `title` 在 Windows 上不显示（Chromium 的
+ * 下拉列表是操作系统画的，DOM 属性够不着），而落点是**深路径**——
+ * `读书笔记 / 技术 / 排版` 在 200px 宽的下拉里早就截断了，用户看不到自己要选哪个目录。
+ * 用户原话「鼠标悬浮上去有预览」要的正是这个：悬浮时给出**完整路径**。
+ *
+ * 交互（与 `FolderDialog` 同一套键盘语言）：
+ * - 点触发器展开；`Esc` / 点外部 / 选中一项后收起；
+ * - `↑`/`↓` 移动高亮、`Enter` 结算、`Home`/`End` 到首尾；
+ * - 悬浮任意一项 → 该项右侧/下方浮出完整路径（`--font-mono`，与「目录」一栏同款）。
+ *
+ * 无障碍：触发器是 `role="combobox"` + `aria-expanded` + `aria-activedescendant`，
+ * 列表是 `role="listbox"`，每一项 `role="option"` + `aria-selected`。
+ */
+function SaveToPicker({
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  options: { value: string; label: string }[];
+  disabled: boolean;
+  onChange: (value: string) => void;
+}): ReactNode {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(value);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const popupRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 浮层位置（视口坐标）。
+   *
+   * `top` 是**浮层的上边缘**：向下展开时 = 触发器下边缘 + 4px；向上翻时 = 触发器
+   * 上边缘 - 4px（配合 CSS 的 `translateY(-100%)` 把整块收上去，底边正好落在那里）。
+   * 触发器上下两个边缘都要存，只存一个算不出另一个方向。
+   *
+   * `maxWidth` 兜住右边界：浮层比触发器宽（完整路径要一行放得下），贴着窗口右边的
+   * 触发器如果再往右长就会顶出视口。
+   */
+  const [rect, setRect] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    maxWidth: number;
+    flip: boolean;
+  } | null>(null);
+
+  const current = options.find((option) => option.value === value) ?? options[0];
+
+  const place = useCallback(() => {
+    const node = triggerRef.current;
+    if (!node) return;
+    const box = node.getBoundingClientRect();
+    // 触发器下方剩的空间不够列表 + 预览（约 300px）时改成向上展开。
+    const below = window.innerHeight - box.bottom;
+    const flip = below < 300 && box.top > below;
+    // 右侧可用宽度：从触发器左边缘到窗口右边缘（留 12px 呼吸位）。
+    const maxWidth = Math.max(240, window.innerWidth - box.left - 12);
+    setRect({ left: box.left, top: flip ? box.top - 4 : box.bottom + 4, width: box.width, maxWidth, flip });
+  }, []);
+
+  // 展开时定位；展开期间跟着滚动/改尺寸重算（不然浮层会留在原地，和触发器脱开）。
+  useLayoutEffect(() => {
+    if (!open) {
+      setRect(null);
+      return;
+    }
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, place]);
+
+  // 收起时把高亮同步回当前值：下次展开光标落在**已选项**上，而不是上次划过的那一项。
+  useEffect(() => {
+    if (!open) setActive(value);
+  }, [open, value]);
+
+  // 点外部收起。用 `mousedown`（不是 `click`）：`click` 要等鼠标抬起，
+  // 那时下拉已经因为选项的 `onClick` 结算过一次了，会先选中再被外部关闭的时序打架。
+  //
+  // 浮层是**传送门**（挂在 `document.body` 上，见下），所以它**不在** `rootRef` 的子树里：
+  // 只查 `rootRef.contains()` 会把「点选项」当成「点外部」，mousedown 先把下拉关掉、
+  // 选项的 click 就再也到不了 —— 点一下什么都不发生。两个容器都要查。
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (rootRef.current?.contains(target) || popupRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const settle = (next: string) => {
+    setOpen(false);
+    if (next !== value) onChange(next);
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      return;
+    }
+    if (!open) {
+      if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
+        event.preventDefault();
+        setOpen(true);
+      }
+      return;
+    }
+    const index = options.findIndex((option) => option.value === active);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : options.length - 1;
+      setActive(options[(Math.max(index, 0) + step) % options.length].value);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setActive(options[0].value);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      setActive(options[options.length - 1].value);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      settle(active);
+    }
+  };
+
+  /**
+   * 预览给的是**真正的工作区相对路径**（`option.value`），不是列表里的
+   * `folderPathLabel` 写法（`读书笔记 / 技术 / 排版`）—— 后者是为了在窄列表里好读，
+   * 而预览存在的意义恰恰是「把被截断的那个值完整、原样地给出来」。
+   *
+   * 根目录项的 `value` 是空串（它没有路径），所以回落到它的标签。
+   */
+  const activeOption = options.find((option) => option.value === active);
+  const previewPath = active === INBOX_ROOT_VALUE ? INBOX_ROOT_LABEL : (activeOption?.value ?? "");
+
+  return (
+    <div className="save-to" ref={rootRef} onKeyDown={onKeyDown}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={cn("field", "save-to__trigger", open && "is-open")}
+        role="combobox"
+        aria-label="保存到"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        disabled={disabled}
+        onClick={() => setOpen((prev) => !prev)}
+      >
+        <span className="truncate">{current?.label ?? INBOX_ROOT_LABEL}</span>
+        <Icon name="chevronDown" size={13} className="save-to__caret" />
+      </button>
+
+      {/*
+        浮层走**传送门**挂到 `document.body`，不是留在原地 + `position: fixed`。
+        两个原因，缺一不可：
+        ① `.dialog` 带 `animation: pop ... both`，而 `pop` 关键帧写的是 `translate`/`scale`。
+           带 `both` 填充模式时动画结束后 `translate: 0 0; scale: 1` **仍然生效**，于是
+           `.dialog` 成了 `position: fixed` 后代的**包含块** —— `left/top` 不再相对视口，
+           整个浮层被平移了对话框的左上角（用户截图里「下拉框位置不对劲」就是这个）。
+        ② `.dialog { overflow: hidden }` 会裁掉这个包含块里的后代 —— 列表底部的项与
+           「完整路径」预览被切掉（用户说的「悬浮的文字被截断，看不到全部的」）。
+        挂到 body 之后这两个祖先都不在链上，`fixed` 重新相对视口，也不再被裁。
+      */}
+      {open && rect
+        ? createPortal(
+            <div
+              ref={popupRef}
+              className={cn("save-to__popup", rect.flip && "is-flipped")}
+              // `top` 已经由 `place()` 按方向算好（向下 = 触发器下边缘 + 4；向上 = 上边缘 - 4），
+              // 这里只把 `is-flipped` 交给 CSS 去 `translateY(-100%)`，不在两处各算一次。
+              // 列表与触发器**同宽对齐**（下拉的常规约定）；预览允许比它宽，见下。
+              style={{ left: rect.left, top: rect.top, width: rect.width }}
+            >
+              <div className="save-to__list" role="listbox" aria-label="保存到">
+                {options.map((option) => {
+                  const selected = option.value === value;
+                  const activeItem = option.value === active;
+                  return (
+                    <button
+                      key={option.value || "\u0000root"}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      className={cn("save-to__item", activeItem && "is-active")}
+                      onClick={() => settle(option.value)}
+                      // 悬浮 = 高亮：`↑/↓` 与鼠标走同一套「当前项」，预览跟着它走。
+                      onMouseEnter={() => setActive(option.value)}
+                    >
+                      <span className="truncate">{option.label}</span>
+                      {selected ? <Icon name="check" size={13} /> : null}
+                    </button>
+                  );
+                })}
+              </div>
+              {/* 预览：完整路径，贴在列表**下方**（不是盖在列表项上 —— 浮层挡住鼠标底下
+                  那一行，等于用户刚看到的内容被自己触发的预览吃掉）。
+                  允许比列表宽（`width: max-content`，上限 = 到窗口右边还剩多少）：
+                  预览的全部意义就是**把被截断的那个值完整给出来**，所以它宁可长一点，
+                  也不许自己再截一次。真放不下时才换行（CSS 的 `overflow-wrap`）。 */}
+              <div
+                className="save-to__preview"
+                role="presentation"
+                title={previewPath}
+                style={{ maxWidth: rect.maxWidth }}
+              >
+                {previewPath}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+    </div>
+  );
 }
 
 export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPanelProps): ReactNode {
@@ -227,30 +499,40 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
   /* ---------------------------- 落点与说明句 ---------------------------- */
 
   /**
-   * 最终落点目录：用户在这次会话里选过的以选中值为准，否则沿用信封的 `target.folder`。
-   * `null` = 工作区根目录（和信封 `target.folder: null` 同义）。
+   * 最终落点目录。
+   *
+   * - **已入库**条目以**实际落盘位置**为准（`state.json` 的 `committedPath`，视图里是
+   *   `entry.notePath`）。为什么不能读信封：用户在「保存到」里改过落点时，改的是**这次入库的
+   *   动作**，`entry.json` 的 `target.folder` 仍是信封原值（通常是 `null` = 根目录）——
+   *   拿它显示就会出现「写着根目录、笔记其实在子目录」的错话。
+   * - 未入库条目：用户在这次会话里选过的以选中值为准，否则沿用信封的 `target.folder`。
+   *   `null` = 工作区根目录（和信封 `target.folder: null` 同义）。
    */
   const effectiveFolder = useMemo(() => {
     if (!entry) return null;
+    if (entry.status === "committed" && entry.notePath) return parentPath(entry.notePath) || null;
     if (folderPick && folderPick.id === entry.id) return folderPick.folder;
     return entry.targetFolder;
-  }, [entry?.id, entry?.targetFolder, folderPick]);
+  }, [entry?.id, entry?.status, entry?.notePath, entry?.targetFolder, folderPick]);
 
-  /** 「保存到」下拉的候选项：根目录 + 既有文件夹树（值 = 文件夹的工作区相对路径）。 */
-  const folderOptions = useMemo(() => {
-    return Object.values(library.folders)
-      .map((folder) => ({ path: folder.id, label: folderPathLabel(folder.id, library.folders) }))
-      .sort((left, right) => left.path.localeCompare(right.path, "zh-Hans-CN"));
-  }, [library.folders]);
+  const saveToOptions = useMemo(
+    () => saveToOptionsFor(library.folders, effectiveFolder),
+    [library.folders, effectiveFolder],
+  );
 
   const landing = useMemo(() => {
     if (!entry) return null;
+    // 已入库：文件名也以**实际落盘路径**为准 —— 实际文件名可能带 ` 2` 后缀、目录也可能不是
+    // 信封里那个；再按「将要发生什么」推算一遍只会和事实打架。
+    if (entry.status === "committed" && entry.notePath) {
+      return { path: entry.notePath, illegal: false, folderMissing: false, sameName: false, editing: false };
+    }
     const requested = safeRequestedPath(effectiveFolder, entry.title || "无标题");
     const folderMissing = !requested.illegal && effectiveFolder !== null && !(effectiveFolder in library.folders);
     const sameName = requested.path in library.notes;
     const editing = Object.values(library.notes).some((note) => note.id === requested.path && library.dirty[note.id]);
     return { path: requested.path, illegal: requested.illegal, folderMissing, sameName, editing };
-  }, [entry?.id, effectiveFolder, entry?.title, library.folders, library.notes, library.dirty]);
+  }, [entry?.id, entry?.status, entry?.notePath, effectiveFolder, entry?.title, library.folders, library.notes, library.dirty]);
 
   const previous = useMemo(() => {
     if (!entry || !entry.sourceUrl) return null;
@@ -261,6 +543,9 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
   const hint = useMemo(() => {
     if (!entry || !landing) return null;
     if (entry.status === "failed") return null;
+    // 已入库条目不再是「将要发生什么」的问题：落点与文件名已经显示**实际结果**，
+    // 再补一句将来时（「入库到…」/「入库时会另存为《… 2》」）只会和事实自相矛盾。
+    if (entry.status === "committed") return null;
     if (landing.illegal) return inboxFailureMessage("IMP-4008");
     if (landing.folderMissing) return `目标目录「${effectiveFolder}」不存在，入库时会存到根目录。`;
     if (landing.editing) return "这篇笔记正在编辑，不能覆盖；可以追加或另存为新笔记。";
@@ -493,9 +778,10 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
       <div className="scrim" onMouseDown={onClose} />
       <div
         ref={dialogRef}
-        // 宽度仍随「有没有列表」走；高度固定（`.dialog--tall`，与设置面板同高）——
-        // 切筛选、切条目、筛选后无结果都不再改面板尺寸（0.3.3 用户要求 #4）。
-        className={cn("dialog", "dialog--tall", showList && "dialog--wide")}
+        // 宽度**固定**（0.3.4 用户要求）：以前是 `showList && "dialog--wide"`，于是
+        // 「空态 560px / 有列表 760px」两档，打开面板、丢弃最后一条、清空收件箱都会让
+        // 整个对话框横向跳一次。高度早已固定（`.dialog--tall`），宽度现在也固定。
+        className={cn("dialog", "dialog--tall", "dialog--wide")}
         role="dialog"
         aria-modal="true"
         aria-label="导入收件箱"
@@ -612,26 +898,12 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
                 {isCommitted ? null : (
                   <div className="inbox__save-to">
                     <span>保存到</span>
-                    <select
-                      className="field"
-                      aria-label="保存到"
+                    <SaveToPicker
                       value={effectiveFolder ?? INBOX_ROOT_VALUE}
+                      options={saveToOptions}
                       disabled={committing}
-                      onChange={(event) =>
-                        entry ? setFolderPick({ id: entry.id, folder: event.target.value || null }) : undefined
-                      }
-                    >
-                      <option value={INBOX_ROOT_VALUE}>{INBOX_ROOT_LABEL}</option>
-                      {folderOptions.map((option) => (
-                        <option key={option.path} value={option.path}>
-                          {option.label}
-                        </option>
-                      ))}
-                      {/* 信封里的目录可能已经不在树上了：原样留着，别把用户的选择悄悄吞掉。 */}
-                      {effectiveFolder && !folderOptions.some((option) => option.path === effectiveFolder) ? (
-                        <option value={effectiveFolder}>{effectiveFolder}</option>
-                      ) : null}
-                    </select>
+                      onChange={(next) => (entry ? setFolderPick({ id: entry.id, folder: next || null }) : undefined)}
+                    />
                   </div>
                 )}
                 <dl className="inbox__dl">
