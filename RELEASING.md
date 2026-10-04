@@ -113,6 +113,14 @@ SHA256SUMS → 存 Actions artifact → 建/更新 GitHub Release（`--generate-
    （`indexOf("\n}\n")`）就永远匹配不到 → CI 扩展单测必红而本地全绿（本地工作区一直是 LF）。
    排查手法：用 `git worktree add` 造一个全新检出（会吃 autocrlf），本地就能复现 CI 的红。
    **删了 `.gitattributes` 这类「本地绿、CI 红」会复发。**
+9. **pnpm 11 全新安装不跑 electron 的 postinstall（v0.4.0 第二次 CI 发布踩过）**：
+   `pnpm install --frozen-lockfile` 在干净环境（CI runner、全新 clone）不执行 electron 的
+   `install.js` —— `allowBuilds: electron: true` 写了不跑、`sideEffectsCache: false` 不跑、
+   去掉 `--frozen-lockfile` 也不跑（pnpm 11.21.0 实测；本机不犯是因为旧安装时代 dist 已生成）。
+   后果是 `node_modules/electron/dist` 缺失，electron-builder 以
+   `The specified electronDist does not exist` 秒败。修法：[release.yml](.github/workflows/release.yml)
+   在 install 后显式 `node node_modules/electron/install.js`（幂等）。
+   本地全新 clone 后想手动补：跑同一条命令即可。
 
 ## 7. 回滚
 

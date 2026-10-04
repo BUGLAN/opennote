@@ -61,6 +61,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # pnpm 11（11.21.0 实测）全新安装时不会执行 electron 的 postinstall
+      # （allowBuilds: electron: true 写了也不跑，关 sideEffectsCache、去掉 --frozen-lockfile 都不跑），
+      # 于是 node_modules/electron/dist 缺失，electron-builder.yml 的 electronDist 指空，
+      # 「打包 Windows 免安装 zip」会以
+      #   The specified electronDist does not exist: ...\node_modules\electron\dist
+      # 秒败。这里手动执行 electron 自带的同一条安装脚本（幂等，zip 走它自己的缓存）。
+      # 详见 RELEASING.md「已知坑」。
+      - name: Electron 二进制就位（pnpm 11 不跑它的 postinstall，实测）
+        run: node node_modules/electron/install.js
+
       - name: 门禁：tag / 版本号 / CHANGELOG 三者一致
         run: node scripts/release-version.mjs check --tag "$env:TAG"
 

@@ -16,6 +16,10 @@
   windows-latest runner 的 `core.autocrlf=true` 把检出源码改写成 CRLF，
   `clip-web-stage.test.mjs` 的源码文本断言（`indexOf("\n}\n")`）在 CRLF 下永远匹配不到。
   已加 `.gitattributes` 统一 LF（png/ico 显式 binary），并把该坑记入 [RELEASING.md](RELEASING.md) §6。
+- CI 打包秒败 `The specified electronDist does not exist`：pnpm 11 全新安装不执行 electron 的
+  postinstall（`allowBuilds: true` 也不跑，pnpm 11.21.0 实测），`node_modules/electron/dist` 缺失。
+  [release.yml](.github/workflows/release.yml) 在 install 后显式跑
+  `node node_modules/electron/install.js`，坑记入 [RELEASING.md](RELEASING.md) §6。
 
 ## [0.4.0] - 2026-10-01
 
