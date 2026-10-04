@@ -407,11 +407,22 @@ components:
     backgroundColor: "{colors.ink}"
     textColor: "{colors.paper}"
     rounded: "{rounded.pill}"
-    maxWidth: 420px
+    maxWidth: "min(420px, 100vw - 32px)"
     padding: "8px 14px"
     typography: "{typography.fs-md}"
     boxShadow: "{effects.shadow-2}"
     animation: "rise 220ms {motion.ease-out} both"
+  toast-msg:
+    selector: ".toast__msg"
+    note: "min-width:0 + 溢出三件套，消息恒单行省略。标题过长尾部截断，药丸不许长成两行板砖"
+  toast-body:
+    selector: ".toast__body"
+    note: "仅次级说明存在时（撤销降级）：列向包住 .toast__msg + .toast__sub，gap 2px"
+  toast-sub:
+    selector: ".toast__sub"
+    typography: "{typography.fs-xs}"
+    opacity: 0.78
+    note: "降级说明小字行，同样单行省略。小字出现即代表撤销力度变弱，属必须告知的语义差别"
   toast-danger:
     backgroundColor: "{colors.accent}"
     textColor: "{colors.accent-ink}"
@@ -1279,9 +1290,11 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 
 | 组件 | 类名 | 关键值 |
 | --- | --- | --- |
-| 提示 | `.toast`（容器 `.toast-root`） | `--ink` 底 + `--paper` 字 + **`--radius: 99px` 药丸** + `--shadow-2`；`max-width: 420px`；`padding: 8px 14px`；`--fs-md`；`rise 220ms` |
+| 提示 | `.toast`（容器 `.toast-root`） | `--ink` 底 + `--paper` 字 + **`--radius: 99px` 药丸** + `--shadow-2`；`max-width: min(420px, 100vw - 32px)`；`padding: 8px 14px`；`--fs-md`；`rise 220ms` |
 | 危险提示 | `.toast--danger` | `--accent` 底 + `--accent-ink` 字 |
-| 提示动作 | `.toast__action` | 下划线文字按钮，`text-underline-offset: 2px`，**必须自己 `pointer-events: auto`** |
+| 提示消息 | `.toast__msg` | `min-width: 0` + 溢出三件套，**恒单行省略**——长标题截断尾部，药丸不许换行长成两行板砖（行模板三件套，见 §列表与行） |
+| 提示次级说明 | `.toast__body` + `.toast__sub` | 仅有降级说明时出现：列向两段，`--fs-xs` + `opacity .78` + 同样单行省略；主文案保持完整，标题不因降级消失 |
+| 提示动作 | `.toast__action` | 下划线文字按钮，`text-underline-offset: 2px`，**必须自己 `pointer-events: auto`**；**`flex: none` + `white-space: nowrap` 恒宽**——没有这两条，长 CJK 标题会把「撤销」挤成竖排两个字 |
 | 进行中 | `.busy` + `.busy__spinner` | `--ink` 药丸 + 12px 旋转环（`2px currentColor` 边 + 透明顶边，`spin .8s linear infinite`） |
 | 空态（整屏） | `.empty` | `grid; place-items: center` + `--s6` 内边距；内部 `.empty__inner`（`max-width: 420px` 居中，`rise 460ms`） |
 | 空态（面板内） | `.tree__empty` / `.inbox__empty` | `--ink-3` + `--fs-sm` + `line-height: 1.7`，居中（定高面板里用 `flex: 1` + `justify-content: center`，不要贴顶） |

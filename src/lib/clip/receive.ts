@@ -527,7 +527,9 @@ function skippedReceipt(envelope: ImportEnvelope, entry: ImportIndexEntry | null
 }
 
 function clipMessage(envelope: ImportEnvelope): string {
-  return envelope.source.url ? `已从网页剪藏：${envelope.title}` : `已导入笔记：${envelope.title}`;
+  // 冻结文案（01 号 §6.2 / 03 号 UI-05 文案表，逐字带句号）：网页通道「已从网页剪藏」，
+  // CLI / AI 等无来源通道「已导入」。前缀与句号不再自由发挥。
+  return envelope.source.url ? `已从网页剪藏：${envelope.title}。` : `已导入：${envelope.title}。`;
 }
 
 /* ============================== 落盘：新建 ============================== */
@@ -666,7 +668,7 @@ async function appendTo(
     revertible: Boolean(preimage),
     preimage,
     assets: assets.paths,
-    message: `已追加到《${target.entry?.title || baseName(stripExtension(path))}》`,
+    message: `已把新片段追加到《${target.entry?.title || baseName(stripExtension(path))}》。`,
   };
   if (preimage) receipt.undoSeconds = UNDO_WINDOW_MS / 1000;
   await indexImport(backend, envelope, receipt, hashes, "appended");
@@ -1087,8 +1089,8 @@ async function logOnly(backend: FileSystemBackend, envelope: ImportEnvelope, op:
  * 入库后的 toast（契约 §6.4「已从网页剪藏：xxx · 撤销」）。
  * `deduped` / `duplicate` / `skipped` / `pending` 一律静默（客户端内联文案、收件箱面板自己说）。
  *
- * 不可回退时**不许**承诺「撤销后恢复原样」（00 号 §6.7④）：文案换成降级说法，动作按钮也换成
- * 「移入回收站」，但仍然显式给足 10 秒窗口。
+ * 不可回退时**不许**承诺「撤销后恢复原样」（00 号 §6.7④）：主文案照旧、降级说明放进 `detail`
+ * 小字行（03 号 UI-05 补充），动作按钮换成「移入回收站」，但仍然显式给足 10 秒窗口。
  */
 function announce(receipt: ImportReceipt): void {
   if (!notificationsEnabled || !receipt.path) return;
@@ -1098,14 +1100,15 @@ function announce(receipt: ImportReceipt): void {
       void undoImport(receipt);
     },
   };
-  const message = receipt.revertible
-    ? receipt.message
-    : // 现在只有 append 会出现 revertible === false；其余状态走这条防御分支，同样不能撒谎。
-      receipt.status === "appended"
+  // 降级说明独立成小字行（03 号 UI-05 补充）：主文案保持完整可读——标题不能因为降级而消失，
+  // 用户得知道撤的是哪条。小字出现即代表「撤销的力度比你想的弱」，属必须告知的语义差别。
+  const detail = receipt.revertible
+    ? undefined
+    : receipt.status === "appended"
       ? "内容已合并进已有笔记，撤销会把整篇移入回收站。"
       : "这次导入没有留下可回退的前像，撤销会把笔记移入回收站。";
   // 撤销窗口 10 秒，**必须显式传 duration**：`notify()` 对 action 分支默认 6000ms。
-  notify(message, { action, duration: UNDO_WINDOW_MS });
+  notify(receipt.message, { action, detail, duration: UNDO_WINDOW_MS });
 }
 
 /* ================================ 撤销 ================================ */

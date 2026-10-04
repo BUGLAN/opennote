@@ -495,7 +495,19 @@ export function Toasts(): ReactNode {
     <div className="toast-root">
       {toasts.map((toast) => (
         <div key={toast.id} className={cn("toast", toast.kind === "danger" && "toast--danger")} role="status">
-          <span>{toast.message}</span>
+          {/*
+           * 消息恒单行（.toast__msg 省略三件套），动作按钮恒宽（.toast__action 的 flex:none）——
+           * 长标题不会再把药丸撑成两行板砖，也不会把「撤销」挤成竖排两个字。
+           * detail 存在时包一层 .toast__body，主文案 + 次级说明小字两段（仅撤销降级场景）。
+           */}
+          {toast.detail ? (
+            <span className="toast__body">
+              <span className="toast__msg">{toast.message}</span>
+              <span className="toast__sub">{toast.detail}</span>
+            </span>
+          ) : (
+            <span className="toast__msg">{toast.message}</span>
+          )}
           {toast.action ? (
             <button
               type="button"

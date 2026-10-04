@@ -148,7 +148,7 @@ describe("L2 接收端 · 新建落盘（契约 §3）", () => {
     expect(receipt.tags).toEqual(["剪藏"]);
     expect(receipt.warnings).toEqual([]);
     expect(receipt.inboxId).toBeNull();
-    expect(receipt.message).toBe("已从网页剪藏：测试标题");
+    expect(receipt.message).toBe("已从网页剪藏：测试标题。");
 
     const text = testBackend.text("剪藏/技术/测试标题.md");
     expect(text).not.toBeNull();
@@ -847,11 +847,12 @@ describe("L2 接收端 · 入库 toast（UI-05 / 00 号 §6.7④）", () => {
     return { delays };
   }
 
-  it("成功 toast = 「已从网页剪藏：标题」+ 撤销动作 + 显式 10 秒窗口", async () => {
+  it("成功 toast = 「已从网页剪藏：标题。」+ 撤销动作 + 显式 10 秒窗口", async () => {
     const { delays } = await withToasts(async () => {
       await receiveEnvelope(raw({ importId: ID1 }));
       const toast = toastStore.get().at(-1);
-      expect(toast?.message).toBe("已从网页剪藏：测试标题");
+      expect(toast?.message).toBe("已从网页剪藏：测试标题。");
+      expect(toast?.detail).toBeUndefined();
       expect(toast?.action?.label).toBe("撤销");
       expect(toast?.kind).toBe("info");
     });
@@ -859,7 +860,7 @@ describe("L2 接收端 · 入库 toast（UI-05 / 00 号 §6.7④）", () => {
     expect(delays).toContain(10_000);
   });
 
-  it("不可回退时换成降级文案与「移入回收站」动作，绝不承诺恢复原样", async () => {
+  it("不可回退时主文案照旧、降级说明进 detail 小字行，动作换成「移入回收站」", async () => {
     await receiveEnvelope(raw({ importId: ID1, body: "第一段" }));
     testBackend.denyWrite.add(".opennote/import-preimages");
     const { delays } = await withToasts(async () => {
@@ -868,7 +869,9 @@ describe("L2 接收端 · 入库 toast（UI-05 / 00 号 §6.7④）", () => {
       );
       expect(receipt.revertible).toBe(false);
       const toast = toastStore.get().at(-1);
-      expect(toast?.message).toBe("内容已合并进已有笔记，撤销会把整篇移入回收站。");
+      // 标题不能因为降级而消失：主文案保持完整，降级说明独立成小字行（UI-05 补充）。
+      expect(toast?.message).toBe("已把新片段追加到《测试标题》。");
+      expect(toast?.detail).toBe("内容已合并进已有笔记，撤销会把整篇移入回收站。");
       expect(toast?.action?.label).toBe("移入回收站");
     });
     expect(delays).toContain(10_000);

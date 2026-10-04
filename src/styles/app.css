@@ -1722,7 +1722,8 @@ mark.hit {
   display: flex;
   align-items: center;
   gap: var(--s2);
-  max-width: 420px;
+  /* 32px 边距护栏沿用对话框的宽度惯例：桌面端 420px 封顶不变，PWA 窄窗口不横向溢出。 */
+  max-width: min(420px, calc(100vw - 32px));
   padding: 8px 14px;
   border-radius: 99px;
   background: var(--ink);
@@ -1730,6 +1731,35 @@ mark.hit {
   font-size: var(--fs-md);
   box-shadow: var(--shadow-2);
   animation: rise var(--dur) var(--ease-out) both;
+}
+
+/*
+ * 消息恒单行：min-width:0 打开 flex 收缩闸门，三件套负责省略（DESIGN.md §列表与行的
+ * 「共通的实现约定」）。标题过长尾部省略——UI-05 的定位是「极短、可撤销、不抢焦点」，
+ * 单行是它的形状；过期后仍有 FR-27 的回收站兜底，省略不损失可恢复性。
+ */
+.toast__msg {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 仅有次级说明时（撤销降级）包住主文案 + 小字，动作按钮仍然垂直居中在最右。 */
+.toast__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.toast__sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  opacity: 0.78;
 }
 
 .toast--danger {
@@ -1753,6 +1783,12 @@ mark.hit {
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
+  /*
+   * 动作恒宽：两个汉字的按钮不参与 flex 收缩、不在字间换行。
+   * 没有这两条时，长 CJK 标题会把按钮压到一个字宽，「撤销」被挤成竖排的「撤 / 销」。
+   */
+  flex: none;
+  white-space: nowrap;
 }
 
 /* ---------------------------- 导入收件箱 (UI-03) ------------------------ */
