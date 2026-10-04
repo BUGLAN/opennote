@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="night" data-accent="seal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设计稿 · 06 入库提示修复原型（UI-05 修订 · 仅设计）</title>
+<style>
+/* ── 令牌：逐字复制自 src/styles/tokens.css（截至撰写时，与 04 稿同一份） ── */
+:root{
+  --radius-sm:5px;--radius:8px;--radius-lg:14px;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --ease:cubic-bezier(0.22,0.61,0.36,1);--ease-out:cubic-bezier(0.16,1,0.3,1);
+  --dur-fast:120ms;--dur:220ms;--dur-slow:460ms;
+  --font-ui:"Figtree Variable","Figtree",system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --font-serif:"Newsreader Variable","Newsreader","Iowan Old Style",Georgia,"Songti SC","Noto Serif SC","Source Han Serif SC","SimSun",serif;
+  --font-display:"Fraunces Variable","Fraunces","Newsreader Variable",Georgia,"Songti SC",serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono",ui-monospace,"Cascadia Code",Consolas,"Liberation Mono",monospace;
+  --fs-xs:11.5px;--fs-sm:12.5px;--fs-md:13.5px;--fs-lg:15px;--tracking-wide:0.08em;
+}
+:root,[data-theme="paper"]{--paper:#fbf8f3;--paper-2:#fffdf9;--paper-3:#f2ece1;--paper-4:#e9e1d3;--ink:#221d17;--ink-2:#5c5347;--ink-3:#97897a;--rule:#e8dfd1;--rule-strong:#d7cbb8;--code-bg:#f4eee4;--sel:rgba(178,58,46,.16);--shadow-c:52 39 22;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.28);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.36),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.035;color-scheme:light}
+[data-theme="celadon"]{--paper:#f4f7f5;--paper-2:#fbfdfc;--paper-3:#e8efec;--paper-4:#dde7e2;--ink:#17221f;--ink-2:#4c5c57;--ink-3:#86968f;--rule:#dce5e1;--rule-strong:#c6d3cd;--code-bg:#eaf0ed;--sel:rgba(47,111,94,.16);--shadow-c:22 44 38;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.06);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.1),0 12px 28px -18px rgb(var(--shadow-c)/.26);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.34),0 2px 8px -4px rgb(var(--shadow-c)/.12);--grain:.03;color-scheme:light}
+[data-theme="sepia"]{--paper:#faf3e6;--paper-2:#fffbf3;--paper-3:#f1e6d2;--paper-4:#e6d8bf;--ink:#2a2118;--ink-2:#6a5a45;--ink-3:#9d8a70;--rule:#e7d9c0;--rule-strong:#d3c1a2;--code-bg:#f3e9d8;--sel:rgba(168,100,42,.18);--shadow-c:60 44 20;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.07);--shadow-2:0 2px 6px -2px rgb(var(--shadow-c)/.12),0 12px 28px -18px rgb(var(--shadow-c)/.3);--shadow-3:0 24px 60px -28px rgb(var(--shadow-c)/.38),0 2px 8px -4px rgb(var(--shadow-c)/.14);--grain:.045;color-scheme:light}
+[data-theme="night"]{--paper:#14120f;--paper-2:#1c1915;--paper-3:#262119;--paper-4:#322b21;--ink:#eae3d7;--ink-2:#b0a796;--ink-3:#7d7466;--rule:#2e2820;--rule-strong:#413930;--code-bg:#1f1b15;--sel:rgba(224,102,79,.24);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.05;color-scheme:dark}
+[data-theme="ink"]{--paper:#0e1113;--paper-2:#151a1d;--paper-3:#1d2428;--paper-4:#273034;--ink:#dfe6e6;--ink-2:#9faeae;--ink-3:#6e7d7e;--rule:#232b2f;--rule-strong:#333d42;--code-bg:#161c20;--sel:rgba(79,181,154,.22);--shadow-c:0 0 0;--shadow-1:0 1px 2px rgb(var(--shadow-c)/.4);--shadow-2:0 2px 8px -2px rgb(var(--shadow-c)/.5),0 16px 34px -20px rgb(var(--shadow-c)/.7);--shadow-3:0 26px 64px -28px rgb(var(--shadow-c)/.8),0 2px 10px -4px rgb(var(--shadow-c)/.6);--grain:.04;color-scheme:dark}
+:root,[data-accent="seal"]{--accent:#b23a2e;--accent-ink:#ffffff;--accent-soft:rgba(178,58,46,.12);--accent-line:rgba(178,58,46,.34)}
+[data-theme="night"][data-accent="seal"],[data-theme="ink"][data-accent="seal"]{--accent:#e0664f;--accent-ink:#1a0f0c;--accent-soft:rgba(224,102,79,.16);--accent-line:rgba(224,102,79,.4)}
+[data-accent="indigo"]{--accent:#34558b;--accent-ink:#ffffff;--accent-soft:rgba(52,85,139,.12);--accent-line:rgba(52,85,139,.34)}
+[data-theme="night"][data-accent="indigo"],[data-theme="ink"][data-accent="indigo"]{--accent:#7ea6e0;--accent-ink:#0b1420;--accent-soft:rgba(126,166,224,.16);--accent-line:rgba(126,166,224,.4)}
+[data-accent="pine"]{--accent:#2f6f5e;--accent-ink:#ffffff;--accent-soft:rgba(47,111,94,.12);--accent-line:rgba(47,111,94,.34)}
+[data-theme="night"][data-accent="pine"],[data-theme="ink"][data-accent="pine"]{--accent:#4fb59a;--accent-ink:#08130f;--accent-soft:rgba(79,181,154,.16);--accent-line:rgba(79,181,154,.4)}
+[data-accent="gamboge"]{--accent:#9a6b12;--accent-ink:#ffffff;--accent-soft:rgba(154,107,18,.14);--accent-line:rgba(154,107,18,.36)}
+[data-theme="night"][data-accent="gamboge"],[data-theme="ink"][data-accent="gamboge"]{--accent:#d9a537;--accent-ink:#171004;--accent-soft:rgba(217,165,55,.16);--accent-line:rgba(217,165,55,.4)}
+
+/* ── base.css 公共层（逐字复制） ─────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-ui);font-size:var(--fs-md);line-height:1.6;-webkit-font-smoothing:antialiased;font-synthesis-weight:none}
+body::before{content:"";position:fixed;inset:0;z-index:9999;pointer-events:none;opacity:var(--grain);mix-blend-mode:multiply;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+[data-theme="night"] body::before,[data-theme="ink"] body::before{mix-blend-mode:overlay}
+h1,h2,h3,h4,p{margin:0}
+button,input{font:inherit;color:inherit;background:none;border:none;margin:0}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+::selection{background:var(--sel)}
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px;border-radius:3px}
+*{scrollbar-width:thin;scrollbar-color:var(--rule-strong) transparent}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);height:28px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--rule-strong);color:var(--ink);background:var(--paper-2);font-size:var(--fs-md);transition:background var(--dur-fast) var(--ease)}
+.btn:hover{background:var(--paper-3)}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
+
+/* ── 设计稿外壳（与 04 稿同一套） ───────────────────────────────────── */
+.mk-bar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;padding:8px var(--s4);border-bottom:1px solid var(--rule);background:color-mix(in srgb,var(--paper-2) 86%,var(--paper))}
+.mk-bar__title{font-family:var(--font-display);font-size:14px;font-weight:600;margin-right:auto}
+.mk-bar__title small{display:block;font-family:var(--font-ui);font-size:var(--fs-xs);font-weight:400;color:var(--ink-3);letter-spacing:var(--tracking-wide)}
+.mk-nav{display:flex;gap:2px;flex-wrap:wrap}
+.mk-nav a{padding:4px 8px;border-radius:var(--radius-sm);color:var(--ink-2);text-decoration:none;font-size:var(--fs-sm)}
+.mk-nav a:hover{background:var(--paper-3);color:var(--ink)}
+.mk-nav a.is-here{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-group{display:flex;align-items:center;gap:var(--s1);padding:2px;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);background:var(--paper)}
+.mk-group>span{padding:0 6px;font-size:var(--fs-xs);color:var(--ink-3)}
+.mk-chip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 8px;border-radius:4px;color:var(--ink-2);font-size:var(--fs-sm)}
+.mk-chip:hover{background:var(--paper-3)}
+.mk-chip.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mk-chip__dot{width:11px;height:11px;border-radius:3px;box-shadow:inset 0 0 0 1px rgb(0 0 0/.14);flex:none}
+.mk-wrap{max-width:1080px;margin:0 auto;padding:var(--s5) var(--s4) var(--s7)}
+.mk-h1{font-family:var(--font-display);font-size:22px;font-weight:600;letter-spacing:-.015em}
+.mk-badge{display:inline-flex;align-items:center;height:20px;padding:0 9px;margin-left:var(--s2);border-radius:99px;background:var(--accent-soft);color:var(--accent);font-family:var(--font-ui);font-size:var(--fs-xs);letter-spacing:var(--tracking-wide);vertical-align:4px}
+.mk-lede{margin-top:var(--s2);max-width:88ch;color:var(--ink-2);font-size:var(--fs-sm);line-height:1.8}
+.mk-lede b{color:var(--ink);font-weight:600}
+.mk-sec{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--rule)}
+.mk-sec>h2{font-family:var(--font-display);font-size:16px;font-weight:600}
+.mk-sec>p{margin-top:3px;max-width:84ch;color:var(--ink-3);font-size:var(--fs-sm);line-height:1.7}
+.mk-spec{margin-top:var(--s5)}
+.mk-spec__id{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--accent);letter-spacing:var(--tracking-wide)}
+.mk-spec__t{font-weight:600;font-size:var(--fs-md);margin-top:2px}
+.mk-spec__n{margin-top:2px;max-width:88ch;color:var(--ink-3);font-size:var(--fs-xs);line-height:1.7}
+.mk-stage{position:relative;min-height:150px;margin-top:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper);overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--s2);padding:var(--s4)}
+.mk-stage--flush{padding:0}
+.mk-stage__hint{position:absolute;right:10px;bottom:8px;font-size:var(--fs-xs);color:var(--ink-3);font-family:var(--font-mono)}
+.mk-cols{display:flex;gap:var(--s3);flex-wrap:wrap;margin-top:var(--s3)}
+.mk-cols>section{flex:1 1 300px;min-width:0}
+.mk-note{margin-top:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius);background:var(--paper-2);font-size:var(--fs-sm);color:var(--ink-2);line-height:1.75}
+.mk-kv{display:flex;gap:var(--s2);padding:4px 0;border-bottom:1px dashed var(--rule);font-size:var(--fs-sm)}
+.mk-kv:last-child{border-bottom:none}
+.mk-kv b{font-weight:600;min-width:108px;flex:none}
+.mk-kv em{font-style:normal;color:var(--ink-3)}
+.mk-code{margin:var(--s3) 0 0;padding:var(--s3) var(--s4);border:1px solid var(--rule);border-radius:var(--radius);background:var(--code-bg);font-family:var(--font-mono);font-size:var(--fs-xs);line-height:1.8;color:var(--ink-2);overflow-x:auto;white-space:pre}
+.mk-code b{color:var(--accent);font-weight:600}
+
+/* ── 病灶复现：与 app.css:1721-1756 现状逐字一致（类名加 -legacy 隔离） ── */
+/* 关键缺失：消息无省略保护、动作按钮无禁缩 —— 长 CJK 文案在任意字符处可断，
+   两个 flex 子项按内容宽度比例收缩，按钮被压到一个字宽，「撤销」竖排。 */
+.toast-legacy{display:flex;align-items:center;gap:var(--s2);max-width:420px;padding:8px 14px;border-radius:99px;background:var(--ink);color:var(--paper);font-size:var(--fs-md);box-shadow:var(--shadow-2)}
+.toast-legacy span{min-width:auto}
+/* .toast__action 现状逐字（app.css:1740-1756）：无 flex:none、无 nowrap。
+ * 类名用 -legacy 后缀，避免命中本页提案的 .toast__action{flex:none} 规则。 */
+.toast-legacy .toast__act-legacy{pointer-events:auto;appearance:none;border:0;background:transparent;padding:0;font:inherit;color:inherit;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+
+/* ═════════ 提案：UI-05 修复（仅布局，零新令牌；实现轮照抄） ═════════
+ * R1 消息恒单行：min-width:0 打开收缩闸门，三件套负责省略。
+ * R2 动作恒宽：flex:none + nowrap，任何文案长度下按钮不收缩、不换行。
+ * R3 次级说明独立小字行：仅降级撤销出现，主文案保持完整。
+ * R4 药丸几何不动；宽度上限补响应式护栏（沿用对话框 32px 边距惯例）。
+ * R5 颜色零改动：--ink/--paper 反色药丸是全项目反馈语言。
+ * S2 hover 透明度 .78（不加背景块）；S3 focus-visible 焦点环沿用全局。 */
+.toast{display:flex;align-items:center;gap:var(--s2);max-width:min(420px,calc(100vw - 32px));padding:8px 14px;border-radius:99px;background:var(--ink);color:var(--paper);font-size:var(--fs-md);box-shadow:var(--shadow-2);animation:rise var(--dur) var(--ease-out) both}
+.toast__msg{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toast__body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.toast__sub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-xs);line-height:1.5;opacity:.78}
+.toast__action{flex:none;white-space:nowrap;pointer-events:auto;color:inherit;text-decoration:underline;text-underline-offset:2px}
+.toast__action:hover{opacity:.78}
+.toast--danger{background:var(--accent);color:var(--accent-ink)}
+
+/* 反例专用（仅本页展示，不进实现） */
+.toast-x1{display:inline-flex;align-items:center;gap:var(--s2);max-width:420px;padding:8px 14px;border-radius:99px;background:var(--paper-2);border:1px solid var(--rule-strong);color:var(--ink);font-size:var(--fs-md);box-shadow:var(--shadow-1)}
+.toast-x1 .toast__action{color:var(--accent);text-decoration:underline;text-underline-offset:2px;flex:none;white-space:nowrap}
+.toast-x2{display:inline-flex;align-items:center;gap:var(--s2);max-width:420px;padding:8px 14px;border-radius:99px;background:var(--ink);color:var(--paper);font-size:var(--fs-md);box-shadow:var(--shadow-2)}
+.toast-x2 .toast__msg{min-width:0;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+.toast-x2 .toast__action{flex:none;white-space:nowrap;align-self:center;color:inherit;text-decoration:underline;text-underline-offset:2px}
+
+/* ── toast-root 复刻（堆叠场景用） ──────────────────────────────────── */
+.mk-toastroot{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:var(--s2);width:max-content;max-width:calc(100% - 32px)}
+.mk-stage--stack{height:280px}
+</style>
+</head>
+<body>
+
+<div class="mk-bar">
+  <span class="mk-bar__title">06 · 入库提示修复原型<small>UI-05 修订 · 仅设计 · 未进实现</small></span>
+  <nav class="mk-nav" aria-label="设计稿导航">
+    <a href="00-index.html">索引</a><a href="04-toast-undo.html">提示与冲突（原稿）</a><a href="06-toast-undo-fix.html" class="is-here">提示修复原型</a>
+  </nav>
+  <div class="mk-group" role="group" aria-label="配色主题">
+    <span>主题</span>
+    <button class="mk-chip" data-set-theme="paper">素笺</button>
+    <button class="mk-chip" data-set-theme="celadon">青瓷</button>
+    <button class="mk-chip" data-set-theme="sepia">琥珀</button>
+    <button class="mk-chip" data-set-theme="night">夜读</button>
+    <button class="mk-chip" data-set-theme="ink">砚池</button>
+  </div>
+  <div class="mk-group" role="group" aria-label="强调色">
+    <span>强调色</span>
+    <button class="mk-chip" data-set-accent="seal"><i class="mk-chip__dot" style="background:#b23a2e"></i>朱砂</button>
+    <button class="mk-chip" data-set-accent="indigo"><i class="mk-chip__dot" style="background:#34558b"></i>靛青</button>
+    <button class="mk-chip" data-set-accent="pine"><i class="mk-chip__dot" style="background:#2f6f5e"></i>松绿</button>
+    <button class="mk-chip" data-set-accent="gamboge"><i class="mk-chip__dot" style="background:#9a6b12"></i>藤黄</button>
+  </div>
+  <button class="btn" data-toggle-light>切换亮 / 暗</button>
+</div>
+
+<main class="mk-wrap">
+  <h1 class="mk-h1">入库提示修复原型<span class="mk-badge">仅设计 · 未进实现</span></h1>
+  <p class="mk-lede">
+    病灶来自一张夜读主题的截图：入库 toast 的长标题把药丸撑成<b>两行板砖</b>，「撤销」被 flex 挤压成<b>竖排两个字</b>，整块亮色浮在暗页上，看起来像一枚不属于当前主题的外来通知。取色核实：药丸底 <b style="font-family:var(--font-mono)">#eae3d7</b> 就是夜读的 <b style="font-family:var(--font-mono)">--ink</b>——颜色其实一直来自令牌（DESIGN.md 规定的反色药丸），<b>真正坏掉的是布局</b>：消息没有省略保护、动作按钮没有禁缩。本页给出修复设计：四条规则全部落在既有令牌与既有类名上，<b>新增令牌数为 0</b>。默认夜读主题，可用顶部切换器核验 5 套调色板 × 4 套强调色。
+  </p>
+
+  <!-- ═══ §1 病灶 ═══ -->
+  <section class="mk-sec">
+    <h2>一、病灶复现（现状 CSS，逐字）</h2>
+    <p>以下两条 stage 用的是 app.css:1721-1756 的现状规则原样复刻（类名加 -legacy 只为与本页提案隔离），文案即截图原文。</p>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">病灶 A · 按钮被挤竖</div>
+      <div class="mk-spec__t">「撤销」变成竖排的「撤 / 销」</div>
+      <div class="mk-spec__n">.toast 是 max-width:420px 的 flex 容器，消息与按钮都是可收缩子项。CJK 文案在任意两个字符之间都可断行，min-content 只有一个字宽——空间不足时两个子项按内容宽度比例收缩，按钮先被压成一个字宽，再在字间换行。</div>
+      <div class="mk-stage">
+        <div class="toast-legacy" role="status"><span>已导入笔记：ComfyUI 图片内嵌工作流：作者说明摘录（Qwen-Image 2.1 / MiniMax H3）</span><button class="toast__act-legacy">撤销</button></div>
+        <span class="mk-stage__hint">现状 DOM：裸 span + 无保护的 .toast__action</span>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">病灶 B · 长文案板砖</div>
+      <div class="mk-spec__t">两行消息把药丸撑成 56px 的亮色块</div>
+      <div class="mk-spec__n">消息换行后药丸高度翻倍，在夜读主题下是一大块亮色圆角矩形——这正是「看起来没应用主题」的来源。旁边放一条正常单行药丸对照：设计想要的形状一直是下面那条细药丸。</div>
+      <div class="mk-stage">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:var(--s2)">
+          <div class="toast-legacy" role="status"><span>已导入笔记：ComfyUI 图片内嵌工作流：作者说明摘录（Qwen-Image 2.1 / MiniMax H3）</span><button class="toast__act-legacy">撤销</button></div>
+          <div class="toast-legacy" role="status"><span>已完成导入。</span></div>
+        </div>
+        <span class="mk-stage__hint">上：病灶（2 行）· 下：设计本意（1 行）</span>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>颜色没有坏</b>截图取色：页面底 #14120f = 夜读 --paper，药丸底 #eae3d7 = 夜读 --ink，正文标题 #eae3d7 = 夜读 --ink。全部命中令牌，反色药丸是 DESIGN.md §语义状态的明文规定——<em>成功 = 中性墨色药丸</em>。修布局即可，不要动颜色。</div>
+        <div class="mk-kv"><b>病灶 C · 降级文案替换主文案</b>现状 receive.ts 的 announce() 在 revertible=false 时把 message 整句换成「内容已合并进已有笔记，撤销会把整篇移入回收站。」——标题消失，用户不知道撤的是哪条。03 号 UI-05 文案表冻结的写法是「主文案照旧 + 次级说明一行」，本页 §二 R3 按规范纠正。</div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ═══ §2 修复方案 ═══ -->
+  <section class="mk-sec">
+    <h2>二、修复方案（四条规则，全部既有零件）</h2>
+
+    <div class="mk-note">
+      <div class="mk-kv"><b>R1 消息恒单行</b>.toast__msg 加 min-width:0 + 溢出三件套（overflow hidden / text-overflow ellipsis / white-space nowrap）。标题过长尾部省略。与全项目行模板的「文字列三件套」约定一致（DESIGN.md §列表与行）；UI-05 的定位是「极短、可撤销、不抢焦点」，单行就是它的形状。</div>
+      <div class="mk-kv"><b>R2 动作恒宽</b>.toast__action 加 flex:none + white-space:nowrap。两个汉字的按钮宽度恒定，任何文案长度下不再收缩、不再换行——竖排 bug 的一行 CSS 硬修复。</div>
+      <div class="mk-kv"><b>R3 次级说明独立成行</b>只有降级撤销出现：.toast__body 列向包住 .toast__msg + .toast__sub（--fs-xs、opacity .78、同样单行省略），主文案保持「已从网页剪藏：{标题}。」完整可读。小字出现即代表撤销力度变弱，属必须告知的语义差别（UI-05 补充）。</div>
+      <div class="mk-kv"><b>R4 几何一字不动</b>99px 圆角、--shadow-2、rise 220ms --ease-out、padding 8px 14px、--fs-md 全部照旧；max-width 补一条响应式护栏 min(420px, 100vw − 32px)，沿用对话框的 32px 边距惯例——桌面端无感，PWA 窄窗口不再横向溢出。</div>
+      <div class="mk-kv"><b>R5 颜色零改动</b>--ink 底 / --paper 字的反色药丸是全项目反馈语言（.busy / .storage-notice 同构）。换底色会丢掉「一眼认出这是通知」的识别度，也违背 DESIGN.md 的语义状态规定。状态仍旧只用两档：中性墨色药丸 = 成功，强调色药丸 = 失败。</div>
+    </div>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">提案 · 类名与 CSS</div>
+      <div class="mk-spec__t">实现轮照抄（app.css + Overlays.tsx）</div>
+      <div class="mk-code"><b>/* app.css · 仅布局 diff，零新令牌 */</b>
+.toast__msg    { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.toast__body   { display:flex; flex-direction:column; gap:2px; min-width:0; }  /* 仅有次级说明时 */
+.toast__sub    { overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+                 font-size:var(--fs-xs); line-height:1.5; opacity:.78; }
+.toast__action { flex:none; white-space:nowrap; }   <b>/* 竖排硬修复（原规则其余不动） */</b>
+.toast         { max-width:min(420px, calc(100vw - 32px)); }  <b>/* 响应式护栏 */</b>
+
+<b>/* Overlays.tsx · DOM（默认两段 → 三段只有降级撤销） */</b>
+&lt;div class="toast" role="status"&gt;
+  &lt;span class="toast__msg"&gt;{message}&lt;/span&gt;
+  &lt;button class="toast__action" type="button"&gt;{action.label}&lt;/button&gt;
+&lt;/div&gt;
+
+&lt;div class="toast" role="status"&gt;  <b>&lt;!-- canRollback=false 才有第二段 --&gt;</b>
+  &lt;span class="toast__body"&gt;
+    &lt;span class="toast__msg"&gt;已从网页剪藏：《中文排版指北》。&lt;/span&gt;
+    &lt;span class="toast__sub"&gt;内容已合并进已有笔记，撤销会把整篇移入回收站。&lt;/span&gt;
+  &lt;/span&gt;
+  &lt;button class="toast__action" type="button"&gt;撤销&lt;/button&gt;
+&lt;/div&gt;</div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">提案 · 前后对照</div>
+      <div class="mk-spec__t">截图同一条文案，修复前 / 修复后</div>
+      <div class="mk-cols">
+        <section>
+          <div class="mk-stage">
+            <div class="toast-legacy" role="status"><span>已导入笔记：ComfyUI 图片内嵌工作流：作者说明摘录（Qwen-Image 2.1 / MiniMax H3）</span><button class="toast__act-legacy">撤销</button></div>
+            <span class="mk-stage__hint">现状：2 行板砖 + 竖排按钮</span>
+          </div>
+        </section>
+        <section>
+          <div class="mk-stage">
+            <div class="toast" role="status"><span class="toast__msg">已导入笔记：ComfyUI 图片内嵌工作流：作者说明摘录（Qwen-Image 2.1 / MiniMax H3）</span><button class="toast__action" type="button">撤销</button></div>
+            <span class="mk-stage__hint">提案：单行省略 + 恒宽动作</span>
+          </div>
+        </section>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>省略的是标题尾部</b>「已导入笔记：ComfyUI 图片内嵌工作流：作者说明摘…」仍足以辨认是哪一条；撤销窗口只有 10 秒，动作恒在；过期后还有 FR-27 的回收站兜底——省略不损失可恢复性。</div>
+        <div class="mk-kv"><b>为什么不做两行</b>高度在 1↔2 行间跳变，多条堆叠时参差；板砖感仍在。见 §四反例 2。</div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ═══ §3 场景画廊 ═══ -->
+  <section class="mk-sec">
+    <h2>三、场景画廊（提案 DOM，文案逐字取自 03 号 UI-05 冻结表）</h2>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-05 / S1 · 成功五分支 + 降级两段式</div>
+      <div class="mk-spec__t">全部单行；降级才有小字</div>
+      <div class="mk-stage" style="padding-bottom:40px">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:var(--s2)">
+          <div class="toast" role="status"><span class="toast__msg">已导入笔记：ComfyUI 图片内嵌工作流：作者说明摘录（Qwen-Image 2.1 / MiniMax H3）</span><button class="toast__action" type="button">撤销</button></div>
+          <div class="toast" role="status"><span class="toast__msg">已从网页剪藏：《中文排版指北》。</span><button class="toast__action" type="button">撤销</button></div>
+          <div class="toast" role="status"><span class="toast__msg">已保存为《中文排版指北 2》（同名文件已存在，另存为新笔记）。</span><button class="toast__action" type="button">撤销</button></div>
+          <div class="toast" role="status"><span class="toast__msg">已把新片段追加到《中文排版指北》。</span><button class="toast__action" type="button">撤销</button></div>
+          <div class="toast" role="status"><span class="toast__msg">已进入收件箱等待确认：《给中文写作者的排版速查》。</span><button class="toast__action" type="button">去确认</button></div>
+          <div class="toast" role="status"><span class="toast__body"><span class="toast__msg">已从网页剪藏：《中文排版指北》。</span><span class="toast__sub">内容已合并进已有笔记，撤销会把整篇移入回收站。</span></span><button class="toast__action" type="button">撤销</button></div>
+        </div>
+        <span class="mk-stage__hint">带动作 10 秒（FR-25 冻结值）· 动作文字下划线 · hover 透明度 .78</span>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>两档撤销</b>最后一行是 canRollback=false：主文案照旧 + 小字说明降级 + 撤销照常可点（点了是移入回收站）。新建（new）永远是完整回退，不加小字。</div>
+        <div class="mk-kv"><b>文案对齐备案</b>现行 clipMessage 产出「已导入笔记：{title}」（无句号），冻结表是「已导入：{标题}。」——前缀与句号都有出入。属实现轮的文案对齐项，不在本设计轮改（见 §五清单第 7 条）。</div>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-05 / S4 · 危险态</div>
+      <div class="mk-spec__t">失败 = 强调色药丸，同样单行</div>
+      <div class="mk-stage">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:var(--s2)">
+          <div class="toast toast--danger" role="status"><span class="toast__msg">写入笔记失败，磁盘可能已满或没有权限。原内容没有丢失。</span><button class="toast__action" type="button">重试</button></div>
+          <div class="toast" role="status"><span class="toast__msg">撤销时间已过，可到回收站恢复《中文排版指北》。</span></div>
+        </div>
+        <span class="mk-stage__hint">上：.toast--danger + 重试 · 下：无动作过期提示（2600ms）</span>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">UI-05 / S5 · 多条堆叠</div>
+      <div class="mk-spec__t">最多 4 条，各自单行，宽窄参差但按钮齐整</div>
+      <div class="mk-stage mk-stage--stack mk-stage--flush">
+        <div class="mk-toastroot">
+          <div class="toast" role="status"><span class="toast__msg">已导入笔记：ComfyUI 图片内嵌工作流：作者说明摘录（Qwen-Image 2.1 / MiniMax H3）</span><button class="toast__action" type="button">撤销</button></div>
+          <div class="toast" role="status"><span class="toast__msg">已从网页剪藏：《中文排版指北》。</span><button class="toast__action" type="button">撤销</button></div>
+          <div class="toast" role="status"><span class="toast__msg">已完成导入。</span></div>
+          <div class="toast" role="status"><span class="toast__msg">「Rust 异步运行时的调度策略」已移入回收站</span><button class="toast__action" type="button">撤销</button></div>
+        </div>
+        <span class="mk-stage__hint">toast-root · bottom 44px · slice(-4) · 同标题合并（toast.ts 现状不变）</span>
+      </div>
+    </section>
+  </section>
+
+  <!-- ═══ §4 反例 ═══ -->
+  <section class="mk-sec">
+    <h2>四、否决的反例（展示理由，不进实现）</h2>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">反例 1 · 底色跟随纸面</div>
+      <div class="mk-spec__t">--paper-2 底 + --rule-strong 边：「通知」变成「一张纸片」</div>
+      <div class="mk-stage">
+        <div class="toast-x1" role="status"><span class="toast__msg">已从网页剪藏：《中文排版指北》。</span><button class="toast__action" type="button">撤销</button></div>
+        <span class="mk-stage__hint">否决</span>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>否决理由</b>夜读里它需要描边才可见，且与 .dialog / .menu 无法区分；反色药丸的识别度恰恰来自「页面是纸、通知是墨」的反转。强调色语义也不允许再引入第三种表面。</div>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">反例 2 · 允许两行（-webkit-line-clamp:2）</div>
+      <div class="mk-spec__t">多给一行标题：高度跳变 + 板砖感仍在</div>
+      <div class="mk-stage">
+        <div class="toast-x2" role="status"><span class="toast__msg">已导入笔记：ComfyUI 图片内嵌工作流：作者说明摘录（Qwen-Image 2.1 / MiniMax H3）</span><button class="toast__action" type="button">撤销</button></div>
+        <span class="mk-stage__hint">否决</span>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>否决理由</b>同一标题短一则一行、长则两行，堆叠时高度参差；用户感知的「板砖」没有消失，只是矮了一点。降级说明已经用 .toast__sub 承担了「第二行」的正当场景。</div>
+      </div>
+    </section>
+
+    <section class="mk-spec">
+      <div class="mk-spec__id">反例 3 · 动作做成 .btn</div>
+      <div class="mk-spec__t">描边按钮：破坏药丸的单一形状</div>
+      <div class="mk-stage">
+        <div class="toast" role="status"><span class="toast__msg">已从网页剪藏：《中文排版指北》。</span><button class="btn" type="button" style="height:22px;padding:0 8px;font-size:var(--fs-sm)">撤销</button></div>
+        <span class="mk-stage__hint">否决</span>
+      </div>
+      <div class="mk-note">
+        <div class="mk-kv"><b>否决理由</b>UI-05 / S2 明文规定动作「不加背景块，保持药丸的单一形状」；下划线文字 + hover 透明度 .78 是药丸动作的既定手感（.toast__action 原样保留）。</div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ═══ §5 实现清单 ═══ -->
+  <section class="mk-sec">
+    <h2>五、下一轮实现清单（本轮不动代码）</h2>
+    <div class="mk-note">
+      <div class="mk-kv"><b>1 · app.css</b>.toast__action 加 <em>flex:none + white-space:nowrap</em>（竖排硬修复，2 个声明）。</div>
+      <div class="mk-kv"><b>2 · app.css</b>.toast 的 max-width 改 <em>min(420px, calc(100vw - 32px))</em>（响应式护栏）。</div>
+      <div class="mk-kv"><b>3 · app.css</b>新增 .toast__msg / .toast__body / .toast__sub（数值见 §二代码块）。</div>
+      <div class="mk-kv"><b>4 · Overlays.tsx</b>消息 span 加 toast__msg 类；ToastItem 增加 detail?: string 时渲染 .toast__body 两段结构。</div>
+      <div class="mk-kv"><b>5 · toast.ts</b>ToastItem 增加 detail?: string，notify() 透传；kind / duration / slice(-4) 不动。</div>
+      <div class="mk-kv"><b>6 · receive.ts</b>announce() 降级分支从「替换 message」改为「message 照旧 + detail=降级句」，对齐 03 号 UI-05 文案表冻结行（revertible=false 场景）。</div>
+      <div class="mk-kv"><b>7 · 文案对齐</b>clipMessage 的「已导入笔记：{title}」与冻结表「已导入：{标题}。」的前缀 / 句号差异，实现轮一并对齐（测试同调）。</div>
+      <div class="mk-kv"><b>8 · 测试</b>receive.test.ts 现有 message / action / duration 断言不变；补 detail 断言（revertible=false → detail 为降级句、message 保持完整）。</div>
+      <div class="mk-kv"><b>9 · 可访问性</b>role="status" 不变；.toast__sub 随 status 一并朗读；焦点环沿用全局 :focus-visible（夜读下 --accent-line 是提亮档，墨底上可见）；打印隐藏清单（prose.css .toast-root）不变。</div>
+      <div class="mk-kv"><b>10 · 不变的既定行为</b>S2 hover 透明度 .78 不加背景块 · S3 焦点环 · S5 最多 4 条 + 同标题合并 · 带 action 显式 10 秒 / 无动作 2600ms · Ctrl/⌘+Z 不绑撤销。</div>
+    </div>
+  </section>
+</main>
+
+<script>
+(function(){
+  var root=document.documentElement, light="paper";
+  function store(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+  function read(k){try{return localStorage.getItem(k)}catch(e){return null}}
+  function apply(theme,accent,persist){
+    root.setAttribute("data-theme",theme); root.setAttribute("data-accent",accent);
+    if(theme!=="night"&&theme!=="ink") light=theme;
+    document.querySelectorAll("[data-set-theme]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-theme")===theme)});
+    document.querySelectorAll("[data-set-accent]").forEach(function(b){b.classList.toggle("is-active",b.getAttribute("data-set-accent")===accent)});
+    if(persist){store("opennote-mock6-theme",theme);store("opennote-mock6-accent",accent)}
+  }
+  document.querySelectorAll("[data-set-theme]").forEach(function(b){b.addEventListener("click",function(){apply(b.getAttribute("data-set-theme"),root.getAttribute("data-accent"),true)})});
+  document.querySelectorAll("[data-set-accent]").forEach(function(b){b.addEventListener("click",function(){apply(root.getAttribute("data-theme"),b.getAttribute("data-set-accent"),true)})});
+  var tl=document.querySelector("[data-toggle-light]");
+  if(tl) tl.addEventListener("click",function(){
+    var dark=root.getAttribute("data-theme")==="night"||root.getAttribute("data-theme")==="ink";
+    apply(dark?light:"night",root.getAttribute("data-accent"),true);
+  });
+  var q=new URLSearchParams(location.search);
+  apply(q.get("theme")||read("opennote-mock6-theme")||"night",q.get("accent")||read("opennote-mock6-accent")||"seal",false);
+})();
+</script>
+</body>
+</html>
