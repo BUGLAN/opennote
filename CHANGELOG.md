@@ -10,6 +10,13 @@
 
 （下一批改动写这里。发布时把这一节落成 `## [x.y.z] - 日期`，并跑 `pnpm release:version x.y.z`。）
 
+### 修复
+
+- 首次 CI 发布（tag `v0.4.0`）在「单测（扩展）」必红而本地全绿：仓库缺 `.gitattributes`，
+  windows-latest runner 的 `core.autocrlf=true` 把检出源码改写成 CRLF，
+  `clip-web-stage.test.mjs` 的源码文本断言（`indexOf("\n}\n")`）在 CRLF 下永远匹配不到。
+  已加 `.gitattributes` 统一 LF（png/ico 显式 binary），并把该坑记入 [RELEASING.md](RELEASING.md) §6。
+
 ## [0.4.0] - 2026-10-01
 
 第一个「有发布链路、能分发」的版本 —— 此前只能在本机打包，打出来的包没人拿得到、版本号也对不上。

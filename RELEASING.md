@@ -108,6 +108,11 @@ SHA256SUMS → 存 Actions artifact → 建/更新 GitHub Release（`--generate-
    （桥有 token / 端口 / 错误码契约，见 [`docs/import/02-接口契约-导入信封与通道.md`](docs/import/02-接口契约-导入信封与通道.md)）。
 7. **`release/` 里的旧产物不会自动清理**：`make-checksums.mjs` 默认只收「当前版本」的产物
    （文件名带根版本或扩展版本），旧 zip 会被跳过并打 `WARN`，不会被写进 `SHA256SUMS`。
+8. **仓库必须有 `.gitattributes`（v0.4.0 首次 CI 发布踩过）**：没有它，windows-latest runner 自带
+   `core.autocrlf=true`，把检出源码全改写成 CRLF，`clip-web-stage.test.mjs` 的源码文本断言
+   （`indexOf("\n}\n")`）就永远匹配不到 → CI 扩展单测必红而本地全绿（本地工作区一直是 LF）。
+   排查手法：用 `git worktree add` 造一个全新检出（会吃 autocrlf），本地就能复现 CI 的红。
+   **删了 `.gitattributes` 这类「本地绿、CI 红」会复发。**
 
 ## 7. 回滚
 
