@@ -1,0 +1,13 @@
+# 仓库与一切检出统一 LF。二进制文件绝不转换。
+#
+# 起因（v0.4.0 发布流水线首次在 CI 上红）：仓库没有 .gitattributes 时，
+# windows-latest runner 自带 core.autocrlf=true，会把所有文本文件检成 CRLF；
+# 而 extension 的测试里有源码文本断言（如 clip-web-stage.test.mjs 的
+# indexOf("\n}\n")），CRLF 下永远匹配不到 → 单测（扩展）必红。
+# 本地为什么绿：本仓工作区文件一直是 LF（工具直写），断言只在本机验证过。
+# 加这个文件后，任何机器、任何 git 配置的检出都与 CI 一致（LF）。
+* text=auto eol=lf
+
+# 显式声明的二进制类型（text=auto 本就会跳过，这里写明是给人看的护栏）：
+*.png binary
+*.ico binary
