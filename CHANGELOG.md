@@ -10,16 +10,13 @@
 
 （下一批改动写这里。发布时把这一节落成 `## [x.y.z] - 日期`，并跑 `pnpm release:version x.y.z`。）
 
+## [0.4.1] - 2026-10-04
+
 ### 修复
 
-- 首次 CI 发布（tag `v0.4.0`）在「单测（扩展）」必红而本地全绿：仓库缺 `.gitattributes`，
-  windows-latest runner 的 `core.autocrlf=true` 把检出源码改写成 CRLF，
-  `clip-web-stage.test.mjs` 的源码文本断言（`indexOf("\n}\n")`）在 CRLF 下永远匹配不到。
-  已加 `.gitattributes` 统一 LF（png/ico 显式 binary），并把该坑记入 [RELEASING.md](RELEASING.md) §6。
-- CI 打包秒败 `The specified electronDist does not exist`：pnpm 11 全新安装不执行 electron 的
-  postinstall（`allowBuilds: true` 也不跑，pnpm 11.21.0 实测），`node_modules/electron/dist` 缺失。
-  [release.yml](.github/workflows/release.yml) 在 install 后显式跑
-  `node node_modules/electron/install.js`，坑记入 [RELEASING.md](RELEASING.md) §6。
+- 入库提示（toast）在长 CJK 标题下被撑成两行、撤销按钮竖排成一个字宽：
+  消息恒单行省略、动作恒宽不换行，药丸宽度补 `min(420px, 100vw - 32px)` 响应式护栏；
+  撤销降级说明独立成小字行，主文案保持完整（对齐 UI-05 文案冻结表）。
 
 ## [0.4.0] - 2026-10-01
 
@@ -44,6 +41,15 @@
 - [`deploy.yml`](.github/workflows/deploy.yml) 钉的 pnpm 9 与本仓库 `pnpm-workspace.yaml`
   （用 pnpm ≥10 的 `allowBuilds`）不兼容：pnpm 9 读该文件会直接报 `packages field missing or empty`。
   两个 workflow 已统一到 pnpm 11。
+- 首次 CI 发布在「单测（扩展）」必红而本地全绿：仓库缺 `.gitattributes`，
+  windows-latest runner 的 `core.autocrlf=true` 把检出源码改写成 CRLF，
+  `clip-web-stage.test.mjs` 的源码文本断言（`indexOf("\n}\n")`）在 CRLF 下永远匹配不到。
+  已加 `.gitattributes` 统一 LF（png/ico 显式 binary），并把该坑记入 [RELEASING.md](RELEASING.md) §6。
+- CI 打包秒败 `The specified electronDist does not exist`：pnpm 11 全新安装不执行 electron 的
+  postinstall（`allowBuilds: true` 也不跑，pnpm 11.21.0 实测），`node_modules/electron/dist` 缺失。
+  [release.yml](.github/workflows/release.yml) 在 install 后显式跑
+  `node node_modules/electron/install.js`，坑记入 [RELEASING.md](RELEASING.md) §6。
+  （以上两条随 tag `v0.4.0` 一起出的修复，整理 CHANGELOG 时从 Unreleased 归位。）
 
 ### 变更
 
