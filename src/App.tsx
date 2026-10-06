@@ -63,6 +63,7 @@ import { buildAppCommands, isEditableTarget, matchesShortcut } from "./lib/appCo
 import { askConfirm, askText } from "./lib/dialogs";
 import { exportNoteHtml, exportNoteMarkdown, exportWorkspaceZip } from "./lib/export";
 import { importIntoWorkspace, migrateLegacyData } from "./lib/import";
+import { copyImage } from "./lib/imageClipboard";
 import { extractHeadings, findCurrentHeading } from "./lib/outline";
 import { notify } from "./lib/toast";
 import { cn, formatRelativeTime } from "./lib/utils";
@@ -439,6 +440,23 @@ export default function App(): ReactNode {
       notify: (message) => notify(message),
       hasNote: (title) => Object.values(library.notes).some((note) => note.title === title),
       imageMode: () => ui.imageMode,
+      // 右键图片：编辑器把「哪张图、属于哪篇笔记」交出来，菜单与剪贴板都留在这一层。
+      // 只有一项，但它是唯一入口 —— 不给图片挂上原生菜单的桌面壳里，右键原本什么都不发生。
+      openImageMenu: (x, y, target) => {
+        openMenu(x, y, [
+          {
+            id: "copy-image",
+            label: "复制图片",
+            icon: "copy",
+            run: () => {
+              void copyImage(target).then((result) => {
+                if (result.ok) notify("图片已复制到剪贴板");
+                else notify(result.message, { kind: "danger" });
+              });
+            },
+          },
+        ]);
+      },
     });
   }, [library.notes, scope, ui.imageMode]);
 

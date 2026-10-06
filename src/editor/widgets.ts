@@ -46,6 +46,7 @@ export class ImageWidget extends WidgetType {
       }
       img.addEventListener("load", () => view.requestMeasure(), { once: true });
       img.src = url;
+      attachImageMenu(wrap, this);
     });
     return wrap;
   }
@@ -53,6 +54,30 @@ export class ImageWidget extends WidgetType {
   ignoreEvent(): boolean {
     return false;
   }
+}
+
+/**
+ * 右键一张图片 → 交给宿主开菜单（`src/App.tsx` 的 `openImageMenu` 实现里是「复制图片」）。
+ *
+ * 两个事件都要接，顺序是必须的：
+ *   - `mousedown`（右键）先 `preventDefault + stopPropagation`。不拦的话 CodeMirror 会把光标
+ *     移进这一行，行一变「活跃」，本 widget 当场被换成源码 —— 元素没了，`contextmenu` 也就
+ *     不会落在它身上，菜单永远开不出来（而且不报错）。
+ *   - `contextmenu` 才是开菜单的时机（真正的右键语义，含触摸板/键盘菜单键）。
+ *
+ * 图片没找到时不挂这两个监听：一个只会失败的死菜单比没有菜单更糟。
+ */
+function attachImageMenu(wrap: HTMLElement, widget: ImageWidget): void {
+  wrap.addEventListener("mousedown", (event) => {
+    if (event.button !== 2) return;
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  wrap.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    bridge.openImageMenu(event.clientX, event.clientY, { src: widget.raw, notePath: widget.notePath });
+  });
 }
 
 /* -------------------------------------------------------------------- math */

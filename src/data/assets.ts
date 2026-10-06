@@ -109,6 +109,37 @@ export async function resolveImageSrc(src: string, baseDir = ""): Promise<string
   return ensureImageUrl(path, fallback && fallback !== path ? [fallback] : []);
 }
 
+/**
+ * 本地图片的**原始字节**（带正确的 MIME）。远程地址、`data:` 与 `blob:` 没有本地字节，
+ * 一律返回 null —— 那是「读不出文件」的不同情形，由调用方各走各的退路，不在这里编一个空 Blob。
+ *
+ * 候选回退与 {@link ensureImageUrl} 逐字一致（笔记目录优先、再试工作区根目录）：
+ * 图片在屏幕上能显示、复制却读不出来，两个产地分家就是同一类静默缺陷。
+ */
+export async function readLocalImageBlob(src: string, baseDir = ""): Promise<Blob | null> {
+  const value = src.trim().replace(/^<|>$/g, "");
+  if (!value || /^(https?:|data:|blob:)/i.test(value)) return null;
+
+  if (value.startsWith("asset://")) {
+    return (await getLegacyAsset(value.slice("asset://".length))) ?? null;
+  }
+
+  const backend = currentBackend();
+  if (!backend) return null;
+  const path = resolveWorkspacePath(value, baseDir);
+  if (!path) return null;
+  const fallback = baseDir ? resolveWorkspacePath(value, "") : null;
+  for (const candidate of [path, ...(fallback && fallback !== path ? [fallback] : [])]) {
+    try {
+      const bytes = await backend.readBytes(candidate);
+      return new Blob([bytes as BlobPart], { type: imageMimeFor(candidate) });
+    } catch {
+      /* 试下一个候选 */
+    }
+  }
+  return null;
+}
+
 export async function preloadImages(markdown: string, baseDir: string): Promise<void> {
   await Promise.all(collectImagePaths(markdown).map((src) => resolveImageSrc(src, baseDir)));
 }
@@ -188,6 +219,24 @@ libraryStore.subscribe(() => {
 export function isImageName(name: string, mime = ""): boolean {
   if (mime.startsWith("image/")) return true;
   return /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(name);
+}
+
+/** 扩展名 → 图片 MIME（`isImageName` 认得的那几种，一份名单）。认不出来时返回空串，绝不猜。 */
+const IMAGE_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  avif: "image/avif",
+  bmp: "image/bmp",
+  svg: "image/svg+xml",
+};
+
+export function imageMimeFor(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return "";
+  return IMAGE_MIME[name.slice(dot + 1).toLowerCase()] ?? "";
 }
 
 export function imageNameForPaste(blob: Blob): string {

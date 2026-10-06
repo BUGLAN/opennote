@@ -14,6 +14,11 @@ export interface EditorBridge {
   imageMode(): "asset" | "inline";
   /** Does a note with this title exist? Drives wiki-link styling. */
   hasNote(title: string): boolean;
+  /**
+   * 右键一张**渲染出来的图片**（视口坐标）。菜单长什么样、能做什么由宿主决定 ——
+   * 编辑器不认识「剪贴板」，只负责把「哪张图、属于哪篇笔记」如实交出去。
+   */
+  openImageMenu(x: number, y: number, target: { src: string; notePath: string }): void;
 }
 
 export const bridge: EditorBridge = {
@@ -22,6 +27,7 @@ export const bridge: EditorBridge = {
   notify: () => {},
   imageMode: () => "asset",
   hasNote: () => false,
+  openImageMenu: () => {},
 };
 
 export function setBridge(next: Partial<EditorBridge>): () => void {

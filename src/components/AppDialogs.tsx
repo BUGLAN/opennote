@@ -352,6 +352,7 @@ export function SettingsDialog({
               <CommandGroup title="格式" commands={byGroup("格式")} onRunCommand={onRunCommand} />
               <p className="dialog__note" style={{ marginTop: 8 }}>
                 剪切 / 复制 / 粘贴 使用系统快捷键（Ctrl/⌘ + X / C / V），编辑器内 Ctrl/⌘ + F 查找替换。
+                图片可以右键 →「复制图片」，复制进剪贴板的是能贴到别的应用里的 PNG。
               </p>
             </>
           ) : null}
