@@ -102,7 +102,7 @@ pnpm package:desktop  # 打包成免安装 zip → release/Opennote-<版本>-win
 ## 桌面版（Electron）
 
 - **没有窗口菜单栏**：桌面端不显示「文件 / 编辑 / 视图 / 帮助」那条原生横条，这些操作全部收进应用内的 **设置**（状态栏齿轮按钮，或 `Ctrl/⌘ + ,`），分成外观 / 文件 / 编辑 / 视图 / 帮助五类，按钮直接取自界面同一份命令注册表，和命令面板、快捷键完全一致。
-- 应用图标与界面左上角的朱砂印章同源：`pnpm icons` 会从同一份绘制代码生成 `public/favicon.svg`、PWA 图标与 `build/icon.ico`（多尺寸），打包时由 `electron-builder.yml` 的 `win.icon` 内嵌进 exe。
+- 应用图标与界面左上角的印章同源：`pnpm icons` 会从同一份绘制代码生成 `public/favicon.svg`、PWA 图标、`build/icon.ico`（多尺寸，打包时由 `electron-builder.yml` 的 `win.icon` 内嵌进 exe），以及界面左上角用的 `public/seal/<强调色>-<明暗>.png` 一套 8 个 —— 那套的颜色直接解析 `tokens.css`，所以**改了强调色要重跑一次 `pnpm icons`**。
 - 安全基线保持默认：`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，所有 IPC 文件操作都必须落在你选定的笔记本目录内（`../../../package.json` 这类路径会被拒绝并报「路径越界」）。
 - preload 只暴露一层薄接口（`window.opennote`），渲染进程拿不到 Node 能力。macOS 上会保留一份只含系统角色的最小菜单（否则 ⌘C/⌘V/⌘Q 不生效），Windows/Linux 直接置空。
 - 打包目标只有免安装 zip（便携、无需安装器）。想要 NSIS 安装包，把 `electron-builder.yml` 里 `win.target` 换成 `nsis` 即可。当前 zip 151 MB（Electron 本体占大头，`app.asar` 只有 11 MB）；发布流程见 [RELEASING.md](RELEASING.md)。

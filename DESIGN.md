@@ -91,8 +91,8 @@ typography:
 
 rounded:
   sm: 5px        # --radius-sm：按钮、输入框、树行、菜单项、标签页
-  md: 8px        # --radius：卡片、代码块、对话框内嵌块、图片
-  lg: 14px       # --radius-lg：对话框、命令面板、拖放遮罩
+  md: 8px        # --radius：卡片、代码块、图片、**对话框与命令面板**（= 桌面端窗口边框的圆角）
+  lg: 14px       # --radius-lg：只剩拖放遮罩 .app.is-dropping::after
   micro: 4px     # 直接写的 4px：kbd、tab__close、segmented 按钮、行内码。历史值，不要再扩散
   seal-sm: 5px   # .seal 印章
   seal-boot: 11px
@@ -119,8 +119,12 @@ motion:
   keyframes: ["rise", "fade", "pop", "pulse", "spin", "sheen（存在但禁止使用）"]
 
 layout:
-  sidebar-w: 268px        # 展开态侧栏宽度
-  sidebar-w-overlay: "min(84vw, 320px)"   # ≤820px 时的浮层宽度
+  sidebar-w: 268px        # 展开态侧栏宽度的**默认值**；用户可在右边框拖拽（200–520px），真值由 applyUi() 写到 :root
+  sidebar-w-min: 200px    # 拖拽下限（树行的「文件夹名 + 计数」还排得下）
+  sidebar-w-max: 520px    # 拖拽上限（窗口最窄 900px 时编辑器不被挤没）
+  sidebar-collapsed: "display: none（只收身体；头部留在顶行，宽度不变）"
+  sidebar-w-overlay: "min(84vw, 320px)"   # ≤820px 时的抽屉宽度
+  seal-icon: "public/seal/<accent>-<kind>.png · 22px 显示 / 96px 出图"
   outline-w: 232px
   tabbar-h: 40px
   statusbar-h: 30px
@@ -199,18 +203,31 @@ components:
 
   # ── 外壳 ────────────────────────────────────────────────────────────
   app:
-    layout: "grid-template-columns: auto minmax(0, 1fr) auto"
-    rows: "minmax(0, 1fr)"
+    layout: "grid-template-columns: auto auto minmax(0, 1fr) auto   # [侧栏] [宽度把手] [主体] [大纲]"
+    rows: "var(--tabbar-h) minmax(0, 1fr)   # 顶行 = 侧栏头部 + 标签栏；第 2 行 = 侧栏身体 + 编辑器 + 状态栏"
     height: "100vh / 100dvh"
-    note: "单行必须显式限高，否则内部滚动容器永远不溢出"
+    note: "两行都必须显式限高，否则内部滚动容器永远不溢出"
   sidebar:
     backgroundColor: "color-mix(in srgb, {colors.paper-2} 62%, {colors.paper})"
     borderColor: "{colors.rule}"
-    width: "{layout.sidebar-w}"
+    area: "grid-area: 2 / 1 / 3 / 2（它只是身体：工作区下拉 + 四个页签 + 文件树 + 脚注）"
+    collapsed: "display: none；头部留在顶行（见 sidebar-head）"
+  sidebar-resizer:
+    width: 6px
+    margin: "-3px（左右各 -3px → 列宽 0，骑在侧栏右边框上）"
+    area: "grid-area: 1 / 2 / 3 / 3（跨两行）；收起时只跨顶行"
+    cursor: "col-resize"
+    desktop: "-webkit-app-region: no-drag（它不在 .sidebar__head 里，那条「子元素自动 no-drag」管不到）"
   sidebar-head:
-    height: "calc({layout.tabbar-h} + 8px)"
-    borderColor: "{colors.rule}"
+    area: "grid-area: 1 / 1 / 2 / 2（顶行，与 .tabbar 同一行；不是 .sidebar 的子元素）"
+    width: "{layout.sidebar-w}（恒为拖出来的宽度，收起时也不变 → 标签栏不跳）"
+    height: "{layout.tabbar-h}"
+    backgroundColor: "color-mix(in srgb, {colors.paper-2} 62%, {colors.paper})"
+    borderColor: "{colors.rule}（下边框与右边框都要自己带）"
     desktop: "-webkit-app-region: drag（子元素一律 no-drag）"
+  sidebar-logo:
+    size: "22 × 22"
+    source: "public/seal/<accent>-<kind>.png（4 套强调色 × 明/暗，pnpm icons 生成）"
   sidebar-tab:
     height: 26px
     textColor: "{colors.ink-2}"
@@ -780,7 +797,7 @@ Opennote 是一个**写作工具**，不是一个仪表盘。它的界面只有�
 三件事定义了它：
 
 1. **一张有纹理的暖纸**。默认主题「素笺」的底色是 `#fbf8f3` —— 暖白，刻意不是纯白。全屏盖一层 3.5% 不透明度的 `feTurbulence` 噪点（`body::before`，`mix-blend-mode: multiply`），让大面积单色不显得像塑料。暗色主题下这层改为 `overlay`。
-2. **一枚朱砂印章**。品牌记号是一个圆角方块 + 一圈内描边 + 居中一个宋体「記」字（见 §Shapes）。它出现在启动页、空态、品牌名左侧、应用图标里 —— 是同一个绘制源（`scripts/make_icons.py` 与 `public/favicon.svg` 同一份几何）。
+2. **一枚朱砂印章**。品牌记号是一个圆角方块 + 一圈内描边 + 居中一个宋体「記」字（见 §Shapes）。它出现在启动页、空态、**侧栏左上角**、应用图标里 —— 同一份几何：`scripts/make_icons.py` 生成（`public/favicon.svg` 与 `public/seal/` 的 8 个印章都是它的产物）。侧栏那一枚按强调色 × 明暗出图，其余仍是 CSS 画的（跟随 `--accent`）。
 3. **正文与界面的字体分工**。界面用 Figtree 无衬线（`--font-ui`），正文用 Newsreader 衬线（`--font-doc` 默认值），标题用 Fraunces 变体衬线并把 `SOFT 40 / WONK 1` 两个轴打开。这个分工是「编辑与阅读是同一块画布」的视觉表达。
 
 ### 关键特征
@@ -789,7 +806,7 @@ Opennote 是一个**写作工具**，不是一个仪表盘。它的界面只有�
 - **强调色稀缺且语义单一**：`--accent` 表示「需要你处理」——主按钮、当前选中项、危险操作、错误文字、焦点环。它**不**表示「成功」。
 - **没有一个语义色令牌**。没有成功绿、警告黄、失败红。这是刻意的：强调色有 4 套（朱砂 / 靛青 / 松绿 / 藤黄），用户可能把强调色设成松绿，那时「成功绿」和强调色就分不清了。状态一律用**文字 + 圆点的填充方式**说（见 §Colors · 语义状态）。
 - **界面几乎没有字号**：只有 4 档（11.5 / 12.5 / 13.5 / 15px）加一个用户可调的正文变量（默认 16.5px）。正文以外的字号越少，界面越像一个整体。
-- **2 档主要圆角 + 1 档卡片圆角**：`5px`（控件）/ `8px`（卡片）/ `14px`（对话框），加药丸 `99px` 和圆点 `50%`。
+- **2 档主要圆角**：`5px`（控件）/ `8px`（卡片**与浮层最外层**，等于桌面端窗口边框的圆角），加药丸 `99px` 和圆点 `50%`。`14px` 只剩拖放遮罩一处。
 - **所有交互态只有三档时长**：`120ms`（hover / 状态切换）、`220ms`（面板进场 / 侧栏滑动）、`460ms`（首屏与空态）。缓动只有两条贝塞尔。
 - **主题是「换值不换结构」**：5 套调色板 × 4 套强调色 = 20 种组合，全部通过 CSS 自定义属性重绑定实现。**没有任何一条 CSS 规则判断「现在是哪个主题」**（除 `tokens.css` 里的调色板定义区）。
 
@@ -940,7 +957,7 @@ font-variation-settings: "SOFT" 40, "WONK" 1;
 ### 层级与字重
 
 - **正文层级靠字号，不靠粗细**。`.prose h1/h2/h3` 的都是 `font-weight: 600`，层级差完全由 `em` 字号 + 上边距 + `border-bottom`（h1 两像素、h2 一像素）承担。
-- **`--tracking-wide: 0.08em` 只给全大写小标题**。用到它的地方必须同时有 `text-transform: uppercase`。全仓共 12 处：`app.css` 里 6 处（`.tree__group`、`.outline__head`、`.inbox__group`、`.palette__kind`、`.empty__recent h4`、`.sidebar__brand small`）、`prose.css` 2 处（`.prose h6`、`.code-lang`）、`editor.css` 2 处（`.md-h6`、代码块语言徽标）、`clip.css` 与扩展 `popup.css` 各 1 处。中文标题**不要**用 uppercase（无效果），也不要用这么宽的字距。
+- **`--tracking-wide: 0.08em` 只给全大写小标题**。用到它的地方必须同时有 `text-transform: uppercase`。全仓共 11 处：`app.css` 里 5 处（`.tree__group`、`.outline__head`、`.inbox__group`、`.palette__kind`、`.empty__recent h4`）、`prose.css` 2 处（`.prose h6`、`.code-lang`）、`editor.css` 2 处（`.md-h6`、代码块语言徽标）、`clip.css` 与扩展 `popup.css` 各 1 处。中文标题**不要**用 uppercase（无效果），也不要用这么宽的字距。
 - **标题字距一律为负**：`.empty__title -0.015em`、`.dialog__title -0.01em`、`.sidebar__name -0.01em`、正文 h1 `-0.012em` / 编辑区 h1 `-0.014em`。这是衬线标题不显得松散的关键。
 - **强调用 `--accent`，不用加粗**。选中态普遍是 `font-weight: 550/600` + `--accent-soft` 底；正文里的强调是 `font-weight: 650`（`.prose strong`）—— 注意正文的强调字重是 **650**，不是 700。
 - **`font-synthesis-weight: none`** 写在 `body` 上。不要引入会导致字体被浏览器伪加粗的字重（除非该字体真有那个字重）。
@@ -971,31 +988,45 @@ font-variation-settings: "SOFT" 40, "WONK" 1;
 
 ### 应用外壳
 
-三层网格，一屏填满，**永不出现页面级滚动条**（滚动只发生在面板内部）：
+两行四列，一屏填满，**永不出现页面级滚动条**（滚动只发生在面板内部）。
+**顶行只有两样东西**：侧栏头部（記 / Opennote / 三个按钮）与标签栏 —— 它们永远同一行、
+同样 40px 高，底边线连成一条。第 2 行才是「侧栏身体 + 编辑器 + 状态栏」。
+侧栏宽度把手自己占一列（列宽 0，骑在侧栏右边框上）：
 
 ```
-┌──────────┬─────────────────────────────┬──────────┐
-│          │  .tabbar          (40px)     │          │
-│ .sidebar ├─────────────────────────────┤ .outline │
-│  268px   │  .editor-host    (1fr)       │  232px   │
-│          ├─────────────────────────────┤          │
-│          │  .statusbar       (30px)     │          │
-└──────────┴─────────────────────────────┴──────────┘
+                     ┌── .sidebar__head (268px) ──┬───────────────────────────┐
+                     │ 記 Opennote      + □ ⇥     │  .tabbar          (40px)   │
+                     ├────────────────────────────┼───────────────────────────┤
+                     │ .sidebar (身体, 268px)      │  .editor-host    (1fr)     │
+                     │ 工作区/页签/文件树/脚注      │                            │
+                     │                            ├───────────────────────────┤
+                     │                            │  .statusbar       (30px)   │
+                     └────────────────────────────┴───────────────────────────┘
+          .sidebar__resizer 骑在两者之间（列宽 0）
+
+收起 = 只收起左栏身体（.sidebar → display:none），头部留在顶行；
+       编辑器与状态栏绕到头部下面，从 x=0 起占满整宽（.main → grid-column: 1 / 4）。
 ```
 
 ```css
 .app {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-rows: minmax(0, 1fr);   /* 必须显式限高 */
+  /* [侧栏] [宽度把手] [标签栏 / 编辑器 + 状态栏] [大纲] */
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  /* 顶行 = 头部 + 标签栏；两行都必须显式限高 */
+  grid-template-rows: var(--tabbar-h) minmax(0, 1fr);
   height: 100dvh;
   overflow: hidden;
 }
 ```
 
-**`grid-template-rows: minmax(0, 1fr)` 不是可选的**。默认的 `auto` 行会被内容撑高，导致侧栏 / 大纲内部的滚动容器永远不溢出（`min-height: auto` 的老问题）。同理，每个作为 flex/grid 子项的滚动容器都要显式写 `min-height: 0`。
+**`grid-template-rows` 两行都不是可选的**。默认的 `auto` 行会被内容撑高，导致侧栏 / 大纲内部的滚动容器永远不溢出（`min-height: auto` 的老问题）。同理，每个作为 flex/grid 子项的滚动容器都要显式写 `min-height: 0`。
 
-`.sidebar` / `.outline` 的折叠是**负 margin 位移**（`.is-collapsed { margin-left: calc(-1 * var(--sidebar-w)) }`），不是 `display: none` —— 因为它们仍在 DOM 里，只是滑出视图。
+**`.sidebar__head` 为什么不是 `.sidebar` 的子元素**：栅格分区按「行」切，头部要留在第 1 行、身体在第 2 行，所以 `Sidebar` 返回 fragment（头部 + `<aside class="sidebar">`），两者都是 `.app` 的直接子项。头部因此要自己带底色与右边框，宽度**恒为 `var(--sidebar-w)`**（收起时也不变 —— 标签栏就不会跳）。同理 `<TabBar>` 从 `.main` 里搬出来，`.main` 只剩「空态 / 编辑器 + 状态栏」，才能在收起时整块绕到最左。
+
+**`.sidebar__resizer` 为什么是独立一列**：宽度 6px、左右各 `-3px` 外边距，算出来的列宽是 0，把手正好骑在侧栏右边框上（各压 3px）。放进 `.sidebar` 里会盖住文件树自己的滚动条（滚动条滑块只剩 1px 可抓），放进 `.main` 里会被编辑器盖住。它必须写 `min-width: 0`（grid 子项默认 `min-width: auto` 会把这一列撑成 6px），拖拽时挂 `window` 上的 `pointermove` / `pointerup`（**不用 `setPointerCapture`**：指针拖到把手外面就收不到事件了），并显式 `-webkit-app-region: no-drag`。
+
+**侧栏的收起**：`>820px` 是「只收缩左栏」—— 头部与标签栏那一行完全不动，`.sidebar` 身体 `display: none`，`.main` 从第 3 列改成跨第 1–3 列（编辑器与状态栏占满整宽）；`≤820px` 是抽屉：从**顶行下面**（`top: var(--tabbar-h)`）滑出，头部留在上面始终可用，`.scrim--drawer` 也让开顶行。`.outline` 仍是负 `margin-right` 位移。
 
 ### 正文栏
 
@@ -1007,9 +1038,9 @@ font-variation-settings: "SOFT" 40, "WONK" 1;
 
 | 常量 | 值 | 说明 |
 | --- | --- | --- |
-| `--sidebar-w` | 268px | 展开态侧栏。≤820px 变 `min(84vw, 320px)` 浮层 |
+| `--sidebar-w` | 268px | 展开态侧栏的**默认**宽度。用户在右边框拖拽后由 `applyUi()` 写成内联值（夹取 200–520px）。≤820px 变 `min(84vw, 320px)` 浮层 |
 | `--outline-w` | 232px | 大纲面板。≤1080px 整个隐藏 |
-| `--tabbar-h` | 40px | 标签栏高度。侧栏头部是 `calc(var(--tabbar-h) + 8px)` = 48px |
+| `--tabbar-h` | 40px | 标签栏高度。**侧栏头部也是它**（`height: var(--tabbar-h)`），两条底边线连成一条 |
 | `--statusbar-h` | 30px | 状态栏高度（贴着底边，内容多时靠 `.statusbar__item--compact` 隐藏降级） |
 | `--titlebar-inset` | 148px | **仅桌面端**：为 Windows/Linux 压右上角的原生窗口按钮留的宽度。见下 |
 
@@ -1044,6 +1075,7 @@ tokens.css  →  base.css  →  prose.css  →  editor.css  →  app.css
 桌面端没有系统标题栏，**应用自己的头部就是标题栏**：
 
 - `.app--desktop .sidebar__head`、`.tabbar`、`.outline__head` 是 `-webkit-app-region: drag`（可拖动窗口），它们的**所有子元素**必须是 `-webkit-app-region: no-drag`（否则按钮点不动）。
+- `.sidebar__resizer`（侧栏宽度把手）**不在**头部里，所以那条「子元素自动 no-drag」的规则管不到它 —— 它自己显式写了 `-webkit-app-region: no-drag`。漏了就会变成「拖窗口」。
 - `.tabbar` 右侧留 `--titlebar-inset: 148px`；大纲展开时，这块留白**跟着搬到** `.outline__head`（用 `:has()` 选择器）。
 - 改动头部区域时**必须**同时检查 `app-region` 与这块留白，否则会出现「窗口拖不动」或「窗口按钮盖住标签」。
 
@@ -1103,13 +1135,15 @@ tokens.css  →  base.css  →  prose.css  →  editor.css  →  app.css
 | 令牌 | 值 | 用途 |
 | --- | --- | --- |
 | `--radius-sm` | 5px | **控件**：`.btn`、`.field`、`.tree__row`、`.menu__item`、`.sidebar__tab`、`.settings__tab`、`.palette__item`、`.cmd`、`.inbox__item`、`.history__item`、`.segmented`（容器）、`.swatch`、`.workspace__button`、`.outline__item` |
-| `--radius` | 8px | **卡片与内嵌块**：`.choice`、`.history__preview`、`.menu`、`.workspace__menu`、`.prose pre`、`.prose img`、`.prose .toc`、`.mermaid-block`、`.inbox__preview`、`.seal`（8px 档的空态印章） |
-| `--radius-lg` | 14px | **浮层最外层**：`.dialog`、`.palette`、拖放遮罩 `.app.is-dropping::after` |
+| `--radius` | 8px | **卡片、内嵌块、以及所有浮层最外层**：`.choice`、`.history__preview`、`.menu`、`.workspace__menu`、`.dialog`、`.palette`、`.prose pre`、`.prose img`、`.prose .toc`、`.mermaid-block`、`.inbox__preview`、`.seal`（8px 档的空态印章） |
+| `--radius-lg` | 14px | 拖放遮罩 `.app.is-dropping::after`（**唯一剩下的用处**：它不是浮层，圆角只影响那圈虚线描边） |
 | `99px` / `999px` | 药丸 | `.toast`（99px）、`.tag`（99px）、`.switch` 轨道（99px）、`.storage-bar`（99px）、滚动条滑块（99px）、`.busy`（999px） |
 | `50%` | 圆点 | `.statusbar__dot`、`.tab__dirty`、`.busy__spinner`、`.task-checkbox` 的勾 |
 | `4px` | 微圆角（**直接写值**） | `kbd`、`.tab__close`、`.segmented button`、`.statusbar__item`、行内码、`.md-wikilink`、`.swatch__dot`、`.md-mark` |
 
-**层级语义**：控件 5px → 卡片 8px → 浮层 14px。**外层圆角 ≥ 内层圆角**，不要出现「14px 对话框里放一个 16px 的块」。
+**层级语义**：控件 5px → 卡片 8px → 浮层 8px（= 桌面端窗口边框的圆角）。**外层圆角 ≥ 内层圆角**，不要出现「8px 对话框里放一个 16px 的块」。
+
+> 浮层曾经是 14px。0.4.3 起改成 **8px**：命令面板 / 对话框比窗口本身的圆角还圆，看起来像「贴上去的一块」。
 
 > `4px` 与 `99px` / `999px` 是历史遗留的写法（没有对应令牌，且 `99px` 与 `999px` 两个写法并存）。新代码里药丸一律写 **`99px`**；4px 微圆角是既定观感，可以继续用，但**不要**再写 6px / 7px / 10px 这类第三种值。
 
@@ -1119,7 +1153,8 @@ tokens.css  →  base.css  →  prose.css  →  editor.css  →  app.css
 
 | 场景 | 尺寸 | 圆角 | 字号 | 内描边 | 额外 |
 | --- | --- | --- | --- | --- | --- |
-| 行内印章 `.seal` | 22px | 5px | 13px | `inset 0 0 0 1px rgba(255,255,255,.32)` | — |
+| 行内印章 `.seal` | 22px | 5px | 13px | `inset 0 0 0 1px rgba(255,255,255,.32)` | 剪藏页仍用；**主界面左上角改用图标资源**（见下） |
+| 侧栏品牌图标 `.sidebar__logo` | 22px | 图形自带 | 图形自带 | 图形自带 | `public/seal/<accent>-<kind>.png` |
 | 插件/收件箱空态 | 40px | `--radius` 8px | 23px | `inset 0 0 0 1.5px …` | — |
 | 启动页 `.boot__seal` | 46px | 11px | 26px | `inset 0 0 0 1.5px rgba(255,255,255,.35)` | `+ --shadow-2` |
 | 整屏空态 `.empty__seal` | 52px | 12px | 30px | `inset 0 0 0 1.5px …` | `+ --shadow-2` |
@@ -1128,7 +1163,8 @@ tokens.css  →  base.css  →  prose.css  →  editor.css  →  app.css
 统一规则：
 - 底 = `--accent`，字 = `--accent-ink`，字族 = `--font-serif`（**不是** `--font-display`：印章要的是宋体的方正，不是 Fraunces 的柔和）。
 - 印章本身就是「强调色出现的地方」，**不要**再给它加渐变、投影色或旋转。
-- 图标资源由 `pnpm icons` 从 `scripts/make_icons.py` 生成（favicon / PWA 图标 / 多尺寸 `build/icon.ico`）。**那是唯一允许写死 `#b23a2e` 的地方** —— 一个构建期 PNG 生成器没法读 CSS 变量。改品牌色时，令牌与这个脚本要一起改。
+- **侧栏左上角那枚是图标资源，不是 CSS 画的方块**：`public/seal/<accent>-<kind>.png`（4 套强调色 × 明/暗 = 8 个），由 `pnpm icons` 生成，颜色由 `scripts/make_icons.py` **直接解析 `tokens.css`** 得到并烘焙进 PNG。界面按 `data-accent` + 主题明暗挑文件（`lib/sealIcon.ts` 的 `sealIconUrl(accent, kind)`，路径写成 `./seal/...` 相对形式，桌面版 `file://` 也解析得到）。为什么不用 CSS：`<span>記</span>` + 背景色的形状取决于机器上有没有宋体，也不和窗口/任务栏图标共用同一个绘制源。**改了强调色令牌就要重跑 `pnpm icons`**，否则界面一套色、图标另一套色。
+- 图标资源由 `pnpm icons` 从 `scripts/make_icons.py` 生成（favicon / PWA 图标 / 多尺寸 `build/icon.ico` / 侧栏印章集）。应用图标那三份的 `#b23a2e` 是**唯一写死的品牌色**（构建期 PNG 生成器没法读 CSS 变量）；侧栏印章集不写死任何颜色。
 
 ### 图标
 
@@ -1272,11 +1308,12 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 | --- | --- | --- |
 | 遮罩 | `.scrim` | `color-mix(paper-4 30%, rgb(20 16 12 / .32))` + `backdrop-filter: blur(3px) saturate(.9)` + `fade 120ms` |
 | 菜单遮罩 | `.scrim--menu` | 更轻：`rgb(20 16 12 / .28)` + `blur(2px)`，`z-index: 55`，`display: none`，靠 `.app.is-sidebar-open` 打开 |
-| 对话框 | `.dialog` | `--paper-2` 底 + `--rule-strong` 边 + `--radius-lg` + `--shadow-3`；宽 `min(560px, 100vw - 32px)`、高 `min(82vh, 760px)`；`pop 220ms` |
+| 移动端抽屉遮罩 | `.scrim--menu.scrim--drawer` | 同一条遮罩，但 `top: var(--tabbar-h)`：让开顶行，头部与它的按钮保持可用（点它就能把抽屉收回去） |
+| 对话框 | `.dialog` | `--paper-2` 底 + `--rule-strong` 边 + `--radius` + `--shadow-3`；宽 `min(560px, 100vw - 32px)`、高 `min(82vh, 760px)`；`pop 220ms` |
 | 宽对话框 | `.dialog--wide` | 760px（收件箱、历史） |
 | 设置对话框 | `.dialog--settings` | 900px |
 | 定高对话框 | `.dialog--tall` | `height: min(600px, calc(100vh - 96px))`，**设置与收件箱共用**，只写在这一处 |
-| 命令面板 | `.palette` | `min(620px, 100vw - 32px)`、高 `min(66vh, 640px)`；输入框 h48 / 15px；脚注一行 `kbd` + `--fs-xs` |
+| 命令面板 | `.palette` | `min(620px, 100vw - 32px)`、高 `min(66vh, 640px)`、`--radius`；输入框 h56 / 15px 且 **`flex: none`**（见下）；脚注一行 `kbd` + `--fs-xs` |
 | 右键菜单 | `.menu` | `min-width: 190px`、`padding: 5px`、`--radius`、`--shadow-2`、`pop 120ms`，`z-index: 80` |
 | 工作区下拉 | `.workspace__menu` | 贴 `.sidebar__workspace` 绝对定位，`top: 36px`，左右各留 `--s3`，`max-height: 62vh`，`--shadow-3` |
 
@@ -1285,6 +1322,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 **滚动归谁**（这是本项目踩过坑的地方）：
 - **不要让 `.dialog__body` 整块滚**：定高面板里，左侧分类栏 / 条目列表会跟着滚上去。做法是让内层容器撑满定高、**各自滚动**（`.settings__pane`、`.inbox__list`、`.inbox__detail`）。
 - 两栏面板的 grid 行高必须是 `grid-template-rows: minmax(0, 1fr)`，否则行高由最长的那一栏决定，切筛选 / 切条目时面板尺寸会跳（表现为「闪」）。
+- **列向 flex 里，有固定高度的子项必须写 `flex: none`**。`.palette` 是 `flex-direction: column` + `max-height`，`.palette__list` 是 `flex: 1`；结果一多（60 项）容器顶到 `max-height` 时，**唯一还有基础高度的输入框**会被压到自己的自动最小高度（实测 48px → 20px，文字贴着上下边框）。这条不只影响命令面板：任何「定高容器 + 一个 `flex: 1` 的滚动区 + 一个定高头部」的组合都要显式 `flex: none`。
 
 ### 反馈
 
@@ -1438,7 +1476,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 - **不依赖颜色**：所有状态都有文字（见 §Colors · 语义状态）。
 - **浏览器缩放 200%** 时不得出现横向滚动：对话框 ≤720px 走单栏规则，表单行改上下堆叠。
 - **语言**：所有文档 `lang="zh-CN"`。
-- **打印**：`prose.css` 末尾的 `@media print` 会隐藏 `.sidebar / .outline / .tabbar / .statusbar / .overlay-root / .toast-root / .storage-notice` 与纸张颗粒，把外壳解开成单列，正文字号转 `11.5pt`，并把 `pre` / `table` 设为 `break-inside: avoid`。**新增的任何外壳级容器都要加进这份隐藏清单**，否则会印到 PDF 上。
+- **打印**：`prose.css` 末尾的 `@media print` 会隐藏 `.sidebar / .sidebar__head / .sidebar__resizer / .outline / .tabbar / .statusbar / .overlay-root / .toast-root / .storage-notice` 与纸张颗粒，把外壳解开成单列，正文字号转 `11.5pt`，并把 `pre` / `table` 设为 `break-inside: avoid`。**新增的任何外壳级容器都要加进这份隐藏清单**，否则会印到 PDF 上。
 
 ---
 
@@ -1533,7 +1571,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 | `≤1180px` | `app.css` | `.statusbar__item--compact` 隐藏（状态栏减少次要项，避免挤成两行） |
 | `≤1080px` | `app.css` | `.outline` 整个隐藏（`display: none`） |
 | `≤900px` | `clip.css` | 剪藏页两栏改上下堆叠，分隔线从「预览栏的右边」挪成「它的下边」 |
-| `≤820px` | `app.css` | `.app` 变单列；`.sidebar` 变 `position: fixed` 浮层（`min(84vw, 320px)` + `--shadow-3` + `translateX` 滑入，`z-index: 58`）；`.app.is-sidebar-open` 显示 `.scrim--menu` |
+| `≤820px` | `app.css` | `.app` 变两列（`[头部][标签栏]` / `[编辑器+状态栏]` 两行）；`.sidebar` 变 `position: fixed` 抽屉，从**顶行下面**（`top: var(--tabbar-h)`）滑出（`min(84vw, 320px)` + `--shadow-3` + `translateX`，`z-index: 58`，`display: flex` 保留动画）；`.sidebar__head` 宽 `auto` 且 `max-width: 46vw`（窄屏不挤掉标签栏）；`.sidebar__resizer` `display: none`；`.scrim--drawer` 让开顶行；`.app.is-sidebar-open` 显示 `.scrim--menu` |
 | `≤720px` | `app.css` | `.settings` 变单列（左导轨转横向换行、`small` 说明隐藏）；`.setting` 长控件改上下堆叠 |
 | `>720px` | `app.css` | `.dialog--tall` 内的 `.settings` 变为撑满定高、只有 `.settings__pane` 滚动 |
 | `print` | `prose.css` | 见 §Accessibility · 打印 |
@@ -1544,7 +1582,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 ### 折叠策略
 
 - **列数减，不是把卡片压小**：`.cmd-grid` 用 `repeat(auto-fill, minmax(196px, 1fr))` 自动降列；`.shortcuts` 用 `minmax(250px, 1fr)`。
-- **侧栏**：`>820px` 是常驻列（折叠 = 负 margin 滑出）；`≤820px` 是浮层 + 遮罩。
+- **侧栏**：`>820px` 是常驻列。**收起 = 只收起左栏本身**：顶行（头部 + 标签栏）完全不动，`.sidebar` 身体 `display: none`，编辑器与状态栏绕到头部下面占满整宽。头部宽度恒为 `var(--sidebar-w)`，所以标签栏不会跳。之所以不是整条滑出去：那样会把「把侧栏叫回来」的按钮一起带走（`Ctrl/⌘+\` 与命令面板是看不见的退路）。`≤820px` 是抽屉 + 遮罩：从顶行下面滑出，头部留在上面始终可用。
 - **大纲**：`≤1080px` 直接隐藏（内容不重要到值得占掉正文宽度）。
 - **对话框**：宽度一律 `min(Npx, calc(100vw - 32px))`，**永远不横向溢出**。
 - **命令面板**：`min(620px, calc(100vw - 32px))`，高 `min(66vh, 640px)`。
