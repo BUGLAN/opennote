@@ -25,8 +25,11 @@ import {
   type LibraryState,
 } from "../data/library";
 import type { Folder, Id, Note, UiSettings } from "../data/types";
+import { themeKind } from "../data/ui";
 import type { WorkspaceRecord } from "../data/workspaces";
 import { askConfirm, askFolder, askText } from "../lib/dialogs";
+import { copyPathToClipboard, noteAbsolutePath } from "../lib/notePath";
+import { sealIconUrl } from "../lib/sealIcon";
 import { notify } from "../lib/toast";
 import { cn, excerpt, formatRelativeTime } from "../lib/utils";
 import { Icon, type IconName } from "./Icons";
@@ -64,7 +67,11 @@ export interface SidebarProps {
   onNewNote(folderId?: Id | null): void;
   onNewFolder(parentId?: Id | null): void;
   onOpenSettings(): void;
-  onCollapse(): void;
+  /**
+   * 头部那个「收起 / 展开」按钮。**必须是切换**：收起后头部仍然留在原地
+   * （这正是它存在的意义），按钮得能把侧栏再叫回来。
+   */
+  onToggleSidebar(): void;
   /** 待确认的收件箱条目数（0 时不显示计数）。 */
   inboxPending: number;
   onOpenInbox(): void;
@@ -113,16 +120,24 @@ export function Sidebar(props: SidebarProps): ReactNode {
   };
 
   return (
-    <aside className={cn("sidebar", !ui.sidebarOpen && "is-collapsed")}>
+    /*
+     * 头部与身体是**两个并排的栅格项**（`.app` 里分别是第 1 行与第 2 行的第 1 列），
+     * 所以这里返回 fragment 而不是一个 `<aside>` 包住两者：
+     * 收起时只有身体消失，头部留在顶行（和标签栏同一行），左上角那个「展开」按钮
+     * 才不会被一起收走。见 `app.css` 的 `.sidebar__head` / `.sidebar.is-collapsed`。
+     */
+    <>
       <div className="sidebar__head">
         <div className="sidebar__brand">
-          <span className="seal" aria-hidden="true">
-            記
-          </span>
-          <span className="sidebar__name">
-            Opennote
-            <small>开源笔记</small>
-          </span>
+          <img
+            className="sidebar__logo"
+            src={sealIconUrl(ui.accent, themeKind(ui.theme))}
+            alt=""
+            width={22}
+            height={22}
+            aria-hidden="true"
+          />
+          <span className="sidebar__name">Opennote</span>
         </div>
         <div className="sidebar__actions">
           <button className="icon-btn" title="新建笔记 (Ctrl/⌘ + N)" onClick={() => props.onNewNote(currentFolderId(scope))}>
@@ -135,13 +150,19 @@ export function Sidebar(props: SidebarProps): ReactNode {
           >
             <Icon name="folder" />
           </button>
-          <button className="icon-btn" title="收起侧栏 (Ctrl/⌘ + \)" onClick={props.onCollapse}>
+          <button
+            className="icon-btn"
+            title={ui.sidebarOpen ? "收起侧栏 (Ctrl/⌘ + \\)" : "展开侧栏 (Ctrl/⌘ + \\)"}
+            aria-expanded={ui.sidebarOpen}
+            onClick={props.onToggleSidebar}
+          >
             <Icon name="sidebar" />
           </button>
         </div>
       </div>
 
-      <div className="sidebar__workspace">
+      <aside className={cn("sidebar", !ui.sidebarOpen && "is-collapsed")}>
+        <div className="sidebar__workspace">
         <button
           type="button"
           className="workspace__button"
@@ -266,7 +287,8 @@ export function Sidebar(props: SidebarProps): ReactNode {
           </button>
         </span>
       </footer>
-    </aside>
+      </aside>
+    </>
   );
 }
 
@@ -594,6 +616,16 @@ function folderMenu(folder: Folder, props: SidebarProps): MenuItem[] {
       },
     },
     {
+      id: "copy-path",
+      label: "复制地址",
+      icon: "link",
+      separatorBefore: true,
+      // 浏览器 / OPFS 笔记本没有本机绝对路径（见 `lib/notePath.ts`）：禁用而不是
+      // 给一个点了没反应的死菜单项。文件夹的 id 也是工作区相对路径，所以同一份推导。
+      disabled: noteAbsolutePath(props.workspace, folder.id) === null,
+      run: () => void copyPathToClipboard(props.workspace, folder.id),
+    },
+    {
       id: "delete",
       label: "删除文件夹",
       icon: "trash",
@@ -726,6 +758,16 @@ function NoteRow({
         label: "移动到…",
         icon: "move",
         run: () => void pickMoveTarget(note),
+      },
+      {
+        id: "copy-path",
+        label: "复制地址",
+        icon: "link",
+        separatorBefore: true,
+        // 笔记本记录从数据层现取（和 `moveNoteWithFeedback` 同一条约定）：菜单是
+        // 点击那一刻才构建的，不需要把 workspace 顺着六个 `NoteRow` 调用点传下来。
+        disabled: noteAbsolutePath(getLibrary().workspace, note.id) === null,
+        run: () => void copyPathToClipboard(getLibrary().workspace, note.id),
       },
       {
         id: "trash",

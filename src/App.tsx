@@ -65,6 +65,7 @@ import { exportNoteHtml, exportNoteMarkdown, exportWorkspaceZip } from "./lib/ex
 import { importIntoWorkspace, migrateLegacyData } from "./lib/import";
 import { copyImage } from "./lib/imageClipboard";
 import { extractHeadings, findCurrentHeading } from "./lib/outline";
+import { copyPathToClipboard, noteAbsolutePath } from "./lib/notePath";
 import { notify } from "./lib/toast";
 import { cn, formatRelativeTime } from "./lib/utils";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
@@ -76,6 +77,7 @@ import { ConflictDialogHost, installImportConflictDialog, uninstallImportConflic
 import { DialogHost, MenuHost, Toasts, openMenu } from "./components/Overlays";
 import { Outline } from "./components/Outline";
 import { Sidebar, currentFolderId, type Scope } from "./components/Sidebar";
+import { SidebarResizer } from "./components/SidebarResizer";
 import { StatusBar } from "./components/StatusBar";
 import { TabBar } from "./components/TabBar";
 import { setBridge } from "./editor/bridge";
@@ -845,7 +847,7 @@ export default function App(): ReactNode {
         onNewNote={(folderId) => newNote(folderId)}
         onNewFolder={(parentId) => void newFolder(parentId)}
         onOpenSettings={() => setSettingsOpen(true)}
-        onCollapse={() => patchUi({ sidebarOpen: false })}
+        onToggleSidebar={() => patchUi({ sidebarOpen: !ui.sidebarOpen })}
         onOpenWorkspace={(record) => void openRecord(record)}
         onAddLocalFolder={() => void openLocalFolder()}
         onNewBrowserWorkspace={() => void newBrowserWorkspace()}
@@ -857,10 +859,27 @@ export default function App(): ReactNode {
         onOpenInbox={() => setInboxOpen(true)}
       />
 
-      <button type="button" className="scrim--menu" aria-label="收起侧栏" onClick={() => patchUi({ sidebarOpen: false })} />
+      {/* 移动端抽屉的遮罩：`scrim--drawer` 让它让开顶行（头部一直可用）。
+          桌面端这条按钮被 `display: none` 关着，只有 ≤820px 打开抽屉时才显形。 */}
+      <button
+        type="button"
+        className="scrim--menu scrim--drawer"
+        aria-label="收起侧栏"
+        onClick={() => patchUi({ sidebarOpen: false })}
+      />
 
-      <div className="main">
-        {hasWorkspace ? (
+      {/* 侧栏宽度的拖拽把手。它是 `.app` 栅格里的**独立一列**（0 宽，骑在侧栏右边框上），
+          不是 `.sidebar` 的子元素：侧栏有 `overflow: hidden`，把把手放进去会盖住树自己的
+          滚动条，滚动条就抓不住了。 */}
+      <SidebarResizer
+        width={ui.sidebarWidth}
+        disabled={!ui.sidebarOpen}
+        onCommit={(sidebarWidth) => patchUi({ sidebarWidth })}
+      />
+
+      {/* 标签栏是**顶行**的一项（和侧栏头部同一行）：这样收起左栏时，编辑器与状态栏
+          能在它下面绕到最左边占满整宽，而标签栏本身不移动（见 app.css 的栅格分区）。 */}
+      {hasWorkspace ? (
           <TabBar
             tabs={ui.tabs}
             notes={library.notes}
@@ -894,13 +913,23 @@ export default function App(): ReactNode {
                     ]
                   : []),
                 {
+                  id: "copy-path",
+                  label: "复制地址",
+                  icon: "link",
+                  separatorBefore: true,
+                  // 浏览器 / OPFS 笔记本没有本机绝对路径（见 `lib/notePath.ts`）：
+                  // 禁用，而不是给一个点了没反应的死菜单项。
+                  disabled: noteAbsolutePath(library.workspace, id) === null,
+                  run: () => void copyPathToClipboard(library.workspace, id),
+                },
+                {
                   id: "reveal",
                   label: "在文件夹中显示",
                   icon: "external",
-                  separatorBefore: true,
                   disabled: !bridge || library.workspace?.kind !== "node",
                   run: () => {
-                    if (bridge && library.workspace) void bridge.shell.showItemInFolder(joinAbsolute(library.workspace.location, id));
+                    const absolute = noteAbsolutePath(library.workspace, id);
+                    if (bridge && absolute) void bridge.shell.showItemInFolder(absolute);
                   },
                 },
                 {
@@ -914,6 +943,7 @@ export default function App(): ReactNode {
           />
         ) : null}
 
+      <div className="main">
         {hasWorkspace && activeNote ? null : hasWorkspace ? (
           <div className="empty">
             <div className="empty__inner">
@@ -1231,11 +1261,6 @@ function storageLabel(record: WorkspaceRecord): string {
   if (record.kind === "node") return `本机磁盘 · ${record.location}`;
   if (record.kind === "fsa") return `浏览器文件夹 · ${record.name}`;
   return `浏览器本地 · ${record.name}`;
-}
-
-function joinAbsolute(root: string, relative: string): string {
-  const separator = root.includes("\\") ? "\\" : "/";
-  return `${root.replace(/[\\/]+$/, "")}${separator}${relative.split("/").join(separator)}`;
 }
 
 function positionOfLine(markdown: string, line: number): number {

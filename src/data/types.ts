@@ -134,6 +134,12 @@ export interface UiSettings {
   snapshots: boolean;
   imageMode: "asset" | "inline";
   sidebarOpen: boolean;
+  /**
+   * 展开态侧栏宽度（px）。`tokens.css` 里的 `--sidebar-w` 只是**默认值**：
+   * 用户在侧栏右边框上拖拽后，真值在 `applyUi()` 里以内联自定义属性写到 `:root`。
+   * 收起态不读它（宽度由头部内容自己决定）。
+   */
+  sidebarWidth: number;
   outlineOpen: boolean;
   sidebarTab: SidebarTab;
   sort: SortKey;
@@ -160,6 +166,27 @@ export interface UiSettings {
 /** R1「导入方式」：外部导入的默认落法。`overwrite` 不在其中，这是有意的。 */
 export type ImportConflictPreference = "new" | "append" | "skip" | "inbox";
 
+/**
+ * 侧栏可拖拽宽度的边界。**只在这一处定义**：`ui.ts` 读取时用它做兜底夹取，
+ * 拖拽把手（`SidebarResizer`）用它做实时夹取 —— 两处各写一遍就会出现
+ * 「存的进去、拖不出来」这种只有一边生效的漂移。
+ *
+ * `default` 必须与 `tokens.css` 的 `--sidebar-w` 一致（268px）；`min` 保证
+ * 树行的「文件夹名 + 计数」还排得下，`max` 保证编辑器不被挤没（窗口最窄 900px）。
+ */
+export const SIDEBAR_WIDTH = { min: 200, max: 520, default: 268 } as const;
+
+/** 把任意来源（localStorage、拖拽、键盘）的宽度夹到合法区间；非法值退回默认值。 */
+export function clampSidebarWidth(value: unknown): number {
+  // 只认数字与数字字符串：`Number(null)` 是 0、`Number("")` 也是 0，直接放过去
+  // 会得到「最小值 200」而不是默认值 —— 一个坏值会被当成用户的窄侧栏选择。
+  if (typeof value !== "number" && typeof value !== "string") return SIDEBAR_WIDTH.default;
+  if (typeof value === "string" && value.trim() === "") return SIDEBAR_WIDTH.default;
+  const width = Number(value);
+  if (!Number.isFinite(width)) return SIDEBAR_WIDTH.default;
+  return Math.min(SIDEBAR_WIDTH.max, Math.max(SIDEBAR_WIDTH.min, Math.round(width)));
+}
+
 export const DEFAULT_UI: UiSettings = {
   theme: "paper",
   appearance: "light",
@@ -177,6 +204,7 @@ export const DEFAULT_UI: UiSettings = {
   snapshots: true,
   imageMode: "asset",
   sidebarOpen: true,
+  sidebarWidth: SIDEBAR_WIDTH.default,
   outlineOpen: false,
   sidebarTab: "files",
   sort: "updated",

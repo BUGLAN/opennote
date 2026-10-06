@@ -1,5 +1,5 @@
 import { createStore, useStore } from "../lib/store";
-import { DEFAULT_UI, THEMES, type ThemeId, type UiSettings } from "./types";
+import { DEFAULT_UI, THEMES, clampSidebarWidth, type ThemeId, type UiSettings } from "./types";
 
 export const STORAGE_KEY = "opennote.ui.v1";
 
@@ -53,6 +53,9 @@ function load(): UiSettings {
     // Guard against theme ids removed in a later version.
     if (!THEMES.some((theme) => theme.id === ui.theme)) ui.theme = DEFAULT_UI.theme;
     if (!ui.tabs.every((id) => typeof id === "string")) ui.tabs = [];
+    // 宽度是**用户拖出来的**：旧版本没有这个键、手改过 localStorage、拖到窗口外
+    // 都会留下越界值，所以读取时统一夹一次，别让坏值把布局撑坏。
+    ui.sidebarWidth = clampSidebarWidth(ui.sidebarWidth);
     return ui;
   } catch {
     return DEFAULT_UI;
@@ -109,6 +112,9 @@ export function applyUi(ui: UiSettings): void {
   root.dataset.appearance = ui.appearance;
   root.style.setProperty("--doc-fs", `${ui.fontSize}px`);
   root.style.setProperty("--doc-lh", String(ui.lineHeight));
+  // 侧栏宽度是**用户拖出来的尺寸**，和 `--doc-fs` 一样只能走内联自定义属性：
+  // 桌面端展开态的列宽、移动端抽屉里的行宽都读同一个名字。
+  root.style.setProperty("--sidebar-w", `${clampSidebarWidth(ui.sidebarWidth)}px`);
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) {
     meta.setAttribute("content", ui.appearance === "dark" ? "#14120f" : "#fbf8f3");
