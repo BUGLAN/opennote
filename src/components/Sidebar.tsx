@@ -381,14 +381,12 @@ function TreeBody(props: TreeProps): ReactNode {
 
   return (
     <div className={cn("tree", props.dropTarget === "root" && "is-drop")} {...dropZoneProps("root", null)}>
-      <ScopeRow
-        icon="note"
-        label="全部笔记"
-        count={counts.all}
-        active={scope.kind === "all"}
-        onClick={() => props.onScope({ kind: "all" })}
-      />
-
+      {/*
+       * 这里原本有一行 `全部笔记 {counts.all}`。删掉它：它不是筛选项，而是一个**什么也不筛**的
+       * 高亮行 —— 文件树本身就把所有笔记都摊在这里了，点它只是把 scope 设回 `all`，
+       * 让「当前文件夹」变回空。真正需要「新建到哪里」的行为由文件夹行的高亮承担，
+       * 整棵树的空白处依旧是拖到根目录的投放区（见上面的 `dropZoneProps("root", null)`）。
+       */}
       {roots.length ? <div className="tree__group">文件夹</div> : null}
       {roots.map((folder) => (
         <FolderBranch key={folder.id} folder={folder} depth={0} {...props} dropZoneProps={dropZoneProps} />
