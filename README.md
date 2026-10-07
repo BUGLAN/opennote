@@ -70,7 +70,14 @@ IndexedDB 只在两处出现，都不存笔记内容：一是 Chrome 的文件�
 - 每个 Release 都带 `SHA256SUMS`，`sha256sum -c SHA256SUMS` 可验证下载完整性。
 - 桌面版目前只有 **Windows x64 免安装 zip**，且**没有代码签名**：首次运行会出现「Windows 已保护你的电脑」，
   点「更多信息 → 仍要运行」即可。mac / Linux 的配置在 [`electron-builder.yml`](electron-builder.yml) 里声明了但尚未交付（未签名、未公证）。
-- 桌面版**没有自动更新**：升级就是下载新 zip 解压覆盖；你的笔记在自己的文件夹里，不受影响。
+- 桌面版**可以自己更新**（Windows x64）：启动时只读一次 GitHub Releases，有新版本就在左上角
+  （「Opennote」与「新建」之间）出现一个**强调色**下载图标；点它下载并校验，图标变成重启图标后
+  点「重启并更新」——应用先保存笔记，再关闭、覆盖当前目录、自动重开。设置 →「帮助」里也能手动检查。
+  只读一次、不上传任何数据（GitHub 会看到你的 IP）；**没有**后台常驻检查，也不会静默安装。
+  你的笔记在自己的文件夹里，不受影响；机制与边界见 [docs/update/00-更新机制.md](docs/update/00-更新机制.md)。
+- 剪藏扩展**没有自动更新**：它没上架任何商店，`chrome://extensions` 的「加载已解压的扩展」也没有
+  更新通道。升级就是下载新的 `Opennote-clip-<版本>.zip` 解压覆盖后点「重新加载」。
+  将来上 Edge Add-ons（免费）或 Chrome Web Store 才有商店级自动更新，见 [RELEASING.md](RELEASING.md) 第 4 节。
 - 仓库目前是私有的：公开之前 Release 与 Actions 产物只对协作者可见，网页版也还没有可访问的部署地址。
   打包与分发流程（版本门禁、产物清单、签名与商店路线、已知坑）见 [RELEASING.md](RELEASING.md)。
 

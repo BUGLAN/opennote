@@ -72,6 +72,21 @@ const IMPORT_RECEIPT_CHANNEL = 'opennote:import:receipt'
 const IMPORT_REQUEST_CHANNEL = 'opennote:import:request'
 const IMPORT_REPLY_CHANNEL = 'opennote:import:reply'
 
+/**
+ * 自更新（`electron/update.cjs` 是唯一产地）。
+ *
+ * 渲染层在这里能做的只有五件事：读状态、检查、下载、取消、重启。**没有**「传 URL」、
+ * 「传路径」、「传版本」的入口 —— 网络与磁盘全在主进程，CSP 的 `connect-src` 保持
+ * `'self' file:` 不变（见 `main.cjs` 的 `cspPolicy()`）。
+ */
+const UPDATE_STATUS_CHANNEL = 'opennote:update:status'
+const UPDATE_CHECK_CHANNEL = 'opennote:update:check'
+const UPDATE_DOWNLOAD_CHANNEL = 'opennote:update:download'
+const UPDATE_CANCEL_CHANNEL = 'opennote:update:cancel'
+const UPDATE_RESTART_CHANNEL = 'opennote:update:restart'
+/** 主进程 → 渲染层的状态/进度广播（进度已按 ≤5 次/秒节流）。 */
+const UPDATE_CHANGED_CHANNEL = 'opennote:update:changed'
+
 const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args)
 
 /** 订阅一个主进程频道，返回退订函数（与 `onDeepLink` / `onInboxChanged` 同一套写法）。 */
@@ -206,6 +221,21 @@ const bridge = {
    * 由主进程用系统对话框如实告知（绝不静默）。arity 1。
    */
   onDeepLink: (callback) => subscribe(DEEPLINK_CHANNEL, callback),
+
+  /**
+   * 桌面端自更新。**只在打包版 Windows x64 上 `supported` 为真**；
+   * 其余平台状态里 `supported:false`，界面据此不显示任何更新入口。
+   */
+  update: {
+    status: () => invoke(UPDATE_STATUS_CHANNEL),
+    /** `force` 只影响「冷却窗口」：手动检查时绕过它，启动检查不绕过。arity 1。 */
+    check: (options) => invoke(UPDATE_CHECK_CHANNEL, options),
+    download: () => invoke(UPDATE_DOWNLOAD_CHANNEL),
+    cancel: () => invoke(UPDATE_CANCEL_CHANNEL),
+    restart: () => invoke(UPDATE_RESTART_CHANNEL),
+    /** 状态与下载进度变化（主进程节流后推送）；返回退订函数。arity 1。 */
+    onChanged: (callback) => subscribe(UPDATE_CHANGED_CHANNEL, callback),
+  },
 
   /** 收件箱目录变化（独立 watcher，去抖 450ms）；浏览器后端下不可用。 */
   onInboxChanged: (callback) => subscribe(INBOX_CHANGED_CHANNEL, callback),

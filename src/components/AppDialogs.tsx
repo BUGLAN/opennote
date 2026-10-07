@@ -3,10 +3,13 @@ import { ACCENTS, FONTS, THEMES, WIDTHS, type Id, type Snapshot, type UiSettings
 import { hasLegacyData } from "../data/legacy";
 import { listSnapshots, restoreSnapshot, takeManualSnapshot } from "../data/library";
 import type { WorkspaceRecord } from "../data/workspaces";
+import type { UpdateStatus } from "../desktop/bridge";
 import { patchUi, setTheme, toggleAppearance } from "../data/ui";
 import type { AppCommand } from "../lib/appCommands";
 import { askConfirm } from "../lib/dialogs";
 import { notify } from "../lib/toast";
+import type { UpdateAction } from "../lib/updateView";
+import { updateSummaryFor } from "../lib/updateView";
 import { cn, formatBytes, formatDateTime } from "../lib/utils";
 import { Icon } from "./Icons";
 import { ImportApiPanel } from "./ImportApiPanel";
@@ -49,6 +52,9 @@ export function SettingsDialog({
   initialSection,
   isDesktop,
   onOpenInbox,
+  updateStatus,
+  onCheckUpdate,
+  onUpdateAction,
 }: {
   settings: UiSettings;
   workspace: WorkspaceRecord | null;
@@ -66,6 +72,10 @@ export function SettingsDialog({
   initialSection?: SectionId;
   isDesktop: boolean;
   onOpenInbox(): void;
+  /** 桌面端自更新状态（浏览器端恒为 null）。 */
+  updateStatus: UpdateStatus | null;
+  onCheckUpdate(): void;
+  onUpdateAction(action: UpdateAction): void;
 }): ReactNode {
   const [section, setSection] = useState<SectionId>(initialSection ?? "外观");
   const [legacy, setLegacy] = useState(false);
@@ -417,6 +427,43 @@ export function SettingsDialog({
                   <p className="dialog__note">导入会把旧笔记与图片写成真实的 .md 文件与跟笔记走的 <code>&lt;笔记名&gt;.assets/</code> 目录，不会删除原数据。</p>
                 </SettingRow>
               ) : null}
+
+              <SettingRow label="更新" hint={isDesktop ? "桌面版：从 GitHub Releases 拉取" : "仅桌面版"}>
+                <div className="setting__value">{updateSummaryFor(updateStatus)}</div>
+                <div className="swatches" style={{ marginTop: 6 }}>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={!isDesktop || !updateStatus?.supported}
+                    onClick={onCheckUpdate}
+                  >
+                    <Icon name="rotate" size={14} />
+                    检查更新
+                  </button>
+                  {updateStatus?.phase === "available" ? (
+                    <button type="button" className="btn btn--primary" onClick={() => onUpdateAction("download")}>
+                      <Icon name="download" size={14} />
+                      下载更新
+                    </button>
+                  ) : null}
+                  {updateStatus?.phase === "downloading" ? (
+                    <button type="button" className="btn" onClick={() => onUpdateAction("cancel")}>
+                      <Icon name="close" size={14} />
+                      取消下载
+                    </button>
+                  ) : null}
+                  {updateStatus?.phase === "ready" ? (
+                    <button type="button" className="btn btn--primary" onClick={() => onUpdateAction("restart")}>
+                      <Icon name="rotate" size={14} />
+                      重启并更新
+                    </button>
+                  ) : null}
+                </div>
+                <p className="dialog__note">
+                  每次启动只读一次 GitHub Releases（不上传任何数据，GitHub 会看到你的 IP）；下载后由你点「重启并更新」，
+                  Opennote 会先保存笔记再关闭、覆盖当前目录并自动重开。笔记文件在你自己的文件夹里，不受影响。
+                </p>
+              </SettingRow>
 
               <SettingRow label="关于">
                 <div className="setting__value">

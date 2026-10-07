@@ -1257,6 +1257,79 @@ async function main() {
     return '安全降级'
   })
 
+  // ------------------------------------------- 自更新（GitHub Releases → 覆盖重启）
+  section('自更新：入口只许「五条命令 + 一条订阅」，未打包时完全不动网络')
+
+  // 单开一个 harness：前面几个 harness 的窗口已经被 D11 关窗握手销毁了，
+  // 而 update handler 有来源校验（`isTrustedSender`）——用旧 harness 会误判成「未授权」。
+  const harnessU = await bootHarness(createHarness({ userData: userDataC, appRoot: emptyAppRoot }))
+  const callU = makeCaller(harnessU)
+
+  await check('preload 的 update 组只有 status/check/download/cancel/restart/onChanged（没有传 URL/路径的入口）', async () => {
+    const bridge = preload.exposed.value
+    assert.deepEqual(
+      Object.keys(bridge.update).sort(),
+      ['cancel', 'check', 'download', 'onChanged', 'restart', 'status'],
+      '渲染层不得有「指定 URL / 路径 / 版本」的入口',
+    )
+    const arity = { status: 0, check: 1, download: 0, cancel: 0, restart: 0, onChanged: 1 }
+    for (const [name, expected] of Object.entries(arity)) {
+      assert.equal(typeof bridge.update[name], 'function', `update.${name} 必须存在`)
+      assert.equal(bridge.update[name].length, expected, `update.${name} 参数个数应为 ${expected}`)
+    }
+    return `${Object.keys(arity).length} 项一致`
+  })
+
+  await check('update 的五个 invoke 频道在主进程都有 handler（不是死调用）', async () => {
+    const channels = [
+      'opennote:update:status',
+      'opennote:update:check',
+      'opennote:update:download',
+      'opennote:update:cancel',
+      'opennote:update:restart',
+    ]
+    for (const channel of channels) {
+      assert.ok(harnessU.state.handlers.has(channel), `${channel} 必须注册 handler`)
+    }
+    return `${channels.length} 个通道配对`
+  })
+
+  await check('未打包（isPackaged=false）时 supported=false：状态如实、check 不发请求、restart 明确拒绝', async () => {
+    const status = await callU('opennote:update:status')
+    assert.equal(status.supported, false)
+    assert.equal(status.phase, 'idle')
+    assert.equal(status.canAutoInstall, false)
+    assert.equal(status.latest, null)
+    const checked = await callU('opennote:update:check', { force: true })
+    assert.equal(checked.supported, false)
+    assert.equal(checked.phase, 'idle', '未支持时必须直接返回，不得进入 checking')
+    const restarted = await callU('opennote:update:restart')
+    assert.deepEqual(restarted, { ok: false, reason: 'UNSUPPORTED' })
+    return 'supported=false 时全部退化，且不写盘'
+  })
+
+  await check('未授权来源调用 update handler 被拒（覆盖磁盘上的 exe 不该由任意 webContents 触发）', async () => {
+    const handler = harnessU.state.handlers.get('opennote:update:restart')
+    const rogue = { sender: { send() {}, isDestroyed: () => false } }
+    await assert.rejects(() => handler(rogue), /未授权的调用来源/)
+    return '来源校验生效'
+  })
+
+  await check('update:changed 的订阅能透传状态并退订（不留死订阅）', async () => {
+    const bridge = preload.exposed.value
+    const seen = []
+    const off = bridge.update.onChanged((status) => seen.push(status))
+    assert.equal(typeof off, 'function')
+    const listeners = preload.listeners.get('opennote:update:changed') || []
+    assert.equal(listeners.length, 1, '应注册监听')
+    listeners[0]({}, { phase: 'available', latest: '0.6.0' })
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].latest, '0.6.0')
+    off()
+    assert.equal((preload.listeners.get('opennote:update:changed') || []).length, 0, '退订后应移除监听')
+    return '透传 + 退订正常'
+  })
+
   // ------------------------------------------------------------------ summary
   if (ELECTRON_PROBE) {
     section('真实 Electron 端到端：file:// CSP 生效、dev server 不注入（--with-electron-probe）')

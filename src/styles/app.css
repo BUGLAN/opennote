@@ -199,6 +199,89 @@
   gap: 2px;
 }
 
+/* ---------------------------- 自更新按钮 -------------------------------- */
+
+/*
+ * 位置：头部 `.sidebar__actions` 的第一个（品牌与「新建」之间）。
+ * 与普通图标**一眼可分**：普通 `.icon-btn` 是 `--ink-2`（灰），这里是 `--accent`。
+ * 只有 `tone==="accent"`（有更新 / 待重启 / 失败）才上强调色；`checking` 是灰的。
+ */
+.icon-btn--update {
+  position: relative;
+}
+
+.icon-btn--update.is-accent,
+.icon-btn--update.is-accent:hover {
+  color: var(--accent);
+}
+
+.icon-btn--update.is-accent:hover {
+  background: var(--accent-soft);
+}
+
+/* 「不可点」只表示正在忙（检查中），不该像禁用按钮那样褪色。 */
+.icon-btn--update:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+/*
+ * 极轻的呼吸：只在需要用户动手时（有更新 / 待重启 / 失败）出现，
+ * 悬停即停（用户已经看过来了），`prefers-reduced-motion` 下完全不闪。
+ */
+@keyframes opennote-update-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.icon-btn--update.is-accent:not(:hover) {
+  animation: opennote-update-breathe 2.6s var(--ease) infinite;
+}
+
+/* 下载/解压进度弧：压在图标外圈，不改变图标本身的可点区域。 */
+.icon-btn__ring {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.icon-btn__ring svg {
+  display: block;
+  /* 从 12 点方向开始画 */
+  transform: rotate(-90deg);
+}
+
+.icon-btn__ring-track,
+.icon-btn__ring-value {
+  fill: none;
+  stroke-width: 2;
+}
+
+.icon-btn__ring-track {
+  stroke: var(--accent-soft);
+}
+
+.icon-btn__ring-value {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transition: stroke-dashoffset var(--dur-fast) linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-btn--update.is-accent:not(:hover) {
+    animation: none;
+  }
+
+  .icon-btn__ring-value {
+    transition: none;
+  }
+}
+
 .sidebar__tabs {
   display: flex;
   gap: 2px;

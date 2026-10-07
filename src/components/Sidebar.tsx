@@ -31,6 +31,7 @@ import { askConfirm, askFolder, askText } from "../lib/dialogs";
 import { copyPathToClipboard, noteAbsolutePath } from "../lib/notePath";
 import { sealIconUrl } from "../lib/sealIcon";
 import { notify } from "../lib/toast";
+import type { UpdateAction, UpdateView } from "../lib/updateView";
 import { cn, excerpt, formatRelativeTime } from "../lib/utils";
 import { Icon, type IconName } from "./Icons";
 import { openMenu, type MenuItem } from "./Overlays";
@@ -75,6 +76,12 @@ export interface SidebarProps {
   /** 待确认的收件箱条目数（0 时不显示计数）。 */
   inboxPending: number;
   onOpenInbox(): void;
+  /**
+   * 桌面端自更新的图标状态（由 `src/lib/updateView.ts` 从主进程状态推出）。
+   * `visible:false` 时这里**一个像素都不占** —— 「有更新才出现」是这个功能的原话。
+   */
+  updateView: UpdateView;
+  onUpdateAction(action: UpdateAction): void;
 }
 
 /** Drag state lives outside React: it only matters between two native events. */
@@ -140,6 +147,42 @@ export function Sidebar(props: SidebarProps): ReactNode {
           <span className="sidebar__name">Opennote</span>
         </div>
         <div className="sidebar__actions">
+          {/*
+            自更新入口：位置就是需求图里那个红框（`.sidebar__brand` 与「新建」之间）。
+            - 只在「有更新 / 正在下载 / 待重启 / 用户主动检查后失败」时出现（`visible`）；
+            - 颜色用 `--accent`，与旁边 `--ink-2` 的普通图标一眼可分；
+            - 文案、图标、可点行为全部来自 `updateViewFor()`，这里不自己判断状态。
+          */}
+          {props.updateView.visible ? (
+            <button
+              type="button"
+              className={cn("icon-btn", "icon-btn--update", props.updateView.tone === "accent" && "is-accent")}
+              title={props.updateView.title}
+              aria-label={props.updateView.title}
+              disabled={props.updateView.action === null}
+              onClick={() => {
+                if (props.updateView.action) props.onUpdateAction(props.updateView.action);
+              }}
+            >
+              <Icon name={props.updateView.icon} />
+              {props.updateView.ring !== null ? (
+                <span className="icon-btn__ring" aria-hidden="true">
+                  <svg viewBox="0 0 26 26" width={26} height={26}>
+                    {/* 进度弧：周长 2πr ≈ 56.5（r=9），dashoffset 按百分比推进 */}
+                    <circle className="icon-btn__ring-track" cx="13" cy="13" r="9" />
+                    <circle
+                      className="icon-btn__ring-value"
+                      cx="13"
+                      cy="13"
+                      r="9"
+                      strokeDasharray="56.5"
+                      strokeDashoffset={56.5 * (1 - props.updateView.ring / 100)}
+                    />
+                  </svg>
+                </span>
+              ) : null}
+            </button>
+          ) : null}
           <button className="icon-btn" title="新建笔记 (Ctrl/⌘ + N)" onClick={() => props.onNewNote(currentFolderId(scope))}>
             <Icon name="plus" />
           </button>

@@ -22,7 +22,8 @@
 
 const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron')
 const { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } = require('node:fs/promises')
-const { existsSync, watch, readdirSync } = require('node:fs')
+const { existsSync, watch, readdirSync, readFileSync } = require('node:fs')
+const { spawn } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const path = require('node:path')
 
@@ -924,6 +925,7 @@ function registerIpcHandlers() {
   registerShellHandlers()
   registerAppHandlers()
   registerImportHandlers()
+  registerUpdateHandlers()
 
   // 主题切换时同步标题栏按钮（叠加层）的底色与符号色。
   ipcMain.handle('opennote:window:titlebar', (event, colors) => {
@@ -1578,6 +1580,283 @@ async function registerImportHandlers() {
 }
 
 // ---------------------------------------------------------------------------
+// 自更新（GitHub Releases → 下载校验 → 退出覆盖 → 重开）
+// ---------------------------------------------------------------------------
+//
+// 分工：网络/磁盘/进程控制全在 `electron/update.cjs`（那里是唯一产地），这里只做
+// 「接线」——注册 IPC、把状态广播给窗口、以及用户点「重启并更新」之后的编排。
+//
+// 不变式（改动前先读 `electron/update.cjs` 的头部注释）：
+//   1) 渲染层不能指定 URL / 路径 / 版本，只能调下面这五条；唯一可配的是主进程环境变量
+//      `OPENNOTE_UPDATE_API_BASE`（镜像与 e2e 用，渲染层碰不到）。
+//   2) CSP **不动**：网络只在主进程发生，渲染层仍然没有 `connect-src http(s)`。
+//   3) 只有 `app.isPackaged && win32 && x64` 才启用（没有产物的平台显示了就是撒谎）。
+//   4) 覆盖安装必须由用户点「重启并更新」触发，且必须先走 D11 落盘握手。
+
+const UPDATE_STATUS_CHANNEL = 'opennote:update:status'
+const UPDATE_CHECK_CHANNEL = 'opennote:update:check'
+const UPDATE_DOWNLOAD_CHANNEL = 'opennote:update:download'
+const UPDATE_CANCEL_CHANNEL = 'opennote:update:cancel'
+const UPDATE_RESTART_CHANNEL = 'opennote:update:restart'
+const UPDATE_CHANGED_CHANNEL = 'opennote:update:changed'
+/** 启动后多久做那一次静默检查：等窗口先画出来，别和首屏抢资源。 */
+const UPDATE_STARTUP_CHECK_DELAY_MS = 5000
+
+let updateModule = null
+let updateModuleTried = false
+let updateController = null
+
+/**
+ * 惰性加载更新模块。缺文件（或加载失败）时退化为「更新能力不存在」，
+ * 而不是让整个桌面端起不来 —— 与 `loadBridgeModule()` 同一套取舍。
+ */
+function loadUpdateModule() {
+  if (updateModuleTried) return updateModule
+  updateModuleTried = true
+  try {
+    updateModule = require('./update.cjs')
+  } catch (error) {
+    updateModule = null
+    console.warn(
+      `[opennote] 更新模块加载失败，本次运行不提供自更新：${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  return updateModule
+}
+
+/** 硬门：只有「打包版 + Windows x64」有可用的免安装包。 */
+function updateSupported() {
+  return app.isPackaged && process.platform === 'win32' && process.arch === 'x64'
+}
+
+function updateDirectory() {
+  return path.join(app.getPath('userData'), 'updates')
+}
+
+/**
+ * 仓库身份只认打包内 `package.json` 的 `repository.url`。
+ * 为什么值得写一条注释：0.6.0 端到端第一次真跑就抓到它写着**不存在的组织**（`opennote/opennote`），
+ * 于是「检查更新」永远 404。现在 `src/desktop/repository.test.ts` 咬住「能解析 + 与 homepage 同仓库」。
+ */
+function repositoryUrlFromPackage() {
+  try {
+    const raw = readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8')
+    const parsed = JSON.parse(raw)
+    return typeof parsed.repository?.url === 'string' ? parsed.repository.url : ''
+  } catch {
+    return ''
+  }
+}
+
+function unsupportedUpdateStatus() {
+  return {
+    supported: false,
+    current: app.getVersion(),
+    phase: 'idle',
+    latest: null,
+    releaseUrl: null,
+    asset: null,
+    progress: null,
+    error: null,
+    canAutoInstall: false,
+    checkedAt: null,
+  }
+}
+
+function ensureUpdater() {
+  if (updateController) return updateController
+  const module = loadUpdateModule()
+  if (!module || typeof module.createUpdater !== 'function') return null
+  updateController = module.createUpdater({
+    appVersion: app.getVersion(),
+    repositoryUrl: repositoryUrlFromPackage(),
+    // 环境变量只在这里读一次：e2e 与将来的国内镜像都走它，渲染层无权设置。
+    apiBase: process.env.OPENNOTE_UPDATE_API_BASE || undefined,
+    downloadBase: process.env.OPENNOTE_UPDATE_DOWNLOAD_BASE || undefined,
+    updatesDir: updateDirectory(),
+    installDir: path.dirname(app.getPath('exe')),
+    platform: process.platform,
+    arch: process.arch,
+    supported: updateSupported(),
+    onChange: (status) => {
+      const window = mainWindow
+      if (!window || window.isDestroyed()) return
+      try {
+        window.webContents.send(UPDATE_CHANGED_CHANNEL, status)
+      } catch {
+        /* 窗口正在销毁时广播失败无所谓 */
+      }
+    },
+    log: (message) => console.log(`[opennote] update ${message}`),
+    apply: (plan) => applyUpdatePlan(plan),
+  })
+  return updateController
+}
+
+/** 状态里附上「上一次覆盖的结果」，只交付一次（成功/失败都要如实说一次）。 */
+function updateStatusForRenderer() {
+  const controller = ensureUpdater()
+  if (!controller) return unsupportedUpdateStatus()
+  const status = controller.status()
+  const applyResult = controller.takeApplyResult()
+  return applyResult ? { ...status, applyResult } : status
+}
+
+/**
+ * 覆盖脚本与握手文件都写到真实路径（helper 在 RUN_AS_NODE 下读不到 asar）。
+ */
+async function prepareUpdateApply(plan) {
+  const module = loadUpdateModule()
+  const protocol = (module && module.PROTOCOL) || {}
+  const helperName = protocol.helperName || '.apply-update.cjs'
+  const applyingMarker = protocol.applyingMarker || '.applying'
+  const handoffFile = protocol.handoffFile || 'handoff.json'
+  const resultFile = protocol.resultFile || 'result.json'
+  const logFile = protocol.logFile || 'apply.log'
+
+  const updatesDir = updateDirectory()
+  await mkdir(updatesDir, { recursive: true })
+  const helperTarget = path.join(plan.stagingDir, helperName)
+  await copyFile(path.join(app.getAppPath(), 'electron', 'update-helper.cjs'), helperTarget)
+  await writeFile(
+    path.join(plan.stagingDir, applyingMarker),
+    JSON.stringify({ version: plan.version, at: new Date().toISOString() }),
+    'utf8',
+  )
+
+  const handoffPath = path.join(updatesDir, handoffFile)
+  const handoff = {
+    pid: process.pid,
+    installDir: path.dirname(app.getPath('exe')),
+    stagingDir: plan.stagingDir,
+    exeName: plan.exeName || 'Opennote.exe',
+    // 原样带走启动参数：`--user-data-dir` 之类必须跟着新进程走。
+    argv: process.argv.slice(1),
+    logPath: path.join(updatesDir, logFile),
+    version: plan.version,
+    resultPath: path.join(updatesDir, resultFile),
+    from: app.getVersion(),
+  }
+  await writeFile(handoffPath, `${JSON.stringify(handoff, null, 2)}\n`, 'utf8')
+  return { handoffPath, helperName, stagedExe: path.join(plan.stagingDir, handoff.exeName) }
+}
+
+/**
+ * 编排「重启并更新」：
+ *   准备 helper 与握手 → 用 **staging 里的新 exe** 起 helper（它等我们退出）→ 关窗
+ *   （走 D11 落盘握手）→ 进程退出后 helper 覆盖并启动新版本。
+ *
+ * 为什么 helper 用 staging 里的 exe：Windows 上正在运行的 exe 锁着自己，只有让
+ * helper 从 staging 跑，旧安装目录才没有任何进程、可以被直接覆盖。
+ *
+ * 「确定要重启吗」由**渲染层的应用内确认框**负责（`src/lib/update.ts` 的 `askConfirm`）：
+ * 主进程在这里弹原生模态会挡住 e2e 与自动化，而且这一步本来就是界面的事。
+ */
+async function applyUpdatePlan(plan) {
+  const window = mainWindow
+  if (!window || window.isDestroyed()) return { ok: false, reason: 'NO_WINDOW' }
+  if (!plan || typeof plan.stagingDir !== 'string') return { ok: false, reason: 'NO_PLAN' }
+
+  const { handoffPath, stagedExe } = await prepareUpdateApply(plan)
+  const child = spawn(stagedExe, [path.join(plan.stagingDir, '.apply-update.cjs')], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+      OPENNOTE_UPDATE_HANDOFF: handoffPath,
+    },
+  })
+  child.on('error', (error) => {
+    console.warn(`[opennote] 更新脚本启动失败：${error instanceof Error ? error.message : String(error)}`)
+  })
+  child.unref()
+
+  // 先把 IPC 回执发出去，再关窗（关窗会触发渲染层的落盘握手，最多等 1.5s）。
+  const timer = setTimeout(() => {
+    const target = mainWindow
+    if (target && !target.isDestroyed()) target.close()
+    else app.quit()
+  }, 200)
+  timer.unref?.()
+  console.log(`[opennote] update 准备覆盖到 v${plan.version}，等待用户重启`)
+  return { ok: true }
+}
+
+/** 启动时收尾：读回上次覆盖结果、恢复「已下载待重启」、清理半成品。 */
+async function resumeUpdateOnStartup() {
+  const controller = ensureUpdater()
+  if (!controller) return
+  try {
+    await controller.resume()
+  } catch (error) {
+    console.warn(`[opennote] 更新状态恢复失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+  // 上一次覆盖的结果**不在这里消费**：它随渲染层第一次 `status` 调用一起交付
+  // （`updateStatusForRenderer`），否则窗口还没订阅时发出去就等于丢了。
+}
+
+/**
+ * 更新通道的处理器包装：来源校验 + 与 `handle()` 同一套错误降级。
+ *
+ * 为什么不用 `handle()`：它不把 `event` 交给回调，而更新能覆盖磁盘上的可执行文件，
+ * 必须校验来源（`ipc-safety-check.cjs` 有「未授权来源被拒」的断言）。
+ * 注册处一律写成 `ipcMain.handle(常量, …)`：`verify-contract.cjs` 的 C-12a 靠
+ * 「常量可解析」把两侧配对咬住，套一层自定义函数名会让通道名解析不出来。
+ */
+function trustedUpdateHandler(fn, fallbackMessage) {
+  return async (event, ...args) => {
+    if (!isTrustedSender(event)) throw new Error('未授权的调用来源')
+    try {
+      return await fn(...args)
+    } catch (error) {
+      throw asUserError(error, fallbackMessage)
+    }
+  }
+}
+
+function registerUpdateHandlers() {
+  ipcMain.handle(
+    UPDATE_STATUS_CHANNEL,
+    trustedUpdateHandler(async () => updateStatusForRenderer(), '读取更新状态失败'),
+  )
+  ipcMain.handle(
+    UPDATE_CHECK_CHANNEL,
+    trustedUpdateHandler(async (options) => {
+      const controller = ensureUpdater()
+      if (!controller) return unsupportedUpdateStatus()
+      await controller.check({ force: options?.force === true })
+      return controller.status()
+    }, '检查更新失败'),
+  )
+  ipcMain.handle(
+    UPDATE_DOWNLOAD_CHANNEL,
+    trustedUpdateHandler(async () => {
+      const controller = ensureUpdater()
+      if (!controller) return unsupportedUpdateStatus()
+      return controller.download()
+    }, '下载更新失败'),
+  )
+  ipcMain.handle(
+    UPDATE_CANCEL_CHANNEL,
+    trustedUpdateHandler(async () => {
+      const controller = ensureUpdater()
+      if (!controller) return unsupportedUpdateStatus()
+      return controller.cancel()
+    }, '取消更新失败'),
+  )
+  ipcMain.handle(
+    UPDATE_RESTART_CHANNEL,
+    trustedUpdateHandler(async () => {
+      const controller = ensureUpdater()
+      if (!controller) return { ok: false, reason: 'UNSUPPORTED' }
+      return controller.restart()
+    }, '重启更新失败'),
+  )
+}
+
+// ---------------------------------------------------------------------------
 // D38：Content-Security-Policy（只对 file:// 注入）
 // ---------------------------------------------------------------------------
 
@@ -1962,6 +2241,17 @@ app.whenReady().then(async () => {
 
     // 窗口就绪：把启动期攒下的 `opennote://` 深链补发出去（不丢）。
     flushDeeplink()
+
+    // 自更新：先收尾上次的覆盖结果，再按「每次启动检查一次」查一遍。
+    // 只有打包版 Windows x64 才启用（没有产物的平台不显示图标，也不发请求）。
+    if (updateSupported()) {
+      await resumeUpdateOnStartup()
+      const updateTimer = setTimeout(() => {
+        const controller = ensureUpdater()
+        if (controller) void controller.check()
+      }, UPDATE_STARTUP_CHECK_DELAY_MS)
+      updateTimer.unref?.()
+    }
 
     // 本地接口：默认关闭。只有用户上次显式开启过（bridge.json 里 enabled=true，
     // 此时桥的初始状态是 stopped 而不是 disabled）才在启动时自动恢复监听。

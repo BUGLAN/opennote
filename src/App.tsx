@@ -67,6 +67,7 @@ import { copyImage } from "./lib/imageClipboard";
 import { extractHeadings, findCurrentHeading } from "./lib/outline";
 import { copyPathToClipboard, noteAbsolutePath } from "./lib/notePath";
 import { notify } from "./lib/toast";
+import { useUpdateController } from "./lib/update";
 import { cn, formatRelativeTime } from "./lib/utils";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { EditorPane, type CursorInfo } from "./components/EditorPane";
@@ -117,6 +118,8 @@ export default function App(): ReactNode {
   const deferredContent = useDeferredValue(activeNote?.content ?? "");
   const hasWorkspace = Boolean(library.workspace);
   const bridge = useMemo(() => desktopBridge(), []);
+  // 桌面端自更新：状态与动作都在 `src/lib/update.ts`（渲染层只显示状态、转发动作）。
+  const update = useUpdateController();
 
   const headings = useMemo(() => extractHeadings(deferredContent), [deferredContent]);
   const currentHeading = useMemo(
@@ -857,6 +860,8 @@ export default function App(): ReactNode {
         supportsBrowserWorkspace={supportsOpfs()}
         inboxPending={inboxPending}
         onOpenInbox={() => setInboxOpen(true)}
+        updateView={update.view}
+        onUpdateAction={update.act}
       />
 
       {/* 移动端抽屉的遮罩：`scrim--drawer` 让它让开顶行（头部一直可用）。
@@ -1062,6 +1067,9 @@ export default function App(): ReactNode {
           onShortcuts={() => setShortcutsOpen(true)}
           initialSection={settingsSection ?? undefined}
           isDesktop={Boolean(bridge)}
+          updateStatus={update.status}
+          onCheckUpdate={update.check}
+          onUpdateAction={update.act}
           onOpenInbox={() => {
             setSettingsOpen(false);
             setInboxOpen(true);

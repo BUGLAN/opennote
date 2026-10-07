@@ -214,6 +214,63 @@ export type ImportReply =
   | { ok: true; result: unknown }
   | { ok: false; error: ImportErrorBody };
 
+/* ===================================================================== *
+ * 桌面端自更新（`opennote:update:*`）
+ *
+ * 唯一产地是 `electron/update.cjs` 的状态机；这里只是它回传给渲染层的**线上形状**。
+ * 渲染层不掌握 URL、路径与版本 —— 它只根据 `phase` 决定画哪个图标、点了之后调哪个方法。
+ * ===================================================================== */
+
+export type UpdatePhase = "idle" | "checking" | "available" | "downloading" | "ready" | "error";
+
+export type UpdateErrorCode =
+  | "NETWORK"
+  | "RATE_LIMIT"
+  | "NOT_FOUND"
+  | "CHECKSUM_MISMATCH"
+  | "DISK_FULL"
+  | "READ_ONLY_INSTALL"
+  | "EXTRACT_FAILED"
+  | "APPLY_FAILED"
+  | "UNSUPPORTED";
+
+/** 下载与解压共用一个进度字段，用 `kind` 区分（界面的措辞必须跟着换）。 */
+export interface UpdateProgress {
+  kind: "download" | "extract";
+  received: number;
+  total: number;
+  percent: number;
+}
+
+/** 上一次覆盖安装的结果（由覆盖脚本写在 `userData/updates/result.json`）。 */
+export interface UpdateApplyResult {
+  ok: boolean;
+  from: string;
+  to: string;
+  error: string | null;
+}
+
+export interface UpdateStatus {
+  /** 只有「打包版 + Windows x64」为 true；false 时界面不该出现任何更新入口。 */
+  supported: boolean;
+  /** 当前运行版本（`app.getVersion()`）。 */
+  current: string;
+  phase: UpdatePhase;
+  /** 识别到的最新版本（去掉 `v` 前缀）；没检查过时为 null。 */
+  latest: string | null;
+  /** Releases 页面地址（只读目录时给「手动下载」用）。 */
+  releaseUrl: string | null;
+  asset: { name: string; size: number } | null;
+  progress: UpdateProgress | null;
+  /** 中文、可执行、不含绝对路径。 */
+  error: { code: UpdateErrorCode; message: string } | null;
+  /** 安装目录可写（探测过才知道；未知时按 true 处理）。 */
+  canAutoInstall: boolean;
+  checkedAt: string | null;
+  /** 只在启动后**第一次** `status` 上出现一次：上次覆盖的结果，界面据此弹一次提示。 */
+  applyResult?: UpdateApplyResult | null;
+}
+
 export interface OpennoteBridge {
   isElectron: true;
   platform: string;
@@ -326,6 +383,21 @@ export interface OpennoteBridge {
       link: { ok: true; kind: "settings"; section: "import" } | { ok: true; kind: "open"; path: string },
     ) => void,
   ): () => void;
+  /**
+   * 桌面端自更新（`opennote:update:*`）。只有打包版 Windows x64 上
+   * `status().supported` 才为真；其余平台界面不显示更新入口。
+   */
+  update: {
+    status(): Promise<UpdateStatus>;
+    /** `force` 只绕过「30 秒冷却」，不改变检查内容。 */
+    check(options?: { force?: boolean }): Promise<UpdateStatus>;
+    download(): Promise<UpdateStatus>;
+    cancel(): Promise<UpdateStatus>;
+    /** 由主进程先走落盘握手再关窗覆盖；`reason` 为 `NOT_READY`/`CANCELLED`/`UNSUPPORTED`。 */
+    restart(): Promise<{ ok: boolean; reason?: string }>;
+    /** 状态与下载进度变化（主进程已节流）；返回退订函数。 */
+    onChanged(callback: (status: UpdateStatus) => void): () => void;
+  };
   /** 收件箱目录变化（独立 watcher，去抖 450ms）；浏览器后端下不可用。 */
   onInboxChanged(callback: (changed: InboxChanged) => void): () => void;
   /**
