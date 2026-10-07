@@ -232,6 +232,21 @@ export async function createBrowserWorkspace(name = "我的笔记"): Promise<Wor
   return rememberWorkspace({ name: directory, kind: "opfs", location: directory });
 }
 
+/**
+ * 从 GitHub 导入的镜像笔记本（网页版）。
+ *
+ * **显示名与目录名是两个东西**：显示名要能读出「这是谁的仓库」（`BUGLAN/opennote`），
+ * 而 OPFS 的目录名在 `sanitizeName()` 之后会把 `/` 换成空格 —— 所以目录名走
+ * `owner-repo`，显示名原样保留。`location`（= 目录名）仍是「同一个笔记本」的判据，
+ * 重复导入同一个仓库因此复用同一条记录，而不是多出一个副本。
+ */
+export async function createMirrorWorkspace(displayName: string, directoryName: string): Promise<WorkspaceRecord> {
+  if (!supportsOpfs()) throw new Error("这个浏览器不支持本地文件系统（OPFS），GitHub 导入暂时用不了");
+  const directory = sanitizeName(directoryName, "repo");
+  await opfsWorkspaceDir(directory);
+  return rememberWorkspace({ name: displayName, kind: "opfs", location: directory });
+}
+
 export function workspaceDisplayName(record: WorkspaceRecord): string {
   if (record.kind === "node") return record.name;
   return record.name;

@@ -5,6 +5,7 @@ import {
   closeTab,
   createFolder,
   createNote,
+  currentBackend,
   cycleTab,
   flushAll,
   flushForClose,
@@ -30,8 +31,10 @@ import {
   WorkspacePermissionError,
   addLocalFolder,
   createBrowserWorkspace,
+  createMirrorWorkspace,
   forgetWorkspace,
   listWorkspaces,
+  resolveBackend,
   useWorkspaces,
   type WorkspaceRecord,
 } from "./data/workspaces";
@@ -70,6 +73,21 @@ import { copyPathToClipboard, noteAbsolutePath } from "./lib/notePath";
 import { notify } from "./lib/toast";
 import { useUpdateController } from "./lib/update";
 import { cn, formatRelativeTime } from "./lib/utils";
+/* GitHub 仓库笔记本（网页版）：导入 → 本地编辑 → 双向同步。模块注释见各自文件头。 */
+import { createGithubApi, type GithubApi } from "./lib/github/api";
+import {
+  forgetGithubToken,
+  loadGithubToken,
+  readBaseline,
+  saveGithubToken,
+  writeBaseline,
+  type GithubBaseline,
+} from "./lib/github/baseline";
+import { askGithubImport, askGithubSync, defaultCommitMessage } from "./lib/github/dialog";
+import { describeGithubError, planImport, runImport } from "./lib/github/importRepo";
+import { parseRepoInput, targetLabel } from "./lib/github/parse";
+import { collectLocalFiles, planPull, planPush, pullChanges, pushChanges, resolvePullConflicts } from "./lib/github/sync";
+import { GithubDialogHost } from "./components/GithubDialog";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { EditorPane, type CursorInfo } from "./components/EditorPane";
 import { HistoryDialog, SettingsDialog, ShortcutsDialog, type SettingsSectionId } from "./components/AppDialogs";
@@ -109,6 +127,8 @@ export default function App(): ReactNode {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [inboxOpen, setInboxOpen] = useState(false);
   const [inboxPending, setInboxPending] = useState(0);
+  /** 当前笔记本的 GitHub 远端（读自 `.opennote/github.json`）；不是镜像笔记本就是 null。 */
+  const [githubRemote, setGithubRemote] = useState<GithubBaseline | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -553,8 +573,204 @@ export default function App(): ReactNode {
     }
   };
 
-  const closeCurrentWorkspace = async () => {
-    const ok = await askConfirm({
+  /* ------------------------------------------------------------ GitHub 仓库 */
+
+  /*
+   * 镜像笔记本的远端信息读自**笔记本里的** `.opennote/github.json`（它随笔记走），
+   * 所以切换笔记本时要重新读一次；不是镜像笔记本就是 null（状态栏因此不显示 GitHub 那一项）。
+   */
+  useEffect(() => {
+    const target = currentBackend();
+    if (!target) {
+      setGithubRemote(null);
+      return;
+    }
+    let cancelled = false;
+    void readBaseline(target)
+      .then((baseline) => {
+        if (!cancelled) setGithubRemote(baseline);
+      })
+      .catch(() => {
+        if (!cancelled) setGithubRemote(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [library.workspace?.id, library.ready]);
+
+  /** 建一个 API 客户端（令牌取本机的；公开仓库没有令牌也能读）。 */
+  const githubApiFor = (owner: string, repo: string, token?: string | null): GithubApi =>
+    createGithubApi({
+      fetch: (input, init) => fetch(input, init),
+      token: token === undefined ? loadGithubToken(owner, repo) : token,
+      target: { owner, repo },
+    });
+
+  const importFromGithub = async () => {
+    const answer = await askGithubImport({
+      repo: githubRemote ? githubRemote.remote : "",
+      hasSavedToken: false,
+    });
+    if (!answer) return;
+    const parsed = parseRepoInput(answer.repo);
+    if (!parsed.ok) {
+      notify(parsed.message, { kind: "danger" });
+      return;
+    }
+    const target = parsed.value;
+    if (target.subPath) {
+      // 只提示、不阻断：镜像与远端按路径一一对应，收窄范围是另一个功能
+      notify("暂不支持只导入仓库里的某个子目录，这次会导入整个仓库。");
+    }
+    setBusy(`正在读取 ${targetLabel(target)}…`);
+    try {
+      const api = createGithubApi({
+        fetch: (input, init) => fetch(input, init),
+        token: answer.token || null,
+        target,
+      });
+      const info = await api.repo();
+      const ref = target.ref ?? info.defaultBranch;
+      const tree = await api.tree(ref);
+      const plan = planImport(tree);
+      if (plan.materialize.length === 0) {
+        notify("这个仓库里没有可导入的笔记或图片（只认 Markdown 与图片）。", { kind: "danger" });
+        return;
+      }
+      const record = await createMirrorWorkspace(targetLabel(target), `${target.owner}-${target.repo}`);
+      const backend = await resolveBackend(record);
+      const headSha = await api.headSha(ref);
+      const report = await runImport({
+        api,
+        ref,
+        headSha,
+        treeSha: tree.sha,
+        plan,
+        target: { owner: target.owner, repo: target.repo, remote: target.remote },
+        backend,
+        onProgress: (done, total) => setBusy(`正在从 GitHub 拉取… ${done}/${total}`),
+      });
+      await writeBaseline(backend, report.baseline);
+      if (answer.token) saveGithubToken(target.owner, target.repo, answer.token, answer.remember);
+      setGithubRemote(report.baseline);
+      await openRecord(record);
+      const skipped = plan.skippedNotNotes + plan.skippedTooLarge + plan.skippedOverLimit;
+      notify(
+        `已从 GitHub 导入 ${report.written} 个文件${report.failed ? `，${report.failed} 个没取下来` : ""}${
+          skipped ? `，跳过 ${skipped} 个非笔记文件` : ""
+        }${plan.truncated ? "；仓库太大，GitHub 只给了一部分文件树" : ""}`,
+      );
+    } catch (error) {
+      notify(describeGithubError(error), { kind: "danger" });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * 打开同步对话框：先把「本地改了哪些 / 远端改了哪些」算出来再问人。
+   * **先算后问**（而不是先问后算）：没有变更时用户看到的是一句「没有改动」，而不是一个
+   * 点了之后什么都没发生的按钮。
+   */
+  const openGithubSync = async () => {
+    const backend = currentBackend();
+    const baseline = githubRemote;
+    if (!backend || !baseline) {
+      notify("当前笔记本不是从 GitHub 导入的。", { kind: "danger" });
+      return;
+    }
+    setBusy("正在比较本地与远端…");
+    let api: GithubApi;
+    let plan: ReturnType<typeof planPush>;
+    let conflicts: string[];
+    try {
+      api = githubApiFor(baseline.owner, baseline.repo);
+      const local = await collectLocalFiles(backend);
+      plan = planPush(baseline, local);
+      const tree = await api.tree(baseline.ref);
+      conflicts = planPull(baseline, tree, local).conflicts.map((item) => item.path);
+    } catch (error) {
+      setBusy(null);
+      notify(describeGithubError(error), { kind: "danger" });
+      return;
+    }
+    setBusy(null);
+    const answer = await askGithubSync({
+      owner: baseline.owner,
+      repo: baseline.repo,
+      ref: baseline.ref,
+      added: plan.added.length,
+      modified: plan.modified.length,
+      deleted: plan.deleted.length,
+      conflicts,
+      hasToken: Boolean(loadGithubToken(baseline.owner, baseline.repo)),
+      message: defaultCommitMessage({ added: plan.added.length, modified: plan.modified.length, deleted: plan.deleted.length }),
+    });
+    if (!answer) return;
+
+    if (answer.action === "push") {
+      setBusy("正在推送到 GitHub…");
+      try {
+        const result = await pushChanges({ api, backend, baseline, message: answer.message || "Opennote 同步" });
+        const next: GithubBaseline = {
+          ...baseline,
+          headSha: result.headSha,
+          treeSha: result.treeSha,
+          files: result.files,
+          importedAt: new Date().toISOString(),
+        };
+        await writeBaseline(backend, next);
+        setGithubRemote(next);
+        notify(`已推送：新增 ${result.added}、修改 ${result.modified}、删除 ${result.deleted}（1 个提交）`);
+      } catch (error) {
+        notify(describeGithubError(error), { kind: "danger" });
+      } finally {
+        setBusy(null);
+      }
+      return;
+    }
+
+    setBusy(answer.action === "pull" ? "正在从远端拉取…" : "正在用远端覆盖…");
+    try {
+      if (answer.action === "overwrite-conflicts") {
+        const result = await resolvePullConflicts({ api, backend, baseline, paths: conflicts });
+        const next: GithubBaseline = { ...baseline, files: result.files };
+        await writeBaseline(backend, next);
+        setGithubRemote(next);
+        await rescanWorkspace();
+        notify(`已用远端覆盖 ${result.overwritten} 个文件`);
+      } else {
+        const result = await pullChanges({ api, backend, baseline });
+        const next: GithubBaseline = {
+          ...baseline,
+          headSha: result.headSha,
+          treeSha: result.treeSha,
+          files: result.files,
+        };
+        await writeBaseline(backend, next);
+        setGithubRemote(next);
+        await rescanWorkspace();
+        notify(
+          `已从远端拉取：更新 ${result.downloaded} 个、删除 ${result.removed} 个${
+            result.conflicts.length ? `；${result.conflicts.length} 个两边都改了，没有动` : ""
+          }`,
+        );
+      }
+    } catch (error) {
+      notify(describeGithubError(error), { kind: "danger" });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** 忘掉这个仓库的令牌（状态栏的「清除令牌」用；与扩展侧那条纪律同源）。 */
+  const forgetGithubRemoteToken = () => {
+    if (!githubRemote) return;
+    forgetGithubToken(githubRemote.owner, githubRemote.repo);
+    notify(`已清除 ${targetLabel(githubRemote)} 的令牌`);
+  };
+
+  const closeCurrentWorkspace = async () => {    const ok = await askConfirm({
       title: `关闭「${library.workspace?.name}」？`,
       message: "笔记不会被删除，只是从 Opennote 里移除这个位置。",
       note: "文件仍然在原来的文件夹里，随时可以重新打开。",
@@ -679,6 +895,8 @@ export default function App(): ReactNode {
         openLocalFolder: () => void openLocalFolder(),
         newBrowserWorkspace: () => void newBrowserWorkspace(),
         uploadFolder: () => void uploadFolderToBrowser(),
+        importFromGithub: bridge ? null : () => void importFromGithub(),
+        syncGithub: githubRemote ? () => void openGithubSync() : null,
         closeWorkspace: () => void closeCurrentWorkspace(),
         toggleStar: () => {
           if (!activeNote) return;
@@ -876,6 +1094,7 @@ export default function App(): ReactNode {
         onAddLocalFolder={() => void openLocalFolder()}
         onNewBrowserWorkspace={() => void newBrowserWorkspace()}
         onUploadFolder={() => void uploadFolderToBrowser()}
+        onImportGithub={bridge ? null : () => void importFromGithub()}
         onCloseWorkspace={() => void closeCurrentWorkspace()}
         supportsLocalFolder={Boolean(bridge) || supportsFileSystemAccess()}
         supportsBrowserWorkspace={supportsOpfs()}
@@ -1009,6 +1228,7 @@ export default function App(): ReactNode {
             onAddLocal={() => void openLocalFolder()}
             onNewBrowser={() => void newBrowserWorkspace()}
             onUpload={() => void uploadFolderToBrowser()}
+            onImportGithub={bridge ? null : () => void importFromGithub()}
           />
         )}
 
@@ -1053,6 +1273,16 @@ export default function App(): ReactNode {
           onOpenSettings={() => setSettingsOpen(true)}
           inboxPending={inboxPending}
           onOpenInbox={() => setInboxOpen(true)}
+          github={
+            githubRemote
+              ? {
+                  label: `GitHub · ${targetLabel(githubRemote)}`,
+                  title: `远端：${githubRemote.remote}（分支 ${githubRemote.ref}）；点一下看本地与远端的差异`,
+                  onOpen: () => void openGithubSync(),
+                  onForgetToken: forgetGithubRemoteToken,
+                }
+              : null
+          }
         />
       </div>
 
@@ -1136,6 +1366,7 @@ export default function App(): ReactNode {
 
       <MenuHost />
       <DialogHost />
+      <GithubDialogHost />
       <ConflictDialogHost />
       <Toasts />
 
@@ -1166,6 +1397,7 @@ function WelcomeScreen({
   onAddLocal,
   onNewBrowser,
   onUpload,
+  onImportGithub,
 }: {
   workspaces: WorkspaceRecord[];
   busy: string | null;
@@ -1175,6 +1407,7 @@ function WelcomeScreen({
   onAddLocal: () => void;
   onNewBrowser: () => void;
   onUpload: () => void;
+  onImportGithub: (() => void) | null;
 }): ReactNode {
   return (
     <div className="empty">
@@ -1207,6 +1440,13 @@ function WelcomeScreen({
             <strong>导入文件夹</strong>
             <small>把本地文件夹拷进浏览器本地存储，之后照常编辑</small>
           </button>
+          {onImportGithub ? (
+            <button type="button" className="choice" onClick={onImportGithub}>
+              <Icon name="download" size={18} />
+              <strong>从 GitHub 仓库导入</strong>
+              <small>公开仓库不用令牌；导入后照常编辑，改动可以同步回仓库</small>
+            </button>
+          ) : null}
         </div>
 
         {workspaces.length ? (

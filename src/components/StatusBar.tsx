@@ -21,6 +21,11 @@ interface StatusBarProps {
   /** 待确认的收件箱条目数（0 时只显示「收件箱」）。 */
   inboxPending: number;
   onOpenInbox(): void;
+  /**
+   * 当前笔记本的 GitHub 远端（不是镜像笔记本时 `null`，那一项整个不渲染）。
+   * `label` 是逐字显示的那一行，`title` 说明同步状态（悬浮可见），点击打开同步对话框。
+   */
+  github: { label: string; title: string; onOpen(): void; onForgetToken(): void } | null;
 }
 
 export function StatusBar(props: StatusBarProps): ReactNode {
@@ -89,6 +94,27 @@ export function StatusBar(props: StatusBarProps): ReactNode {
         <Icon name="layers" size={13} />
         {props.inboxPending ? `收件箱 ${props.inboxPending}` : "收件箱"}
       </button>
+      {props.github ? (
+        <>
+          <button
+            type="button"
+            className="statusbar__item statusbar__item--button statusbar__item--compact"
+            title={props.github.title}
+            onClick={props.github.onOpen}
+          >
+            <Icon name="download" size={13} />
+            {props.github.label}
+          </button>
+          <button
+            type="button"
+            className="statusbar__item statusbar__item--button statusbar__item--compact"
+            title="清除这个仓库保存在浏览器里的访问令牌"
+            onClick={props.github.onForgetToken}
+          >
+            清除令牌
+          </button>
+        </>
+      ) : null}
       <button
         type="button"
         className="statusbar__item statusbar__item--button"

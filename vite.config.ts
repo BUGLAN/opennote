@@ -163,7 +163,13 @@ function contentSecurityPolicyPlugin(): Plugin {
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
         "img-src 'self' data: blob:",
         "font-src 'self' data: https://cdn.jsdelivr.net",
-        "connect-src 'self'",
+        /*
+         * 两个 GitHub 来源是「从 GitHub 仓库导入 / 同步」要用的（网页版专属）：
+         * `api.github.com` 读元数据 / 文件树 / 写提交，`raw.githubusercontent.com` 逐文件读内容
+         * （CDN 不占 API 那 60 次/小时的匿名配额）。两处都返回 `Access-Control-Allow-Origin: *`。
+         * 桌面版**不放**这两个：它的策略在 `electron/main.cjs` 的 `cspPolicy()` 里，那边对应功能也不开放。
+         */
+        "connect-src 'self' https://api.github.com https://raw.githubusercontent.com",
         "media-src 'self' blob: data:",
         "object-src 'none'",
         "base-uri 'none'",

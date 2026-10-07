@@ -61,6 +61,8 @@ export interface SidebarProps {
   onAddLocalFolder(): void;
   onNewBrowserWorkspace(): void;
   onUploadFolder(): void;
+  /** 从 GitHub 仓库导入（网页版专属）。`null` = 这个形态不支持，菜单项整个不渲染。 */
+  onImportGithub: (() => void) | null;
   onCloseWorkspace(): void;
   onScope(scope: Scope): void;
   onTab(tab: SidebarTab): void;
@@ -246,6 +248,17 @@ export function Sidebar(props: SidebarProps): ReactNode {
               <Icon name="upload" size={14} />
               <span>导入文件夹到浏览器…</span>
             </button>
+            {/*
+              从 GitHub 仓库导入（0.4.0）：**只有网页版**能看见这一项 —— 桌面版的 CSP 里没有
+              api.github.com（`electron/main.cjs` 的 `cspPolicy()` 是 `connect-src 'self' file:`），
+              而镜像落在 OPFS 里。传 null 就是不支持，按钮整个不渲染（不留死元素）。
+            */}
+            {props.onImportGithub ? (
+              <button type="button" className="menu__item" onClick={props.onImportGithub}>
+                <Icon name="download" size={14} />
+                <span>从 GitHub 仓库导入…</span>
+              </button>
+            ) : null}
             {props.workspace ? (
               <>
                 <div className="menu__sep" />

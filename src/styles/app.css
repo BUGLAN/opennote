@@ -1437,6 +1437,73 @@ mark.hit {
   color: var(--ink-3);
 }
 
+/* ------------------------------------------------------------------ GitHub 对话框
+ * 两个对话框（导入 / 同步）共用一套排版：一行标签 + 一个控件 + 一行小字说明。
+ * 间距一律用既有令牌；**没有新增设计令牌**（新增令牌要走 DESIGN.md 的裁定）。
+ */
+.github-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.github-form__label {
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+
+.github-form__hint {
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+  color: var(--ink-3);
+}
+
+.github-form__check {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+
+.github-sync__remote {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+
+.github-sync__counts {
+  font-size: var(--fs-md);
+  color: var(--ink);
+}
+
+.github-sync__conflicts {
+  padding: var(--s3);
+  border: 1px solid var(--rule-strong);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+}
+
+.github-sync__conflict-title {
+  font-size: var(--fs-sm);
+  color: var(--ink);
+}
+
+.github-sync__conflicts ul {
+  margin: var(--s2) 0 var(--s3);
+  padding-left: 1.2em;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+
+.github-sync__conflicts code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
 /*
  * 「移动到…」目标文件夹选择器（`Overlays.tsx` 的 `FolderDialog`）。
  *

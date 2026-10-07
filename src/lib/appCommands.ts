@@ -43,6 +43,10 @@ export interface CommandContext {
   openInbox(): void;
   /** 打开「设置 · 导入与接口」，剪藏通道与本地接口都在那一栏。 */
   openImportSettings(): void;
+  /** 从 GitHub 仓库导入（网页版专属；桌面版不支持时传 `null`）。 */
+  importFromGithub: (() => void) | null;
+  /** 同步当前镜像笔记本与 GitHub（不是镜像笔记本时传 `null`，那一组命令整个不出现）。 */
+  syncGithub: (() => void) | null;
 }
 
 export type CommandGroup =
@@ -125,6 +129,27 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       group: "笔记本",
       icon: "upload",
       run: () => ctx.uploadFolder(),
+    },
+    /*
+     * GitHub 两条（0.4.0）。用 `enabled: () => ctx.…!== null` 而不是「在 run 里再判一次」：
+     * 命令面板的过滤与快捷键派发都读同一个 `enabled()`，桌面版 / 非镜像笔记本因此
+     * **在面板里就看不到**这些命令 —— 不会出现「点了没反应」的条目（假按钮的老毛病）。
+     */
+    {
+      id: "import-github",
+      label: "从 GitHub 仓库导入…",
+      group: "笔记本",
+      icon: "download",
+      enabled: () => ctx.importFromGithub !== null,
+      run: () => ctx.importFromGithub?.(),
+    },
+    {
+      id: "sync-github",
+      label: "同步到 GitHub…",
+      group: "数据",
+      icon: "rotate",
+      enabled: () => ctx.syncGithub !== null,
+      run: () => ctx.syncGithub?.(),
     },
     {
       id: "close-workspace",
