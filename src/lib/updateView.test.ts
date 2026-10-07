@@ -101,6 +101,31 @@ describe("设置面板里的状态说明", () => {
     const text = updateSummaryFor(status({ checkedAt: "2026-10-06T11:27:59.000Z" }));
     expect(text).toMatch(/检查/);
   });
+
+  it("桌面端桥读不到时才说「读取更新状态失败」", () => {
+    expect(updateSummaryFor(null, { desktop: true })).toContain("读取更新状态失败");
+  });
+});
+
+describe("网页版的更新说明", () => {
+  it("网页版不撒谎说「读取失败」：说明仅桌面版可更新，并带上构建时的版本号", () => {
+    (globalThis as Record<string, unknown>).__OPENNOTE_VERSION__ = "0.7.3";
+    try {
+      const text = updateSummaryFor(null, { desktop: false });
+      expect(text).toContain("网页版");
+      expect(text).toContain("v0.7.3");
+      expect(text).toContain("桌面版");
+      expect(text).not.toContain("读取更新状态失败");
+    } finally {
+      delete (globalThis as Record<string, unknown>).__OPENNOTE_VERSION__;
+    }
+  });
+
+  it("构建常量也读不到（退化环境）→ 只说清「仅桌面版」，不报错", () => {
+    const text = updateSummaryFor(null, { desktop: false });
+    expect(text).toContain("桌面版");
+    expect(text).not.toContain("读取更新状态失败");
+  });
 });
 
 describe("上次覆盖结果的提示", () => {

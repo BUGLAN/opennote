@@ -13,6 +13,15 @@ import { VitePWA } from "vite-plugin-pwa";
  */
 const isDesktop = process.env.OPENNOTE_DESKTOP === "1";
 
+/**
+ * Root `package.json` — its `version` is the single version source for both
+ * desktop (`app.getVersion()` at runtime) and web (baked into the bundle via
+ * `define` below, because the web build has no preload bridge to ask).
+ */
+const appPackage = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as {
+  version?: string;
+};
+
 /** The slice of rolldown's `PreRenderedChunk` the chunk layout needs. */
 interface PreRenderedChunkInfo {
   name: string;
@@ -188,6 +197,12 @@ function contentSecurityPolicyPlugin(): Plugin {
 
 export default defineConfig({
   base: isDesktop ? "./" : (process.env.VITE_BASE ?? "/"),
+  define: {
+    // 网页版没有 preload 桥（`window.opennote.version` 不存在），关于页之前只能写
+    // 「版本未知」。构建时把根 package.json 的版本号烧进包里；
+    // `src/lib/appVersion.ts` 是渲染层唯一消费处。
+    __OPENNOTE_VERSION__: JSON.stringify(appPackage.version ?? ""),
+  },
   plugins: [
     react(),
     VitePWA({

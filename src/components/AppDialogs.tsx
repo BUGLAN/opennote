@@ -6,6 +6,7 @@ import type { WorkspaceRecord } from "../data/workspaces";
 import type { UpdateStatus } from "../desktop/bridge";
 import { patchUi, setTheme, toggleAppearance } from "../data/ui";
 import type { AppCommand } from "../lib/appCommands";
+import { appVersion } from "../lib/appVersion";
 import { askConfirm } from "../lib/dialogs";
 import { notify } from "../lib/toast";
 import type { UpdateAction } from "../lib/updateView";
@@ -429,7 +430,7 @@ export function SettingsDialog({
               ) : null}
 
               <SettingRow label="更新" hint={isDesktop ? "桌面版：从 GitHub Releases 拉取" : "仅桌面版"}>
-                <div className="setting__value">{updateSummaryFor(updateStatus)}</div>
+                <div className="setting__value">{updateSummaryFor(updateStatus, { desktop: isDesktop })}</div>
                 <div className="swatches" style={{ marginTop: 6 }}>
                   <button
                     type="button"
@@ -467,15 +468,17 @@ export function SettingsDialog({
 
               <SettingRow label="关于">
                 <div className="setting__value">
-                  {/* 版本号只有**一个产地**：preload 的 `window.opennote.version`（→ `app.getVersion()` → package.json）。
-    这里曾经硬编码 `v0.2.0`，从 0.3.0 起一直在对用户撒谎；而 preload 的兜底曾拿 **Electron 版本**冒充，
-    会让用户看到 `v38.x` 并以为那是 Opennote 的版本。读不到就如实说「版本未知」——宁可知未知，不可冒充。 */}
-    <strong>Opennote</strong> · 开源笔记 ·{" "}
-    {(() => {
-      const desktop = (window as unknown as { opennote?: { version?: string } }).opennote
-      return desktop?.version ? `v${desktop.version}` : "版本未知"
-    })()}{" "}
-    · MIT License
+                  {/* 版本号的唯一产地是 `src/lib/appVersion.ts`：桌面读 preload 的 `window.opennote.version`
+      （→ `app.getVersion()` → 打包内 package.json），网页读构建时 Vite `define` 烧进包的
+      `__OPENNOTE_VERSION__`（同一个根 package.json，不是冒充）。这里曾硬编码 `v0.2.0`，
+      从 0.3.0 起一直在对用户撒谎；preload 的兜底也曾拿 **Electron 版本**冒充，会让用户看到
+      `v38.x`。两处都读不到才如实说「版本未知」——宁可知未知，不可冒充。 */}
+                  <strong>Opennote</strong> · 开源笔记 ·{" "}
+                  {(() => {
+                    const version = appVersion();
+                    return version ? `v${version}` : "版本未知";
+                  })()}{" "}
+                  · MIT License
                 </div>
                 <p className="dialog__note" style={{ marginTop: 4 }}>
                   纯前端、无后端、无账号、无遥测。笔记就是你磁盘上的 Markdown 文件，界面只是把它排版好给你看。

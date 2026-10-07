@@ -1,5 +1,6 @@
 import type { IconName } from "../components/Icons";
 import type { UpdateStatus } from "../desktop/bridge";
+import { appVersion } from "./appVersion";
 import { formatBytes, formatDateTime } from "./utils";
 
 /**
@@ -91,7 +92,15 @@ export function updateViewFor(status: UpdateStatus | null, options: { showError?
 }
 
 /** 设置面板「更新」那一行左侧的说明文字。与 tooltip 同一批事实，措辞不同。 */
-export function updateSummaryFor(status: UpdateStatus | null): string {
+export function updateSummaryFor(status: UpdateStatus | null, options: { desktop?: boolean } = {}): string {
+  // 只有**显式** `desktop: false`（网页版）才走这一分支：不传参数的旧调用一律按桌面端
+  // 语义处理，别让默认值悄悄改掉「读取更新状态失败」这句话的适用范围。
+  if (options.desktop === false) {
+    // 网页版没有更新通道，「读取更新状态失败」在这里是撒谎——那是桌面端桥读不到时的话。
+    // 如实说明 + 带上构建时烧进包里的版本号（`appVersion()`），别让用户对着一句错误发呆。
+    const version = appVersion();
+    return version ? `网页版 v${version} · 自动更新只在桌面版提供` : "自动更新只在桌面版提供";
+  }
   if (!status) return "读取更新状态失败";
   if (!status.supported) {
     return `当前 v${status.current} · 这个平台没有免安装包，不提供自动更新（只有打包版 Windows x64 可以）`;
