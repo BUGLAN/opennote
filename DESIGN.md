@@ -346,6 +346,10 @@ components:
     zIndex: 60
     display: "grid; place-items: center"
     padding: 20px
+  overlay-root-palette:
+    display: "grid; place-items: start center"
+    paddingTop: "max(24px, 17vh)"
+    note: "命令面板专用。面板高度随结果条数实时变，居中会让输入框跟着跑（60→5 项实测下跳 111px），顶部锚定后变短只朝下收缩"
   scrim:
     background: "color-mix(in srgb, {colors.paper-4} 30%, rgb(20 16 12 / 0.32))"
     backdropFilter: "blur(3px) saturate(0.9)"
@@ -389,7 +393,7 @@ components:
     width: "min(620px, calc(100vw - 32px))"
     maxHeight: "min(66vh, 640px)"
   palette-input:
-    height: 48px
+    height: 56px
     fontSize: 15px
     borderColor: "{colors.rule}"
   palette-item:
@@ -1326,7 +1330,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 | 宽对话框 | `.dialog--wide` | 760px（收件箱、历史） |
 | 设置对话框 | `.dialog--settings` | 900px |
 | 定高对话框 | `.dialog--tall` | `height: min(600px, calc(100vh - 96px))`，**设置与收件箱共用**，只写在这一处 |
-| 命令面板 | `.palette` | `min(620px, 100vw - 32px)`、高 `min(66vh, 640px)`、`--radius`；输入框 h56 / 15px 且 **`flex: none`**（见下）；脚注一行 `kbd` + `--fs-xs` |
+| 命令面板 | `.palette` | `min(620px, 100vw - 32px)`、高 `min(66vh, 640px)`、`--radius`；**顶部锚定**（`.overlay-root--palette`，`place-items: start center` + `padding-top: max(24px, 17vh)`）：高度随结果条数变，打字时输入框不动，变短只朝下收缩；输入框 h56 / 15px 且 **`flex: none`**（见下）；脚注一行 `kbd` + `--fs-xs` |
 | 右键菜单 | `.menu` | `min-width: 190px`、`padding: 5px`、`--radius`、`--shadow-2`、`pop 120ms`，`z-index: 80` |
 | 工作区下拉 | `.workspace__menu` | 贴 `.sidebar__workspace` 绝对定位，`top: 40px`（8px 容器上 padding + 30px 按钮 + 2px 缝），左右各留 `--s3`，`max-height: 62vh`，`--shadow-3` |
 
@@ -1598,7 +1602,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 - **侧栏**：`>820px` 是常驻列。**收起 = 只收起左栏本身**：顶行（头部 + 标签栏）完全不动，`.sidebar` 身体 `display: none`，编辑器与状态栏绕到头部下面占满整宽。头部宽度恒为 `var(--sidebar-w)`，所以标签栏不会跳。之所以不是整条滑出去：那样会把「把侧栏叫回来」的按钮一起带走（`Ctrl/⌘+\` 与命令面板是看不见的退路）。`≤820px` 是抽屉 + 遮罩：从顶行下面滑出，头部留在上面始终可用。
 - **大纲**：`≤1080px` 直接隐藏（内容不重要到值得占掉正文宽度）。
 - **对话框**：宽度一律 `min(Npx, calc(100vw - 32px))`，**永远不横向溢出**。
-- **命令面板**：`min(620px, calc(100vw - 32px))`，高 `min(66vh, 640px)`。
+- **命令面板**：`min(620px, calc(100vw - 32px))`，高 `min(66vh, 640px)`。位置**顶部锚定**在上边距 `max(24px, 17vh)`（17vh + 66vh = 83vh，底部永不越界），不随结果条数居中浮动 —— 居中会让输入框在打字时上下跑。
 - **正文**：`--measure` 由用户控制，窄屏时 `100%` 生效（`46rem` 在 360px 屏上是溢出宽度，但正文容器不会被撑破，因为 `.prose` 有 `overflow-wrap: break-word`）。
 - **状态栏**：不换行（`flex-wrap: nowrap` + `overflow: hidden`），靠逐个 `display: none` 降级。
 

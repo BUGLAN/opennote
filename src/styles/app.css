@@ -1203,6 +1203,18 @@ mark.hit {
   padding: 20px;
 }
 
+/*
+ * 命令面板不走居中：它的高度随结果条数实时变（max-height 封顶），居中会让整块面板
+ * 连同输入框一起上下平移 —— 打字的时候输入框会跑（60 项 → 5 项实测下跳 111px）。
+ * 顶部锚定后变短只朝下收缩，输入框钉死在同一个像素位置。17vh = 满高面板
+ * （max-height 66vh）在 100vh 窗口里居中时的上边距（(100-66)/2），所以结果最多时
+ * 观感与居中版一致；17vh + 66vh = 83vh，底部永不越界。
+ */
+.overlay-root--palette {
+  place-items: start center;
+  padding-top: max(24px, 17vh);
+}
+
 .scrim {
   position: absolute;
   inset: 0;

@@ -81,7 +81,7 @@ export function CommandPalette({ mode, entries, onClose }: CommandPaletteProps):
   };
 
   return (
-    <div className="overlay-root">
+    <div className="overlay-root overlay-root--palette">
       <div className="scrim" onMouseDown={onClose} />
       <div className="palette" role="dialog" aria-modal="true" aria-label="命令面板">
         <input
