@@ -187,11 +187,21 @@ cd extension ; node tools\cdp-inpage-check.mjs
 | 组 | 判据 | 为什么这条判据值钱 |
 | --- | --- | --- |
 | A 检测与呈现 | popup 底栏出现 `#webPrimary`、**文案逐字** `剪藏到 127.0.0.1:4173`、且它的 `top` **小于**主按钮的 `top` | 「检测到网页版 → 在剪切上面加一个按钮」是用户原话；位置错了就是另一种东西。这条同时证明 `tabs` 权限真的读到了那个标签页的 URL |
+| A2 真点一下 | 用 CDP 的 `Input.dispatchMouseEvent` 在按钮上发一次**可信点击**（先 `elementFromPoint()` 确认指针底下真是它），断言 1.2 秒内**没有**出现 `IMP-3001`「没有获得访问…」。实测点完按钮变「正在剪藏…」、`data-busy=true` | 这是 0.2.1 那个缺陷的回归判据：`chrome.permissions.request` 必须在**有用户手势**的 popup 里调用。0.2.0 把它放在 service worker，手势不跨进程 → 用户一次气泡都没弹过就收到 `IMP-3001`（真机截图现场）。合成 `element.click()` 不带手势，验不出这条 |
 | B 协议 | 把**真** `deliverInpage`（`content/inpage-bridge.js`，经 `chrome.scripting.executeScript({func})` 注入）送进真网页版标签页后，service worker 收到 `opennote:inpage-report`，且 `local === false`、`error.code === "IMP-4007"` | 整条通道里唯一有平台不确定性的地方是**内容脚本隔离世界的 `window.postMessage` 能否被页面监听器收到**（官方文档说可以，但那只是文档）。`local:false` 说明回执来自**页面**（hello→ready→import→result 四步全通），`IMP-4007` 说明那句话出自**应用侧接收端**（`receiveEnvelopeOutcome()`），不是注入脚本自己编的 |
 
-**2026-10-07 实测（Chrome 154.0.8037.58 / Windows）**：13 项全 PASS —— `#webPrimary` 文案
-`剪藏到 127.0.0.1:4173`、位置 `web top=519 < primary top=557`，回执
+**2026-10-07 实测（Chrome 154.0.8037.58 / Windows）**：15 项全 PASS —— `#webPrimary` 文案
+`剪藏到 127.0.0.1:4173`、位置 `web top=519 < primary top=557`、点击后 `data-busy=true`
+（申请已发出）、以及回执
 `{"ok":false,"error":{"code":"IMP-4007","userMessage":"Opennote 里还没有打开笔记本文件夹。…"}}`。
+
+**写这个工具时踩到的两个坑**（留在这里，免得下一个人重踩）：
+
+1. **瞄准要与重绘赛跑**：popup 打开后 `refreshPreview()` 回包会再 `render()` 一次，底栏整体上下
+   移动几十像素。按「刚测到的 rect」直接点，会点到移动过来的 `#primary` 上（现场显示的是主按钮
+   那条路线的 `IMP-2001`）。所以先 `elementFromPoint()` 确认指针底下真是 `#webPrimary` 再点。
+2. **headless 的 popup 视口只有约 510px 高**，底栏会被挤到折线以下，`elementFromPoint` 在视口外
+   返回 `null`（8 次全落空）。滚到底再瞄即可。
 
 **这个工具**验不到**的（诚实清单，别把它读成「全链路已验」）**：
 

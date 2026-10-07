@@ -1,7 +1,8 @@
 # 反向验证（变异 → 红；恢复 → 绿）。每个变异都先备份、跑断言、再恢复，最后核对 git 干净。
 #
-# 9 个变异 + 1 个协议检查（构建进行中 → verify 必须 exit 2）。M2 起不再有模板/高亮模块，
-# 那两个变异点换成了 V19（产物指纹）与 V18（令牌回显）；0.4.0 新增 ⑨（V17B 网页版按钮位置）。
+# 10 个变异 + 1 个协议检查（构建进行中 → verify 必须 exit 2）。M2 起不再有模板/高亮模块，
+# 那两个变异点换成了 V19（产物指纹）与 V18（令牌回显）；0.4.0 新增 ⑨（V17B 按钮位置），
+# 0.4.1 新增 ⑩（V17B 权限申请不许回到 service worker）。
 # `Mutate` 遇到不存在的文件会 SKIP 而不是整轮崩。
 #
 # ⚠ 协调警告：本脚本在运行期间会把 `src/` 与 `dist/` 短暂改成「故意坏的」状态（含 `node build.mjs` 重建），
@@ -147,6 +148,13 @@ $results += Mutate "src/popup/popup.html" `
   'class="btn" id="webPrimary"' `
   "⑨ V17B 网页版按钮默认隐藏（去掉 hidden）" `
   "#webPrimary 默认必须 hidden"
+
+# ⑩ V17B：把权限申请挪回 service worker（0.2.0 的真机缺陷：手势不跨进程 → 用户一次气泡都没弹过就报 IMP-3001）
+$results += Mutate "src/background.js" `
+  'return await chrome.permissions.contains({ origins: [pattern] });' `
+  'return await chrome.permissions.request({ origins: [pattern] });' `
+  "⑩ V17B 权限申请挪回 service worker" `
+  "background 里不许调用 chrome.permissions.request"
 
 $results | ForEach-Object { $report += $_; $report += "" }
 

@@ -1066,8 +1066,31 @@ if (!/webPrimary\.addEventListener\("click"/.test(popupCodeV17B)) {
 if (!/func: deliverInpage/.test(background)) {
   fail(GROUP_V17B, "交付必须注入 content/inpage-bridge.js 的 deliverInpage（自包含函数）");
 }
-if (!/chrome\.permissions\.request\(\{ origins: \[pattern\] \}\)/.test(background)) {
-  fail(GROUP_V17B, "投递前必须按 origin 申请可选主机权限（安装期不申请、一次一个站点）");
+/*
+ * 权限分工（0.2.1 修的缺陷）：`chrome.permissions.request` 要求处在**用户手势**里，
+ * 而手势不会跨进程传进 service worker —— 0.2.0 把它放在 background 里，真机现象是
+ * 「一次气泡都没弹过就报 IMP-3001」。所以：**申请只许在 popup 里，background 只能查**。
+ *
+ * 这里按**裸源码**匹配 `await chrome.permissions.request(` 而不是解析后的源码：
+ * 本文件既有的剥注释实现（`popupCodeV17A`）会被 `` `${origin}/*` `` 这个模板字符串里的
+ * `/*` 骗到 —— 它以为块注释开始了，把**函数体里那行真正的调用**一起吃掉，于是断言恒假
+ * （实测踩过）。匹配「真正的调用形状」（带 `await` 与左括号）比匹配标识符更可靠：
+ * 注释里提到 `chrome.permissions.request` 不会命中它。
+ */
+if (!/await chrome\.permissions\.request\(/.test(popupJs)) {
+  fail(GROUP_V17B, "optional 主机权限的申请必须发生在 popup 里（那里才有用户手势）：找不到 await chrome.permissions.request(");
+}
+if (/await chrome\.permissions\.request\(/.test(background)) {
+  fail(GROUP_V17B, "background 里不许调用 chrome.permissions.request —— 用户手势不会跨进程传进 service worker，调用必被拒绝（0.2.0 的真机缺陷）");
+}
+if (!/function ensureWebPermission\(origin\)/.test(popupCodeV17B)) {
+  fail(GROUP_V17B, "popup 里必须只有一个权限申请产地（ensureWebPermission）");
+}
+if (!/await ensureWebPermission\(web\.origin\)/.test(popupCodeV17B)) {
+  fail(GROUP_V17B, "popup 必须在发请求**之前**申请权限（拿不到就不发请求）");
+}
+if (!/await hasHostPermission\(web\.origin\)/.test(background)) {
+  fail(GROUP_V17B, "background 必须用 hasHostPermission()（只查不申请）复核权限");
 }
 if (!/export async function deliverInpage\(payload\)/.test(inpageBridgeSrc)) {
   fail(GROUP_V17B, "content/inpage-bridge.js 必须导出 deliverInpage(payload)");

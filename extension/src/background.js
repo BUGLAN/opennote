@@ -754,14 +754,21 @@ export async function detectWebTarget(options = {}) {
   return pickWebCandidate(tabs, { excludeTabId: current, blocked: inpageFailedTabs });
 }
 
-/** 可选主机权限：只在用户点按钮那一刻申请（必须在用户手势里），已有就直接过。 */
-async function ensureHostPermission(origin) {
+/**
+ * 可选主机权限：**这里只查，不申请**。
+ *
+ * `chrome.permissions.request` 要求调用点处在**用户手势**里，而手势不会跨进程传进
+ * service worker —— 在这里调用会被 Chrome 直接拒掉。0.2.0 就是栽在这上面：用户点
+ * 「剪藏到 buglan.github.io」，一次气泡都没弹过就收到 `IMP-3001`「没有获得访问…的权限」。
+ * 现在申请挪到了 popup（`popup.js` 的 `ensureWebPermission()`，那里才有手势）；
+ * 这里退化成 `contains()`，拿不到就如实回同一句话。`verify.mjs` V17B 盯着这条分工。
+ */
+async function hasHostPermission(origin) {
   const pattern = `${origin}/*`;
   try {
-    if (await chrome.permissions.contains({ origins: [pattern] })) return true;
-    return await chrome.permissions.request({ origins: [pattern] });
+    return await chrome.permissions.contains({ origins: [pattern] });
   } catch (error) {
-    console.warn("[opennote] 申请网页版所在站点的访问权限失败", error);
+    console.warn("[opennote] 查询网页版所在站点的访问权限失败", error);
     return false;
   }
 }
@@ -826,7 +833,8 @@ export async function deliverToWebPage({ envelope, folderLabel, noteTitle, confl
     };
   }
 
-  if (!(await ensureHostPermission(web.origin))) {
+  // 权限由 popup 在用户手势里申请过（见 `hasHostPermission` 的注释）；这里只复核一次
+  if (!(await hasHostPermission(web.origin))) {
     return {
       status: "error",
       code: "IMP-3001",

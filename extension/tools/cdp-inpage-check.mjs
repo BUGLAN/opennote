@@ -278,6 +278,80 @@ async function main() {
       "#webPrimary 在主按钮**上方**（用户要求的位置）",
       webButton ? `web top=${webButton.top} < primary top=${webButton.primaryTop}` : undefined,
     );
+
+    /*
+     * A2. **真点一下那颗按钮**（0.2.1 修的缺陷的回归判据）。
+     *
+     * 0.2.0 把 `chrome.permissions.request` 放在了 service worker 里，而手势不会跨进程传过去，
+     * 于是用户点下去**一次气泡都没弹过**就立刻看到 `IMP-3001`「没有获得访问 <域名> 的权限」。
+     * 这里用 CDP 的 `Input.dispatchMouseEvent` 发一次**可信点击**（合成 `element.click()`
+     * 不带手势，验不出这条），然后断言 1.2 秒内界面**没有**出现那句立刻失败。
+     *
+     * 实测（0.2.1，Chrome 154）：点下去后按钮变成「正在剪藏…」、`data-busy=true` —— 那就是
+     * 「申请真的发出去了、正在等浏览器气泡」的证据（headless 不弹气泡，所以它会一直等）。
+     * 0.2.0 的现场则是 1.2 秒内直接出现 IMP-3001 那句话，这条断言会当场红。
+     *
+     * 气泡本身 CDP 点不了（浏览器级 UI），所以「点允许 → 入库」那一步仍归人工（见 README §4.2）。
+     */
+    if (webButton) {
+      /*
+       * 瞄准必须**当场复核**：popup 打开后还会异步重绘一次（`refreshPreview()` 回包后
+       * `render()`），底栏整体会上下移动几十像素。第一次写这个探针时按「刚测到的 rect」
+       * 点击，结果落在了移动过来的 `#primary` 上（点击现场显示的是主按钮那条路线的
+       * `IMP-2001`，而不是网页版通道）—— 所以这里用 `elementFromPoint()` 确认指针底下
+       * 真的是 `#webPrimary` 再点，点不到就重测（最多 8 次）。
+       */
+      let aim = null;
+      for (let attempt = 0; attempt < 8 && !aim; attempt += 1) {
+        const spot = await evaluate(
+          popup,
+          `(() => {
+             // headless 的 popup 视口只有约 510px 高，底栏会被挤到折线以下；先滚到底再瞄，
+             // 否则 elementFromPoint 在视口外返回 null，探针根本点不到按钮（实测 8 次全落空）。
+             window.scrollTo(0, document.documentElement.scrollHeight);
+             const body = document.querySelector(".clip__body");
+             if (body) body.scrollTop = body.scrollHeight;
+             const b = document.getElementById("webPrimary");
+             if (!b || b.hidden) return null;
+             const r = b.getBoundingClientRect();
+             const x = Math.round(r.left + r.width / 2); const y = Math.round(r.top + r.height / 2);
+             const el = document.elementFromPoint(x, y);
+             return { x, y, rect: { top: Math.round(r.top), left: Math.round(r.left), w: Math.round(r.width), h: Math.round(r.height) },
+                      at: el ? el.tagName + "#" + (el.id || "") + "." + String(el.className || "").slice(0, 24) : null,
+                      inner: { w: window.innerWidth, h: window.innerHeight },
+                      isWeb: Boolean(el && (el.id === "webPrimary" || el.closest("#webPrimary"))) }; })()`,
+        ).catch(() => null);
+        if (attempt === 0) console.log("     探针 · 瞄准现场：" + JSON.stringify(spot));
+        if (spot && spot.isWeb) aim = spot;
+        else await sleep(300);
+      }
+      observe(Boolean(aim), "指针当场落在 #webPrimary 上（不是被重绘挪走后的别处）", aim ? `(${aim.x}, ${aim.y})` : "8 次都没瞄准到按钮");
+      if (!aim) {
+        popup.close();
+        return;
+      }
+      await popup.send("Input.dispatchMouseEvent", { type: "mousePressed", x: aim.x, y: aim.y, button: "left", clickCount: 1 });
+      await popup.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: aim.x, y: aim.y, button: "left", clickCount: 1 });
+      await sleep(1200);
+      const after = await evaluate(
+        popup,
+        `(() => { const clip = document.getElementById("clip");
+           const block = document.querySelector(".clip__block");
+           return { state: clip ? clip.dataset.state : null, busy: clip ? clip.dataset.busy : null,
+                    chip: (document.getElementById("chipText") || {}).textContent || null,
+                    tokenRow: (() => { const t = document.getElementById("tokenRow"); return t ? !t.hidden : null; })(),
+                    web: (() => { const w = document.getElementById("webPrimary"); return w ? { hidden: w.hidden, text: w.textContent.trim() } : null; })(),
+                    primary: (() => { const p = document.getElementById("primary"); return p ? { hidden: p.hidden, text: p.textContent.trim(), disabled: p.disabled } : null; })(),
+                    body: (document.getElementById("region") || {}).innerText ? document.getElementById("region").innerText.slice(0, 120) : "",
+                    text: block ? block.textContent.trim().slice(0, 80) : "" }; })()`,
+      ).catch(() => null);
+      console.log("     探针 · 点击后现场：" + JSON.stringify(after));
+      observe(
+        !after || !after.text.includes("没有获得访问"),
+        "点一下按钮不会当场报「没有获得访问…的权限」（0.2.0 的缺陷）",
+        after ? `state=${after.state} busy=${after.busy} block="${after.text}"` : "popup 已关闭（气泡抢焦点）—— 见 README §4.2 边界",
+      );
+    }
     popup.close();
 
     /* ── B. 协议：真注入函数 × 真网页版页面 ───────────────────────────── */

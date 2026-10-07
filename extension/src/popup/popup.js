@@ -1138,6 +1138,28 @@ async function submit() {
 }
 
 /**
+ * 可选主机权限**必须在这里申请**，不能交给 service worker（0.2.1 修的缺陷）。
+ *
+ * `chrome.permissions.request` 要求调用点处在**用户手势**里，而 popup 的这次点击就是那个手势；
+ * 手势**不会**跨进程传给 service worker —— 在 SW 里调用会被 Chrome 直接拒掉。真机现象：
+ * 用户点「剪藏到 buglan.github.io」→ 一次气泡都没弹过 → 看到 `IMP-3001`
+ * 「没有获得访问 buglan.github.io 的权限，这次剪藏没有发送。」（0.2.0 的现场）。
+ *
+ * `verify.mjs` 的 V17B 现在盯着这条：`permissions.request` 只许出现在 popup 里，
+ * background 只能 `contains`（它没有手势，只能如实回答「有没有」）。
+ */
+async function ensureWebPermission(origin) {
+  const pattern = `${origin}/*`;
+  try {
+    if (await chrome.permissions.contains({ origins: [pattern] })) return true;
+    return await chrome.permissions.request({ origins: [pattern] });
+  } catch (error) {
+    console.warn("[opennote] 申请网页版所在站点的访问权限失败", error);
+    return false;
+  }
+}
+
+/**
  * 剪藏到**已打开的网页版**（契约 02 §5.7 / FR-39）。
  *
  * 与 `submit()` 是同一套抽取、同一套信封、同一套回执处理（`applyReply`），只把投递
@@ -1156,6 +1178,16 @@ async function submitToWeb() {
   busy = true;
   busyLabel = "正在剪藏…";
   render(currentPlan());
+  // 权限申请必须在这次点击的手势里（见 ensureWebPermission）；拿不到就不发请求，如实说
+  if (!(await ensureWebPermission(web.origin))) {
+    busy = false;
+    renderBlockReply({
+      status: "error",
+      code: "IMP-3001",
+      label: `没有获得访问 ${web.host} 的权限，这次剪藏没有发送。`,
+    });
+    return;
+  }
   const response = await send(
     {
       type: "opennote:inpage-clip",
