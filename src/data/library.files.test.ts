@@ -12,6 +12,7 @@ vi.mock("./workspaces", () => ({
 
 import {
   childFolders,
+  closeWorkspace,
   deleteFolder,
   flushAll,
   flushMeta,
@@ -165,6 +166,63 @@ describe("filesystem-backed workspace operations", () => {
     await renameNote("故事/第一章.md", "改名");
     expect(testBackend.files.get(joinPath("故事", "改名.md"))).toBe("# 改过\n未落盘");
     expect(testBackend.files.has("故事/第一章.md")).toBe(false);
+  });
+});
+
+/**
+ * 用户实测（0.5.0）：「重命名完成后，再点击其他地方，文件名又会恢复，或者直接就不修改」。
+ *
+ * 根因：`title` 是**派生字段** —— `makeNote()` / `refresh()` 都拿
+ * `deriveTitle(正文, 文件名)` 现算（`src/lib/utils.ts:61`：正文里第一个标题赢，文件名只是兜底），
+ * 而 `renameNote()` 只把新名字写进内存里的 `title`。于是
+ *   ① 在编辑器里打字 → `refresh()` → 正文的 H1 把新名字顶回去；
+ *   ② 任何一次重扫（桌面端的文件监听、Ctrl+S 手动同步、外部改动）→ `makeNote()` → 同样顶回去。
+ * 重扫还会重建整个 `notes`，所以只改内存的写法连「撑到下次重扫」都做不到。
+ *
+ * 「重命名只改显示名；正文里的一级标题不会被改写」（对话框原话）要成立，新名字就得落成
+ * `Note.titleOverride`（`types.ts` 里本来就有这个字段，但从来没人写过它），并且像 `starred`
+ * 一样进 `.opennote/state.json`、跟着重命名/移动一起改键，重扫时再挂回去。
+ */
+describe("重命名改的是显示名，不是「派生标题的一次性覆盖」", () => {
+  it("重扫之后不许被正文里的 H1 顶回去（桌面端文件监听 / Ctrl+S 同步都会触发这条）", async () => {
+    await renameNote("故事/第一章.md", "改名");
+    expect(getLibrary().notes["故事/改名.md"]?.title).toBe("改名");
+
+    await flushMeta();
+    await rescanWorkspace();
+
+    expect(getLibrary().notes["故事/改名.md"]?.title).toBe("改名");
+  });
+
+  it("在编辑器里打字（refresh）之后也不许被顶回去（「直接就不修改」的那条现场）", async () => {
+    await renameNote("故事/第一章.md", "改名");
+    updateNoteContent("故事/改名.md", "# 第一章\n又改了一段");
+    expect(getLibrary().notes["故事/改名.md"]?.title).toBe("改名");
+  });
+
+  it("重开笔记本（state.json）之后仍然是新名字 —— 否则重启一次改名就白做了", async () => {
+    await renameNote("故事/第一章.md", "改名");
+    await flushMeta();
+
+    await closeWorkspace();
+    await openWorkspace(record, { silent: true });
+
+    expect(getLibrary().notes["故事/改名.md"]?.title).toBe("改名");
+  });
+
+  it("进回收站再恢复：显示名跟着键走（回收站里那一行也不许变回正文 H1）", async () => {
+    await renameNote("故事/第一章.md", "改名");
+    await flushMeta();
+
+    await trashNote("故事/改名.md");
+    await flushMeta();
+    await rescanWorkspace();
+    expect(getLibrary().trash[".opennote/trash/故事/改名.md"]?.title).toBe("改名");
+
+    await restoreNote(".opennote/trash/故事/改名.md");
+    await flushMeta();
+    await rescanWorkspace();
+    expect(getLibrary().notes["故事/改名.md"]?.title).toBe("改名");
   });
 });
 

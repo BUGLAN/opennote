@@ -78,9 +78,33 @@ interface WorkspaceMeta {
   lastOpened: Id | null;
   /** UI bits that belong to this notebook rather than to this machine (D27). */
   ui?: { sidebarTab: SidebarTab };
+  /**
+   * 手动改过的显示名（`renameNote`），按笔记路径存。
+   *
+   * 为什么必须存在这里：`Note.title` 是**派生字段** —— `makeNote()` / `refresh()` 都拿
+   * `deriveTitle(正文, 文件名)` 现算（正文里第一个标题赢，文件名只是兜底）。用户实测
+   * （0.5.0）：「重命名完成后，再点击其他地方，文件名又会恢复，或者直接就不修改」——
+   * 就是只写了内存里的 `title`，随后任何一次 `refresh()`（在编辑器里打字）或
+   * `rescanWorkspace()`（桌面端文件监听、Ctrl+S、外部改动都会触发）把它算了回去。
+   *
+   * 「重命名只改显示名；正文里的一级标题不会被改写」（重命名对话框的原话）要成立，
+   * 新名字就得是**这一态的真源**：写进 `state.json`，重扫时挂回 `Note.titleOverride`，
+   * 键跟着笔记走（重命名 / 移动 / 进回收站 / 恢复）。
+   */
+  titleOverrides?: Record<Id, string>;
 }
 
 const defaultMeta: WorkspaceMeta = { version: 1, starred: [], expanded: [], lastOpened: null };
+
+/** `state.json` 里的 `titleOverrides`：只留「非空字符串 → 非空字符串」，别的一律丢掉。 */
+function readTitleOverrides(value: unknown): Record<Id, string> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const out: Record<Id, string> = {};
+  for (const [path, title] of Object.entries(value as Record<string, unknown>)) {
+    if (path && typeof title === "string" && title) out[path] = title;
+  }
+  return Object.keys(out).length ? out : null;
+}
 
 const SIDEBAR_TABS: SidebarTab[] = ["files", "search", "tags", "starred"];
 
@@ -188,7 +212,8 @@ function refresh(note: Note, content: string): Note {
   return {
     ...note,
     content: text,
-    title: deriveTitle(text, stripExtension(baseName(note.id))),
+    // 手动改过显示名的笔记（`renameNote`）不被正文的 H1 顶回去；没改过的照旧由正文派生。
+    title: note.titleOverride ?? deriveTitle(text, stripExtension(baseName(note.id))),
     tags: deriveTags(text),
     chars: counts.chars,
     words: counts.words,
@@ -255,12 +280,14 @@ async function readMeta(target: FileSystemBackend): Promise<WorkspaceMeta> {
   try {
     const parsed = JSON.parse(raw) as Partial<WorkspaceMeta>;
     const sidebarTab = parsed.ui?.sidebarTab;
+    const titleOverrides = readTitleOverrides(parsed.titleOverrides);
     return {
       version: 1,
       starred: Array.isArray(parsed.starred) ? parsed.starred.map(String) : [],
       expanded: Array.isArray(parsed.expanded) ? parsed.expanded.map(String) : [],
       lastOpened: parsed.lastOpened ? String(parsed.lastOpened) : null,
       ...(isSidebarTab(sidebarTab) ? { ui: { sidebarTab } } : {}),
+      ...(titleOverrides ? { titleOverrides } : {}),
     };
   } catch (error) {
     const backup = await backupCorruptState(target, raw);
@@ -414,6 +441,23 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
   const workspaceMeta = await readMeta(target);
   for (const path of workspaceMeta.starred) {
     if (notes[path]) notes[path] = { ...notes[path], starred: true };
+  }
+  /*
+   * 手动改过的显示名挂回去 —— 这一步就是「重命名之后重扫，名字不许被正文 H1 顶回去」的落点。
+   *
+   * 这里**不**顺手清理「路径已经不在扫描结果里」的条目：一次与 move 擦肩而过的重扫
+   * （桌面端文件监听 / OPFS 的非原子 move）可能短暂看不到文件，那会把用户刚改的名字静静丢掉。
+   * 真正确定删除的路径由 `purgeNote` / `emptyTrash` / 删文件夹负责清账。
+   */
+  const overrides = workspaceMeta.titleOverrides;
+  if (overrides) {
+    for (const [path, title] of Object.entries(overrides)) {
+      const note = notes[path] ?? trash[path];
+      if (!note) continue;
+      const pinned = { ...note, titleOverride: title, title };
+      if (notes[path]) notes[path] = pinned;
+      else trash[path] = pinned;
+    }
   }
   return { notes, folders, trash, meta: workspaceMeta, files, bytes, stamps };
 }
@@ -1043,6 +1087,44 @@ async function mergeHistory(target: FileSystemBackend, from: Id, to: Id): Promis
   await target.remove(from, { recursive: true }).catch(() => undefined);
 }
 
+/**
+ * 把「手动改过的显示名」写进笔记本状态（`.opennote/state.json`）—— 这条路的**唯一真源**。
+ *
+ * `Note.title` 是派生字段（`makeNote()` / `refresh()` 都拿 `deriveTitle(正文, 文件名)` 现算），
+ * 只写内存会被下一次 `refresh()`（在编辑器里打字）或 `rescanWorkspace()`（文件监听 / Ctrl+S）
+ * 算回去 —— 用户实测的「重命名完成后，再点击其他地方，文件名又会恢复」就是这个。
+ */
+function setTitleOverride(id: Id, title: string | null): void {
+  const next: Record<Id, string> = { ...(meta.titleOverrides ?? {}) };
+  if (title) next[id] = title;
+  else delete next[id];
+  const keys = Object.keys(next);
+  meta = { ...meta, titleOverrides: keys.length ? next : undefined };
+  scheduleMeta(200);
+}
+
+/** 显示名的键跟着文件走：重命名 / 移动走 `remapIds()`，进回收站与恢复这两条不走。 */
+function moveTitleOverride(from: Id, to: Id): void {
+  const title = meta.titleOverrides?.[from];
+  if (!title) return;
+  const next: Record<Id, string> = { ...meta.titleOverrides };
+  delete next[from];
+  next[to] = title;
+  meta = { ...meta, titleOverrides: next };
+  scheduleMeta(400);
+}
+
+/** 文件真的没了：把它的显示名一起清账（删文件夹 / 彻底删除 / 清空回收站）。 */
+function dropTitleOverrides(within: (path: Id) => boolean): void {
+  if (!meta.titleOverrides) return;
+  const next: Record<Id, string> = {};
+  for (const [path, title] of Object.entries(meta.titleOverrides)) {
+    if (!within(path)) next[path] = title;
+  }
+  meta = { ...meta, titleOverrides: Object.keys(next).length ? next : undefined };
+  scheduleMeta(400);
+}
+
 export async function renameNote(id: Id, title: string): Promise<void> {
   const note = libraryStore.get().notes[id];
   const target = backend;
@@ -1063,7 +1145,16 @@ export async function renameNote(id: Id, title: string): Promise<void> {
     else await target.move(id, nextPath);
     remapIds(id, nextPath);
     await moveHistory(target, id, nextPath);
-    patchNotes((notes) => ({ ...notes, [nextPath]: { ...notes[nextPath], title: clean, updatedAt: Date.now() } }));
+    // 新名字**同时**写进 `Note.titleOverride` 与笔记本状态：只写 `title` 会被下一次
+    // `refresh()` / 重扫按正文 H1 算回去（用户实测：改完名再点别处又变回去）。
+    patchNotes((notes) => ({
+      ...notes,
+      [nextPath]: { ...notes[nextPath], title: clean, titleOverride: clean, updatedAt: Date.now() },
+    }));
+    setTitleOverride(nextPath, clean);
+    // 立刻落盘，别等 200ms 去抖：重命名一返回，**随后任何一次重扫**都必须读到这条记录
+    // （桌面端文件监听是 500ms 去抖，但不能指望每个触发源都比去抖慢 —— Ctrl+S 就能随时重扫）。
+    await flushMeta();
   } catch (error) {
     reportError(error, "重命名失败");
   }
@@ -1190,6 +1281,8 @@ export async function trashNote(id: Id): Promise<void> {
     await moveHistory(target, id, trashPath);
     // 附件目录随笔记进回收站：留着它就会变成「删了再恢复，图丢了」（或在 trash 里留孤儿）。
     await moveNoteAssets(target, id, trashPath);
+    // 显示名的键跟到回收站路径下：重扫时回收站里的这一条也要保持用户改过的名字。
+    moveTitleOverride(id, trashPath);
     const current = libraryStore.get().notes[id] ?? note;
     setState((prev) => {
       const notes = { ...prev.notes };
@@ -1226,6 +1319,8 @@ export async function restoreNote(id: Id): Promise<void> {
     // 必须用 `nextPath` 而不是 `id`：`id` 还在回收站前缀下，派生出来的目录会指错地方
     // （“方向反了”就是这一条：两个方向用了同一个基准，等于一个方向都没修）。
     await moveNoteAssets(target, id, nextPath);
+    // 恢复后的路径可能带序号（`第一章 2.md`）：显示名的键跟着落到最终路径上。
+    moveTitleOverride(id, nextPath);
     setState((prev) => {
       const trash = { ...prev.trash };
       delete trash[id];
@@ -1311,6 +1406,7 @@ export async function purgeNote(id: Id): Promise<void> {
   try {
     await target.remove(id, { recursive: true });
     await removeNoteArtifacts(target, id);
+    dropTitleOverrides((path) => path === id);
     setState((prev) => {
       const trash = { ...prev.trash };
       delete trash[id];
@@ -1329,6 +1425,7 @@ export async function emptyTrash(): Promise<number> {
   try {
     for (const id of ids) await removeNoteArtifacts(target, id);
     if (await target.exists(TRASH_DIR)) await target.remove(TRASH_DIR, { recursive: true });
+    dropTitleOverrides((path) => path === TRASH_DIR || path.startsWith(`${TRASH_DIR}/`));
     setState((prev) => ({ ...prev, trash: {} }));
     return count;
   } catch (error) {
@@ -1702,6 +1799,10 @@ function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): voi
     starred: meta.starred.map(replace),
     expanded: meta.expanded.map(replace),
     lastOpened: meta.lastOpened ? replace(meta.lastOpened) : null,
+    // 显示名的键也要跟着走，否则移动/重命名之后那条改名记录就指空、重扫时名字又变回正文 H1。
+    titleOverrides: meta.titleOverrides
+      ? Object.fromEntries(Object.entries(meta.titleOverrides).map(([path, title]) => [replace(path), title]))
+      : undefined,
   };
   scheduleMeta(400);
 }
