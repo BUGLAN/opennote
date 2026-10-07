@@ -486,6 +486,73 @@ describe("重启与启动恢复", () => {
     expect(status.latest).toBe("0.6.0");
   });
 
+  it("回归：resume 进 ready 后再 check()（含启动 5 秒后的自动检查）→ 保持 ready，只补元数据，不重新下载", async () => {
+    const data = await fixture();
+    const server = await startFixtureServer(data);
+    const { updater, updatesDir } = makeUpdater(server.base, data);
+    const staging = path.join(updatesDir, "staging-0.6.0");
+    fs.mkdirSync(staging, { recursive: true });
+    fs.writeFileSync(path.join(staging, ".ready"), JSON.stringify({ version: "0.6.0" }), "utf8");
+    await updater.resume();
+    const status = await updater.check();
+    expect(status.phase).toBe("ready");
+    expect(status.latest).toBe("0.6.0");
+    // resume 恢复的 assetInfo 没有真实 url/size，检查要把它补齐。
+    expect(status.releaseUrl).toContain("/tag/v0.6.0");
+    expect(status.asset?.size).toBe(data.zip.length);
+    // 没有任何 zip 下载请求，staging 原样保留。
+    expect(server.zipRequests).toBe(0);
+    expect(fs.existsSync(staging)).toBe(true);
+  });
+
+  it("回归：resume 进 ready 后 check 失败（apiStatus 500）→ 不丢 ready、不报 error", async () => {
+    const data = await fixture({ apiStatus: 500 });
+    const server = await startFixtureServer(data);
+    const { updater, updatesDir } = makeUpdater(server.base, data);
+    const staging = path.join(updatesDir, "staging-0.6.0");
+    fs.mkdirSync(staging, { recursive: true });
+    fs.writeFileSync(path.join(staging, ".ready"), JSON.stringify({ version: "0.6.0" }), "utf8");
+    await updater.resume();
+    const status = await updater.check();
+    expect(status.phase).toBe("ready");
+    expect(status.error).toBeNull();
+    expect(fs.existsSync(staging)).toBe(true);
+  });
+
+  it("GitHub 出了比 staged 更新的版本 → 丢弃旧 staging、进 available 提示下载新版本", async () => {
+    const data = await fixture({ version: "0.7.0" });
+    const server = await startFixtureServer(data);
+    const { updater, updatesDir } = makeUpdater(server.base, data);
+    const stale = path.join(updatesDir, "staging-0.6.0");
+    fs.mkdirSync(stale, { recursive: true });
+    fs.writeFileSync(path.join(stale, ".ready"), JSON.stringify({ version: "0.6.0" }), "utf8");
+    expect((await updater.resume()).phase).toBe("ready");
+    const status = await updater.check();
+    expect(status.phase).toBe("available");
+    expect(status.latest).toBe("0.7.0");
+    expect(fs.existsSync(stale)).toBe(false);
+  });
+
+  it("resume 进 ready 后 check() 保持了 ready，restart() 仍然可用", async () => {
+    const data = await fixture();
+    const server = await startFixtureServer(data);
+    const plans: Record<string, unknown>[] = [];
+    const { updater, updatesDir } = makeUpdater(server.base, data, {
+      apply: async (plan) => {
+        plans.push(plan);
+        return { ok: true };
+      },
+    });
+    const staging = path.join(updatesDir, "staging-0.6.0");
+    fs.mkdirSync(staging, { recursive: true });
+    fs.writeFileSync(path.join(staging, ".ready"), JSON.stringify({ version: "0.6.0" }), "utf8");
+    await updater.resume();
+    await updater.check();
+    expect(updater.status().phase).toBe("ready");
+    expect(await updater.restart()).toEqual({ ok: true });
+    expect(String(plans[0]?.stagingDir)).toContain("staging-0.6.0");
+  });
+
   it("上次覆盖到一半（.applying 且没有结果文件）→ 如实报 APPLY_FAILED，可重试", async () => {
     const data = await fixture();
     const server = await startFixtureServer(data);

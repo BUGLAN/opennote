@@ -510,6 +510,10 @@ function createUpdater(config = {}) {
     if (!force && phase === 'checking') return statusPayload()
     if (!force && checkedAt && now() - lastCheckAt < CHECK_COOLDOWN_MS) return statusPayload()
     if (inFlight) return inFlight
+    // 检查前先记住「已下载待重启」的包（resume 恢复的，或本会话刚下完的）。
+    // 检查只负责刷新元数据，绝不能把它覆盖成 available/error —— 否则启动 5 秒后的
+    // 自动检查会把「已下载」翻回「下载更新」，用户被要求重下 151 MB（staging 明明还在）。
+    const resumedReady = phase === 'ready' ? readyPlan : null
     phase = 'checking'
     lastError = null
     emit()
@@ -521,6 +525,24 @@ function createUpdater(config = {}) {
         latest = release.version
         latestTag = release.tag
         releaseUrl = release.htmlUrl || `${downloadBase}/tag/${release.tag}`
+        if (resumedReady && isNewer(resumedReady.version, appVersion)) {
+          if (compareVersions(release.version, resumedReady.version) <= 0) {
+            // staged 的包仍是最新的（GitHub 同版本，或 GitHub 上反而没有更新了）：
+            // 保持 ready，只把检查得来的元数据补齐（resume 恢复的 url/size 是空的）。
+            if (compareVersions(release.version, resumedReady.version) === 0) {
+              const asset = pickWindowsAsset({ assets: release.assets }, { arch })
+              if (asset && asset.name === resumedReady.assetName) assetInfo = asset
+            }
+            phase = 'ready'
+            return statusPayload()
+          }
+          // GitHub 出了比 staged 更新的版本：旧包过期，删掉残留（否则下次启动会被
+          // resume 误恢复成「可更新到一个旧版本」），再走正常 available。
+          await withAsarDisabled(() =>
+            fileSystem.rm(resumedReady.stagingDir, { recursive: true, force: true }).catch(() => {}),
+          )
+          readyPlan = null
+        }
         if (!isNewer(release.version, appVersion)) {
           assetInfo = null
           phase = 'idle'
@@ -544,9 +566,17 @@ function createUpdater(config = {}) {
         phase = 'available'
       } catch (error) {
         progress = null
-        lastError = { code: errorCodeOf(error), message: errorMessageOf(error) }
-        phase = 'error'
-        log(`检查更新失败（${lastError.code}）：${lastError.message}`)
+        if (resumedReady && readyPlan === resumedReady && isNewer(resumedReady.version, appVersion)) {
+          // 检查失败（断网、限流）不能把「已下载待重启」打成 error：包还在磁盘上，
+          // 用户随时可以重启更新。错误只进日志，不打扰用户。
+          phase = 'ready'
+          lastError = null
+          log(`检查更新失败，但已有下载好的 v${resumedReady.version}，保持待重启：${errorMessageOf(error)}`)
+        } else {
+          lastError = { code: errorCodeOf(error), message: errorMessageOf(error) }
+          phase = 'error'
+          log(`检查更新失败（${lastError.code}）：${lastError.message}`)
+        }
       } finally {
         inFlight = null
         emit()
