@@ -1382,7 +1382,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 | 文档面 | `&` → `color: var(--ink)` / `fontSize: var(--doc-fs)` / 背景透明 | 编辑器不自己上底色，露给 `.editor-host` 的 `--paper` |
 | 滚动与排版 | `.cm-scroller` → `fontFamily: var(--font-doc)` / `lineHeight: var(--doc-lh)` | 正文的字体与行高从这里进编辑器 |
 | 正文栏 | `.cm-content` → `maxWidth: var(--measure)` / `margin: 0 auto` | 栏宽 = 用户设置 |
-| 光标 | `.cm-cursor` → `borderLeft: 2px solid var(--accent)` / `borderRadius: 1px` | 光标是强调色，2px |
+| 光标 | `.cm-cursor` → `borderLeft: 2px solid var(--accent)` / `borderRadius: 1px` / `transform: translateY(-15%)` | 光标是强调色，2px。**那个 15% 不是随手写的**：CodeMirror 给的高度是这一行的**字体盒**，而汉字墨迹比字体盒**高 0.12em、下沿又短 0.12em**（同 `.cm-selectionBackground` 撑开 padding 的成因），不补就「比字低一截」——用户 0.5.0 报的「光标偏移? 偏下」。用百分比是因为 **`translateY` 的百分比按元素自身高度算**，而那个高度正是这一行的字体盒 ⇒ 任意字号、任意标题级别、任意字体预设下都等于要补的那 0.12em；写死 `-2px` 在 H1（30px 光标）上补不够、在小字号上又补过头。实测：正文行光标 101–117 → 100–114（汉字墨迹 100–115），H1 行 185–214 → 181–209（墨迹 181–209，上下各 0px）。**几何只能在真实浏览器里量**（`pnpm dev` → 取 `.cm-cursor` 的 `getBoundingClientRect()` 与同一行墨迹的像素范围对比），所以 `src/editor/theme.test.ts` 只守「必须是百分比、不许写死像素」这条性质 |
 | 选区（失焦 / 原生） | `.cm-selectionBackground, .cm-content ::selection` → `var(--sel)` | 只管编辑器**没有焦点**时的选区（含浏览器原生 `::selection`）；聚焦态那条故意不在这里，见下 |
 | 选区（聚焦） | **不在这个文件里**，落在 `editor.css` 的 `.cm-selectionLayer .cm-selectionBackground` | 见下「聚焦选区的两条硬约束」 |
 | 行号槽 | `.cm-gutters` → `color: var(--ink-3)` / `fontFamily: var(--font-mono)` / `fontSize: 11px`、无边框、透明底 | |
@@ -1392,7 +1392,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 | 语法高亮 | 全部走 `HighlightStyle` 的 **class 名**（`tok-keyword` 等），颜色定义在 `prose.css` | **不要在 `theme.ts` 里写颜色** —— 高亮颜色只有 `prose.css` 一处产地，编辑器与导出 HTML 因此永远一致 |
 | 空文档提示 | `contentAttributes: { "data-placeholder": "开始写下这一刻…" }`，由 `editor.css` 的 `::before` 绘制 | |
 
-**这个文件里仅有的非令牌值**：`.cm-content { padding: "56px 10px 45vh" }`、`.cm-gutters { fontSize: "11px" }`、`.cm-panels` / `.cm-tooltip` 的 `fontSize: "13px"`、`.cm-searchMatch { borderRadius: "2px" }`、面板输入框的 `borderRadius: "4px"`、`zIndex: "30"`。改这些之前先确认没有对应令牌。
+**这个文件里仅有的非令牌值**：`.cm-content { padding: "56px 10px 45vh" }`、`.cm-gutters { fontSize: "11px" }`、`.cm-panels` / `.cm-tooltip` 的 `fontSize: "13px"`、`.cm-searchMatch { borderRadius: "2px" }`、面板输入框的 `borderRadius: "4px"`、`zIndex: "30"`、**`.cm-cursor { transform: "translateY(-15%)" }`**（补汉字墨迹与字体盒之间的 0.12em，见上表「光标」那一行 —— 这一条**必须**写成自身高度的百分比，换成像素值就会在标题级别上失准）。改这些之前先确认没有对应令牌。
 
 **选区与行底色的三条硬约束**（踩过坑的，改 CodeMirror 样式前必读）：
 

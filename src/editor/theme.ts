@@ -36,9 +36,31 @@ const baseTheme = EditorView.theme({
   ".cm-line": {
     padding: "0",
   },
+  /*
+   * 光标「偏下」的根因（用户 0.5.0 实测：「光标偏移? 偏下」）：
+   * CodeMirror 给的 `.cm-cursor` 高度就是这一行的**字体盒**（16.5px 字号下 16px），而汉字的墨迹
+   * 比字体盒**高 0.12em、下沿又短 0.12em** —— 和 `.cm-selectionBackground` 撑开 padding 是同一个
+   * 成因（见 `editor.css` 那段注释）。于是汉字行上光标的**上沿落在字的上半截、下沿拖到字脚下面**，
+   * 看着就是「光标比字低了一截」。拉丁字母没有这个错位（实测墨迹正好落在字体盒里）。
+   *
+   * 为什么是 `translateY(-15%)` 而不是 `margin-top: -2px`：
+   * **`translateY` 的百分比按元素自身高度算，而那个高度正是这一行的字体盒** —— 所以这 15% 在任意
+   * 字号、任意标题级别、任意字体预设下都正好等于要补的那 0.12em（实测：正文行光标 16px → 补 2.4px，
+   * H1 行光标 30px → 补 4.5px；两处的量测结果见下）。写死像素值会在 H1 上不够、在小字号上过分。
+   *
+   * 实测（Windows / 默认字体栈 / 16.5px 正文 / 夜读主题，网页版截图上按像素量的；`--doc-*` 与
+   * 字体预设都不影响结论，只有比例）：
+   *   正文汉字行：墨迹 y 100–115，光标改前 101–117（上差 1px、下差 2px）⇒ 改后 100–114（上下各 1px）；
+   *   H1 汉字行：墨迹 181–209，光标改前 185–214（上差 4px、下差 5px）⇒ 改后 181–209（上下各 0px）；
+   *   拉丁行：墨迹 131–147，光标改前 131–147（本来就对齐）⇒ 改后 128–144（仍在字母上下沿内，
+   *   不切 `j`/`q` 的降部）。
+   * 复核办法：`pnpm dev` 起网页版，在浏览器控制台里取 `.cm-cursor` 的 `getBoundingClientRect()` 与
+   * 同一行墨迹的像素范围对比（汉字墨迹比字体盒高 0.12em、下沿短 0.12em）。
+   */
   ".cm-cursor, .cm-dropCursor": {
     borderLeft: "2px solid var(--accent)",
     borderRadius: "1px",
+    transform: "translateY(-15%)",
   },
   /*
    * 选区底色见 `src/styles/editor.css` 的 `.cm-selectionLayer .cm-selectionBackground`：
