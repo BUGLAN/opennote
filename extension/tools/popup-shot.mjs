@@ -14,8 +14,13 @@
  *
  * 用法：`node tools/popup-shot.mjs [--shots=名字,名字]`
  *   可用镜头：card-page / card-element / card-page-night / card-element-night / card-warn / card-pickfail
+ *             card-token / card-token-night / card-token-saved / card-token-before
  *             card-before-page / card-before-element
  *             picker-paper / picker-night / picker-before-paper / picker-before-night
+ *
+ * `card-token*`（0.3.5）：`?state=needs-pairing` 让替身快照换成「这台客户端还没有配置访问令牌」——
+ * 即用户首启看到的现场（令牌块 + IMP-2001 说明块）。`card-token-before` 走 `variant=before`，
+ * 用来出一帧「改动前」的对照图（见下）。
  *
  * `card-pickfail`（0.3.3）：点 `选择当前元素` 后接口回一份 `injection_failed` ⇒ 工具条那一行出现
  * 失败说明（`#pickNote`）。用它证明「图片开关**始终**与两个按钮同一行」——这个状态下它最容易被挤下去。
@@ -85,7 +90,7 @@ const ARTICLE = [
 const PICKED = ["## 只剪这一段", "", "被点中的那块正文，与整页提取不是同一份内容。"].join("\n");
 
 /** popup 的 `chrome` 替身 + 固定快照（必须**在模块之前**以经典脚本运行）。 */
-function popupStub(mode, theme, stage, click, pickfail) {
+function popupStub(mode, theme, stage, click, pickfail, state) {
   const snapshot = `
     const extraction = {
       url: "https://example.com/posts/local-first",
@@ -103,15 +108,16 @@ function popupStub(mode, theme, stage, click, pickfail) {
       extraction,
       restricted: false,
       extractionFailed: false,
-      stateId: "connected",
+      stateId: STATE,
       inbox: true,
       pickedElement: MODE === "element" ? { tagName: "article", selector: "article", chars: 120, isIframe: false } : null,
       pickArmed: false,
-      settings: { hasToken: true, tokenTail: "pvr4", mode: MODE, pendingCount: 0, folder: "", tags: [], notePaths: [] }
+      settings: { hasToken: STATE !== "needs-pairing", tokenTail: STATE === "needs-pairing" ? "" : "pvr4", mode: MODE, pendingCount: 0, folder: "", tags: [], notePaths: [] }
     };`;
   return `<script>
 (() => {
   const MODE = ${JSON.stringify(mode)};
+  const STATE = ${JSON.stringify(state || "connected")};
   const ARTICLE = ${JSON.stringify(ARTICLE)};
   const PICKED = ${JSON.stringify(PICKED)};
   ${snapshot}
@@ -174,6 +180,15 @@ function popupStub(mode, theme, stage, click, pickfail) {
       if (button) button.click();
     }, 300);
   }
+  /* 插件设置（⋯ → 插件设置）：S30 的令牌只读回显只在这个视图里出现，所以必须能拍它。 */
+  if (${JSON.stringify(click)} === "settings") {
+    setTimeout(() => {
+      const more = document.getElementById("more");
+      if (more) more.click();
+      const item = document.querySelector('[data-action="settings"]');
+      if (item) item.click();
+    }, 300);
+  }
 })();
 </script>`;
 }
@@ -185,6 +200,7 @@ function popupDocument(query) {
   const stage = query.get("stage") || "ok";
   const click = query.get("click") || "";
   const pickfail = query.get("pickfail") || "";
+  const state = query.get("state") || "connected";
   const before = query.get("variant") === "before";
   const html = readFileSync(before ? join(BEFORE, "popup", "popup.html") : join(DIST, "popup", "popup.html"), "utf8");
   const base = before ? "/before" : "/dist";
@@ -193,7 +209,7 @@ function popupDocument(query) {
     .replace('href="popup.css"', `href="${base}/popup/popup.css"`)
     .replace(
       '<script type="module" src="popup.js"></script>',
-      `${popupStub(mode, theme, stage, click, pickfail)}<script type="module" src="${base}/popup/popup.js"></script>`,
+      `${popupStub(mode, theme, stage, click, pickfail, state)}<script type="module" src="${base}/popup/popup.js"></script>`,
     )
     .replace("<html lang=\"zh-CN\" data-theme=\"paper\" data-accent=\"seal\">", `<html lang="zh-CN" data-theme="${theme}" data-accent="seal">`);
 }
@@ -298,6 +314,13 @@ const SHOT_LIST = [  { name: "card-page", url: "/popup-harness.html?mode=page", 
   // 0.3.3：点选失败 → 工具条那一行多出一句失败说明（`#pickNote`）。这是「图片开关**始终**与两个按钮
   // 同一行」最容易被挤下去的现场（用户第二张真机截图就是这个），所以专门拍一帧。
   { name: "card-pickfail", url: "/popup-harness.html?mode=page&pickfail=injection_failed&click=pick", window: "360,700" },
+  // 0.3.5：首启「还没有配置访问令牌」的现场（`state=needs-pairing`）—— 令牌块 + 上方的 IMP-2001 说明块
+  // 同时在场，是最容易看出「块与块之间没有边距/边框」的状态。
+  { name: "card-token", url: "/popup-harness.html?mode=page&state=needs-pairing", window: "360,700" },
+  { name: "card-token-night", url: "/popup-harness.html?mode=page&state=needs-pairing&theme=night", window: "360,700" },
+  { name: "card-token-saved", url: "/popup-harness.html?mode=page&click=settings", window: "360,700" },
+  { name: "card-token-before", url: "/popup-harness.html?mode=page&state=needs-pairing&variant=before", window: "360,700" },
+  { name: "card-token-saved-before", url: "/popup-harness.html?mode=page&click=settings&variant=before", window: "360,700" },
   { name: "card-before-page", url: "/popup-harness.html?mode=page&variant=before", window: "360,700" },
   { name: "card-before-element", url: "/popup-harness.html?mode=element&variant=before", window: "360,700" },
   { name: "card-before-page-night", url: "/popup-harness.html?mode=page&theme=night&variant=before", window: "360,700" },

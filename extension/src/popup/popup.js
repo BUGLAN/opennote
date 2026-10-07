@@ -42,6 +42,12 @@ const tokenSave = $("tokenSave");
 const tokenError = $("tokenError");
 const tokenHint = $("tokenHint");
 const tokenMain = $("tokenMain");
+/**
+ * `#tokenMain` 的**默认主句**（`03` `UI-01/C56`）：产地是 popup.html，不在这里重抄一遍。
+ * 令牌块是常驻元素（`render()` 只换 `#region`），所以「plan 没给句子」的态（插件设置）必须
+ * 显式回到这一句 —— 否则会把上一态（`IMP-2002` 那句）带过来，越看越糊涂。
+ */
+const TOKEN_MAIN_DEFAULT = tokenMain.textContent;
 const tokenRepaste = $("tokenRepaste");
 const tokenConfirm = $("tokenConfirm");
 const tokenConfirmYes = $("tokenConfirmYes");
@@ -655,19 +661,40 @@ function tokenInputBlock(force = false) {
     // M2：尾 4 位由后台从**已保存的令牌**推导（settings.tokenTail），这里不再有 `????` 假尾号。
     tokenCode.textContent = maskTokenTail(state.tokenTail);
     tokenNext.textContent = "换一个令牌：在 Opennote 里重新生成，然后回来粘贴。";
-    return el("div");
+  } else {
+    setTimeout(() => tokenInput.focus(), 0);
   }
-  const box = el("div");
-  tokenRow.appendChild(box);
-  setTimeout(() => tokenInput.focus(), 0);
-  return box;
+  /*
+   * 令牌块的**本体**是 `.clip__body` 里的 `#tokenRow`（03 §UI-01/S6：主句 + 说明句 + 输入框 +
+   * 代价披露同属一个 `--paper-2` 内嵌块，材质见 popup.css），它**不搬进错误块**。
+   * 所以这里对调用方「没有东西可挂」—— 交回一个空片段：`appendChild` 照旧能用，但不会往卡片里
+   * 塞一个永远为空的 `<div>`。那个空 div 是 0.3.1 留下的死代码，它唯一的后果是让
+   * 「这张卡片是不是空的」恒为假（插件设置因此一直挂着一张只有边框、写着假错误句的卡片）。
+   */
+  return document.createDocumentFragment();
 }
 
 function blockNode(block, plan) {
   const box = el("div", `clip__alert${block.kind === "queued" ? " is-quiet" : ""}`);
   // 最后一道兜底：任何情况下错误块里都必须有一句给人看的话（绝不静默失败）。
   const message = block.message || (block.code ? userMessage(block.code) : null) || userMessage("IMP-4014");
-  box.appendChild(el("p", null, message));
+  /*
+   * 令牌块（`kind: "token"`）的**主句只有一个产地**：上面那个 `.clip__token`（`#tokenMain`）。
+   * 03 §UI-01/S6 把主句 `C56` 定在令牌块**本体**里，错误块只负责 `code` 与动作。
+   *
+   * 0.3.5 在这里修掉两件事（同一段代码的两个后果）：
+   *   ① 原来无条件渲染 `<p>`，而 `#tokenMain` 的 HTML 默认文案**就是同一句** `IMP-2001`
+   *      ⇒ 首启屏上同一句话说两遍（两块卡片并排，其中一块连边框都没有）；
+   *   ② `#tokenMain` 写死的是 `IMP-2001` 那句，而输入框在 `IMP-2002`（令牌不正确）时**也**露出来
+   *      ⇒ 令牌块张口就说「还没有配置访问令牌」，与它下面那行错误句自相矛盾。
+   * 现在主句由 plan 写进令牌块（这一态的真实句子）；plan 没给句子时（插件设置）保留 HTML 默认文案。
+   */
+  if (block.kind === "token") {
+    if (block.message) tokenMain.textContent = block.message;
+    else tokenMain.textContent = TOKEN_MAIN_DEFAULT;
+  } else {
+    box.appendChild(el("p", null, message));
+  }
   if (block.next) box.appendChild(el("p", "next", block.next));
   if (block.code) box.appendChild(el("div", "code", block.code));
   // `kind: "token"`（㉞）：这个错误块的下一步动作只有一个 —— 粘贴长期令牌。
@@ -678,6 +705,13 @@ function blockNode(block, plan) {
   const acts = el("div", "acts");
   for (const action of (plan && plan.actions) || []) acts.appendChild(actionButton(action));
   if (acts.childNodes.length) box.appendChild(acts);
+  /*
+   * 「界面上不留任何死元素」：插件设置（`settingsPlan`）就是这种情形 —— 主句在令牌块里、
+   * 没有 `code`、没有动作，再留一个只有边框的空卡片，用户只会以为界面坏了。
+   * （0.3.5 之前这里靠兜底句 `IMP-4014` 撑满，于是插件设置那张卡片写的是
+   * 「导入时出现了内部错误，已记录日志。请重试一次。」—— 一句与设置无关的假错误。）
+   */
+  if (!box.childNodes.length) return document.createDocumentFragment();
   return box;
 }
 

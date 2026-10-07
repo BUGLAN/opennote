@@ -265,6 +265,43 @@ V7 逐字文案 76 → 92 条；`verify.mjs` 顶部 V1–V20 不变。新增反�
 `node tools/run-tests.mjs`（144 条全绿）；视觉证据是用**新镜头** `card-pickfail` 出的图（见 §14）——
 它专门把「工具条那一行多出一句失败说明」这个最容易被挤下去的状态拍下来。
 
+### 12.0.2 0.3.5（首启令牌块：补材质 + 主句唯一产地）
+
+**用户原话**：「第一次启动的时候，需要向用户要密钥，然后此时的样式有问题，文本贴在边框附近，
+没有正确的 border 和 margin」。
+
+**根因不是「哪条 margin 写小了」**：`.clip__token`（令牌块）从 0.3.1 起**一条 CSS 规则都没有** ——
+`git log -S 'clip__token' -- src/popup/popup.css` 是空的：**从来没写过，不是被删了**。0.3.1 把配对码
+整体删除那一轮，只落了 HTML（`#tokenRow`）与渲染逻辑，于是首启屏上它是这么个东西：`<p>` 吃 UA 默认
+外边距、输入框与「连接」各占一行、整块左右都贴到窗口边缘（现场见 §14 的 `card-token-before`）。
+同一段代码还带出三件连带缺陷：
+
+- **同一句话说两遍**：`#tokenMain` 的 HTML 默认文案与错误块（`.clip__alert`）里的 `IMP-2001` 是同一串字；
+- **`IMP-2002` 时说的是错话**：输入框在「令牌不正确」时也露出来，而写死的那句是「还没有配置访问令牌」；
+- **插件设置挂着一张假错误卡片**：`settingsPlan` 没有 `code`、没有动作，错误块靠兜底句 `IMP-4014` 撑满 ——
+  用户在「插件设置」里读到的是「导入时出现了内部错误，已记录日志。请重试一次。」（现场见 §14 的
+  `card-token-saved-before`）。
+
+**做法（三处，互相独立）**：
+
+1. `popup.css` 按 `03` §6.1 的 `.clip__token` 行补齐材质：`--paper-2` 内嵌块 + `--rule` 边框 +
+   `--radius-sm` + `--s3` 内外边距；`label` + `.field`（`--font-mono`）+ 主按钮**同一行**；S30 的只读回显
+   用 `--code-bg` 等宽块 + 「重新粘贴令牌」同排。两条 `display:flex` 的行各自补 `[hidden]{display:none}`
+   兜底 —— 同 `#primary` 那个坑：**作者 `display` 会盖掉 UA 的 `[hidden]`**。
+2. `popup.js`：令牌块的**主句只有一个产地** —— `blockNode()` 把这一态的真实句子（`IMP-2001`/`IMP-2002`）
+   写进 `#tokenMain`，错误块不再重复渲染 `<p>`；没有主句、没有 `code`、没有动作时（插件设置），
+   错误块**整个不渲染**（不再留一张只有边框的空卡片）。
+3. 令牌块本体**位置不变**（仍在 `.clip__body` 里，**不搬进**错误块 —— 搬进去就是卡片套卡片、双层边框）；
+   `tokenInputBlock()` 交回空片段，删掉 0.3.1 留下的空 `<div>` 占位：它唯一的作用是让「这张卡片是不是空的」
+   恒为假（第 2 条那个判断因此永远进不去）。
+
+**判定**：`node build.mjs` → `node verify.mjs`（V1–V20 全绿）→ `node tools/run-tests.mjs`（151 条全绿，
+其中新增 4 条）。4 条新判据做了**变异自检**：把 `src/` 换回改动前那一版（`git archive HEAD extension/src`
+到临时目录后重跑同一个测试文件），**正是这 4 条红、其余 17 条绿** —— 守卫能红，不是恒绿的装饰。
+
+**一个字都没碰的**：用户可见文案（V7 的逐字清单不变）、`tokens.css`（55 个令牌，V5/V19 兜底）、
+扩展版本号（发版时按 `RELEASING.md` §1 用 `pnpm release:version --extension` 两处一起写）。
+
 ### 12.1 0.3.2（M1 极简 + M2 清死代码）
 
 **M1（task-24，用户可见）**：界面只剩 `选择当前元素` + `整页提取` 两个按钮；三区分段、模板选择器、
@@ -372,6 +409,31 @@ node tools\cdp-pick-check.mjs
 - 旧的 `page-01-mask-paper.png` / `page-02-mask-night.png`（各 31744 B、来自 `cdp-pick-check` 的
   `Emulation.setEmulatedMedia`）**保持原样留着**，作为「上一次为什么没验出来」的现场：那次两帧字节相同，
   原因是影子根里根本没有主题可言（见 §12.0 ①）。
+
+**0.3.5 重出的一轮（首启令牌块：材质 + 主句唯一产地，见 §12.0.2）**：新镜头 `card-token` /
+`card-token-night` / `card-token-saved`，外加两帧同状态对照（`card-token-before` /
+`card-token-saved-before`，走 `variant=before`，读的是 `.shots/before/` 里**改动前**的那一版源码）：
+
+| 文件 | 是什么 | 字节 | sha256（前 16） |
+| --- | --- | --- | --- |
+| `.shots/card-token-before.png` | 改动前：主句贴着窗口左边缘（无边框、无内外边距），「连接」被挤到单独一行；下面那块把同一句又说了一遍 | 37723 | `a663800580d97b0a` |
+| `.shots/card-token.png` | 改动后：`--paper-2` 卡片 + `--rule` 边框 + `--s3` 内外边距；`访问令牌` + 输入框 + `连接` 同一行；同一句只说一遍 | 33647 | `d10c1908fbf2a3db` |
+| `.shots/card-token-night.png` | 同上，夜读主题 | 33474 | `5385ef37a1ffe5e4` |
+| `.shots/card-token-saved-before.png` | 改动前 · 插件设置：裸文本 + 一张写着 `IMP-4014`（与「插件设置」毫无关系的假错误）的卡片 | 24347 | `c0e7a6191b9a11ce` |
+| `.shots/card-token-saved.png` | 改动后 · 插件设置（`S30`）：只剩一张卡片 —— `--code-bg` 只读回显 + `重新粘贴令牌` + `C73` 次行 + 代价披露 | 23761 | `68d8da317b17b27d` |
+
+同批命令：`node tools/popup-shot.mjs --shots=card-token,card-token-night,card-token-saved,card-token-before,card-token-saved-before`。
+
+**没被这次改动碰到的那条路可以自证**：`card-page` 重出后仍是 **36181 B / `bcd5ffbe6d1d4886`** —— 与上面
+0.3.3 那一轮的记录**逐字节相同** ⇒ 连接正常态一个像素都没动（这一帧没有令牌块，所以它接不住本轮的改动，
+正好当对照组）。
+
+**读这一轮的表要多知道一件事（诚实边界）**：这些帧在**页头那一条**（像素 `y≈12–55`）会有 0–11 B 的
+run-to-run 抖动 —— 与本次改动**无关**：0.3.3 就有的 `card-element` 同样会在 23959 B / `8e135de2131151fb`
+与 23970 B / `e1ab675589ff5eb2` 之间跳（各跑 4 次的实测）。所以上表的字节/sha 是**某一次运行**的取值，
+不能拿「字节完全相同」当本轮的判据；本轮的可证伪判据是 `tests/popup-card.test.mjs` 里那 4 条 +
+同状态两帧的**可见差异**（主句首行最左的深色像素：改前 `x=2`，改后 `x=30` —— 差值正是
+`--s3` 外边距 + `--s3` 内边距 + 1px 边框 = 25px，再用 Pillow 在两帧上量的）。
 
 **已知边界（不许写成已验）**：以上都是**静态渲染**；真机 action popup 里的点击路径仍归 `T-11`（人工）。
 

@@ -269,6 +269,29 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__alert.is-quiet{border-left-color:var(--rule-strong)}
 .clip__code{margin-top:10px;font-family:var(--font-mono);font-size:18px;letter-spacing:.34em;text-align:center;height:34px}
 .clip__hint{margin-top:10px;font-size:var(--fs-xs);color:var(--ink-2);line-height:1.7}
+
+/* ── 令牌块（UI-01/S6 S10 S30–S32）· 材料与 `.token`（UI-04）同源，见 03 §6.1 的 `.clip__token` 行 ──
+   0.3.1 配对删除后，这一块只有 HTML 与渲染逻辑，popup.css 里**一条规则都没有**：于是它是一段
+   贴着窗口左右边缘的裸文本（无边框、无内外边距、输入框与按钮各占一行），而它的主句与下面那个
+   `.clip__alert` 里的 `IMP-2001` 又是同一句话 —— 首启屏看起来像「样式没加载」。这里按规范补齐：
+   `--paper-2` 内嵌块 + `--rule` 边框 + `--radius-sm`，外边距/内边距都用 `--s3`（与 `.clip__alert` 同档）。 */
+.clip__token{margin:var(--s3);padding:var(--s3);border:1px solid var(--rule);border-radius:var(--radius-sm);background:var(--paper-2);animation:rise var(--dur) var(--ease-out) both}
+.clip__token-main{margin:0;font-size:var(--fs-sm);line-height:1.7;color:var(--ink)}
+.clip__token .clip__hint{margin-top:8px}
+.clip__token .clip__hint--cost{margin-top:10px;font-size:var(--fs-sm);color:var(--ink-2)}
+.clip__token #tokenError{margin-top:8px;font-size:var(--fs-sm);color:var(--ink)}
+/* S6：`label` + `.field`（等宽）+ 主按钮同一行；S31 的非法态只换边框色，不新起一行 */
+.clip__token-input{display:flex;align-items:center;gap:var(--s2);margin-top:10px;flex-wrap:wrap}
+.clip__token-input>label{flex:none;font-size:var(--fs-sm);color:var(--ink-3)}
+.clip__token-input .field{flex:1 1 140px;min-width:0;font-family:var(--font-mono)}
+.clip__token-input .field[aria-invalid="true"]{border-color:var(--accent-line);box-shadow:inset 0 0 0 1px var(--accent-line)}
+/* S30：令牌已保存 → 只读回显（`--code-bg` 底的等宽块）+ 「重新粘贴令牌」+ C73 次行 */
+.clip__token-saved{display:flex;align-items:center;gap:var(--s2);margin-top:10px;flex-wrap:wrap}
+.clip__token-code{flex:1 1 auto;min-width:0;padding:5px var(--s2);border:1px solid var(--rule);border-radius:var(--radius-sm);background:var(--code-bg);font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.clip__token-next{flex-basis:100%;font-size:var(--fs-xs);color:var(--ink-3)}
+/* 上面两条是 `display:flex`，会盖掉 UA 的 `[hidden]`（同 `#primary` 那段注释的坑） */
+.clip__token-input[hidden],
+.clip__token-saved[hidden]{display:none}
 /* 属性区：行右侧的「按模板更新」（C38）与标题计数（C37） */
 .clip__reset{flex:none;height:22px;padding:0 6px;border-radius:var(--radius-sm);color:var(--accent);font-size:var(--fs-xs)}
 .clip__reset:hover{background:var(--paper-3)}

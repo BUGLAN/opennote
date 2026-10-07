@@ -274,3 +274,79 @@ test("④ 底栏动作是定宽图标按钮，文案逐字留在 title / aria-la
   assert.match(code, /function svgIcon/, "SVG 拼装要有唯一产地");
 });
 
+/* ── 令牌块（0.3.5 用户实测：首启「还没有配置访问令牌」时文本贴着窗口边缘） ───────────
+
+   用户原话：「第一次启动的时候，需要向用户要密钥，然后此时的样式有问题，文本贴在边框附近，
+   没有正确的 border 和 margin」。
+
+   根因不是「哪条 margin 写小了」，而是**这一块从 0.3.1 起一条 CSS 规则都没有**：配对码整体删除后，
+   只落了 HTML（`#tokenRow`）与渲染逻辑，`.clip__token` 及其子元素在 popup.css 里查无此名
+   （`git log -S 'clip__token' -- src/popup/popup.css` 是空的 —— 从来没写过，不是被删了）。
+   后果有两层：① `<p>` 用 UA 默认外边距、输入框与「连接」各占一行、整块左右都贴到窗口边缘；
+   ② `#tokenMain` 里写死的那句与上面 `.clip__alert` 的 `IMP-2001` 是**同一串字**，同一句话说两遍，
+   而且「令牌不正确」（`IMP-2002`）时它还坚持说「还没有配置访问令牌」。
+
+   下面四条分别咬住：材质、`hidden` 语义、主句唯一产地、空卡片。 */
+
+test("令牌块有卡片材质：`--paper-2` / `--rule` / `--radius-sm` / `--s3`（03 §6.1 的 `.clip__token` 行）", () => {
+  const rule = (CSS.match(/\.clip__token\{[^}]*\}/) || [])[0] || "";
+  assert.ok(rule, "缺少 .clip__token 规则 —— 没有它整块就是贴着窗口左右边缘的裸文本");
+  assert.match(rule, /border:1px solid var\(--rule\)/, "边框（用户报的「没有正确的 border」）");
+  assert.match(rule, /padding:var\(--s3\)/, "内边距（「文本贴在边框附近」）");
+  assert.match(rule, /margin:var\(--s3\)/, "外边距（与 `.clip__alert` 同一档）");
+  assert.match(rule, /background:var\(--paper-2\)/, "`--paper-2` 内嵌块（03 §6.1 逐字）");
+  assert.match(rule, /border-radius:var\(--radius-sm\)/, "圆角取令牌，不手写像素");
+  // 反面：每个子类都要有规则，否则「看起来像样式没加载」会换一种形式回来
+  for (const name of ["clip__token-main", "clip__token-input", "clip__token-saved", "clip__token-code", "clip__token-next"]) {
+    assert.ok(CSS.includes(`.${name}`), `.${name} 在 popup.css 里没有规则（写了不生效与「没写」一样是缺陷）`);
+  }
+});
+
+test("令牌块里那两行是 `display:flex` ⇒ `hidden` 必须自己兜（同 `#primary` 那个坑）", () => {
+  const input = (CSS.match(/\.clip__token-input\{[^}]*\}/) || [])[0] || "";
+  const saved = (CSS.match(/\.clip__token-saved\{[^}]*\}/) || [])[0] || "";
+  assert.match(input, /display:flex/, "「访问令牌」+ 输入框 + 「连接」必须同一行（原来是各占一行）");
+  assert.match(saved, /display:flex/, "只读回显 + 「重新粘贴令牌」同一行");
+  const hide = (CSS.match(/\.clip__token-input\[hidden\][^{]*\{[^}]*\}/) || [])[0] || "";
+  assert.ok(hide, "`#tokenInputRow` / `#tokenSaved` 靠 `hidden` 属性切换 —— 必须有兜底规则");
+  assert.match(hide, /\.clip__token-saved\[hidden\]/, "两条都要兜（只兜一条 = 另一条永远露着）");
+  assert.match(hide, /display:none/, "兜底必须是 display:none");
+});
+
+test("令牌块的主句只有一个产地：`#tokenMain`（错误块不再把同一句说第二遍）", () => {
+  const body = code.slice(code.indexOf("function blockNode("), code.indexOf("function noticeNode("));
+  assert.ok(body.length > 0, "找不到 blockNode() —— 被判对象消失了，必须红（不是跳过）");
+  assert.match(body, /if \(block\.kind === "token"\)/, "令牌块要单独分支（主句归它）");
+  assert.match(
+    body,
+    /tokenMain\.textContent = block\.message;/,
+    "主句写的是**这一态**的句子（IMP-2002 时不许还说「还没有配置访问令牌」）",
+  );
+  // 令牌块是常驻元素（`render()` 只换 `#region`）：plan 没给句子时必须**显式回到默认那句**，
+  // 否则插件设置会把上一态（IMP-2002）的句子带过来。
+  assert.match(body, /else tokenMain\.textContent = TOKEN_MAIN_DEFAULT;/, "没句子时要回默认主句（C56）");
+  assert.match(code, /const TOKEN_MAIN_DEFAULT = tokenMain\.textContent;/, "默认主句的产地是 HTML（不在这里重抄一遍）");
+  assert.match(body, /else \{\s*box\.appendChild\(el\("p", null, message\)\);/, "非令牌块照旧渲染主句（绝不静默失败）");
+  /*
+   * 令牌块的**本体**是 `.clip__body` 里的 `#tokenRow`（它自己就是一张卡片），**不搬进**错误块 ——
+   * 搬进去就是「卡片套卡片」，两层边框与两层 `--s3` 内边距。所以这个函数对调用方没有东西可挂：
+   * 它交回一个空片段，`appendChild` 照旧能用。第一版交回的是 `el("div")`（空 div），
+   * 那正是 0.3.1 留下的死代码 —— 它让下面那条「空卡片」判断**恒为假**。
+   */
+  assert.doesNotMatch(code, /tokenRow\.appendChild\(/, "令牌块不许被搬进错误块（双层边框）");
+  assert.match(code, /return document\.createDocumentFragment\(\);/, "没东西可挂时交回空片段，而不是一个永远为空的 div");
+});
+
+test("插件设置不留空卡片：没有主句、没有 code、没有动作时错误块整个不渲染", () => {
+  const body = code.slice(code.indexOf("function blockNode("), code.indexOf("function noticeNode("));
+  assert.match(
+    body,
+    /if \(!box\.childNodes\.length\) return document\.createDocumentFragment\(\);/,
+    "插件设置（settingsPlan：主句在令牌块里、code 与动作都没有）不许留一张只有边框的空卡片",
+  );
+  // 0.3.5 之前那张卡片靠兜底句撑满，写的是与设置无关的 `IMP-4014`（用户看到的假错误）。
+  // 反面：令牌块**本体**仍然在 HTML 里（没有把整块删掉当修复），并有人负责露出它。
+  assert.match(HTML, /<div class="clip__token" id="tokenRow" hidden>/, "令牌块默认隐藏（`hidden` 写在 HTML 上）");
+  assert.match(code, /tokenRow\.hidden = false;/, "…并且有地方把它露出来（否则这一段界面根本没有）");
+});
+
