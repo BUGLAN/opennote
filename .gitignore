@@ -15,3 +15,4 @@ coverage
 
 # DSH 工具在本地跑诊断时留下的报告目录，不属于本项目产物
 .dsh-acl-report/
+.tmp-shots
