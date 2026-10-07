@@ -1,7 +1,8 @@
 # 反向验证（变异 → 红；恢复 → 绿）。每个变异都先备份、跑断言、再恢复，最后核对 git 干净。
 #
-# 8 个变异 + 1 个协议检查（构建进行中 → verify 必须 exit 2）。M2 起不再有模板/高亮模块，
-# 那两个变异点换成了 V19（产物指纹）与 V18（令牌回显）；`Mutate` 遇到不存在的文件会 SKIP 而不是整轮崩。
+# 9 个变异 + 1 个协议检查（构建进行中 → verify 必须 exit 2）。M2 起不再有模板/高亮模块，
+# 那两个变异点换成了 V19（产物指纹）与 V18（令牌回显）；0.4.0 新增 ⑨（V17B 网页版按钮位置）。
+# `Mutate` 遇到不存在的文件会 SKIP 而不是整轮崩。
 #
 # ⚠ 协调警告：本脚本在运行期间会把 `src/` 与 `dist/` 短暂改成「故意坏的」状态（含 `node build.mjs` 重建），
 #   别人此时跑 `node verify.mjs` 会看到**假红**（例如 V1 报「缺少 commands：pick-element / clip-page」）。
@@ -34,7 +35,10 @@ function Run-Tests {
 function Mutate([string]$file, [string]$find, [string]$replace, [string]$label, [string]$expect) {
   $full = Join-Path (Get-Location) $file
   if (-not (Test-Path $full)) { return "SKIP $label：文件不存在（$file）—— 已随 M2 删除？" }
-  $backup = "$full.bak-mutation"
+  # 备份必须放在**仓库之外**：`build.mjs` 把 `src/**` 逐字拷进 dist，`src/x.js.bak-mutation`
+  # 会立刻变成 dist 里的一个额外文件 → V2b 产物清单先红并**提前 exit**，
+  # 于是「这次变异想证明的那条断言」根本没机会跑，报告里全是「未命中」（实测踩过）。
+  $backup = Join-Path ([System.IO.Path]::GetTempPath()) ("opennote-mutation-" + [guid]::NewGuid().ToString("N") + ".bak")
   Copy-Item $full $backup -Force
   try {
     $text = Get-Content $full -Raw
@@ -60,7 +64,8 @@ function Mutate([string]$file, [string]$find, [string]$replace, [string]$label, 
 function MutateDist([string]$file, [string]$append, [string]$label, [string]$expect) {
   $full = Join-Path (Get-Location) $file
   if (-not (Test-Path $full)) { return "SKIP $label：文件不存在（$file）—— 先跑 node build.mjs" }
-  $backup = "$full.bak-mutation"
+  # 同 Mutate：备份不能落在 dist 里（那本身就会让 V2b 多出一个文件而提前 exit）
+  $backup = Join-Path ([System.IO.Path]::GetTempPath()) ("opennote-mutation-" + [guid]::NewGuid().ToString("N") + ".bak")
   Copy-Item $full $backup -Force
   try {
     Add-Content -Path $full -Value $append
@@ -135,6 +140,13 @@ $results += Mutate "src/manifest.json" `
   '"clip-selection": {' `
   "⑧ V1 快捷键语义（Alt+Shift+S 退回 clip-selection）" `
   "缺少 commands：pick-element / clip-page"
+
+# ⑨ V17B：网页版按钮不再默认隐藏（没有检测到网页版时，那颗空按钮会一直挂在底栏上）
+$results += Mutate "src/popup/popup.html" `
+  'class="btn" id="webPrimary" hidden' `
+  'class="btn" id="webPrimary"' `
+  "⑨ V17B 网页版按钮默认隐藏（去掉 hidden）" `
+  "#webPrimary 默认必须 hidden"
 
 $results | ForEach-Object { $report += $_; $report += "" }
 
