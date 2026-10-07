@@ -282,17 +282,25 @@
   }
 }
 
+/* 上边距归零：与工作区按钮之间的那段间距由 `.sidebar__workspace` 的下 padding 出，
+   两处不会各留一半。标签行自身的落点因此不变。 */
 .sidebar__tabs {
   display: flex;
   gap: 2px;
-  padding: var(--s2) var(--s3) 6px;
+  padding: 0 var(--s3) 6px;
 }
 
 /* ---- workspace (notebook) switcher ------------------------------------ */
 
+/*
+ * 上下各 `--s2`（8px）：按钮因此在「头部」与「标签栏」之间垂直居中
+ * ——上下留白相等，按钮不再贴着头部的分割线。
+ * 容器总高（8 + 30 + 8 = 46px）与改动前（4 + 30 + 4 + 标签栏 8px 上 padding）一致，
+ * 所以标签栏及其以下的位置一点没动。
+ */
 .sidebar__workspace {
   position: relative;
-  padding: 0 var(--s3) var(--s2);
+  padding: var(--s2) var(--s3);
 }
 
 .workspace__button {
@@ -323,7 +331,8 @@
 .workspace__menu {
   position: absolute;
   z-index: 40;
-  top: 36px;
+  /* 8px 容器上 padding + 30px 按钮 + 2px 缝：跟着 `.sidebar__workspace` 的 padding 走 */
+  top: 40px;
   left: var(--s3);
   right: var(--s3);
   max-height: 62vh;

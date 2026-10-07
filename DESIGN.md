@@ -1315,7 +1315,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 | 定高对话框 | `.dialog--tall` | `height: min(600px, calc(100vh - 96px))`，**设置与收件箱共用**，只写在这一处 |
 | 命令面板 | `.palette` | `min(620px, 100vw - 32px)`、高 `min(66vh, 640px)`、`--radius`；输入框 h56 / 15px 且 **`flex: none`**（见下）；脚注一行 `kbd` + `--fs-xs` |
 | 右键菜单 | `.menu` | `min-width: 190px`、`padding: 5px`、`--radius`、`--shadow-2`、`pop 120ms`，`z-index: 80` |
-| 工作区下拉 | `.workspace__menu` | 贴 `.sidebar__workspace` 绝对定位，`top: 36px`，左右各留 `--s3`，`max-height: 62vh`，`--shadow-3` |
+| 工作区下拉 | `.workspace__menu` | 贴 `.sidebar__workspace` 绝对定位，`top: 40px`（8px 容器上 padding + 30px 按钮 + 2px 缝），左右各留 `--s3`，`max-height: 62vh`，`--shadow-3` |
 
 **对话框内部结构固定**：`.dialog__head`（标题 `--font-display` 17px/600 + 右侧 `.icon-btn` 关闭按钮）→ `.dialog__body`（`--s4` 内边距，**自己滚动**）→ `.dialog__foot`（`color-mix(paper-3 40%, paper-2)` 底、上方 1px `--rule`、`.spacer` 把主按钮推到右边）。
 
