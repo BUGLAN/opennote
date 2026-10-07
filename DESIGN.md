@@ -266,6 +266,17 @@ components:
     textColor: "{colors.ink-3}"
     typography: "{typography.fs-xs}"
     fontVariantNumeric: tabular-nums
+  sidebar-foot:
+    area: ".sidebar 的最后一个子项（工作区 / 页签 / 文件树之后）"
+    height: "{layout.statusbar-h}"
+    backgroundColor: "继承 .sidebar（不分色，脚注与树同底）"
+    borderColor: "{colors.rule}（上边框）"
+    textColor: "{colors.ink-3}"
+    typography: "{typography.fs-xs}"
+    note: "与 .statusbar **同高同底**：两条底边线连成一条（顶行 sidebar-head / tabbar 同为 tabbar-h 的上下镜像）。高度必须写死，靠内容撑会高 6.39px"
+  sidebar-foot-actions:
+    layout: "display: flex; align-items: center; margin-left: auto（设置按钮 22 × 22）"
+    note: "不用行内 span 包 inline-flex 按钮：那会撑出 23.39px 的行盒，把 30px 的底栏顶高"
   tabbar:
     backgroundColor: "color-mix(in srgb, {colors.paper-2} 40%, {colors.paper})"
     borderColor: "{colors.rule}"
@@ -990,7 +1001,9 @@ font-variation-settings: "SOFT" 40, "WONK" 1;
 
 两行四列，一屏填满，**永不出现页面级滚动条**（滚动只发生在面板内部）。
 **顶行只有两样东西**：侧栏头部（記 / Opennote / 三个按钮）与标签栏 —— 它们永远同一行、
-同样 40px 高，底边线连成一条。第 2 行才是「侧栏身体 + 编辑器 + 状态栏」。
+同样 40px 高，底边线连成一条。**底行也一样**：侧栏脚注（`.sidebar__foot`）与状态栏
+（`.statusbar`）同为 30px（`--statusbar-h`），两条底边线连成一条 —— 侧栏列表的下沿与
+右侧内容区的下沿落在同一个 y 上。第 2 行才是「侧栏身体 + 编辑器 + 状态栏」。
 侧栏宽度把手自己占一列（列宽 0，骑在侧栏右边框上）：
 
 ```
@@ -998,9 +1011,9 @@ font-variation-settings: "SOFT" 40, "WONK" 1;
                      │ 記 Opennote      + □ ⇥     │  .tabbar          (40px)   │
                      ├────────────────────────────┼───────────────────────────┤
                      │ .sidebar (身体, 268px)      │  .editor-host    (1fr)     │
-                     │ 工作区/页签/文件树/脚注      │                            │
-                     │                            ├───────────────────────────┤
-                     │                            │  .statusbar       (30px)   │
+                     │ 工作区/页签/文件树          │                            │
+                     ├────────────────────────────┼───────────────────────────┤
+                     │ .sidebar__foot   (30px)    │  .statusbar       (30px)   │
                      └────────────────────────────┴───────────────────────────┘
           .sidebar__resizer 骑在两者之间（列宽 0）
 
@@ -1041,7 +1054,7 @@ font-variation-settings: "SOFT" 40, "WONK" 1;
 | `--sidebar-w` | 268px | 展开态侧栏的**默认**宽度。用户在右边框拖拽后由 `applyUi()` 写成内联值（夹取 200–520px）。≤820px 变 `min(84vw, 320px)` 浮层 |
 | `--outline-w` | 232px | 大纲面板。≤1080px 整个隐藏 |
 | `--tabbar-h` | 40px | 标签栏高度。**侧栏头部也是它**（`height: var(--tabbar-h)`），两条底边线连成一条 |
-| `--statusbar-h` | 30px | 状态栏高度（贴着底边，内容多时靠 `.statusbar__item--compact` 隐藏降级） |
+| `--statusbar-h` | 30px | **底行两条底栏共用的高度**：`.statusbar` 与侧栏脚注 `.sidebar__foot`。两条底边线靠它连成一条（顶行靠 `--tabbar-h`，同一个原则的上下镜像）。内容多时靠 `.statusbar__item--compact` 隐藏降级 |
 | `--titlebar-inset` | 148px | **仅桌面端**：为 Windows/Linux 压右上角的原生窗口按钮留的宽度。见下 |
 
 **桌面窗口的硬约束**（`electron/main.cjs`，改布局时必须知道）：
@@ -1709,17 +1722,17 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 `99px`（`.toast` / `.tag` / `.switch` / `.storage-bar` / 滚动条）与 `999px`（`.busy`）并存；`4px`（多处的微圆角）、`5px`（`.seal` 的内联值，等于 `--radius-sm`）、`11px` / `12px` / `13px`（各档印章）、`3px`（`.md-mark` / `.md-wikilink` / 焦点环）都没有令牌。
 **不影响观感，但新代码请用 `99px` 与既有令牌。**
 
-### 4. 内联样式（`src/*.tsx` + `src/components/*.tsx`：`style={…}` 共 78 处，其中 `style={{ … }}` 字面对象 62 处）
+### 4. 内联样式（`src/*.tsx` + `src/components/*.tsx`：`style={…}` 共 81 处，其中 `style={{ … }}` 字面对象 65 处）
 
-按文件分布（`style={{` 计数）：**62 处**，分布：
+按文件分布（`style={{` 计数）：**65 处**，分布：
 
 | 文件 | 处数 |
 | --- | --- |
 | `src/components/ImportApiPanel.tsx` | 24 |
-| `src/components/Sidebar.tsx` | 15 |
-| `src/components/AppDialogs.tsx` | 8 |
-| `src/components/Overlays.tsx` | 5 |
-| `src/components/InboxPanel.tsx` | 4 |
+| `src/components/Sidebar.tsx` | 14 |
+| `src/components/AppDialogs.tsx` | 9 |
+| `src/components/InboxPanel.tsx` | 6 |
+| `src/components/Overlays.tsx` | 6 |
 | `src/components/Outline.tsx` | 3 |
 | `src/components/CommandPalette.tsx` | 2 |
 | `src/App.tsx` | 1 |

@@ -601,14 +601,40 @@
   padding: var(--s2) var(--s2) var(--s4);
 }
 
+/*
+ * 底栏（脚注）：高度**必须**和 `.statusbar` 一样是 `--statusbar-h`，两条底边线才连成一条。
+ * 这是顶行 `.sidebar__head` / `.tabbar` 同为 `--tabbar-h` 的上下镜像 —— 顶行的线靠同一个
+ * 高度令牌对齐，底行的线也一样，而且同样**不能靠内容撑**。
+ *
+ * 不写高度时它是内容撑出来的：6px + 6px 内边距 + 设置按钮那一行的行盒 23.39px + 1px 上边框
+ * = 36.39px，比状态栏高 6.39px。侧栏列表的下沿因此比右侧内容区（状态栏上边框）高一截，
+ * 看上去就是「左栏那条横线比右边那条高半个行高」（用户截图 @2x 实测差 13 图像 px）。
+ *
+ * 29px 的内容盒装得下现在的东西（最高的是 22px 的设置按钮，见 `.sidebar__foot-actions`），
+ * 但 `.sidebar` 是 `overflow: hidden`：将来往这里塞更高的元素会被裁掉 —— 加之前先确认
+ * 底边线还齐不齐。
+ */
 .sidebar__foot {
   display: flex;
   align-items: center;
   gap: var(--s2);
+  height: var(--statusbar-h);
   padding: 6px var(--s3);
   border-top: 1px solid var(--rule);
   font-size: var(--fs-xs);
   color: var(--ink-3);
+}
+
+/*
+ * 脚注右侧的动作位（设置按钮）。用 flex 而不是「行内 `<span>` 包一颗 `inline-flex` 按钮」：
+ * 后者按基线对齐时会撑出 23.39px 的行盒（按钮自己只有 22px），白白多 1.4px —— 在 30px 的
+ * 底栏里就成了「内容比内容盒还高」，只能靠溢出到内边距里落位。这里让它和状态栏的
+ * `.statusbar__item` 一样，是**盒模型里量得到的高度**（22px）。
+ */
+.sidebar__foot-actions {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
 }
 
 .sidebar__filter {

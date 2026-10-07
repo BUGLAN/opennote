@@ -324,7 +324,9 @@ export function Sidebar(props: SidebarProps): ReactNode {
         <span title={props.workspace ? workspaceLocation(props.workspace) : undefined}>
           {counts.all} 篇笔记
         </span>
-        <span style={{ marginLeft: "auto" }}>
+        {/* 动作位的高度是「盒模型里量得到的 22px」（`.sidebar__foot-actions`），
+            不再用行内 `<span>` 包按钮 —— 那会撑出 23.39px 的行盒，把 30px 的底栏顶高。 */}
+        <span className="sidebar__foot-actions">
           <button className="icon-btn" title="设置" onClick={props.onOpenSettings} style={{ width: 22, height: 22 }}>
             <Icon name="settings" size={14} />
           </button>
