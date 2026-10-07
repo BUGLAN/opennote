@@ -221,8 +221,15 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__row>label{width:44px;flex:none;font-size:var(--fs-sm);color:var(--ink-3)}
 .clip__row .field{height:26px;font-size:var(--fs-sm)}
 
-.clip__foot{display:flex;align-items:center;gap:var(--s2);padding:var(--s3);border-top:1px solid var(--rule);background:var(--paper-2);flex:none}
+.clip__foot{display:flex;align-items:center;gap:var(--s2);padding:var(--s3);border-top:1px solid var(--rule);background:var(--paper-2);flex:none;flex-wrap:wrap}
 .clip__foot .btn{flex:1;height:30px}
+/*
+ * 网页版按钮独占底栏第一行（主按钮「上方」）。
+ * 底栏是单行 `display:flex`，「上方」只能靠换行实现：`flex-wrap:wrap` + `flex-basis:100%`
+ * 让它在任何宽度下都占满一整行，后面的 `#footActs` / `#primary` / `#more` 自然落到第二行。
+ * 注意 `flex-basis:100%` 必须写在**换成整行**的那一颗上，写成 `width:100%` 会被 `flex:1` 拉回等分宽。
+ */
+#webPrimary{flex:0 0 100%}
 .clip__acts{display:flex;gap:var(--s2);flex:1;flex-wrap:wrap}
 .clip__acts:empty{display:none}
 .clip__more{width:30px;height:30px;flex:none;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--rule-strong);border-radius:var(--radius-sm);color:var(--ink-2);background:var(--paper)}
@@ -250,7 +257,8 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
  * 两件事**同一个根因**，所以一并在这里收口。`.clip__pick-detail[hidden]` 与
  * `.clip__menu[hidden]` 是同款补丁（见 task-21 那段注释），这里补齐最后两颗。 */
 #primary[hidden],
-#more[hidden]{display:none}
+#more[hidden],
+#webPrimary[hidden]{display:none}
 
 .clip__menu{position:absolute;right:var(--s3);bottom:52px;z-index:10;min-width:190px;padding:4px;border:1px solid var(--rule-strong);border-radius:var(--radius);background:var(--paper-2);box-shadow:var(--shadow-2);display:flex;flex-direction:column}
 .clip__menu[hidden]{display:none}

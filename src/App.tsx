@@ -47,6 +47,7 @@ import {
 } from "./data/inbox";
 import { findImportLogEntry, readImportIndex, readImportLog } from "./data/importLog";
 import {
+  installInpageBridge,
   receiveEnvelopeOutcome,
   setImportChannelContext,
   setImportLandingPreference,
@@ -205,6 +206,26 @@ export default function App(): ReactNode {
       })();
     });
   }, [bridge]);
+
+  /**
+   * 页面内桥（网页版通道，契约 02 §5.7 / FR-39）：网页版没有本地接口，剪藏扩展
+   * 唯一的投递方式是把信封 `postMessage` 到这个页面。装一次即可 —— `workspace()`
+   * 现读 store（不依赖 React 状态），所以切换笔记本不必重装监听。
+   *
+   * 通道声明（`inpage`）在桥内部完成，与上面本地桥那条注释说的是同一件事：
+   * 不声明就会落在默认的 `"in-app"`，「外部导入先进收件箱」与 overwrite 闸门
+   * 会同时静默失效。
+   */
+  useEffect(() => {
+    return installInpageBridge({
+      workspace: () => {
+        const state = libraryStore.get();
+        const target = currentBackend();
+        return { name: state.workspace?.name ?? null, writable: Boolean(target?.canWrite) };
+      },
+      receive: (raw) => receiveEnvelopeOutcome(raw),
+    });
+  }, []);
 
   /**
    * 主进程转交的其余导入/收件箱操作。只有一份实现（就是这里的 data/*），

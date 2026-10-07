@@ -98,6 +98,30 @@ export type {
   ImportUndoResult,
 } from "./receive";
 
+/**
+ * 页面内桥（网页版接收剪藏的通道，契约 02 §5.7 / FR-39）。
+ * 协议常量在这里导出，扩展侧 `content/inpage-bridge.js` 的重复字面量由
+ * `extension/verify.mjs` 的 V21 逐字比对。
+ */
+export {
+  INPAGE_PREFIX,
+  INPAGE_VERSION,
+  INPAGE_HELLO,
+  INPAGE_READY,
+  INPAGE_IMPORT,
+  INPAGE_RESULT,
+  INPAGE_EVENT,
+  INPAGE_MAX_REQ_ID,
+  INPAGE_MAX_BYTES,
+  createInpageBridge,
+  installInpageBridge,
+  inpagePayloadBytes,
+  readInpageMessage,
+  validateInpageEvent,
+} from "./inpageBridge";
+
+export type { InpageEventLike, InpageHost, InpageMessage, InpageReason, InpageBridgeDeps } from "./inpageBridge";
+
 export {
   FRONT_MATTER_KEYS,
   downgradeLeadingH1,

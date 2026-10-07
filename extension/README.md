@@ -8,7 +8,7 @@
 
 ## 0. 30 秒上手
 
-1. 构建：`cd extension ; node build.mjs` → 产物在 `extension/dist`（**24 个文件**；逐个清单见 §2 与 `verify.mjs` 的 V2b）。
+1. 构建：`cd extension ; node build.mjs` → 产物在 `extension/dist`（**26 个文件**；逐个清单见 §2 与 `verify.mjs` 的 V2b）。
 2. Chrome → `chrome://extensions` → 打开「开发者模式」→「加载已解压的扩展程序」→ 选 **`E:\repo\opennote\extension\dist`**。
 3. 打开桌面版 Opennote 的「设置 · 文件 · 导入与接口」，开启本地接口，**复制 47 字符长期令牌**。
 4. 点扩展图标 → 在 popup 里**粘贴令牌**（`opn_` + 43 位）→ 芯片变成「本地接口已开启」。
@@ -24,14 +24,15 @@
 
 | 命令 | 覆盖什么 | 期望 |
 | --- | --- | --- |
-| `node build.mjs` | 拷贝 `src/` → `dist/`、tokens 逐字注入（3 处 `:root`→`:host`；**25 处根属性选择器 → `:host(...)`**，夜版覆盖层靠它）、生成 PNG 图标、写 `BUILD-INFO.json`、`verifyManifest()` | `[build] dist 就绪：24 个文件` |
-| `node verify.mjs` | 静态验收 **V1–V20**：清单/权限/引用完整性/**产物正面清单（V2b：逐个列出该在的与必须不在的）**/零远程主机/零 eval+内联处理器/tokens 逐字同源/0 新令牌/逐字文案/契约硬约束/无 emoji/极简形态（两按钮 + 无死元素 + 来源允许空值）/反引号禁用/元素选择纪律/去配对+令牌格式/四因分离/令牌回显/**产物一致性**/**V17A：A 接通 + ⑤ 选中态 + ③ 图片开关** | `✓ 20 组验收全部通过（V1–V20）`（退出码 0） |
-| `node tools/run-tests.mjs` | **跑测试的唯一入口**：144 条单测（信封、状态、队列、桥（真 HTTP）、自包含性、判定链、四因分离、极简形态、令牌回显、产物守卫、**A 接通/资产形状/图片降级（真回环）**）；失败自动落 `.test-failure.log` | `通过：144 条（node --test 退出码 0）` |
+| `node build.mjs` | 拷贝 `src/` → `dist/`、tokens 逐字注入（3 处 `:root`→`:host`；**25 处根属性选择器 → `:host(...)`**，夜版覆盖层靠它）、生成 PNG 图标、写 `BUILD-INFO.json`、`verifyManifest()` | `[build] dist 就绪：26 个文件` |
+| `node verify.mjs` | 静态验收 **V1–V21**：清单/权限/引用完整性/**产物正面清单（V2b：逐个列出该在的与必须不在的）**/零远程主机/零 eval+内联处理器/tokens 逐字同源/0 新令牌/逐字文案/契约硬约束/无 emoji/极简形态（两按钮 + 无死元素 + 来源允许空值）/反引号禁用/元素选择纪律/去配对+令牌格式/四因分离/令牌回显/**产物一致性**/**V17A：A 接通 + ⑤ 选中态 + ③ 图片开关**/**V17B：网页版通道按钮**/**V21：页面内桥协议两处一致** | `✓ 21 组验收全部通过（V1–V21）`（退出码 0） |
+| `node tools/run-tests.mjs` | **跑测试的唯一入口**：158 条单测（信封、状态、队列、桥（真 HTTP）、自包含性、判定链、四因分离、极简形态、令牌回显、产物守卫、**A 接通/资产形状/图片降级（真回环）**、**页面内桥（候选判定/字节上限/注入脚本自包含）**）；失败自动落 `.test-failure.log` | `通过：158 条（node --test 退出码 0）` |
 | `node tools/dist-race-probe.mjs --seconds 25 --builds 40` | **诊断工具**（不是门禁，永远 exit 0）：量化「构建进行中读产物」的窗口有多大 | 半写窗口命中的采样数（见 §1.1） |
 | `node tools/cdp-pick-check.mjs` | 真机：真 Chrome + 真扩展 + 两个按钮 + ㉝ 全链（**诊断工具，不是门禁**） | `元素选择真机验证：全部 PASS` |
 | `node tools/mutation-stage-assets.mjs` | **反向验证**（7 个：资产形状退回 `{url,alt}`、`CLIP_WEB_READY` 退回 false、openUrl 自己拼、stage 退回旧 clip.html、图片开关默认改成开、产物清单多一个/少一个）：每个变异先打印**命中处数 + 前后 sha256**，没落地就 `NO_EFFECT` + `exit 2` | 7/7 命中期望文案后 `verify exit=0` / tests 0 fail |
 | `pwsh -File tools/mutation-check.ps1` | 8 个变异**必须变红**且命中期望文案（历史那一套，变异点不同） | 8/8 命中后 `verify exit=0`、tests 0 fail |
 | `node tools/real-bridge-stage-probe.mjs` | **诊断工具**（不是门禁，永远 exit 0）：起**真桥**（`electron/bridge.cjs`，不需要 Electron）复跑 `/v1/clip/stage` 的三种资产形状 | 三种输入各自的 HTTP 状态 + 错误码 |
+| `node tools/cdp-inpage-check.mjs` | **诊断工具**（不是门禁，永远 exit 0）：真 Chrome + 真扩展 + **真网页版产物**（`npx vite build` 的 `dist/`）验网页版通道的两件事 —— ① popup 底栏那颗 `剪藏到 <域名>` 按钮的出现位置与逐字文案；② 把**真注入函数** `deliverInpage` 送进真网页版标签页，收回页面侧的结构化回执（跨世界 `postMessage` 是否真的通） | 见 §15 |
 | `node tools/popup-shot.mjs` | **诊断工具**（不是门禁，永远 exit 0）：用**真** `popup.js` / `picker.js` 渲染截图到 `extension/.shots/`（不是 action popup 的截图，见工具头部） | 每个镜头的字节数与 sha256 |
 | `node tools/mock-bridge.mjs --mode healthy --port 8795 --token "opn_…" --inbox` | 本地假桥（真 HTTP），用来跑 §4 的六态；`/v1/clip/stage` 也照 02 §2.5 校验 `assets[]` | 见 §4 |
 
@@ -72,24 +73,24 @@
 ```
 extension/
 ├─ src/
-│  ├─ manifest.json            # MV3 清单：无 options_ui、无通配 host（host_permissions 恰好 10 条）
-│  ├─ background.js            # SW（module）：探测/状态/信封/投递/暂存/元素选择落盘/暂存给网页版剪藏页
-│  ├─ lib/{assets,bridge,envelope,errors,pick,queue,stage,state,store}.js
-│  ├─ content/{extract-page,picker,clipboard}.js
+│  ├─ manifest.json            # MV3 清单：无 options_ui、host_permissions 恰好 10 条回环；可选主机权限恰好 2 条
+│  ├─ background.js            # SW（module）：探测/状态/信封/投递/暂存/元素选择落盘/暂存给网页版剪藏页/网页版通道
+│  ├─ lib/{assets,bridge,envelope,errors,inpage,pick,queue,stage,state,store}.js
+│  ├─ content/{extract-page,inpage-bridge,picker,clipboard}.js
 │  ├─ popup/{popup.html,popup.css,popup.js}
 │  └─ styles/tokens.css        # 设计令牌唯一来源（构建期逐字注入影子根）
-├─ tests/                      # 144 条单测（`node tools/run-tests.mjs`）
+├─ tests/                      # 158 条单测（`node tools/run-tests.mjs`）
 ├─ tools/{cdp-pick-check,mock-bridge,mutation-check,mutation-stage-assets,dist-guard,dist-race-probe,popup-shot,real-bridge-stage-probe,run-tests,no-undef-check}
-├─ verify.mjs                  # V1–V20（V2b 产物正面清单、V17A A 接通/⑤/③）
+├─ verify.mjs                  # V1–V21（V2b 产物正面清单、V17A A 接通/⑤/③、V17B 网页版通道、V21 协议一致）
 ├─ .gitignore                  # 两个门禁标记（.building / .mutation-running）+ .shots/ 不进版本库
 └─ README.md
 ```
 
-**产物清单（24 个，V2b 逐个正面断言；数字上界已删除）**：
+**产物清单（26 个，V2b 逐个正面断言；数字上界已删除）**：
 ```
 BUILD-INFO.json  background.js  manifest.json
-content/{clipboard,extract-page,picker}.js
-lib/{assets,bridge,envelope,errors,pick,queue,stage,state,store,timeout}.js
+content/{clipboard,extract-page,inpage-bridge,picker}.js
+lib/{assets,bridge,envelope,errors,inpage,pick,queue,stage,state,store,timeout}.js
 popup/{popup.css,popup.html,popup.js}   styles/tokens.css   icons/icon{16,32,48,128}.png
 ```
 `manifest.json` 引用的 10 个文件都在清单内（V2b 会比对），清单之外的文件一律红。
@@ -98,6 +99,7 @@ M2（task-28）删除：`lib/templates.js`、`lib/highlights.js`、`content/high
 manifest 的 `options_ui`、`chrome.storage.local` 的 `opennote.templates.v1` / `opennote.highlights.v1`。
 task-3（本轮）删除：`src/clip/clip.html` + `src/clip/clip.js`（被网页版剪藏页取代，**连它的 `?tabId=` 路由与 `tabById()` 一起删**）；
 新增：`lib/stage.js`（暂存请求体形状的唯一定义）+ `lib/assets.js`（图片字节层与降级）⇒ 27 → **24**。
+0.4.0（网页版通道）新增：`content/inpage-bridge.js`（自包含注入函数）+ `lib/inpage.js`（协议常量与候选判定的唯一事实源）⇒ 24 → **26**。
 
 ## 3. 权限清单与联网边界
 
@@ -106,10 +108,16 @@ task-3（本轮）删除：`src/clip/clip.html` + `src/clip/clip.js`（被网页
 | `storage` | 令牌/端口/落点/模式 + 离线暂存队列 + 元素选择结果（单键 `opennote.clip.state.v1`） | 每次都要重新粘贴令牌，「先暂存」无法实现 |
 | `contextMenus` | 右键 `剪藏整页正文到 Opennote`（**恰好一项**） | 右键入口消失 |
 | `activeTab` | 用户点图标/快捷键/右键那一刻才拿到当前标签页 | 连当前页都读不到 |
-| `scripting` | 注入 `extract-page.js` / `clipboard.js` / `picker.js`（**只在用户点了「选择当前元素」或按 `Alt+Shift+S` 时才注入**） | 元素选择与复制降级失效 |
+| `scripting` | 注入 `extract-page.js` / `clipboard.js` / `picker.js` / `inpage-bridge.js`（**只在用户点了按钮或按了快捷键之后**） | 元素选择、复制降级与网页版投递全部失效 |
+| `tabs`（0.4.0 新增） | **发现「浏览器里开着哪个 Opennote 网页版」**：没有它时 `tab.url`/`tab.title` 一律读不到（`activeTab` 只覆盖当前标签页，而用户此刻正在剪的是**别的**页面） | 网页版通道的按钮永远不会出现。代价如实记：安装时多一句「读取你的浏览记录」的提示；我们只用 `url`/`title` 判断，不读历史、不读页面正文 |
 
 `host_permissions` **恰好 10 条**：`http://127.0.0.1:8787/* … 8796/*`。**没有** `<all_urls>`、没有通配域、
 没有 `clipboardWrite`（复制走 §7 的三级降级）。V1/V3 逐条守着这些数字。
+
+`optional_host_permissions` **恰好 2 条**（`http://*` / `https://*` 的任意主机）：**安装时不产生任何提示**，
+它是「允许申请」的范围，不是「已经拿到」的权限。真正申请的时机只有一个 —— 用户在 popup 上点
+`剪藏到 <域名>` 那一刻，按**那个标签页的 origin** 申请一次（`chrome.permissions.request`，
+一次一个站点；已经给过就直接过）。V1 把这两条钉死，V3 只对这两行精确取值放行。
 
 ## 4. 连接状态：逐态复现
 
@@ -124,8 +132,78 @@ task-3（本轮）删除：`src/clip/clip.html` + `src/clip/clip.js`（被网页
 
 测法：`node tools/mock-bridge.mjs --mode healthy --port 8795 --token "opn_<43 位>" --inbox`（各态用不同 `--mode`）。
 
-## 5. `conflict` 纪律（回归受 V8 保护）
+### 4.1 网页版通道（0.4.0）：剪藏到已打开的网页版
 
+**为什么需要**：网页版没有本地接口可连（它的 CSP 是 `default-src 'self'` + `connect-src 'self'`，
+页面**不能** fetch `127.0.0.1`），桌面版才有桥。所以「网页版正开在浏览器里」时，唯一能把信封送进
+笔记本的办法是让内容脚本与那个页面直接对话 —— 契约 02 §5.7 / FR-39 的**页面内桥**（`postMessage`）。
+
+**用户看到什么**：检测到网页版标签页时，底栏在 `剪藏到 Opennote` **上方**多出一颗整行按钮
+`剪藏到 <域名>`（域名取自被检测到的那个标签页，如 `buglan.github.io`；本地开发就是 `127.0.0.1:5173`）。
+没检测到就**不出现**（界面上不留死元素）。它自己一条点击路径（`opennote:inpage-clip` → 后台交付），
+**不**并进 `#primary` 的 intent 分支。
+
+**一次剪藏的四步**（全部在 service worker 里编排）：
+
+| 步骤 | 做什么 | 失败时 |
+| --- | --- | --- |
+| ① 找候选 | `chrome.tabs.query({})` → 标题或 URL 里带 `opennote` 的 http(s) 标签页；排除**正在被剪的那一页**与本会话握手失败过的标签页 | 没有候选 → 按钮不出现（不是错误态） |
+| ② 上限 | 信封 > **1 MiB** 就不发（`postMessage` 会整份复制对象） | `IMP-4005` + 一句人话（关掉「图片一起保存」，或改用桌面版） |
+| ③ 权限 | `chrome.permissions.request({origins:[<该页 origin>/*]})` —— **必须在这次点击的手势里**，一次一个站点 | `IMP-3001` + `没有获得访问 <域名> 的权限，这次剪藏没有发送。` |
+| ④ 握手 + 入库 | 注入 `content/inpage-bridge.js`：`hello` → 等 `ready`（300 ms）→ `import` → 等 `result`（5 s） | 没握手：`IMP-1006`（可能不是网页版）；超时：`IMP-1004`（`Opennote 的页面没有响应…`）|
+
+**候选判定是启发式的，握手才是唯一真相**：标题里带 Opennote 的普通网页也会被当成候选 ——
+点下去握手不通过，就如实说一句，并把那个标签页记进本会话的失败集合（不再重复打扰）。
+
+**协议纪律**（逐条对齐 02 §5.7）：
+
+- 消息只有 `opennote:inpage:hello / ready / import / result / event`，`v` 恒为 1，`reqId` ≤ 64 字符；
+- `window.postMessage(data, targetOrigin)` **必须显式给 origin**，绝不 `"*"`（V21 卡这一条）；
+- 页面侧只校验 `event.source === window` + 同源 + 形状 + `reqId` + 信封校验；
+  **订正**：契约原文第 2 条要求页面看到 `event.origin === chrome-extension://<id>` —— 这条在
+  `postMessage` 上**不可实现**（内容脚本与页面共享同一个窗口，同窗口消息的 origin 必然是页面自己的
+  origin，Chrome 官方文档明说两个方向都只能走共享 DOM）。订正已写进 `docs/import/02` §5.7 与
+  `src/lib/clip/inpageBridge.ts` 的模块注释；
+- 注入脚本**自包含**（只有一个顶层声明，不 import 任何东西 —— `executeScript({func})` 传的是源码副本），
+  因此协议字面量在两处各写一份，`verify.mjs` 的 **V21** 逐字比对。
+
+**边界（不许写成已验）**：`chrome.permissions.request` 会弹一次浏览器气泡；如果 popup 因此被关掉，
+**入库仍然照常完成**（后续步骤全在 service worker 里），只是看不到那条回执 —— 笔记会在 Opennote 里
+自己冒出来（应用侧另有 toast）。这条路径的真机验证见 §4.2。
+
+## 4.2 真机验证：网页版通道（`node tools/cdp-inpage-check.mjs`）
+
+**跑法**（先出两个产物：扩展 dist 与**真网页版** dist）：
+
+```powershell
+cd extension ; node build.mjs
+cd ..        ; npx vite build          # 网页版产物，工具会在 127.0.0.1:4173 上起静态服务
+cd extension ; node tools\cdp-inpage-check.mjs
+```
+
+工具自己起 Chrome（`--headless=new` + `--enable-unsafe-extension-debugging`）、装载 `dist`、
+开两个标签页（真网页版 + 一张普通文章页），然后验两组事：
+
+| 组 | 判据 | 为什么这条判据值钱 |
+| --- | --- | --- |
+| A 检测与呈现 | popup 底栏出现 `#webPrimary`、**文案逐字** `剪藏到 127.0.0.1:4173`、且它的 `top` **小于**主按钮的 `top` | 「检测到网页版 → 在剪切上面加一个按钮」是用户原话；位置错了就是另一种东西。这条同时证明 `tabs` 权限真的读到了那个标签页的 URL |
+| B 协议 | 把**真** `deliverInpage`（`content/inpage-bridge.js`，经 `chrome.scripting.executeScript({func})` 注入）送进真网页版标签页后，service worker 收到 `opennote:inpage-report`，且 `local === false`、`error.code === "IMP-4007"` | 整条通道里唯一有平台不确定性的地方是**内容脚本隔离世界的 `window.postMessage` 能否被页面监听器收到**（官方文档说可以，但那只是文档）。`local:false` 说明回执来自**页面**（hello→ready→import→result 四步全通），`IMP-4007` 说明那句话出自**应用侧接收端**（`receiveEnvelopeOutcome()`），不是注入脚本自己编的 |
+
+**2026-10-07 实测（Chrome 154.0.8037.58 / Windows）**：13 项全 PASS —— `#webPrimary` 文案
+`剪藏到 127.0.0.1:4173`、位置 `web top=519 < primary top=557`，回执
+`{"ok":false,"error":{"code":"IMP-4007","userMessage":"Opennote 里还没有打开笔记本文件夹。…"}}`。
+
+**这个工具**验不到**的（诚实清单，别把它读成「全链路已验」）**：
+
+1. **`chrome.permissions.request` 的那次浏览器气泡点不了**：CDP 动不了浏览器级 UI（与 `T-11` 同类边界）。
+   工具绕开它，用「让网页版标签页成为活动标签页 → 触发 action 拿 `activeTab` → 注入」这条等价路径
+   验协议；**「首次点击 → 弹气泡 → 允许 → 入库」那一步归人工**。
+2. **popup 上那颗按钮的点击路径**（`submitToWeb()` → 抽正文 → 建信封 → 投递）没有在真机上点过 ——
+   真机只验到按钮**在**、位置对、文案对。逻辑那一半由 `verify.mjs` V17B + `tests/inpage.test.mjs` 卡。
+3. 入库**成功**（`ok:true` + `created`）没有真机证据：探针用的是一次性 profile，里面没有打开笔记本，
+   所以页面如实回 `IMP-4007`。要出成功态，得先在那个 profile 里建一本浏览器笔记本再跑 —— 归人工。
+
+## 5. `conflict` 纪律（回归受 V8 保护）
 - 信封**默认不下发** `conflict` 键 —— 落点交给应用侧设置（默认收件箱）与判定链；
 - 只有「追加到指定笔记」才有 `conflict: "append"`，而 M1 起 UI 上已经没有这个输入；
 - 客户端**永不**下发 `"new"` / `"overwrite"`，`overwrite` 在扩展侧不可达。
@@ -200,8 +278,36 @@ node tools\cdp-pick-check.mjs                                   # 真知乎文�
 5. 令牌只读回显的**尾 4 位**已在 M2 修正（此前刚粘贴完会显示 `opn_••••••••••••????`）：
    尾 4 位从唯一真源推导 + 掩码纯函数 `maskTokenTail()`，V18 + 单测三层卡住。
 6. **`IMP-2004`（配对码错误）**保留码号但**不再产出**（配对整体删除）。
+7. **网页版通道的三处真机边界**（0.4.0，逐条见 §4.2 末尾）：`chrome.permissions.request` 的浏览器气泡
+   点不了（所以「首次点击 → 允许 → 入库」那一步归人工）；popup 上那颗按钮的**点击路径**没有真机点过；
+   入库**成功态**没有真机证据（探针用的一次性 profile 里没有打开笔记本，页面如实回 `IMP-4007`）。
+8. **候选标签页判定是启发式的**（标题或 URL 里带 `opennote`）：标题里出现 Opennote 的普通网页也会成为
+   候选，点下去握手不通过就如实报一句，并把那个标签页记进本会话的失败集合。多标签页时只挑**一个**
+   （URL 里带 opennote 的优先 → 活动标签页 → 标签页顺序），不做选择器。
 
 ## 12. 变更记录
+
+### 12.-1 0.4.0（网页版通道：剪藏到已打开的网页版）
+
+**用户原话**：「如果检测到当前浏览器打开了 opennote 网页版，在剪切上面加一个按钮，比如剪切到 xx 网址，
+比如 buglan.github.io」。落地为契约 02 §5.7 / FR-39 那条**一直只有文档、没有实现**的页面内桥。
+
+- **权限**：新增 `tabs`（发现网页版标签页的唯一办法）+ `optional_host_permissions` 两条（安装期无提示，
+  按 origin 逐个申请）。`host_permissions` 一条没动（仍是 10 条回环）。V1 新增可选主机权限断言，
+  **V8 反向**（原来断言「不需要 tabs」，现在断言「必须有 tabs」并写明理由）。
+- **新增两个产物**：`content/inpage-bridge.js`（自包含注入函数，`hello → ready → import → result`）、
+  `lib/inpage.js`（协议常量与候选判定的唯一事实源）。24 → **26** 个文件，V2b 清单同步。
+- **popup**：底栏多一颗 `#webPrimary`，**位置在主按钮之前**（DOM 顺序，V17B 盯），CSS 靠
+  `.clip__foot{flex-wrap:wrap}` + `flex:0 0 100%` 独占第一行；默认 `hidden`（没检测到就没有这颗按钮）。
+  可见性判定只有一个产地 `webTargetFor(plan)`。
+- **background**：`clipActiveTab()` 里的抽取与建信封抽成 `buildEnvelopeForTab()`，本地桥与网页版
+  两条投递路径**共用**（否则两条路迟早给出不一样的正文）；新增 `detectWebTarget()` /
+  `deliverToWebPage()` / `askInpage()`（注入 + 回执挂起表 + 5 s 上限）与 `settleInpage()`。
+- **门禁**：V7 逐字文案 +9 条、V12b 消息清单 14 → 16 条、新增 **V17B**（按钮位置/可见性/CSS/文案/
+  独立点击路径）与 **V21**（注入脚本自包含 + 6 个协议常量两处逐字一致 + 无 `"*"`）；
+  测试 144 → 158 条；`tools/mutation-check.ps1` 新增一个变异（把按钮挪到主按钮之后必须红）。
+- **文档**：`docs/import/02` §5.7 记下页面侧 origin 判据的**订正**（内容脚本的 postMessage 必然带
+  页面自己的 origin），`docs/import/03` 新增该按钮的 UI 条目与逐字文案。
 
 ### 12.0 0.3.2（task-3：接通网页版剪藏页 + 删旧页 + ⑤②③①）
 

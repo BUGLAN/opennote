@@ -63,6 +63,13 @@
 
   <div class="clip__foot" id="foot">
     <div class="clip__acts" id="footActs"></div>
+    <!--
+      网页版通道（契约 02 §5.7 / FR-39）：检测到浏览器里开着 Opennote 网页版时，这一行**长出来**
+      一颗整行按钮 `剪藏到 <host>`，位置就在主按钮**上方**（用户原话「在剪切上面加一个按钮」）。
+      没有检测到就 `hidden` —— 界面上不留死元素。DOM 位置固定在 `#primary` 之前，
+      布局靠 `popup.css` 的 `#webPrimary{flex:0 0 100%}` 独占一行（底栏本身是单行 flex）。
+    -->
+    <button type="button" class="btn" id="webPrimary" hidden></button>
     <button type="button" class="btn btn--primary" id="primary">剪藏到 Opennote</button>
     <button type="button" class="clip__more" id="more" title="更多" aria-label="更多" aria-haspopup="menu" aria-expanded="false"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.4" fill="currentColor"></circle><circle cx="8" cy="8" r="1.4" fill="currentColor"></circle><circle cx="13" cy="8" r="1.4" fill="currentColor"></circle></svg></button>
   </div>

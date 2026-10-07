@@ -10,6 +10,8 @@
 
 import { extractPage } from "./content/extract-page.js";
 import { copyInPage } from "./content/clipboard.js";
+// 页面内桥的页面侧实现（自包含，注入到**网页版 Opennote 那个标签页**里）。
+import { deliverInpage } from "./content/inpage-bridge.js";
 import {
   buildEnvelope,
   envelopeProblems,
@@ -40,6 +42,14 @@ import { makeQueueItem, enqueue, removeItem, markAttempt, takeBatch } from "./li
 import { withTimeout, settleWithin, TimeoutError } from "./lib/timeout.js";
 import { STATE, decideState, planFor, stateForCode } from "./lib/state.js";
 import { userMessage } from "./lib/errors.js";
+// 页面内桥（网页版通道，契约 02 §5.7 / FR-39）：协议常量与候选判定。
+import {
+  INPAGE_MAX_BYTES,
+  INPAGE_READY_MS,
+  INPAGE_RESULT_MS,
+  inpageBytes,
+  pickWebCandidate,
+} from "./lib/inpage.js";
 // M2（task-28）：模板（㉙）与高亮（㉚）整套退场 —— 模板模块、高亮模块、页面采集脚本与选项页
 // 都已删除（连文件一起），这里不再有任何引用，产物里也不该再出现它们的痕迹（见 verify V17）。
 
@@ -631,21 +641,24 @@ async function openPopup() {
 }
 
 /**
- * 主流程：抽取 → 建信封 → 投递（或暂存）。
- * @param {{mode:"selection"|"page", overrides?:object, tabId?:number}} input
+ * 抽取 → 建信封。**两条投递路径共用**（本地桥 `deliver()` 与网页版页面内桥
+ * `deliverToWebPage()`）：正文来源、元素选择、字段容错只在这里判一次 ——
+ * 复制一份就是第二个产地，两条路迟早会给出不一样的正文。
+ *
+ * 返回 `{ reply }` = 已经是一个可直接回给 popup 的失败回执；
+ * 否则返回 `{ mode, envelope, composed }` 交给调用方投递。
  */
-export async function clipActiveTab(input) {
+async function buildEnvelopeForTab(input) {
   const { mode = "selection", overrides = {}, tabId = null } = input || {};
   const tab = tabId !== null && tabId !== undefined ? await chrome.tabs.get(tabId).catch(() => null) : await activeTab();
   if (!tab || tab.id === undefined || isRestrictedUrl(tab.url)) {
-    return { status: "restricted", code: "IMP-1006", label: "这个页面不允许插件读取内容。", state: STATE.RESTRICTED_PAGE };
+    return { reply: { status: "restricted", code: "IMP-1006", label: "这个页面不允许插件读取内容。", state: STATE.RESTRICTED_PAGE } };
   }
   const extraction = await getExtraction(tab.id, { force: Boolean(overrides.force) });
   if (!extraction) {
-    return { status: "restricted", code: "IMP-1006", label: "这个页面不允许插件读取内容。", state: STATE.RESTRICTED_PAGE };
+    return { reply: { status: "restricted", code: "IMP-1006", label: "这个页面不允许插件读取内容。", state: STATE.RESTRICTED_PAGE } };
   }
 
-  const state = await readState();
   // 元素选择（㉝）：正文必须是**被点中的那块**。之前 `clipActiveTab` 没把已选元素交给
   // `buildClipEnvelope` → 元素模式剪藏会提交空正文（信封校验直接挡下，用户看到的是假失败）。
   // M2 修掉：与预览走同一条取法（`currentPicked`），预览里看到的就是会发出去的。
@@ -670,24 +683,38 @@ export async function clipActiveTab(input) {
   const problems = envelopeProblems(envelope);
   if (problems.length) {
     return {
-      status: "error",
-      code: "IMP-4003",
-      label: userMessage("IMP-4003"),
-      detail: problems.join("；"),
-      state: STATE.CONNECTED,
+      reply: {
+        status: "error",
+        code: "IMP-4003",
+        label: userMessage("IMP-4003"),
+        detail: problems.join("；"),
+        state: STATE.CONNECTED,
+      },
     };
   }
   if (bodyByteLength(envelope.body) > MAX_BODY_BYTES) {
     // 不截断用户原文（02 §2.6）——如实拒绝并给复制降级。
     return {
-      status: "error",
-      code: "IMP-4004",
-      label: userMessage("IMP-4004"),
-      state: STATE.CONNECTED,
-      needManualCopy: true,
+      reply: {
+        status: "error",
+        code: "IMP-4004",
+        label: userMessage("IMP-4004"),
+        state: STATE.CONNECTED,
+        needManualCopy: true,
+      },
     };
   }
+  return { mode, envelope, composed };
+}
 
+/**
+ * 主流程：抽取 → 建信封 → 投递到**本地接口**（或暂存）。
+ * @param {{mode:"selection"|"page", overrides?:object, tabId?:number}} input
+ */
+export async function clipActiveTab(input) {
+  const built = await buildEnvelopeForTab(input);
+  if (built.reply) return built.reply;
+  const { mode, envelope, composed } = built;
   await mutate(() => ({ folder: composed.folder || "", tags: composed.tags, mode }));
   return deliver({
     envelope,
@@ -698,6 +725,233 @@ export async function clipActiveTab(input) {
     notePath: composed.notePath,
   });
 }
+
+/* ────────── 页面内桥：把这次剪藏交给**已打开的网页版**（契约 02 §5.7 / FR-39） ────────── */
+
+/**
+ * 本会话里握手失败过的标签页（`tabId`）。握手是「它到底是不是 Opennote 网页版」的
+ * 唯一真相判据，失败一次就不再拿同一个标签页烦用户（候选判定是启发式的，误判要能自愈）。
+ */
+const inpageFailedTabs = new Set();
+
+/**
+ * 等页面回执的挂起表：`reqId → {resolve, timer, tabId}`。
+ * 注入的 `content/inpage-bridge.js` 通过 `chrome.runtime.sendMessage` 回报
+ * （与 `content/picker.js` 同一条路），所以必须有一个「等它回来」的地方。
+ */
+const inpagePending = new Map();
+
+/** 找一个「浏览器里开着的 Opennote 网页版」标签页；没有就返回 null（按钮不出现）。 */
+export async function detectWebTarget(options = {}) {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (error) {
+    console.warn("[opennote] 读取标签页失败（网页版通道不可用）", error);
+    return null;
+  }
+  const current = options.excludeTabId !== undefined ? options.excludeTabId : (await activeTab())?.id ?? null;
+  return pickWebCandidate(tabs, { excludeTabId: current, blocked: inpageFailedTabs });
+}
+
+/** 可选主机权限：只在用户点按钮那一刻申请（必须在用户手势里），已有就直接过。 */
+async function ensureHostPermission(origin) {
+  const pattern = `${origin}/*`;
+  try {
+    if (await chrome.permissions.contains({ origins: [pattern] })) return true;
+    return await chrome.permissions.request({ origins: [pattern] });
+  } catch (error) {
+    console.warn("[opennote] 申请网页版所在站点的访问权限失败", error);
+    return false;
+  }
+}
+
+/** 注入桥 + 等回执（5 s 上限；页面可能正在渲染大文档）。 */
+async function askInpage({ tabId, envelope }) {
+  const reqId = newImportId();
+  const done = new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      inpagePending.delete(reqId);
+      resolve(null);
+    }, INPAGE_RESULT_MS + 1500);
+    inpagePending.set(reqId, { resolve, timer, tabId });
+  });
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: deliverInpage,
+      args: [{ reqId, envelope, readyMs: INPAGE_READY_MS, resultMs: INPAGE_RESULT_MS }],
+    });
+  } catch (error) {
+    const detail = describeError(error);
+    console.warn(`[opennote] 页面内桥注入失败：${detail}`, error);
+    const pending = inpagePending.get(reqId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      inpagePending.delete(reqId);
+      pending.resolve({ ok: false, local: true, code: "IMP-1006", label: "没能在这个标签页里运行剪藏脚本。", detail });
+    }
+  }
+  return done;
+}
+
+/**
+ * 投递到网页版。返回形状与 `deliver()` 一致，popup 的 `applyReply()` 不用分叉。
+ *
+ * 四道闸门按顺序：找到候选标签页 → 信封不超 1 MiB →（首次）拿到该站点的访问权限 →
+ * 握手并入库。任一失败都**如实失败**，绝不假装成功（这是外部写入，不是本地操作）。
+ */
+export async function deliverToWebPage({ envelope, folderLabel, noteTitle, conflict = null, notePath = "", target = null }) {
+  const web = target || (await detectWebTarget());
+  if (!web) {
+    return {
+      status: "error",
+      code: "IMP-4006",
+      label: "没有找到已打开的 Opennote 窗口，请先打开 Opennote 网页版再重试。",
+      state: STATE.NOT_RUNNING,
+      folderLabel,
+      noteTitle,
+    };
+  }
+
+  const bytes = inpageBytes(envelope);
+  if (bytes === null || bytes > INPAGE_MAX_BYTES) {
+    return {
+      status: "error",
+      code: "IMP-4005",
+      label: "这次剪藏的内容超过了网页版通道的 1 MB 上限，没有发送。可以关掉「图片一起保存」，或改用桌面版本地接口。",
+      state: STATE.CONNECTED,
+      folderLabel,
+      noteTitle,
+    };
+  }
+
+  if (!(await ensureHostPermission(web.origin))) {
+    return {
+      status: "error",
+      code: "IMP-3001",
+      label: `没有获得访问 ${web.host} 的权限，这次剪藏没有发送。`,
+      state: STATE.CONNECTED,
+      folderLabel,
+      noteTitle,
+    };
+  }
+
+  const reply = await askInpage({ tabId: web.tabId, envelope });
+  if (!reply) {
+    inpageFailedTabs.add(web.tabId);
+    return {
+      status: "error",
+      code: "IMP-1004",
+      label: "Opennote 的页面没有响应。请确认笔记本标签页还开着，或改用桌面版本地接口。",
+      state: STATE.CONNECTED,
+      folderLabel,
+      noteTitle,
+    };
+  }
+  if (reply.local) {
+    // 渠道级失败（没握手 / 注入失败）：这个标签页本会话不再作为候选。
+    inpageFailedTabs.add(web.tabId);
+    return {
+      status: "error",
+      code: reply.code || "IMP-1004",
+      label: reply.label || userMessage(reply.code || "IMP-1004"),
+      detail: reply.detail || null,
+      state: reply.code === "IMP-1004" ? STATE.CONNECTED : STATE.NOT_RUNNING,
+      folderLabel,
+      noteTitle,
+    };
+  }
+  if (!reply.ok) {
+    const code = (reply.error && reply.error.code) || "IMP-4014";
+    return {
+      status: "error",
+      code,
+      label: (reply.error && reply.error.userMessage) || userMessage(code),
+      detail: reply.error ? reply.error.message : null,
+      state: stateForCode(code),
+      folderLabel,
+      noteTitle,
+    };
+  }
+
+  const result = reply.result || {};
+  const status = result.status || "created";
+  await mutate((prev) => ({
+    webTabId: web.tabId,
+    webHost: web.host,
+    lastOkAt: new Date().toISOString(),
+    notePaths: rememberNotePath(prev.notePaths, result.path),
+  }));
+  if (status === "pending") {
+    // 进收件箱（应用侧「先进入收件箱」命中）：不是失败，也不是「已经写进笔记」。
+    return {
+      status: "pending",
+      code: null,
+      label: "已进入收件箱等待确认",
+      state: STATE.INBOX_PENDING,
+      inboxId: result.inboxId || null,
+      serverStatus: status,
+      folderLabel,
+      noteTitle,
+      conflict,
+      notePath: notePath || null,
+    };
+  }
+  return {
+    status: "created",
+    code: null,
+    label: "已剪藏",
+    state: STATE.CONNECTED,
+    path: result.path || null,
+    serverStatus: status,
+    deduped: Boolean(result.deduped),
+    tags: Array.isArray(result.tags) ? result.tags : envelope.tags,
+    warnings: Array.isArray(result.warnings) ? result.warnings : [],
+    folderLabel,
+    noteTitle,
+    conflict,
+    notePath: notePath || null,
+  };
+}
+
+/** popup 的「剪藏到 <网页版>」：与本地桥共用抽取与建信封，只换投递那一段。 */
+export async function clipToWebPage(input) {
+  const built = await buildEnvelopeForTab(input);
+  if (built.reply) return built.reply;
+  const { mode, envelope, composed } = built;
+  await mutate(() => ({ folder: composed.folder || "", tags: composed.tags, mode }));
+  return deliverToWebPage({
+    envelope,
+    folderLabel: folderLabelOf(composed.folder),
+    noteTitle: envelope.title,
+    conflict: composed.conflict,
+    notePath: composed.notePath,
+  });
+}
+
+/** 注入脚本的回执（`content/inpage-bridge.js` → 这里 → `askInpage()` 的 promise）。 */
+function settleInpage(message, sender) {
+  const pending = inpagePending.get(message.reqId);
+  if (!pending) return false;
+  // 只认**目标标签页**发回来的回执：内容脚本只可能是我们注入的，但把这条判据写下来，
+  // 免得将来多一个注入点时两个标签页的回执互相串台。
+  const senderTab = sender && sender.tab ? sender.tab.id : null;
+  if (senderTab !== pending.tabId) return false;
+  clearTimeout(pending.timer);
+  inpagePending.delete(message.reqId);
+  pending.resolve({
+    ok: message.ok === true,
+    result: message.result,
+    error: message.error,
+    local: Boolean(message.local),
+    code: message.code || null,
+    label: message.label || null,
+    detail: message.detail || null,
+  });
+  return true;
+}
+
 
 /* ────────── A · 网页版剪藏页：暂存 + 打开（扩展侧只做两件事） ────────── */
 
@@ -906,10 +1160,19 @@ async function loadSnapshot() {
   // 三区需要的数据：模板清单 + 当前页高亮 + 追加落点历史（都是扩展侧本地数据）
   const pickedForTab = await currentPicked(snapshot.tab ? snapshot.tab.url : "");
 
+  /*
+   * 网页版通道（契约 02 §5.7 / FR-39）：浏览器里开着 Opennote 网页版时，popup 上多一个
+   * 「剪藏到 <host>」按钮。候选判定是**启发式**（标题或 URL 里有没有 opennote），
+   * 真正的判据是点下去之后的握手 —— 所以这里不报错、不解释，只回答「有没有按钮」。
+   * 受限页面不检测：连正文都读不到，多一个按钮就是死元素。
+   */
+  const web = snapshot.restricted ? null : await detectWebTarget({ excludeTabId: snapshot.tab ? snapshot.tab.id : null });
+
   return {
     ...snapshot,
     stateId,
     plan,
+    web,
     workspace: probed.workspace,
     defaultFolder: probed.defaultFolder,
     // 交付方式（API-01 的 `inbox`）：true / false / undefined（判断不出来）——popup 如实显示
@@ -981,6 +1244,15 @@ async function handle(message) {
       // M2：popup 只发 mode / title / importId / body（模板与属性面板已退场）。
       // task-29 ②：`body` 是「所见即所剪」的那一半 —— 用户在 popup 里改过的正文必须原样进信封。
       const reply = await clipActiveTab({
+        mode: message.mode,
+        overrides: { title: message.title, importId: message.importId, body: message.body },
+      });
+      return { ok: true, reply };
+    }
+    case "opennote:inpage-clip": {
+      // 网页版通道（契约 02 §5.7）：与 `opennote:submit` 共用抽取与建信封，只把投递
+      // 换成页面内桥。`body` 同样是「所见即所剪」的那一份。
+      const reply = await clipToWebPage({
         mode: message.mode,
         overrides: { title: message.title, importId: message.importId, body: message.body },
       });
@@ -1144,7 +1416,13 @@ async function handle(message) {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // 注入脚本的回执（`content/inpage-bridge.js`）：这是**通知**不是请求，必须先于
+  // `handle()` 结算，否则会落进 default 分支被当成 IMP-3005 的未知消息。
+  if (message && message.type === "opennote:inpage-report") {
+    settleInpage(message, sender);
+    return false;
+  }
   handle(message)
     .then((reply) => sendResponse(reply))
     .catch((error) => sendResponse({ ok: false, code: "IMP-4014", detail: String(error && error.message) }));

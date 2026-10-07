@@ -23,6 +23,7 @@ const regionBody = $("regionBody");
 const region = $("region");
 const footActs = $("footActs");
 const primary = $("primary");
+const webPrimary = $("webPrimary");
 const more = $("more");
 const menu = $("menu");
 const deliveryHint = $("deliveryHint");
@@ -92,6 +93,12 @@ let imageDownload = IMAGE_DOWNLOAD_DEFAULT;
  * 超时返回 `{ ok: false, timedOut: true }`，调用方必须给出**用户可见的出口**（不许静默 return）。
  */
 const SEND_TIMEOUT_MS = 10000;
+/**
+ * 网页版通道的动作要给得宽：第一次点会弹一次「访问 <站点>」的授权气泡，
+ * 用户在气泡上停多久我们不知道 —— 10 秒的通用时限会把一次**正在正常进行**的剪藏
+ * 报成失败。真正等待页面回执的那 5 秒由扩展侧自己卡（`INPAGE_RESULT_MS`）。
+ */
+const INPAGE_SEND_TIMEOUT_MS = 30000;
 
 function send(message, timeoutMs = SEND_TIMEOUT_MS) {
   return new Promise((resolve) => {
@@ -740,9 +747,23 @@ function planForState(stateId, extra = {}) {
   });
 }
 
+/**
+ * 网页版按钮的可见性判定（一处产地，`render()` 与点击路径都读它）。
+ *
+ * `snapshot.web` 由后台的 `detectWebTarget()` 给出（标题/URL 启发式 + 本会话握手失败的
+ * 标签页排除）。这里再叠一层「有没有东西可剪」：成功态、加载骨架、空态（含元素模式还没选、
+ * 以及读不到页面那两条）与受限页面一律不出按钮 —— 否则用户点下去只会拿到一次注定失败的
+ * 请求（死元素的翻版）。
+ */
+function webTargetFor(plan) {
+  if (!snapshot || !snapshot.web) return null;
+  if (plan.ok || plan.skeleton || plan.empty) return null;
+  if (plan.state === STATE.RESTRICTED_PAGE) return null;
+  return snapshot.web;
+}
+
 /** 当前应显示的状态（S4 空态、S5 受限页面都在这里收敛）。 */
-function currentPlan() {
-  if (!snapshot) return planForState(STATE.CHECKING);
+function currentPlan() {  if (!snapshot) return planForState(STATE.CHECKING);
   // task-21：抽取失败**不是**页面类型不支持 —— 单独一句真话 + 可执行的下一步
   if (snapshot.extractionFailed && !snapshot.restricted) {
     const failed = planForState(snapshot.stateId || STATE.CHECKING);
@@ -879,6 +900,33 @@ function render(planInput) {
     primary.setAttribute("aria-busy", "false");
   }
   more.hidden = Boolean(plan.ok) || plan.state === STATE.RESTRICTED_PAGE;
+
+  /*
+   * 网页版通道按钮（契约 02 §5.7 / FR-39）：**只有检测到网页版标签页时才存在** ——
+   * 没有就 `hidden`，界面上不留死元素（与两条工具按钮同一条纪律）。
+   *
+   * 出现条件比主按钮宽松：本地接口没开（`INTERFACE_OFF`）、没配令牌、没有工作区……
+   * 这些状态里网页版**照样能收**，所以这里不看连接态，只看「有没有东西可剪」。
+   * 反过来，成功态 / 空态 / 读不到页面 / 受限页面一律不出现（那时剪出去的是空正文）。
+   */
+  const web = webTargetFor(plan);
+  if (web) {
+    const loading = busy || Boolean(plan.primary && plan.primary.busy);
+    webPrimary.hidden = false;
+    webPrimary.replaceChildren();
+    if (loading) webPrimary.appendChild(el("span", "spinner"));
+    webPrimary.appendChild(document.createTextNode(loading ? busyLabel : `剪藏到 ${web.host}`));
+    webPrimary.disabled = loading;
+    webPrimary.setAttribute("aria-busy", loading ? "true" : "false");
+    // 按钮文案里那个域名同时进 title：给「剪藏到 127.0.0.1:5173」这种本地开发地址一个可读的完整说明
+    webPrimary.title = `把这一页剪藏到已打开的 Opennote 网页版（${web.url}）`;
+  } else {
+    webPrimary.hidden = true;
+    webPrimary.replaceChildren();
+    webPrimary.disabled = false;
+    webPrimary.setAttribute("aria-busy", "false");
+    webPrimary.removeAttribute("title");
+  }
 }
 
 /** 预览：与真正提交共用 background 的同一条合成路径（来源 = 页面自动提取）。 */
@@ -1089,8 +1137,45 @@ async function submit() {
   applyReply(response.reply);
 }
 
-async function stage() {
+/**
+ * 剪藏到**已打开的网页版**（契约 02 §5.7 / FR-39）。
+ *
+ * 与 `submit()` 是同一套抽取、同一套信封、同一套回执处理（`applyReply`），只把投递
+ * 通道换成页面内桥 —— popup 不自己拼消息、不自己碰 postMessage，全部交给后台。
+ *
+ * **与主按钮的准入条件不同**：不看本地接口状态（网页版在「本地接口未开启」「没配令牌」
+ * 「没有工作区」这些状态下照样能收），只看「有没有东西可剪」。
+ */
+async function submitToWeb() {
   if (busy || !snapshot || snapshot.restricted) return;
+  const web = webTargetFor(currentPlan());
+  if (!web) return;
+  const problems = precheck();
+  if (problems.length) return; // S21：本地预检不通过就不发请求
+  const payload = collectPayload();
+  busy = true;
+  busyLabel = "正在剪藏…";
+  render(currentPlan());
+  const response = await send(
+    {
+      type: "opennote:inpage-clip",
+      mode: payload.mode,
+      title: payload.title,
+      importId: payload.importId,
+      // 与 `submit()` 同一条纪律：界面上那一份正文原样发出去（所见即所剪）。
+      body: payload.body,
+    },
+    INPAGE_SEND_TIMEOUT_MS,
+  );
+  busy = false;
+  if (!response || !response.reply) {
+    renderBlockReply({ status: "error", code: "IMP-4014", label: userMessage("IMP-4014") });
+    return;
+  }
+  applyReply(response.reply);
+}
+
+async function stage() {  if (busy || !snapshot || snapshot.restricted) return;
   const payload = collectPayload();
   busy = true;
   busyLabel = "正在剪藏…";
@@ -1396,6 +1481,13 @@ function bindEvents() {
       return;
     }
     void submit();
+  });
+
+  // 网页版通道按钮：自己一颗、自己一条处理路径（不挤进 `#primary` 的 intent 分支 ——
+  // 那颗按钮的 `dataset.intent` 已经被「暂存」「打开编辑页」占着，再加一个必然看串）。
+  webPrimary.addEventListener("click", (event) => {
+    if (event.target.closest(".spinner")) return;
+    void submitToWeb();
   });
 
 

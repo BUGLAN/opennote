@@ -2,26 +2,28 @@
  * extension/ 的**机械化验收**（零依赖）。跑：`node verify.mjs`
  *
  * 与 tests/ 的分工：tests 验证「逻辑对不对」，verify 验证「交付物能不能装、装完安不安全」。
- * 一共 12 组断言，任何一条不过就 exit 1 并打印具体文件与行号：
- *  V1 manifest 基本盘（MV3 / service_worker / 最小权限 / 无 content_scripts）
+ * 任何一条不过就 exit 1 并打印具体文件与行号：
+ *  V1 manifest 基本盘（MV3 / service_worker / 最小权限 / 无 content_scripts / 可选主机权限恰好 2 条）
  *  V2 manifest 引用到的每个文件都真实存在
- *  V3 全 dist 零远程地址（只允许 127.0.0.1 / localhost，以及 SVG 命名空间）
+ *  V3 全 dist 零远程地址（只允许 127.0.0.1 / localhost、SVG 命名空间，以及 manifest 里那 2 条可选主机模式）
  *  V4 零 eval / new Function / 字符串注入 / 内联脚本
  *  V5 tokens.css 与仓库根逐字节一致（SHA-256 比对），且 BUILD-INFO 记录一致
  *  V6 **0 个新设计令牌**：dist 里新增的自定义属性声明必须为 0
- *  V7 逐字文案清单（03 §UI-01 + mockup + 00 §6.14㉗㉘）全部出现在交付物里
- *  V8 契约硬约束：不发 overwrite、探测走 API-03、端口范围 8787–8796、401 不泄漏令牌
+ *  V7 逐字文案清单（03 §UI-01 + mockup + 00 §6.14㉗㉘ + 0.4.0 网页版通道）全部出现在交付物里
+ *  V8 契约硬约束：不发 overwrite、探测走 API-03、端口范围 8787–8796、401 不泄漏令牌、必须有 tabs
  *  V9 中文文案里没有 emoji
  *  V10/V11 已在 M2（task-28）随模板/高亮模块一起删除（理由见下文 V10/V11 段）——
  *  原 V10 模板白名单（00 §6.14 ㉙）：变量/过滤器/触发器/behavior 白名单、priority 降序、内置 3 个、
  *      条件只认一层 {{#if}}（`{{#each}}`/`{{else}}`/嵌套一律**原样输出**并在这里报错）
  *  原 V11 高亮形态（00 §6.14 ㉚）：键名、`## 高亮` 小节形态、空高亮不生成、按 URL 分组
  *  V12 三区（00 §6.14 ㉘）：正文/高亮/属性都在交付物里，且 ⋯ 菜单里没有「剪藏到收件箱」（M1 起只剩极简形态）
- *  V13–V18 见下文各段
+ *  V13–V18 见下文各段（V17 含 V17A 卡片形状 / V17B 网页版通道按钮位置与可见性）
  *  V19 产物一致性（M2 收尾）：dist 全量指纹必须等于 BUILD-INFO 记的那个 —— 读一个写了一半的
  *      产物**不许**被当成绿；构建进行中由 `.building` 标记挡成退出码 2（与 `.mutation-running` 同构）
  *  V20 自由变量（no-undef 的静态版）：删模块留下的孤儿（`normalizeUrl` / `highlights`）必须在此报红
  *      —— `node --check` 对运行时 ReferenceError 是盲的，而它已经让 popup 卡死过一次
+ *  V21 页面内桥协议一致（0.4.0）：注入脚本必须自包含、六个协议常量与 lib/inpage.js 逐字一致、
+ *      postMessage 必须显式 targetOrigin（绝不 "*"）
  */
 
 import { createHash } from "node:crypto";
@@ -108,13 +110,23 @@ if (manifest.background && manifest.background.type !== "module") {
   fail(GROUP_V1, "service worker 需要 type=module（源码用静态 ESM 相对导入，无打包器）");
 } else pass("service worker 用 ES module 静态导入（零打包器）");
 
-const allowedPermissions = ["storage", "contextMenus", "activeTab", "scripting"];
+/*
+ * `tabs` 是 0.4.0 新加的，理由只有一条：**「浏览器里有没有开着 Opennote 网页版」只能从
+ * 标签页的 URL/标题看出来**（没有 host 权限时 `tab.url`/`tab.title` 一律读不到）。
+ * 网页版没有本地接口可连（它的 CSP 是 `connect-src 'self'`），页面内桥是它唯一的入口，
+ * 而入口的前提就是先知道「哪个标签页是它」。代价如实记在这里：安装时会多一句
+ * 「读取你的浏览记录」的提示；我们只读 `url`/`title`，不读历史、不读正文。
+ * 投递仍然要**按 origin 单独申请可选主机权限**（见下面的 optional_host_permissions）。
+ */
+const allowedPermissions = ["storage", "contextMenus", "activeTab", "scripting", "tabs"];
 const permissions = manifest.permissions || [];
 for (const permission of permissions) {
   if (!allowedPermissions.includes(permission)) fail(GROUP_V1, `多要了权限：${permission}`);
 }
-for (const required of ["storage", "contextMenus", "scripting"]) {
-  if (!permissions.includes(required)) fail(GROUP_V1, `缺少必要权限：${required}`);
+for (const required of ["storage", "contextMenus", "scripting", "tabs"]) {
+  if (!permissions.includes(required)) {
+    fail(GROUP_V1, `缺少必要权限：${required}${required === "tabs" ? "（网页版通道要靠它发现已打开的笔记本标签页）" : ""}`);
+  }
 }
 if (permissions.includes("clipboardWrite")) {
   fail(GROUP_V1, "不应申请 clipboardWrite：复制降级走页面内 execCommand（见 README 降级链）");
@@ -127,6 +139,19 @@ for (let port = 8787; port <= 8796; port += 1) expectedHosts.push(`http://127.0.
 if (JSON.stringify(hostPermissions) !== JSON.stringify(expectedHosts)) {
   fail(GROUP_V1, `host_permissions 必须精确等于 8787–8796 的 10 条回环模式，实际：${JSON.stringify(hostPermissions)}`);
 } else pass("host_permissions = 10 条 127.0.0.1 回环模式（8787–8796，无 <all_urls>）");
+
+/*
+ * 可选主机权限（网页版所在站点）：**声明得宽、申请得窄**。
+ * 声明成「http 加 https 的任意主机」是 Chrome 的硬要求（可选权限必须在清单里预先声明才能申请），
+ * 但安装时**不产生任何提示**；真正申请的是用户在 popup 上点按钮那一刻、那个标签页的
+ * origin（见 background.js 的 `ensureHostPermission()`），一次一个站点。
+ * 这条断言把它钉死：多一条、少一条、或换成别的写法都要当场红。
+ */
+const optionalHosts = manifest.optional_host_permissions || [];
+if (JSON.stringify(optionalHosts) !== JSON.stringify(["http://*/*", "https://*/*"])) {
+  fail(GROUP_V1, `optional_host_permissions 必须精确等于 ["http://*/*","https://*/*"]（按 origin 申请的候选范围），实际：${JSON.stringify(optionalHosts)}`);
+} else pass("optional_host_permissions = 2 条（安装期无提示，按 origin 逐个申请）");
+if (manifest.optional_permissions) fail(GROUP_V1, "不需要 additional optional_permissions");
 
 if (manifest.content_scripts) fail(GROUP_V1, "不许用 content_scripts（会要求 <all_urls>，改用 activeTab + scripting 按需注入）");
 else pass("无 content_scripts（按需注入）");
@@ -234,6 +259,7 @@ const EXPECTED_DIST_FILES = [
   "background.js",
   "content/clipboard.js",
   "content/extract-page.js",
+  "content/inpage-bridge.js",
   "content/picker.js",
   "icons/icon128.png",
   "icons/icon16.png",
@@ -243,6 +269,7 @@ const EXPECTED_DIST_FILES = [
   "lib/bridge.js",
   "lib/envelope.js",
   "lib/errors.js",
+  "lib/inpage.js",
   "lib/pick.js",
   "lib/queue.js",
   "lib/stage.js",
@@ -285,7 +312,7 @@ for (const ref of manifestRefs) {
   if (!EXPECTED_DIST_FILES.includes(ref)) fail(GROUP_V2B, `manifest 引用的 ${ref} 不在产物清单里（清单漏了或 manifest 改了）`);
 }
 if (!extraDistFiles.length && !missingDistFiles.length && !smuggledDistFiles.length) {
-  pass(`产物清单逐个核对通过：${distRelFiles.length} 个文件，manifest 引用的 ${manifestRefs.length} 个都在清单内（M1 时 27、task-29 删页前 24）`);
+  pass(`产物清单逐个核对通过：${distRelFiles.length} 个文件，manifest 引用的 ${manifestRefs.length} 个都在清单内（M1 时 27、task-29 删页前 24、0.4.0 页面内桥 +2）`);
 } else {
   // 清单不对就**停在这里**：后面的断言会去 import 产物里的模块，缺文件时那一步会先抛 ENOENT，
   // 于是「缺少清单里的文件」这句人话根本来不及打印（实测过：node 直接把异常栈吐在最后）。
@@ -320,8 +347,16 @@ pass(`service worker 导入图共 ${importGraph.size} 个文件，全部为相�
 
 const GROUP_V3 = "V3 零远程代码";
 const ALLOWED_HOSTS = new Set(["127.0.0.1", "localhost", "www.w3.org"]);
+/*
+ * `manifest.json` 的 `optional_host_permissions` 是本条唯一的例外：那两行是**匹配模式**
+ * （`http://*` 与 `https://*` 的任意主机），不是「代码会去连的远程地址」——扩展一个请求
+ * 都不会自己发出去，真正申请哪个站点由用户在 popup 上点按钮时决定（一次一个 origin）。
+ * 例外**只对这两条精确取值生效**：多一条、改了写法都照旧判红。
+ */
+const OPTIONAL_HOST_LINES = new Set(["http://*/*", "https://*/*"]);
 let remoteHits = 0;
 let placeholderHits = 0;
+let optionalHostHits = 0;
 for (const file of textFiles) {
   // `placeholder="https://example.com/…"` 是 03 §UI-01 C36 冻结的**示例占位符**（输入框里的灰字示例），
   // 浏览器不会去请求它 —— 只有它允许出现 example.com，其余一律禁止。
@@ -336,6 +371,10 @@ for (const file of textFiles) {
     });
   text.split("\n").forEach((line, index) => {
     for (const match of line.matchAll(/https?:\/\/[^\s"'`)<>]+/g)) {
+      if (file.endsWith("manifest.json") && [...OPTIONAL_HOST_LINES].some((value) => line.trim().replace(/[",]/g, "") === value)) {
+        optionalHostHits += 1;
+        continue;
+      }
       const host = (match[0].match(/^https?:\/\/([^/:?#]+)/) || [])[1] || "";
       if (ALLOWED_HOSTS.has(host)) continue;
       remoteHits += 1;
@@ -347,7 +386,10 @@ for (const file of textFiles) {
   const text = readDist(file);
   if (/^\s*\/\/#\s*sourceMappingURL=/m.test(text)) fail(GROUP_V3, `${file} 含 sourceMappingURL`);
 }
-if (remoteHits === 0) pass(`全部 ${textFiles.length} 个文本产物无远程地址（仅允许回环与 SVG 命名空间；示例占位符已排除 ${placeholderHits} 处）`);
+if (optionalHostHits !== 2) {
+  fail(GROUP_V3, `manifest 的可选主机模式应恰好 2 条（http / https 任意主机），实际命中 ${optionalHostHits} 条`);
+}
+if (remoteHits === 0) pass(`全部 ${textFiles.length} 个文本产物无远程地址（仅允许回环与 SVG 命名空间；示例占位符已排除 ${placeholderHits} 处，可选主机模式 ${optionalHostHits} 条）`);
 
 /* ── V4 零动态代码 ───────────────────────────────────────────────── */
 
@@ -544,6 +586,19 @@ const requiredCopy = [
   // 右键菜单最终两项（03 §UI-03）
   "剪藏整页正文",
   "高亮这段文字",
+  /*
+   * 0.4.0 网页版通道（契约 02 §5.7 / 03 §UI-12）：这些句子逐字来自契约与设计稿，
+   * 这里卡住「谁把它们改了」—— 每一句都对应一条**用户真的会看到**的路径。
+   * 动态的那半（`剪藏到 {域名}`）不在这里，由 V17B 盯模板。
+   */
+  "没有找到已打开的 Opennote 窗口，请先打开 Opennote 网页版再重试。",
+  "Opennote 的页面没有响应。请确认笔记本标签页还开着，或改用桌面版本地接口。",
+  "这次剪藏的内容超过了网页版通道的 1 MB 上限，没有发送。可以关掉「图片一起保存」，或改用桌面版本地接口。",
+  "没有获得访问 ",
+  "的权限，这次剪藏没有发送。",
+  "这个标签页没有回应 Opennote 的握手，可能不是网页版笔记本。",
+  "没能在这个标签页里运行剪藏脚本。",
+  "这次剪藏没有带上必要的信息（reqId / 信封）。",
 ];
 const missingCopy = requiredCopy.filter((text) => !bundle.includes(text));
 if (missingCopy.length > 0) {
@@ -583,8 +638,15 @@ else pass("请求带 credentials:omit / redirect:error / cache:no-store / AbortC
 if (/IMP-2002[\s\S]{0,200}token\s*\+/.test(bundle)) {
   fail(GROUP_V8, "IMP-2002 的处理里把令牌拼进了文案（02 §10 S-06 禁止回显）");
 } else pass("错误文案不回显令牌（02 §10 S-06）");
-if (manifest.permissions.includes("tabs")) fail(GROUP_V8, "不需要 tabs 权限（activeTab 足够）");
-else pass("未申请 tabs / <all_urls> / clipboardWrite");
+/*
+ * V8 原本写着「不需要 tabs 权限（activeTab 足够）」—— 那条判据在 0.4.0 **反过来**了，
+ * 理由写在 V1 的 `allowedPermissions` 上方：网页版通道必须先发现「哪个标签页是笔记本」，
+ * 而没有 tabs 权限时 `tab.title`/`tab.url` 一律读不到（activeTab 只覆盖当前标签页，
+ * 而用户此刻正在剪的是**别的**页面）。这里改成正面要求它存在。
+ */
+if (!manifest.permissions.includes("tabs")) {
+  fail(GROUP_V8, "缺少 tabs 权限：网页版通道发现不了已打开的笔记本标签页（且 activeTab 只覆盖当前页）");
+} else pass("已申请 tabs（网页版通道的发现前提；不读历史、不读正文，只用 url/title）");
 
 /* ── V9 无 emoji ─────────────────────────────────────────────────── */
 
@@ -687,9 +749,12 @@ const DECLARED_MESSAGES = [
   { name: "opennote:copy-in-page", sender: "popup" },
   { name: "opennote:element-picked", sender: "picker" },
   { name: "opennote:pick-cancelled", sender: "picker" },
+  // 0.4.0 网页版通道（契约 02 §5.7）：popup 发起，注入脚本回报。
+  { name: "opennote:inpage-clip", sender: "popup" },
+  { name: "opennote:inpage-report", sender: "inpage" },
 ];
 const pickerSrc = readDist("dist/content/picker.js");
-const senderText = { popup: popupJs, picker: pickerSrc };
+const senderText = { popup: popupJs, picker: pickerSrc, inpage: readDist("dist/content/inpage-bridge.js") };
 const contractHits = [];
 for (const item of DECLARED_MESSAGES) {
   if (!background.includes(`case "${item.name}":`) && !background.includes(`"${item.name}"`)) {
@@ -950,6 +1015,107 @@ if (!/pickNote\.textContent =/.test(popupCodeV17A)) {
 }
 if (!failures.some((item) => item.includes(GROUP_V17A))) {
   pass("A 接通（请求体形状唯一定义 + openUrl 只来自接口 + 失败不打开页面）、⑤ 选中态（aria-pressed + 既有令牌）、③ 图片开关（默认关 + 始终与按钮同一行 + 说明句已删）");
+}
+
+/* ── V17B 网页版通道按钮（0.4.0：用户原话「在剪切上面加一个按钮」） ────────
+ *
+ * 判据盯**位置与可见性**，不盯「元素存在」——元素一直都在，位置错了用户看到的就是
+ * 一颗长在别处的按钮（与 ③ 的位置判据同一条纪律）。
+ */
+const GROUP_V17B = "V17B 网页版通道";
+const popupCodeV17B = popupCodeV17A;
+const inpageBridgeSrc = readDist("dist/content/inpage-bridge.js");
+const inpageLibSrc = readDist("dist/lib/inpage.js");
+const webBtnIndex = popupHtmlBare.indexOf('id="webPrimary"');
+const primaryIndex = popupHtmlBare.indexOf('id="primary"');
+if (webBtnIndex < 0) {
+  fail(GROUP_V17B, "popup.html 里必须有 #webPrimary（网页版通道按钮）");
+} else if (primaryIndex < 0 || webBtnIndex > primaryIndex) {
+  fail(GROUP_V17B, "#webPrimary 必须在 #primary **之前**（用户要求：按钮加在「剪藏到 Opennote」上方）");
+}
+const webBtnTag = (popupHtmlBare.match(/<button[^>]*id="webPrimary"[^>]*>/) || [])[0] || "";
+if (!/\bhidden\b/.test(webBtnTag)) {
+  fail(GROUP_V17B, "#webPrimary 默认必须 hidden（没有检测到网页版时不留死元素）");
+}
+if (!/#webPrimary\{flex:0 0 100%\}/.test(popupCss)) {
+  fail(GROUP_V17B, "#webPrimary 必须 flex:0 0 100% —— 底栏是单行 flex，「上方」只能靠独占一整行实现（写 width 会被 flex:1 拉回等分宽）");
+}
+if (!/\.clip__foot\{[^}]*flex-wrap:wrap/.test(popupCss)) {
+  fail(GROUP_V17B, ".clip__foot 必须允许换行（flex-wrap:wrap），否则 #webPrimary 的 100% 基准没有第二行可占");
+}
+if (!/#webPrimary\[hidden\]\{display:none\}/.test(popupCss)) {
+  fail(GROUP_V17B, "#webPrimary 需要自己的 [hidden]{display:none}（.btn 的作者 display 会盖掉 UA 的 [hidden]）");
+}
+if (!/webPrimary\.hidden = !?web|webPrimary\.hidden = false/.test(popupCodeV17B)) {
+  fail(GROUP_V17B, "popup 必须按检测结果设置 #webPrimary 的 hidden（没检测到就不显示）");
+}
+if (!/function webTargetFor\(plan\)/.test(popupCodeV17B)) {
+  fail(GROUP_V17B, "可见性判定必须只有一个产地（webTargetFor）");
+}
+if (!/剪藏到 \$\{web\.host\}/.test(popupCodeV17B)) {
+  fail(GROUP_V17B, "网页版按钮的文案必须是「剪藏到 {域名}」（域名来自被检测到的那个标签页）");
+}
+if (!/type: "opennote:inpage-clip"/.test(popupCodeV17B)) {
+  fail(GROUP_V17B, "popup 必须走 opennote:inpage-clip（不许自己碰 postMessage）");
+}
+if (!/webPrimary\.addEventListener\("click"/.test(popupCodeV17B)) {
+  fail(GROUP_V17B, "#webPrimary 必须有独立的点击路径（不挤进 #primary 的 intent 分支）");
+}if (!background.includes("case \"opennote:inpage-clip\":")) {
+  fail(GROUP_V17B, "background 缺少 opennote:inpage-clip 的接收点");
+}
+if (!/func: deliverInpage/.test(background)) {
+  fail(GROUP_V17B, "交付必须注入 content/inpage-bridge.js 的 deliverInpage（自包含函数）");
+}
+if (!/chrome\.permissions\.request\(\{ origins: \[pattern\] \}\)/.test(background)) {
+  fail(GROUP_V17B, "投递前必须按 origin 申请可选主机权限（安装期不申请、一次一个站点）");
+}
+if (!/export async function deliverInpage\(payload\)/.test(inpageBridgeSrc)) {
+  fail(GROUP_V17B, "content/inpage-bridge.js 必须导出 deliverInpage(payload)");
+}
+if ((inpageBridgeSrc.match(/^export /gm) || []).length !== 1) {
+  fail(GROUP_V17B, "content/inpage-bridge.js 必须只有一个顶层声明（executeScript({func}) 给的是源码副本，引用模块作用域必然 ReferenceError）");
+}
+if (!failures.some((item) => item.includes(GROUP_V17B))) {
+  pass("网页版通道：按钮在主按钮上方独占一行、默认隐藏、文案带域名、独立点击路径 + 注入自包含函数 + 按 origin 申请权限");
+}
+
+/* ── V21 协议字面量两处一致（内容脚本不能 import，字面量必然重复） ────────
+ *
+ * `content/inpage-bridge.js` 是注入进页面的**自包含**函数，不能 `import` 任何模块，
+ * 所以协议类型只能在那里再写一遍。这条断言把「两处漂了」变成当场红：
+ * 唯一事实源是 `lib/inpage.js` 的常量声明。
+ */
+const GROUP_V21 = "V21 协议一致";
+const inpageBridgeRaw = inpageBridgeSrc;
+const inpageLibRaw = inpageLibSrc;
+const jsConst = (name) => {
+  const match = inpageLibRaw.match(new RegExp(`export const ${name} = "([^"]+)";`));
+  if (match) return match[1];
+  const numeric = inpageLibRaw.match(new RegExp(`export const ${name} = (\\d+);`));
+  return numeric ? numeric[1] : null;
+};
+for (const name of ["INPAGE_PREFIX", "INPAGE_VERSION", "INPAGE_HELLO", "INPAGE_READY", "INPAGE_IMPORT", "INPAGE_RESULT"]) {
+  const value = jsConst(name);
+  if (value === null) {
+    fail(GROUP_V21, `lib/inpage.js 里找不到 export const ${name} = …;`);
+    continue;
+  }
+  // 注入脚本里连前缀都要自己写一遍，所以逐条按它的两种写法查：
+  // 前缀 = 引号字面量；版本号 = 裸数字（`const VERSION = 1;`）；其余 = 去掉前缀后的引号字面量。
+  let ok = false;
+  if (name === "INPAGE_PREFIX") ok = inpageBridgeRaw.includes(`"${value}"`);
+  else if (name === "INPAGE_VERSION") ok = new RegExp(`const VERSION = ${value};`).test(inpageBridgeRaw);
+  else ok = inpageBridgeRaw.includes(`"${value.replace("opennote:inpage:", "")}"`);
+  if (!ok) fail(GROUP_V21, `content/inpage-bridge.js 里找不到与 ${name}（${value}）对应的字面量`);
+}
+if (!/window\.postMessage\(message, origin\)/.test(inpageBridgeRaw)) {
+  fail(GROUP_V21, "页面内桥必须显式给 targetOrigin（契约硬红线：绝不 \"*\"）");
+}
+if (/postMessage\([^)]*,\s*"\*"\s*\)/.test(inpageBridgeRaw)) {
+  fail(GROUP_V21, "页面内桥出现了 postMessage(data, \"*\")：契约明令禁止");
+}
+if (!failures.some((item) => item.includes(GROUP_V21))) {
+  pass("页面内桥协议：6 个常量与 lib/inpage.js 字面量一致，且显式 targetOrigin（无 \"*\"）");
 }
 /* ── V14 元素选择（00 §6.15㉝ / 03 §UI-16） ──────────────────────── */
 
@@ -1260,4 +1426,4 @@ if (failures.length > 0) {
   for (const item of failures) console.error(`  ${item}`);
   process.exit(1);
 }
-console.log("\n✓ 20 组验收全部通过（V1–V20）");
+console.log("\n✓ 21 组验收全部通过（V1–V21）");
