@@ -900,6 +900,9 @@ export default function App(): ReactNode {
                 {
                   id: "close-others",
                   label: "关闭其他标签",
+                  // 与「关闭」同一族的 × ：动作一样是关标签，靠文案区分（VS Code 的 Close / Close Others
+                  // 也是同一颗 ×）。不给新图标 —— `DESIGN.md` 明写「缺图标先讨论，不要引入新图标集」。
+                  icon: "close",
                   run: () => ui.tabs.filter((tabId) => tabId !== id).forEach((tabId) => closeTab(tabId)),
                 },
                 ...(library.notes[id]

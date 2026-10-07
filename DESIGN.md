@@ -1648,7 +1648,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 | 全局令牌 | 在 `tokens.css` 里、不带块前缀 | `--paper-2`、`--radius-sm`、`--dur-fast` |
 | React 组件 | 具名导出函数组件，返回类型写 `ReactNode`，props 内联类型标注 | `export function Modal({...}: {...}): ReactNode` |
 | 组件文件组织 | 一个文件一个主组件；子组件放同文件下方，用注释横幅分隔 | `/* ------------ sub-screens */` |
-| 图标 | `<Icon name="…" size={15} />`，颜色靠 `currentColor` | 缺图标先讨论，别引新图标集 |
+| 图标 | `<Icon name="…" size={15} />`，颜色靠 `currentColor` | 缺图标先讨论，别引新图标集。**右键菜单项（`MenuItem`）的 `icon` 是必填字段**：漏写会在 `pnpm typecheck` 就红（0.5.0 用户实测过「关闭其他标签」那一行图标列是空的，而上下每项都有） |
 | 状态管理 | `src/lib/store.ts` 的 `createStore` + `useStore` / `useStoreSelector` | `toastStore`、`uiStore` |
 | 交互态 | 默认 `S-C1` → hover 底 `--paper-3` **并把字提到 `--ink`** → 选中 `--accent-soft`（`S-C8`） | 见 §Control States |
 | 无障碍 | 纯图标按钮给 `aria-label` 或 `title`；装饰性元素 `aria-hidden="true"`；状态类文字 `role="status"` | 见 §Accessibility |

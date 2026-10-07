@@ -24,7 +24,14 @@ import { Icon, type IconName } from "./Icons";
 export interface MenuItem {
   id: string;
   label: string;
-  icon?: IconName;
+  /**
+   * 图标**必填**。原来是 `icon?: IconName`，渲染层对「没给图标」的情形**静默**补一个 14px 空位 ——
+   * 于是漏写一个图标只表现为「那一行左边空着」（0.5.0 用户实测：标签右键菜单的「关闭其他标签」），
+   * 类型系统与测试都看不见。改成必填后，漏写会在 `pnpm typecheck`（= `pnpm build` 的一环）就红。
+   *
+   * 只能用 `Icon` 既有的名字：`DESIGN.md` 明写「不要引入新图标集，缺图标先讨论」。
+   */
+  icon: IconName;
   shortcut?: string;
   danger?: boolean;
   disabled?: boolean;
@@ -93,7 +100,7 @@ export function MenuHost(): ReactNode {
                 item.run();
               }}
             >
-              {item.icon ? <Icon name={item.icon} size={14} /> : <span style={{ width: 14 }} />}
+              <Icon name={item.icon} size={14} />
               <span>{item.label}</span>
               {item.shortcut ? <kbd>{item.shortcut}</kbd> : null}
             </button>
