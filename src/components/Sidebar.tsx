@@ -29,6 +29,7 @@ import {
 import type { Folder, Id, Note, UiSettings } from "../data/types";
 import { themeKind } from "../data/ui";
 import type { WorkspaceRecord } from "../data/workspaces";
+import { isCapacitorNative } from "../fs";
 import { askConfirm, askFolder, askText } from "../lib/dialogs";
 import { copyPathToClipboard, noteAbsolutePath } from "../lib/notePath";
 import { sealIconUrl } from "../lib/sealIcon";
@@ -230,7 +231,16 @@ export function Sidebar(props: SidebarProps): ReactNode {
           onClick={() => props.onSwitcherOpen(!props.switcherOpen)}
           title={props.workspace ? workspaceLocation(props.workspace) : "还没有打开笔记本"}
         >
-                    <Icon name={props.workspace?.kind === "node" ? "folder" : props.workspace ? "layers" : "info"} size={13} />
+          <Icon
+            name={
+              props.workspace?.kind === "node" || props.workspace?.kind === "capacitor"
+                ? "folder"
+                : props.workspace
+                  ? "layers"
+                  : "info"
+            }
+            size={13}
+          />
           <span className="truncate">{props.workspace?.name ?? "未打开笔记本"}</span>
           <Icon name="chevronDown" size={12} className="workspace__caret" />
         </button>
@@ -247,14 +257,20 @@ export function Sidebar(props: SidebarProps): ReactNode {
                   props.onOpenWorkspace(record);
                 }}
               >
-                <Icon name={record.kind === "node" ? "folder" : "layers"} size={14} />
+                <Icon name={record.kind === "node" || record.kind === "capacitor" ? "folder" : "layers"} size={14} />
                 <span className="truncate">{record.name}</span>
               </button>
             ))}
             {props.workspaces.length ? <div className="menu__sep" /> : null}
             <button type="button" className="menu__item" disabled={!props.supportsLocalFolder} onClick={props.onAddLocalFolder}>
               <Icon name="folder" size={14} />
-              <span>{props.supportsLocalFolder ? "打开本机文件夹…" : "本机文件夹（需 Chrome/Edge 或桌面版）"}</span>
+              <span>
+                {isCapacitorNative()
+                  ? "新建手机笔记本…"
+                  : props.supportsLocalFolder
+                    ? "打开本机文件夹…"
+                    : "本机文件夹（需 Chrome/Edge 或桌面版）"}
+              </span>
             </button>
             <button type="button" className="menu__item" disabled={!props.supportsBrowserWorkspace} onClick={props.onNewBrowserWorkspace}>
               <Icon name="plus" size={14} />
@@ -398,6 +414,7 @@ export function Sidebar(props: SidebarProps): ReactNode {
 function workspaceLocation(record: WorkspaceRecord): string {
   if (record.kind === "node") return `本机磁盘 · ${record.location}`;
   if (record.kind === "fsa") return `浏览器文件夹 · ${record.name}`;
+  if (record.kind === "capacitor") return `手机文件夹 · Documents/OpenNote/${record.name}`;
   return `浏览器本地存储 · ${record.name}`;
 }
 

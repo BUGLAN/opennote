@@ -14,6 +14,14 @@ import { VitePWA } from "vite-plugin-pwa";
 const isDesktop = process.env.OPENNOTE_DESKTOP === "1";
 
 /**
+ * 移动版（Capacitor 壳，见 scripts/build-mobile.mjs）与桌面版同理：Service Worker
+ * 没有意义（整包随 APK 更新，旧 SW 反而会缓存住上一版资源），meta CSP 也必须关——
+ * Capacitor 会把原生桥以内联 `<script>` 注进返回的 HTML，按哈希放行的策略会把它
+ * 拦下来。WebView 只加载随包分发的可信内容，安全层由原生壳承担。
+ */
+const isMobile = process.env.OPENNOTE_MOBILE === "1";
+
+/**
  * Root `package.json` — its `version` is the single version source for both
  * desktop (`app.getVersion()` at runtime) and web (baked into the bundle via
  * `define` below, because the web build has no preload bridge to ask).
@@ -159,7 +167,7 @@ function contentSecurityPolicyPlugin(): Plugin {
     apply: "build",
     enforce: "post",
     transformIndexHtml(html) {
-      if (isDesktop) return html;
+      if (isDesktop || isMobile) return html;
       const hashes = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)].map(
         (match) => `'sha256-${createHash("sha256").update(normalizedScriptText(match[1]), "utf8").digest("base64")}'`,
       );
@@ -206,7 +214,7 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      disable: isDesktop,
+      disable: isDesktop || isMobile,
       registerType: "autoUpdate",
       includeAssets: ["favicon.svg", "icon-192.png", "icon-512.png"],
       manifest: {

@@ -39,6 +39,12 @@
     "build:clip": "vite build --config vite.clip.config.ts",
     "build:desktop": "node scripts/build-desktop.mjs",
     "package:desktop": "node scripts/build-desktop.mjs && electron-builder --config electron-builder.yml",
+    "build:mobile": "node scripts/build-mobile.mjs",
+    "cap:sync": "node scripts/build-mobile.mjs && cap sync android",
+    "cap:sync:web": "cap sync android",
+    "open:android": "cap open android",
+    "build:apk": "pnpm run cap:sync && cd android && gradlew.bat assembleDebug",
+    "build:apk:release": "pnpm run cap:sync && cd android && gradlew.bat assembleRelease",
     "pack:extension": "node extension/build.mjs && node scripts/pack-extension.mjs",
     "checksums": "node scripts/make-checksums.mjs release",
     "update:e2e": "node scripts/update-e2e.cjs",
@@ -48,6 +54,9 @@
     "release:build": "node scripts/build-desktop.mjs && electron-builder --config electron-builder.yml && node extension/build.mjs && node scripts/pack-extension.mjs && node scripts/make-checksums.mjs release"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/filesystem": "^8.1.4",
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.11.1",
     "@codemirror/lang-markdown": "^6.5.2",
@@ -73,6 +82,7 @@
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.2",
     "@types/markdown-it": "^14.2.0",
     "@types/node": "^26.6.3",
     "@types/react": "^19.3.0",

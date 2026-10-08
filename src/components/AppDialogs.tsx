@@ -246,7 +246,11 @@ export function SettingsDialog({
                       <strong>{workspace.name}</strong>
                     </div>
                     <div className="setting__path">
-                      {workspace.kind === "node" ? workspace.location : `opfs:/${workspace.location}`}
+                      {workspace.kind === "node"
+                        ? workspace.location
+                        : workspace.kind === "capacitor"
+                          ? `Documents/OpenNote/${workspace.location}`
+                          : `opfs:/${workspace.location}`}
                     </div>
                     <div className="setting__meta">
                       已索引 {stats.files} 个 Markdown 文件 · {formatBytes(stats.bytes)}
@@ -562,6 +566,7 @@ function CommandGroup({
 function workspaceHint(workspace: WorkspaceRecord): string {
   if (workspace.kind === "node") return "直接读写本机磁盘上的文件夹";
   if (workspace.kind === "fsa") return "浏览器已授权的磁盘文件夹（刷新后可能需要重新授权）";
+  if (workspace.kind === "capacitor") return "手机里的真实文件夹，iOS「文件」App / Android 文件管理器都能看到";
   return "浏览器自己的文件系统（OPFS），重开浏览器依然在";
 }
 

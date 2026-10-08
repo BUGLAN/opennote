@@ -8,6 +8,17 @@
   box-sizing: border-box;
 }
 
+/*
+ * 安全区（手机 PWA / Capacitor）：页面以 `viewport-fit=cover` 延伸到状态栏与
+ * 手势条底下，布局用这两个变量让出系统条高度。优先取 Capacitor 原生注入的
+ * `--safe-area-inset-*`（老版 Android WebView 里 `env()` 恒为 0，Chromium bug
+ * 40699457），否则用标准 `env()`；桌面浏览器两者都不存在，恒为 0。
+ */
+:root {
+  --inset-top: max(var(--safe-area-inset-top, 0px), env(safe-area-inset-top, 0px));
+  --inset-bottom: max(var(--safe-area-inset-bottom, 0px), env(safe-area-inset-bottom, 0px));
+}
+
 html,
 body,
 #root {

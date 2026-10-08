@@ -32,6 +32,7 @@ import {
   addLocalFolder,
   createBrowserWorkspace,
   createMirrorWorkspace,
+  createMobileWorkspace,
   forgetWorkspace,
   listWorkspaces,
   resolveBackend,
@@ -60,7 +61,7 @@ import {
   type ImportUndoResult,
   type ImportReceipt,
 } from "./lib/clip";
-import { importFilesIntoOpfs, pickFiles, supportsFileSystemAccess, supportsOpfs } from "./fs";
+import { importFilesIntoOpfs, isCapacitorNative, pickFiles, supportsFileSystemAccess, supportsOpfs } from "./fs";
 import { desktopBridge, type ImportOutcome } from "./desktop/bridge";
 import { patchUi, setTheme as applyTheme, toggleAppearance, useUi } from "./data/ui";
 import type { Id, Snapshot, ThemeId, UiSettings } from "./data/types";
@@ -555,6 +556,21 @@ export default function App(): ReactNode {
 
   const openLocalFolder = async () => {
     try {
+      // 手机 App（Capacitor）里没有系统文件夹选择器：这里「添加文件夹」就是
+      // 新建一个手机笔记本（Documents/OpenNote/<名字>），SAF 选任意文件夹是后续工作。
+      if (isCapacitorNative()) {
+        const name = await askText({
+          title: "新建手机笔记本",
+          label: "笔记本名称",
+          value: "我的笔记",
+          note: "笔记会以纯文件形式保存在手机的 Documents/OpenNote 文件夹里，用文件管理器（iOS「文件」App）就能看到。",
+          confirmLabel: "创建",
+        });
+        if (!name) return;
+        const record = await createMobileWorkspace(name);
+        await openRecord(record);
+        return;
+      }
       const record = await addLocalFolder();
       if (record) await openRecord(record);
     } catch (error) {
@@ -1118,7 +1134,7 @@ export default function App(): ReactNode {
         onUploadFolder={() => void uploadFolderToBrowser()}
         onImportGithub={bridge ? null : () => void importFromGithub()}
         onCloseWorkspace={() => void closeCurrentWorkspace()}
-        supportsLocalFolder={Boolean(bridge) || supportsFileSystemAccess()}
+        supportsLocalFolder={Boolean(bridge) || supportsFileSystemAccess() || isCapacitorNative()}
         supportsBrowserWorkspace={supportsOpfs()}
         inboxPending={inboxPending}
         onOpenInbox={() => setInboxOpen(true)}
@@ -1255,7 +1271,7 @@ export default function App(): ReactNode {
           <WelcomeScreen
             workspaces={workspaces}
             busy={busy}
-            supportsLocalFolder={Boolean(bridge) || supportsFileSystemAccess()}
+            supportsLocalFolder={Boolean(bridge) || supportsFileSystemAccess() || isCapacitorNative()}
             supportsBrowserWorkspace={supportsOpfs()}
             onOpen={(record) => void openRecord(record)}
             onAddLocal={() => void openLocalFolder()}
@@ -1461,11 +1477,13 @@ function WelcomeScreen({
         <div className="workspace-choices">
           <button type="button" className="choice" onClick={onAddLocal} disabled={!supportsLocalFolder}>
             <Icon name="folder" size={18} />
-            <strong>打开本机文件夹</strong>
+            <strong>{isCapacitorNative() ? "新建手机笔记本" : "打开本机文件夹"}</strong>
             <small>
-              {supportsLocalFolder
-                ? "选一个目录，笔记就是里面的 .md 文件"
-                : "当前浏览器不支持直接读写磁盘，请用下面的方式"}
+              {isCapacitorNative()
+                ? "笔记保存在手机的 Documents/OpenNote 文件夹里，随时用文件 App 查看"
+                : supportsLocalFolder
+                  ? "选一个目录，笔记就是里面的 .md 文件"
+                  : "当前浏览器不支持直接读写磁盘，请用下面的方式"}
             </small>
           </button>
           <button type="button" className="choice" onClick={onNewBrowser} disabled={!supportsBrowserWorkspace}>
@@ -1492,7 +1510,7 @@ function WelcomeScreen({
             <h4>最近的笔记本</h4>
             {workspaces.slice(0, 5).map((record) => (
               <button key={record.id} type="button" className="empty__recent-item" onClick={() => onOpen(record)}>
-                <Icon name={record.kind === "node" ? "folder" : "layers"} size={13} />
+                <Icon name={record.kind === "node" || record.kind === "capacitor" ? "folder" : "layers"} size={13} />
                 <span className="truncate">{record.name}</span>
                 <time>{storageLabel(record)}</time>
               </button>
@@ -1570,6 +1588,7 @@ async function undoImportById(importId: string): Promise<ImportUndoResult> {
 function storageLabel(record: WorkspaceRecord): string {
   if (record.kind === "node") return `本机磁盘 · ${record.location}`;
   if (record.kind === "fsa") return `浏览器文件夹 · ${record.name}`;
+  if (record.kind === "capacitor") return `手机文件夹 · Documents/OpenNote/${record.name}`;
   return `浏览器本地 · ${record.name}`;
 }
 

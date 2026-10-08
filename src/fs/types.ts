@@ -6,7 +6,7 @@ export interface EntryInfo {
   mtimeMs: number;
 }
 
-export type BackendKind = "node" | "fsa" | "opfs";
+export type BackendKind = "node" | "fsa" | "opfs" | "capacitor";
 
 /**
  * Everything the notebook needs from "a folder on some disk". Three backends
@@ -47,6 +47,8 @@ export function describeBackend(kind: BackendKind): string {
       return "本机磁盘";
     case "fsa":
       return "浏览器文件夹";
+    case "capacitor":
+      return "手机文件夹";
     default:
       return "浏览器本地";
   }

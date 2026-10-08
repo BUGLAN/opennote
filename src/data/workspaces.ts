@@ -1,11 +1,15 @@
 import { createStore, useStore } from "../lib/store";
 import { desktopBridge } from "../desktop/bridge";
 import {
+  capacitorWorkspaceDir,
   createHandleBackend,
+  createCapacitorBackend,
   createNodeBackend,
   deleteDirectoryHandle,
+  ensureCapacitorPermissions,
   getDirectoryHandle,
   hasPermission,
+  isCapacitorNative,
   joinPath,
   opfsWorkspaceDir,
   pickDirectory,
@@ -29,6 +33,7 @@ export interface WorkspaceRecord {
    * `fsa`: key of the directory handle stored in IndexedDB — a uid, because the
    * old fixed `""` key made a second browser folder overwrite the first (D32).
    * `opfs`: directory name inside the browser's private file system.
+   * `capacitor`: folder name under the phone's `Documents/OpenNote/`.
    */
   location: string;
   addedAt: number;
@@ -180,6 +185,11 @@ export async function resolveBackend(record: WorkspaceRecord, requestPermission 
     if (!(await hasPermission(handle, requestPermission))) throw new WorkspacePermissionError(current);
     return createHandleBackend(handle, "fsa");
   }
+  if (record.kind === "capacitor") {
+    // capacitorWorkspaceDir 返回带 OpenNote/ 前缀的完整根目录，后端的
+    // 所有相对路径都以它为基准——不能只传 location，否则会写到 Documents 顶层。
+    return createCapacitorBackend(await capacitorWorkspaceDir(record.location));
+  }
   return createHandleBackend(await opfsWorkspaceDir(record.location), "opfs");
 }
 
@@ -230,6 +240,18 @@ export async function createBrowserWorkspace(name = "我的笔记"): Promise<Wor
   const directory = sanitizeName(name, "笔记");
   await opfsWorkspaceDir(directory);
   return rememberWorkspace({ name: directory, kind: "opfs", location: directory });
+}
+
+/**
+ * 手机 App（Capacitor 壳）里的笔记本：一个真正的文件夹，位于系统
+ * `Documents/OpenNote/<名字>`，iOS 的「文件」App 与 Android 文件管理器都能看到。
+ */
+export async function createMobileWorkspace(name = "我的笔记"): Promise<WorkspaceRecord> {
+  if (!isCapacitorNative()) throw new Error("只有在手机 App 里才能把笔记存成手机里的文件");
+  await ensureCapacitorPermissions();
+  const directory = sanitizeName(name, "笔记");
+  await capacitorWorkspaceDir(directory);
+  return rememberWorkspace({ name: directory, kind: "capacitor", location: directory });
 }
 
 /**

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Opennote</string>
+    <string name="title_activity_main">Opennote</string>
+    <string name="package_name">com.buglan.opennote</string>
+    <string name="custom_url_scheme">com.buglan.opennote</string>
+</resources>
