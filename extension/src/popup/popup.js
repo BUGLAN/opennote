@@ -905,11 +905,14 @@ function render(planInput) {
    * 网页版通道按钮（契约 02 §5.7 / FR-39）：**只有检测到网页版标签页时才存在** ——
    * 没有就 `hidden`，界面上不留死元素（与两条工具按钮同一条纪律）。
    *
-   * 出现条件比主按钮宽松：本地接口没开（`INTERFACE_OFF`）、没配令牌、没有工作区……
-   * 这些状态里网页版**照样能收**，所以这里不看连接态，只看「有没有东西可剪」。
-   * 反过来，成功态 / 空态 / 读不到页面 / 受限页面一律不出现（那时剪出去的是空正文）。
+   * 本地接口**就绪时不再出现**（0.4.0，用户实测反馈）：桌面版开着的时候，这个按钮和
+   * 主按钮剪的是同一个本机 Opennote，两个一模一样的按钮只会让人犹豫该点哪个。
+   * 就绪 = `CONNECTED`（桥健康 + 令牌通过 + 工作区已开）；其余状态（接口未开、没配令牌、
+   * 没有工作区……）网页版**照样能收**，按钮照旧出现。
+   * 成功态 / 空态 / 读不到页面 / 受限页面一律不出现（那时剪出去的是空正文）。
    */
-  const web = webTargetFor(plan);
+  const localReady = Boolean(snapshot && snapshot.stateId === STATE.CONNECTED);
+  const web = localReady ? null : webTargetFor(plan);
   if (web) {
     const loading = busy || Boolean(plan.primary && plan.primary.busy);
     webPrimary.hidden = false;

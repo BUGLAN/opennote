@@ -36,6 +36,22 @@ export const INPAGE_TITLE_MARK = "opennote";
 /** 受限 scheme：这些页面里根本没有网页版笔记本可言。 */
 const NON_HTTP_RE = /^(chrome|edge|brave|about|devtools|view-source|file|chrome-extension|moz-extension|data|blob):/i;
 
+/**
+ * 回环地址与桥端口段（8787–8796）上的「Opennote ××」页面**不是网页版**：
+ * 那是本地接口自己（桥只服务 `/clip/` 暂存页与 API）。它们标题里带着 Opennote，
+ * 会被启发式误判成候选 —— 用户实测：桌面版开着时 popup 上面多出一颗
+ * 「剪藏到 127.0.0.1:8787」，和主按钮剪的是同一个本机应用（0.4.0 修掉）。
+ */
+export function isLoopbackHost(hostname) {
+  const host = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+export function isBridgePort(port) {
+  const value = Number(port);
+  return Number.isFinite(value) && value >= 8787 && value <= 8796;
+}
+
 /** `http(s)` 才算候选（`file://` 上的本地构建也读不到扩展消息，直接排除）。 */
 export function isHttpUrl(url) {
   return typeof url === "string" && /^https?:\/\//i.test(url) && !NON_HTTP_RE.test(url);
@@ -74,6 +90,15 @@ export function isWebCandidate(tab, options = {}) {
   if (options.excludeTabId !== null && options.excludeTabId !== undefined && tab.id === options.excludeTabId) return false;
   const blocked = options.blocked instanceof Set ? options.blocked : new Set(options.blocked || []);
   if (blocked.has(tab.id)) return false;
+  let parsed = null;
+  try {
+    parsed = new URL(String(tab.url));
+  } catch {
+    return false;
+  }
+  // 回环地址 / 桥端口段：本地接口与它的剪藏页，不是网页版（见 isLoopbackHost 的注释）。
+  if (isLoopbackHost(parsed.hostname)) return false;
+  if (isBridgePort(parsed.port)) return false;
   const title = String(tab.title || "").toLowerCase();
   const url = String(tab.url || "").toLowerCase();
   return title.includes(INPAGE_TITLE_MARK) || url.includes(INPAGE_TITLE_MARK);

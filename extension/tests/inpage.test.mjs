@@ -56,6 +56,20 @@ test("候选判定：正在被剪的那个标签页、以及本会话握手失�
   assert.equal(isWebCandidate(tab({ id: 7 }), { blocked: [8] }), true);
 });
 
+test("候选判定：回环地址与桥端口段（8787–8796）是本地接口/剪藏页，不是网页版（0.4.0）", () => {
+  // 用户实测：桌面版开着时 popup 出现「剪藏到 127.0.0.1:8787」——那是桥服务器的剪藏暂存页，
+  // 标题「Opennote 剪藏」命中启发式，但它和主按钮剪的是同一个本机应用。
+  assert.equal(isWebCandidate(tab({ url: "http://127.0.0.1:8787/clip/abc?k=x", title: "Opennote 剪藏" })), false);
+  // 回环上的网页版 dev server 一并排除（0.4.0 裁定：本地运行时不给网页版按钮）
+  assert.equal(isWebCandidate(tab({ url: "http://localhost:5173/", title: "Opennote · 开源笔记" })), false);
+  assert.equal(isWebCandidate(tab({ url: "http://127.0.0.1:4173/", title: "Opennote" })), false);
+  assert.equal(isWebCandidate(tab({ url: "http://[::1]:5173/", title: "Opennote" })), false);
+  // 桥端口段落在任意主机上都排除（端口段是契约唯一事实）
+  assert.equal(isWebCandidate(tab({ url: "https://192.168.1.8:8788/", title: "Opennote" })), false);
+  // 非桥端口的公网地址照旧是候选
+  assert.equal(isWebCandidate(tab({ url: "https://notes.example.com/", title: "Opennote" })), true);
+});
+
 test("挑一个候选：URL 里带 opennote 的优先，其次活动标签页，再次标签页顺序", () => {
   const picked = pickWebCandidate([
     tab({ id: 1, url: "https://notes.example.com/", title: "Opennote · 开源笔记", index: 1 }),
