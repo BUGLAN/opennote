@@ -14,9 +14,14 @@
  *
  * 用法：`node tools/popup-shot.mjs [--shots=名字,名字]`
  *   可用镜头：card-page / card-element / card-page-night / card-element-night / card-warn / card-pickfail
+ *             card-done / card-done-night / card-done-before / card-done-created / card-done-duplicate
  *             card-token / card-token-night / card-token-saved / card-token-before
  *             card-before-page / card-before-element
  *             picker-paper / picker-night / picker-before-paper / picker-before-night
+ *
+ * `card-done*`（0.4.x）：**剪藏之后**的底栏 —— `receipt=pending`（进收件箱，默认交付方式）/`created`/
+ * `duplicate` 三种回执喂回真 popup 的 `applyReply()`。用户圈出那两颗图标按钮的现场就是它，
+ * `card-done-before` 用改动前的代码出同一帧做对照（删了什么，一眼可见）。
  *
  * `card-token*`（0.3.5）：`?state=needs-pairing` 让替身快照换成「这台客户端还没有配置访问令牌」——
  * 即用户首启看到的现场（令牌块 + IMP-2001 说明块）。`card-token-before` 走 `variant=before`，
@@ -90,7 +95,7 @@ const ARTICLE = [
 const PICKED = ["## 只剪这一段", "", "被点中的那块正文，与整页提取不是同一份内容。"].join("\n");
 
 /** popup 的 `chrome` 替身 + 固定快照（必须**在模块之前**以经典脚本运行）。 */
-function popupStub(mode, theme, stage, click, pickfail, state) {
+function popupStub(mode, theme, stage, click, pickfail, state, receipt) {
   const snapshot = `
     const extraction = {
       url: "https://example.com/posts/local-first",
@@ -120,6 +125,7 @@ function popupStub(mode, theme, stage, click, pickfail, state) {
   const STATE = ${JSON.stringify(state || "connected")};
   const ARTICLE = ${JSON.stringify(ARTICLE)};
   const PICKED = ${JSON.stringify(PICKED)};
+  const RECEIPT = ${JSON.stringify(receipt || "")};
   ${snapshot}
   window.__shot = { mode: MODE, created: [] };
   if (${JSON.stringify(theme)} === "night") {
@@ -143,6 +149,21 @@ function popupStub(mode, theme, stage, click, pickfail, state) {
             break;
           case "opennote:preview":
             reply = { ok: true, preview: { mode: message.mode, title: extraction.article.title, pickedElement: { tagName: "article", markdown: PICKED }, images: IMAGES } };
+            break;
+          /*
+           * 剪藏之后的四态（0.4.x 用户圈出底栏那两颗图标按钮的现场）。receipt=created /
+           * pending / duplicate 分别把回执喂回 popup，跑的是 popup 自己的 applyReply()。
+           * 注意 created 会在 2 秒后自动关窗（S8）—— 出那一帧要看截图时机，见 SHOT_LIST 的注释。
+           * （这段注释在模板字符串里，所以不写反引号。）
+           */
+          case "opennote:submit":
+            reply = { ok: true, reply: RECEIPT === "pending"
+              ? { status: "pending", noteTitle: "写给工程师的本地优先笔记" }
+              : RECEIPT === "duplicate"
+                ? { status: "created", serverStatus: "duplicate", path: "收件箱/写给工程师的本地优先笔记.md" }
+                : RECEIPT === "created"
+                  ? { status: "created", serverStatus: "created", folderLabel: "收件箱", noteTitle: "写给工程师的本地优先笔记", path: "收件箱/写给工程师的本地优先笔记.md" }
+                  : { ok: true } };
             break;
           case "opennote:clip-stage":
             reply = { ok: true, reply: ${JSON.stringify(stage)} === "warn"
@@ -180,6 +201,13 @@ function popupStub(mode, theme, stage, click, pickfail, state) {
       if (button) button.click();
     }, 300);
   }
+  /* 剪藏之后的四态：点一次主按钮，让真 popup 自己走 submit() → applyReply()（模板字符串里不写反引号）。 */
+  if (${JSON.stringify(click)} === "submit") {
+    setTimeout(() => {
+      const button = document.getElementById("primary");
+      if (button) button.click();
+    }, 300);
+  }
   /* 插件设置（⋯ → 插件设置）：S30 的令牌只读回显只在这个视图里出现，所以必须能拍它。 */
   if (${JSON.stringify(click)} === "settings") {
     setTimeout(() => {
@@ -209,7 +237,7 @@ function popupDocument(query) {
     .replace('href="popup.css"', `href="${base}/popup/popup.css"`)
     .replace(
       '<script type="module" src="popup.js"></script>',
-      `${popupStub(mode, theme, stage, click, pickfail, state)}<script type="module" src="${base}/popup/popup.js"></script>`,
+      `${popupStub(mode, theme, stage, click, pickfail, state, query.get("receipt") || "")}<script type="module" src="${base}/popup/popup.js"></script>`,
     )
     .replace("<html lang=\"zh-CN\" data-theme=\"paper\" data-accent=\"seal\">", `<html lang="zh-CN" data-theme="${theme}" data-accent="seal">`);
 }
@@ -324,6 +352,19 @@ const SHOT_LIST = [  { name: "card-page", url: "/popup-harness.html?mode=page", 
   { name: "card-before-page", url: "/popup-harness.html?mode=page&variant=before", window: "360,700" },
   { name: "card-before-element", url: "/popup-harness.html?mode=element&variant=before", window: "360,700" },
   { name: "card-before-page-night", url: "/popup-harness.html?mode=page&theme=night&variant=before", window: "360,700" },
+  /*
+   * 0.4.x：剪藏之后的底栏（用户圈出那两颗图标按钮的现场）。
+   *   `card-done`         = 进收件箱（`S23`，应用侧默认交付方式）—— **对照组**，改动前这里底栏就是那两颗图标；
+   *   `card-done-before`  = 同一态、改动前的代码（`.shots/before/`），用来并排看「删了什么」；
+   *   `card-done-created` = 直接写入（`S8`）。这一帧要抢在 2 秒自动关窗之前 ——
+   *                         `--virtual-time-budget=2000` 正好压线，关了窗就是一张空白页（那时看 `card-done`）。
+   *   `card-done-duplicate` = 重复剪藏（`S24`）：`打开那条笔记` 是错误块里的文字按钮，不是底栏图标。
+   */
+  { name: "card-done", url: "/popup-harness.html?mode=page&click=submit&receipt=pending", window: "360,700" },
+  { name: "card-done-night", url: "/popup-harness.html?mode=page&theme=night&click=submit&receipt=pending", window: "360,700" },
+  { name: "card-done-before", url: "/popup-harness.html?mode=page&click=submit&receipt=pending&variant=before", window: "360,700" },
+  { name: "card-done-created", url: "/popup-harness.html?mode=page&click=submit&receipt=created", window: "360,700" },
+  { name: "card-done-duplicate", url: "/popup-harness.html?mode=page&click=submit&receipt=duplicate", window: "360,700" },
   { name: "picker-paper", url: "/picker-harness.html?theme=paper", window: "720,520" },
   { name: "picker-night", url: "/picker-harness.html?theme=night", window: "720,520" },
   { name: "picker-before-paper", url: "/picker-harness.html?theme=paper&variant=before", window: "720,520" },

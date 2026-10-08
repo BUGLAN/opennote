@@ -180,7 +180,25 @@ test("S5 受限页面与 S8 成功的文案逐字核对", () => {
   assert.equal(success.ok.message, "已剪藏到「读书笔记」。");
   assert.equal(success.ok.detail, "中文排版指北.md");
   assert.equal(success.chip.text, "本地接口已开启");
-  assert.deepEqual(success.actions.map((a) => a.label), ["打开这篇笔记", "再剪一段"]);
+});
+
+/*
+ * 0.4.x 用户实测（原话：「这两个图片删除…底部恢复常态 [剪藏到 Opennote] 即可」）：
+ * 成功 / 进收件箱两态的底栏曾经被 `plan.primary = null` 换成两颗 30px 图标按钮
+ * （`打开这篇笔记` / `打开 Opennote` + `再剪一段`）—— 提示已经说清结果，用户要的是
+ * **常态那颗主按钮**。下面两条分别咬住「主按钮回来了」与「图标动作真的没了」，
+ * 回退任意一条都会变红。
+ */
+test("S8/S23：剪藏成功与进收件箱的底栏都是常态主按钮", () => {
+  const success = planFor(STATE.SUCCESS, { folderLabel: "读书笔记", noteTitle: "中文排版指北" });
+  const pending = planFor(STATE.INBOX_PENDING, { noteTitle: "中文排版指北" });
+  for (const [name, plan] of [["S8", success], ["S23", pending]]) {
+    assert.ok(plan.primary, `${name} 底栏必须有主按钮（不许是 null）`);
+    assert.equal(plan.primary.label, "剪藏到 Opennote", `${name} 的底栏文案回到 C50`);
+    assert.equal(plan.primary.disabled, false, `${name} 的主按钮必须可用（不是灰按钮）`);
+    assert.deepEqual(plan.actions, [], `${name} 底栏不再有图标动作`);
+  }
+  assert.equal(pending.ok.message, "已进入收件箱等待确认：中文排版指北。");
 });
 
 test("错误块里出现的 message 一定来自错误码表（没有自造文案）", () => {

@@ -248,25 +248,19 @@ function iconExternal() {
 /**
  * 底栏动作按钮的图标（0.3.4 用户：「图3这个文字出界，换成图标」）。
  *
- * 只有**底栏**那颗按钮用它。错误块里的动作（`重试` / `打开 Opennote 设置`）不动：
- * 那是一块够宽的容器，文字按钮更好读，而且它是错误态唯一的出口，不该只留一个图标。
- * 认不出的 id 退到「在独立页面里打开」那一款 —— 宁可图标不够贴切，
- * 也不能让一颗按钮变成没有形状的空白。
+ * 只有**底栏**那颗按钮用它 —— 也就是「没有主按钮可放」的那几个状态（受限页面 = 打开 Opennote、
+ * 读不到正文 = 重试）。剪藏成功 / 进收件箱 / 重复剪藏 / 图片降级**都不再走这条路**：
+ * 那些状态的底栏是常态主按钮（`C50`），动作留在错误块里当文字按钮（`C98`）。
+ * 错误块里的动作（`重试` / `打开 Opennote 设置`）同样不动：那是一块够宽的容器，
+ * 文字按钮更好读，而且它是错误态唯一的出口，不该只留一个图标。
  */
 function actionIcon(id) {
-  if (id === "again") {
-    // 剪刀 = 「再剪一段」。
-    return svgIcon([
-      "M1.6 4.5a1.9 1.9 0 1 0 3.8 0 1.9 1.9 0 1 0-3.8 0",
-      "M1.6 11.5a1.9 1.9 0 1 0 3.8 0 1.9 1.9 0 1 0-3.8 0",
-      "M5 5.7 13.5 12.5",
-      "M5 10.3 13.5 3.5",
-    ]);
-  }
   if (id === "retry") {
     // 回转箭头 = 「重试」。
     return svgIcon(["M13 8a5 5 0 1 1-1.5-3.6", "M13.2 2.4v3.4h-3.4"]);
   }
+  // 认不出的 id 退到「在独立页面里打开」那一款 —— 宁可图标不够贴切，
+  // 也不能让一颗按钮变成没有形状的空白。
   return svgIcon([PATH_EXTERNAL]);
 }
 
@@ -1150,6 +1144,18 @@ function collectPayload() {
   return { mode, title, body, importId };
 }
 
+/**
+ * 撤掉成功态的自动关窗计时器（`S8`：直接写入默认 2 秒后自动关闭）。
+ *
+ * 0.4.x（`C98`）之后成功态的底栏是**常态主按钮**，用户可能在这 2 秒里再点一次 ——
+ * 那一下属于「用户还在用这个弹窗」，上一次的计时器必须就地作废。
+ */
+function cancelCloseTimer() {
+  if (!closeTimer) return;
+  clearTimeout(closeTimer);
+  closeTimer = null;
+}
+
 async function submit() {
   if (busy || !snapshot || snapshot.restricted) return;
   const stateId = snapshot.stateId;
@@ -1159,6 +1165,10 @@ async function submit() {
   const payload = collectPayload();
   busy = true;
   busyLabel = "正在剪藏…";
+  // 成功态有一个 2 秒的自动关窗计时器（`S8`）。底栏恢复常态主按钮之后（`C98`），用户
+  // **可以**在这 2 秒里再点一次 —— 那一下必须先把老计时器撤掉，否则弹窗会在这一次剪藏
+  // 进行到一半时被上一次的计时器关掉（界面自己消失，用户只看到「点了没反应」）。
+  cancelCloseTimer();
   render(currentPlan());
   const response = await send({
     type: "opennote:submit",
@@ -1220,6 +1230,8 @@ async function submitToWeb() {
   const payload = collectPayload();
   busy = true;
   busyLabel = "正在剪藏…";
+  // 与 `submit()` 同一条：上一次成功留下的自动关窗计时器不能带走这一次剪藏。
+  cancelCloseTimer();
   render(currentPlan());
   // 权限申请必须在这次点击的手势里（见 ensureWebPermission）；拿不到就不发请求，如实说
   if (!(await ensureWebPermission(web.origin))) {
@@ -1280,11 +1292,13 @@ function applyReply(reply) {
       pendingNotePath = reply.path || null;
       const plan = planForState(STATE.CONNECTED);
       plan.block = { kind: "error", message: "已在笔记中（未重复入库）。", next: null, code: null };
-      plan.actions = [
-        { id: "open-note", label: "打开那条笔记", primary: true, path: reply.path || null },
-        { id: "again", label: "再剪一段", primary: false },
-      ];
-      plan.primary = null;
+      // `打开那条笔记` 留在错误块里当**文字按钮**（`blockNode` 那条路），底栏恢复常态主按钮：
+      // 0.4.x 用户「这两个图片删除…底部恢复常态 [剪藏到 Opennote] 即可」—— 底栏不再有图标动作，
+      // 所以这里不再置 `plan.primary = null`（那会把动作挤到底栏、渲染成两颗图标）。
+      // 回执没给 `path` 时不画按钮（没有路径就是没有路径，不猜）。
+      plan.actions = reply.path
+        ? [{ id: "open-note", label: "打开那条笔记", primary: false, path: reply.path }]
+        : [];
       plan.rows = false;
       plan.preview = false;
       render(plan);
@@ -1298,15 +1312,15 @@ function applyReply(reply) {
       snapshot.settings.notePaths = [reply.path, ...list.filter((item) => item !== reply.path)].slice(0, 20);
     }
     // ③ 图片降级的逐条原因：**不静默、也不自动关窗** —— 自动 2 秒关窗会把这些话一起带走。
-    // 与网页版通道的 warnings 同一处理：摆在用户眼前，给「打开那条笔记 / 再剪一段」。
+    // 与网页版通道的 warnings 同一处理：摆在用户眼前；回执给了路径就在错误块里给一颗
+    // **文字**按钮 `打开那条笔记`（底栏那颗主按钮保持常态，不再被图标动作顶掉）。
     const warnings = Array.isArray(reply.warnings) ? reply.warnings.filter((item) => item) : [];
     if (warnings.length) {
       const plan = planForState(STATE.CONNECTED);
       plan.block = { kind: "error", message: warnings.join(" "), next: null, code: null };
       plan.actions = reply.path
-        ? [{ id: "open-note", label: "打开那条笔记", primary: true, path: reply.path }]
-        : [{ id: "again", label: "再剪一段", primary: true }];
-      plan.primary = null;
+        ? [{ id: "open-note", label: "打开那条笔记", primary: false, path: reply.path }]
+        : [];
       plan.rows = false;
       plan.preview = false;
       render(plan);
@@ -1317,7 +1331,7 @@ function applyReply(reply) {
       noteTitle: reply.noteTitle || titleValue,
     });
     render(plan);
-    if (closeTimer) clearTimeout(closeTimer);
+    cancelCloseTimer();
     closeTimer = setTimeout(() => window.close(), 2000);
     return;
   }

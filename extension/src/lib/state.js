@@ -310,6 +310,12 @@ export function planFor(state, ctx = {}) {
   }
 
   // 成功态由 popup 单独填充（`已剪藏到「{目录}」。` + 次行最终笔记标题）。
+  //
+  // 底栏**恢复常态**（0.4.x 用户原话：「这两个图片删除…底部恢复常态 [剪藏到 Opennote] 即可」）：
+  // 成功提示已经把结果说清楚了，底栏不再放 `打开这篇笔记` / `再剪一段` 这两颗图标按钮 ——
+  // `primary` 保持上面那份默认值（`C50` 的 `剪藏到 Opennote`，可用），`actions` 保持空数组。
+  // 两颗图标按钮的删除理由与判据见 `03` §UI-01 的 `C98`：成功之后界面上只剩一条主路径，
+  // 少一次「该点哪个」的犹豫；打开笔记仍可从 Opennote 侧完成。
   if (state === STATE.SUCCESS) {
     plan.ok = {
       message: `已剪藏到「${folderLabel}」。`,
@@ -318,16 +324,12 @@ export function planFor(state, ctx = {}) {
     plan.preview = false;
     plan.rows = false;
     plan.segments = false;
-    plan.primary = null;
-    plan.actions = [
-      { id: "open-note", label: "打开这篇笔记", primary: false },
-      { id: "again", label: "再剪一段", primary: false },
-    ];
   }
 
   // 进收件箱（00 §6.14 ㉘；逐字见 03 §UI-01 C60 / S23）：应用侧「先进入收件箱」命中时回执是 pending
   // —— 这不是失败，也不是「已经写进笔记」；文案逐字冻结为 `已进入收件箱等待确认：{标题}。`
   // 次行是 `在 Opennote 的「导入收件箱」里确认。`；**不提供**「打开收件箱」按钮（本轮没有深链）。
+  // 底栏同样**恢复常态**（与 `S8` 同一条：`C98` 删掉那两颗图标动作，主按钮回到 `C50`）。
   if (state === STATE.INBOX_PENDING) {
     plan.ok = {
       message: `已进入收件箱等待确认：${noteTitle || "未命名笔记"}。`,
@@ -336,11 +338,6 @@ export function planFor(state, ctx = {}) {
     plan.preview = false;
     plan.rows = false;
     plan.segments = false;
-    plan.primary = null;
-    plan.actions = [
-      { id: "open-opennote", label: "打开 Opennote", primary: false },
-      { id: "again", label: "再剪一段", primary: false },
-    ];
   }
 
   // C 三区（00 §6.14 ㉘：「正文 / 高亮 / 属性」）——哪些区可用由状态决定，

@@ -86,6 +86,55 @@ test("M1：来源信息自动填写、允许空值 —— 缺失字段是 null �
   assert.equal(full.source.publishedAt, "2026-01-01T08:00:00+08:00");
 });
 
+/*
+ * 0.4.x 用户实测（原话：「这两个图片删除…底部恢复常态 [剪藏到 Opennote] 即可」）：
+ * 「剪藏成功 / 进收件箱 / 重复剪藏 / 图片降级」这几条**剪藏之后**的路径，底栏都必须是
+ * 常态主按钮 —— 不再出现 `打开这篇笔记` / `再剪一段` 那两颗 30px 图标按钮。
+ * 判据分两层：`state.js` 的两态不撤主按钮（行为层，见 `state.test.mjs`），
+ * 以及 `popup.js` 的两条内联回执分支不给底栏塞动作（这一条）。
+ */
+test("M1：剪藏之后底栏恢复常态主按钮 —— 四态都不留图标动作", () => {
+  /* 注释里解释了「这里不再置 plan.primary = null」，直接匹配源码会把注释本身当成违规 ——
+     与 `popup-card.test.mjs` 同一条做法：先剥注释，再判。 */
+  const strip = (src) => src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+  /*
+   * 抓「一个分支」：起点标记 + 直到同级收尾的 `}`。**抓到的片段必须够短**（下面那条断言在管）：
+   * 第一版把「图片降级」的标记写成 `if (warnings.length) {` —— 文件名里有两处同名的判断，
+   * 正则从**第一处**（`openClipWeb()` 里那个）起吞了 130 行半张文件，于是那条判据在旧代码上
+   * 也是绿的（假绿）。判据自己也要能被证伪：抓错片段就必须红。
+   */
+  const branchOf = (src, marker, indent) => {
+    const re = new RegExp(`${marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?\\n${indent}\\}`);
+    return (src.match(re) || [])[0] || "";
+  };
+  const state = strip(readFileSync(join(ROOT, "src/lib/state.js"), "utf8"));
+  const popup = strip(popupJs);
+  for (const [id, label] of [["SUCCESS", "S8"], ["INBOX_PENDING", "S23"]]) {
+    const branch = branchOf(state, `if (state === STATE.${id}) {`, "  ");
+    assert.ok(branch, `state.js 里找不到 ${label} 分支`);
+    assert.ok(branch.split("\n").length < 20, `${label} 分支抓取过宽（抓到的是半张文件，判据会变假绿）`);
+    assert.ok(!branch.includes("plan.primary = null"), `${label} 不许把底栏主按钮撤掉`);
+    assert.ok(!/plan\.actions = \[/.test(branch), `${label} 不许再挂底栏动作`);
+  }
+  /* 「图片降级」的标记必须带上它前面那行 `const warnings = …`：
+     文件名里 `if (warnings.length) {` 有两处（`openClipWeb()` 里还有一处），只写它就会抓错分支。 */
+  for (const [name, marker] of [
+    ["重复剪藏", 'if (reply.serverStatus === "duplicate") {'],
+    ["图片降级", 'const warnings = Array.isArray(reply.warnings) ? reply.warnings.filter((item) => item) : [];\n    if (warnings.length) {'],
+  ]) {
+    const branch = branchOf(popup, marker, "    ");
+    assert.ok(branch, `popup.js 里找不到${name}分支`);
+    assert.ok(branch.split("\n").length < 20, `${name} 分支抓取过宽（抓到的是半张文件，判据会变假绿）`);
+    assert.ok(!branch.includes("plan.primary = null"), `${name}：不许把底栏主按钮撤掉（那会把动作挤成图标）`);
+    assert.ok(!branch.includes('id: "again"'), `${name}：不许再挂「再剪一段」图标动作`);
+    assert.ok(!/label: "打开这篇笔记"/.test(branch), `${name}：不许再挂「打开这篇笔记」图标动作`);
+  }
+  // 「再剪一段」整条路径退场：图标、动作、处理器一起删（不留死代码）
+  assert.ok(!popup.includes('"again"'), "popup.js 里还留着已退场的「再剪一段」");
+  // 全文件只允许**插件设置**视图撤掉主按钮（那是一个没有剪藏动作的视图，`settingsPlan()`）
+  assert.equal((popup.match(/plan\.primary = null/g) || []).length, 1, "除插件设置外，任何视图都不许撤掉底栏主按钮");
+});
+
 test("M1：来源字段的键集合不变（不增不减，避免为凑键位塞占位）", () => {
   const envelope = buildEnvelope({
     importId: "test-m1-2",
