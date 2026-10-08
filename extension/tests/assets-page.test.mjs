@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { collectImageAssetsFromPage, MAX_ASSETS } from "../src/lib/assets.js";
+import { collectImageAssetsFromPage, rewriteRemoteImageRefs, MAX_ASSETS } from "../src/lib/assets.js";
 
 /** 最小 PNG 头（嗅探只看前 16 字节）。 */
 const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -93,4 +93,41 @@ test("MIME 以本地重嗅为准：不信任页面自报的 mime", () => {
     { url: "https://a.test/pic.png", ok: true, base64: b64(PNG), byteLength: PNG.length, mime: "text/html" },
   ]);
   assert.equal(out.assets[0].mime, "image/png");
+});
+
+test("urlNames：只收成功那批，且同 basename 的第二个改名（引用必须一一对应）", () => {
+  const a = "https://cdn.a.test/photo.png";
+  const b = "https://cdn.b.test/photo.png";
+  const out = collectImageAssetsFromPage(
+    [item(a), item(b), item("https://cdn.c.test/gone.png")],
+    [ok(a), ok(b), { url: "https://cdn.c.test/gone.png", ok: false, error: "服务器返回 403" }],
+  );
+  assert.deepEqual(out.urlNames, [
+    { url: a, name: "photo.png" },
+    { url: b, name: "photo-2.png" },
+  ]);
+  assert.deepEqual(
+    out.assets.map((asset) => asset.name),
+    ["photo.png", "photo-2.png"],
+  );
+});
+
+test("rewriteRemoteImageRefs：拿到字节的引用改写成 assets/<名>，没拿到的原样保留", () => {
+  const body = [
+    "![图一](https://cdn.a.test/photo.png)",
+    "![图二](https://cdn.b.test/photo.png)",
+    "![没拿到](https://cdn.c.test/gone.png)",
+    "带空格的：![三](<https://cdn.d.test/a b.png>)",
+  ].join("\n");
+  const next = rewriteRemoteImageRefs(body, [
+    { url: "https://cdn.a.test/photo.png", name: "photo.png" },
+    { url: "https://cdn.b.test/photo.png", name: "photo-2.png" },
+    { url: "https://cdn.d.test/a b.png", name: "a_b.png" },
+  ]);
+  assert.ok(next.includes("![图一](assets/photo.png)"), next);
+  assert.ok(next.includes("![图二](assets/photo-2.png)"), next);
+  assert.ok(next.includes("![没拿到](https://cdn.c.test/gone.png)"), "没拿到字节的引用必须原样保留");
+  assert.ok(next.includes("![三](assets/a_b.png)"), "尖括号写法也要改写");
+  // 空映射：一个字符都不动
+  assert.equal(rewriteRemoteImageRefs(body, []), body);
 });

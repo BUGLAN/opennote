@@ -313,6 +313,34 @@ function paragraph(tag, text) {
   return node;
 }
 
+/**
+ * 预览里的图片（0.4.0 用户要求：「图片一起保存」勾上时，预览里也要真的看得见图）。
+ *
+ * 只画**能直接显示**的地址（`http(s)` / `data:`）；正文里已经是 `assets/<名>` 的
+ * （扩展侧抓到字节后改写过的客户端写法）在 popup 里没有落点，退化成一句说明 ——
+ * 不画一个必然裂掉的 `<img>`。加载失败也退化成说明句，绝不静默留个破图。
+ */
+function imageBlock(src, alt) {
+  const figure = el("figure", "doc-image");
+  const caption = () => el("figcaption", "doc-image__alt", alt ? `图片：${alt}` : "图片");
+  if (/^(https?:|data:)/i.test(src)) {
+    const img = el("img");
+    img.src = src;
+    img.alt = alt || "";
+    img.loading = "lazy";
+    img.addEventListener("error", () => {
+      figure.classList.add("is-broken");
+      figure.replaceChildren(caption());
+    });
+    figure.appendChild(img);
+    if (alt) figure.appendChild(el("figcaption", "doc-image__alt", alt));
+  } else {
+    figure.classList.add("is-broken");
+    figure.appendChild(caption());
+  }
+  return figure;
+}
+
 function tableCells(line) {
   let text = String(line).trim();
   if (text.startsWith("|")) text = text.slice(1);
@@ -426,6 +454,14 @@ function renderDoc(markdown) {
       blocks += 1;
       continue;
     }
+    // 独占一行的图片：画成真的图（见 imageBlock 的说明）。
+    const image = line.match(/^\s*!\[([^\]]*)\]\(\s*(<[^>]*>|[^)\s]+)(?:\s+"[^"]*")?\s*\)\s*$/);
+    if (image) {
+      box.appendChild(imageBlock((image[2] || "").replace(/^<|>$/g, ""), image[1].trim()));
+      blocks += 1;
+      index += 1;
+      continue;
+    }
     const bullet = line.match(/^\s*([-*+]|\d+\.)\s+(.*)$/);
     if (bullet) {
       const list = el(/^\d/.test(bullet[1]) ? "ol" : "ul", "doc-list");
@@ -483,6 +519,8 @@ function imageSwitch() {
   input.checked = imageDownload;
   input.addEventListener("change", () => {
     imageDownload = input.checked;
+    // 记住上一次的选择（用户明确要的记忆功能）：落 chrome.storage.local，下次打开照旧。
+    void send({ type: "opennote:set-image-download", value: imageDownload });
     render();
     schedulePreview();
   });
@@ -1465,13 +1503,6 @@ async function runAction(id, action) {
       tokenConfirm.hidden = false;
       tokenConfirmYes.focus();
       break;
-    case "again":
-      if (closeTimer) clearTimeout(closeTimer);
-      titleTouched = false;
-      currentImportId = null;
-      lastSignature = null;
-      await load(true);
-      break;
     default:
       break;
   }
@@ -1583,6 +1614,10 @@ async function load(force = false) {
     return;
   }
   snapshot = response;
+  // ③ 图片开关以**上次的选择**初始化（storage 里的记忆）；storage 没有时保持首装默认（关）。
+  if (response.settings && typeof response.settings.imageDownload === "boolean") {
+    imageDownload = response.settings.imageDownload;
+  }
   // M1 默认来源（只有两个按钮）：本页已经选过元素 → `选择当前元素`；否则 → `整页提取`。
   const picked = response.pickedElement;
   mode = picked && picked.tagName ? "element" : "page";

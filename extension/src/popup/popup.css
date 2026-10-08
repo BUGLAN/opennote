@@ -150,6 +150,11 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .clip__doc .doc-list li{margin:.2em 0}
 .clip__doc .doc-hr{border:none;border-top:1px solid var(--rule);margin:.9em 0}
 .clip__doc .doc-note{margin:.7em 0 0;font-family:var(--font-ui);font-size:var(--fs-xs);color:var(--ink-3)}
+/* 预览里的图片（0.4.0）：限高、圆角、纸色描边；加载失败（或本地 assets/ 引用）退化成一句说明。 */
+.clip__doc .doc-image{margin:.7em 0;padding:0}
+.clip__doc .doc-image img{display:block;max-width:100%;max-height:220px;border:1px solid var(--rule);border-radius:var(--radius-sm);background:var(--paper-3);object-fit:contain}
+.clip__doc .doc-image .doc-image__alt{margin:.3em 0 0;font-family:var(--font-ui);font-size:var(--fs-xs);color:var(--ink-3)}
+.clip__doc .doc-image.is-broken{padding:.5em .7em;border:1px dashed var(--rule-strong);border-radius:var(--radius-sm);color:var(--ink-3)}
 
 /* ③ 图片下载开关（默认关）：**与两个按钮始终同一行**（用户明确要求），靠右对齐。
    它不占第三个按钮位：`00` §6.14 ㊶ 冻结的是「工具条上的**动作**只有两个」，而这是一个选项（复选框）。

@@ -92,7 +92,14 @@ export async function fetchImagesInPage(options) {
     try {
       const response = await fetch(url, {
         signal: controller.signal,
-        credentials: "omit",
+        /*
+         * **不写 `credentials: "omit"`**（0.4.0 修）：omit 会把**同源**请求的 Cookie 也一起
+         * 丢掉 —— 而 Confluence / 内部 Wiki 这类页面上的配图恰恰是「同源 + 需要登录态」，
+         * 用户实测「图片直接丢失了」正是它们。
+         * 用浏览器的默认值 `same-origin`：同源带 Cookie（附件图取得到），跨域不带
+         * （跨域带凭据需要 `Access-Control-Allow-Credentials`，写了反而会把本来能取的图变红）。
+         */
+        credentials: "same-origin",
         cache: "no-store",
         redirect: "follow",
       });

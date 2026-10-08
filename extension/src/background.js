@@ -37,6 +37,7 @@ import { IMAGE_DOWNLOAD_DEFAULT, buildStageRequest as stageRequest, openUrlOf } 
 // 这里只做注入与组装（上限判定、失败降级全在 lib/assets.js）。
 import {
   collectImageAssetsFromPage,
+  rewriteRemoteImageRefs,
   MAX_ASSET_BYTES,
   MAX_ASSETS,
   MAX_ASSETS_TOTAL_BYTES,
@@ -677,11 +678,13 @@ async function buildEnvelopeForTab(input) {
   // 同源图直接可取）。失败逐条降级：不进 assets、正文保留原始网址、原因随回执带给用户。
   let assets = [];
   let assetWarnings = [];
+  let imageNames = [];
   if (imageDownload) {
     const candidates = await imagesForStage(tab.id, mode, pickedElement, extraction);
     const downloaded = await downloadImagesForTab(tab.id, candidates.items || []);
     assets = downloaded.assets;
     assetWarnings = [...downloaded.warnings];
+    imageNames = downloaded.urlNames || [];
     const missing = Number(candidates.dropped) || 0;
     if (missing > 0) assetWarnings.push(`有 ${missing} 张图片没有可下载的地址，正文里保留原始网址。`);
   }
@@ -701,6 +704,12 @@ async function buildEnvelopeForTab(input) {
     assets,
     version: chrome.runtime.getManifest().version,
   });
+  // ③ 拿到字节的那批改写成 `assets/<名>`（契约 §3.4 的客户端写法）：不改写的话，
+  // 应用侧 `rewriteAssetRefs()` 认不出远程 URL，图片会落盘成孤儿、正文仍指着一个
+  // 桌面 CSP 加载不了的 https 地址（用户实测「桌面端没有显示」就是这个）。
+  if (imageNames.length) {
+    envelope.body = rewriteRemoteImageRefs(envelope.body, imageNames);
+  }
 
   const problems = envelopeProblems(envelope);
   if (problems.length) {
@@ -1034,7 +1043,7 @@ async function imagesForStage(tabId, mode, picked, extraction) {
  */
 const IMAGE_DOWNLOAD_TIMEOUT_MS = 25000;
 async function downloadImagesForTab(tabId, items) {
-  const empty = { assets: [], warnings: [], downloaded: 0, failed: 0, skipped: 0 };
+  const empty = { assets: [], warnings: [], downloaded: 0, failed: 0, skipped: 0, urlNames: [] };
   if (!Array.isArray(items) || items.length === 0) return empty;
   try {
     const injection = await withTimeout(
@@ -1054,7 +1063,8 @@ async function downloadImagesForTab(tabId, items) {
       "图片下载",
     );
     const results = injection && injection[0] ? injection[0].result : null;
-    return collectImageAssetsFromPage(items, Array.isArray(results) ? results : []);
+    const collected = collectImageAssetsFromPage(items, Array.isArray(results) ? results : []);
+    return { ...collected, urlNames: collected.urlNames || [] };
   } catch (error) {
     const detail = error instanceof TimeoutError ? "下载超时" : describeError(error);
     return {
@@ -1063,6 +1073,7 @@ async function downloadImagesForTab(tabId, items) {
       downloaded: 0,
       failed: items.length,
       skipped: 0,
+      urlNames: [],
     };
   }
 }
@@ -1086,11 +1097,13 @@ async function stageClipForWeb({ mode, body, imageDownload }) {
   // 拿不到字节的图**不进 assets[]**、正文里的原始 URL 原样保留、原因进 warnings（绝不发必拒的形状）。
   let assets = [];
   let warnings = [];
+  let imageNames = [];
   if (imageDownload) {
     const candidates = await imagesForStage(tab.id, normalized, pickedElement, extraction);
     const downloaded = await downloadImagesForTab(tab.id, candidates.items || []);
     assets = downloaded.assets;
     warnings = [...downloaded.warnings];
+    imageNames = downloaded.urlNames || [];
     // 连「候选地址」都取不到的（data: / 懒加载没填 / 超过 32 条）也如实说一句
     const missing = Number(candidates.dropped) || 0;
     if (missing > 0) warnings.push(`有 ${missing} 张图片没有可下载的地址，正文里保留原始网址。`);
@@ -1103,6 +1116,11 @@ async function stageClipForWeb({ mode, body, imageDownload }) {
     assets,
     warnings,
   });
+  // ③ 与本地桥同一条纪律：拿到字节的那批引用改写成 `assets/<名>`，
+  // 剪藏页提交时才能被 `rewriteAssetRefs()` 映射到真正落盘的文件。
+  if (imageNames.length) {
+    request.body = rewriteRemoteImageRefs(request.body, imageNames);
+  }
 
   const state = await readState();
   const probe = await discover({ preferredPort: state.port, ports: BRIDGE_PORTS });
@@ -1272,6 +1290,8 @@ async function loadSnapshot() {
       folder: probed.stored.folder || "",
       tags: probed.stored.tags || [],
       mode: probed.stored.mode || "page",
+      // ③ 图片开关：popup 以此初始化（记住上一次的选择，用户明确要的记忆功能）。
+      imageDownload: Boolean(probed.stored.imageDownload),
       hasToken: Boolean(probed.stored.token),
       // M2：只读回显的尾 4 位从**唯一真源**（已保存的令牌）推导 —— 粘贴后立刻 load() 就是真值，
       // 不再出现「刚粘贴完显示 ????」这种界面说假话的错值。
@@ -1434,6 +1454,11 @@ async function handle(message) {
     }
     case "opennote:pick":
       return { ok: true, reply: await startPick() };
+    case "opennote:set-image-download": {
+      // ③ 图片开关的记忆：popup 每次打开从快照初始化，切换即落 chrome.storage.local。
+      await mutate(() => ({ imageDownload: Boolean(message.value) }));
+      return { ok: true };
+    }
     case "opennote:pick-cancelled":
       await mutate(() => ({ pickArmedAt: null }));
       return { ok: true };

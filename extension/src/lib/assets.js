@@ -154,7 +154,10 @@ export function bytesFromBase64(base64) {
  *
  * @param {Array<{url:string}>} items 图片候选清单（与 `extract-page.js` 的 `collectImages` 同源）
  * @param {Array<{url:string, ok:boolean, base64?:string, byteLength?:number, mime?:string|null, error?:string}>} results
- * @returns {{assets:Array<{name:string,mime:string,dataBase64:string}>, warnings:string[], downloaded:number, failed:number, skipped:number}}
+ * @returns {{assets:Array<{name:string,mime:string,dataBase64:string}>, warnings:string[], downloaded:number, failed:number, skipped:number, urlNames:Array<{url:string,name:string}>}}
+ *   `urlNames` 是**成功那批**的 `url → assets[].name` 映射：正文引用改写要用它，
+ *   而且**必须一一对应**（两个不同 URL 撞同一个 basename 时，第二个改名 `x-2.png`，
+ *   否则两处引用都会指到同一张图 —— 那是「图串了」的经典成因）。
  */
 export function collectImageAssetsFromPage(items, results, options = {}) {
   const {
@@ -164,6 +167,28 @@ export function collectImageAssetsFromPage(items, results, options = {}) {
   } = options;
   const assets = [];
   const warnings = [];
+  const urlNames = [];
+  const used = new Set();
+  /** 同一个 basename 只允许一次：第二次起 `名字-2.png`、`名字-3.png`（与 02 §2.5 的命名习惯一致）。 */
+  const uniqueName = (base) => {
+    if (!used.has(base)) {
+      used.add(base);
+      return base;
+    }
+    const dot = base.lastIndexOf(".");
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const ext = dot > 0 ? base.slice(dot) : "";
+    for (let index = 2; index < 100; index += 1) {
+      const candidate = `${stem}-${index}${ext}`;
+      if (!used.has(candidate)) {
+        used.add(candidate);
+        return candidate;
+      }
+    }
+    const fallback = `${stem}-${Date.now().toString(36)}${ext}`;
+    used.add(fallback);
+    return fallback;
+  };
   const byUrl = new Map();
   for (const result of Array.isArray(results) ? results : []) {
     if (result && typeof result.url === "string") byUrl.set(result.url, result);
@@ -213,7 +238,8 @@ export function collectImageAssetsFromPage(items, results, options = {}) {
     }
     /* MIME 以本地重嗅为准（不信任注入环境自报的 `mime`，桥那边也会再判一次）。 */
     const mime = sniffMime(bytes) || mimeFromHeader(result.mime);
-    const built = assetFromBytes({ bytes, mime, name: assetNameOf(url, mime), url });
+    const name = uniqueName(assetNameOf(url, mime));
+    const built = assetFromBytes({ bytes, mime, name, url });
     if (built.error) {
       failed += 1;
       warnings.push(`图片没能保存（${built.error}），正文里保留原始网址：${url}`);
@@ -221,9 +247,37 @@ export function collectImageAssetsFromPage(items, results, options = {}) {
     }
     total += bytes.length;
     assets.push(built.asset);
+    urlNames.push({ url, name: built.asset.name });
   }
   if (skipped > 0) {
     warnings.push(`只下载了前 ${assets.length} 张图片，其余 ${skipped} 张在正文里保留原始网址。`);
   }
-  return { assets, warnings, downloaded: assets.length, failed, skipped };
+  return { assets, warnings, downloaded: assets.length, failed, skipped, urlNames };
+}
+
+/**
+ * 正文里的**远程图片引用**改写成本地落名（`![alt](<原始网址>)` → `![alt](assets/<名>)`）。
+ *
+ * 为什么必须做：应用侧的 `rewriteAssetRefs()`（契约 §3.4）只认两种**客户端写法** ——
+ * `./assets/<名>` 与裸名 `](<名>)`。远程 URL 不在其中，所以「字节到手了、却没有任何东西
+ * 把正文指向那张图」—— 图片落盘成孤儿，正文继续指着一个桌面 CSP `img-src 'self' file:
+ * data: blob:` 根本加载不了的地址（用户实测：桌面端没有显示）。
+ *
+ * 只改写**真的拿到字节那批**（`urlNames` 就是那批）：拿不到字节的引用原样保留，
+ * 与「逐条降级 + warnings 如实说」完全一致；应用侧还有一层兜底（设置开着时自己下载）。
+ *
+ * 精确整串替换（`split/join`，不是正则）：URL 里的 `?`、`&`、`%`、`(` 都不是正则安全的，
+ * 而这些 URL 是从页面里原样抽出来的。
+ */
+export function rewriteRemoteImageRefs(body, urlNames) {
+  let next = String(body || "");
+  for (const entry of Array.isArray(urlNames) ? urlNames : []) {
+    const url = entry && typeof entry.url === "string" ? entry.url : "";
+    const name = entry && typeof entry.name === "string" ? entry.name : "";
+    if (!url || !name) continue;
+    next = next.split(`](${url})`).join(`](assets/${name})`);
+    // 尖括号写法 `](<url>)`（URL 带空格/括号时页面可能这么给）
+    next = next.split(`](<${url}>)`).join(`](assets/${name})`);
+  }
+  return next;
 }
