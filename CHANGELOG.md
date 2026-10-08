@@ -10,6 +10,17 @@
 
 （下一批改动写这里。发布时把这一节落成 `## [x.y.z] - 日期`，并跑 `pnpm release:version x.y.z`。）
 
+## [0.8.2] - 2026-10-08
+
+### 修复
+
+- **补回 `Sidebar.tsx` 的过滤接线**（`v0.8.0` / `v0.8.1` 两个 tag 因此构建不出来，**都没有产出
+  任何 Release 资产，请不要使用**）：两次「按 hunk 拆分提交」时，排除关键词里的 `OpenNote`
+  把 `onOpenNote` 也一并匹配，`Sidebar.tsx` 的 15 个 hunk 被删掉 7 个（`TreeFilter` 声明、
+  `TreeProps.filter`、文件页签的 `filter={nameFilter}`、SearchBody 的 `tree` 实参等），
+  于是打 tag 的那棵树 `tsc` 过不了，release 流水线在类型检查处失败。
+  本版补回这些改动；**功能与 0.8.0 的说明完全一致**（见下面 0.8.0 一节），只多这一处修复。
+
 ## [0.8.1] - 2026-10-08
 
 ### 修复
