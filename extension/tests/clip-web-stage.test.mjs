@@ -24,7 +24,8 @@ import { test } from "node:test";
 
 import { startMockBridge } from "../tools/mock-bridge.mjs";
 import { postClipStage } from "../src/lib/bridge.js";
-import { collectImageAssets, sniffMime } from "../src/lib/assets.js";
+import { collectImageAssetsFromPage, sniffMime } from "../src/lib/assets.js";
+import { fetchImagesInPage } from "../src/content/fetch-images.js";
 import {
   IMAGE_DOWNLOAD_DEFAULT,
   STAGE_REQUEST_KEYS,
@@ -158,7 +159,11 @@ test("③ 下载成功：真字节 → {name, mime, dataBase64}，base64 能还�
       response.writeHead(404).end("nope");
     },
     async (base) => {
-      const { assets, warnings, downloaded, failed } = await collectImageAssets([{ url: `${base}/ok.png` }]);
+      // 0.4.0 起字节由**页面侧**抓（fetchImagesInPage），组装交给 collectImageAssetsFromPage ——
+      // 两层在这里串起来测：页面抓到的就是会进信封的。
+      const url = `${base}/ok.png`;
+      const results = await fetchImagesInPage({ items: [{ url }] });
+      const { assets, warnings, downloaded, failed } = collectImageAssetsFromPage([{ url }], results);
       assert.equal(downloaded, 1);
       assert.equal(failed, 0);
       assert.deepEqual(warnings, []);
@@ -196,16 +201,16 @@ test("③ 降级：服务器报错 / 不是图片 / 超时 / 太大 —— 一�
       response.writeHead(404).end("nope");
     },
     async (base) => {
-      const result = await collectImageAssets(
-        [
-          { url: `${base}/error.png` },
-          { url: `${base}/text.txt` },
-          { url: `${base}/big.png` },
-          { url: `${base}/slow.png` },
-          { url: `${base}/ok.png` },
-        ],
-        { timeoutMs: 300, maxBytes: 1024 },
-      );
+      const items = [
+        { url: `${base}/error.png` },
+        { url: `${base}/text.txt` },
+        { url: `${base}/big.png` },
+        { url: `${base}/slow.png` },
+        { url: `${base}/ok.png` },
+      ];
+      // 页面侧把单件上限放宽（组装侧才是判定产地），超时仍由页面侧真实发生。
+      const results = await fetchImagesInPage({ items, timeoutMs: 300, maxBytes: 1024 * 1024 * 1024 });
+      const result = collectImageAssetsFromPage(items, results, { maxBytes: 1024 });
       assert.deepEqual(result.assets, [], "一张都没拿到字节 ⇒ assets 必须为空（不许退化成 {url,alt}）");
       assert.equal(result.failed, 5);
       assert.ok(result.warnings.length >= 5, "每个失败都要有自己的那句话");

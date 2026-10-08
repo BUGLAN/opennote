@@ -1128,6 +1128,8 @@ async function submit() {
     // 必须原样进信封，而不是剪藏时又用回原始抽取结果（改了不生效是最糟的一种假开关）。
     // 没改过时它就是抽取结果本身，行为与 M2 一致。
     body: payload.body,
+    // ③ 图片开关：勾上时 background 会在页面里把图片抓成字节再进信封（见 background.js）。
+    imageDownload,
   });
   busy = false;
   if (!response || !response.reply) {
@@ -1253,6 +1255,21 @@ function applyReply(reply) {
     if (reply.path && snapshot && snapshot.settings) {
       const list = Array.isArray(snapshot.settings.notePaths) ? snapshot.settings.notePaths : [];
       snapshot.settings.notePaths = [reply.path, ...list.filter((item) => item !== reply.path)].slice(0, 20);
+    }
+    // ③ 图片降级的逐条原因：**不静默、也不自动关窗** —— 自动 2 秒关窗会把这些话一起带走。
+    // 与网页版通道的 warnings 同一处理：摆在用户眼前，给「打开那条笔记 / 再剪一段」。
+    const warnings = Array.isArray(reply.warnings) ? reply.warnings.filter((item) => item) : [];
+    if (warnings.length) {
+      const plan = planForState(STATE.CONNECTED);
+      plan.block = { kind: "error", message: warnings.join(" "), next: null, code: null };
+      plan.actions = reply.path
+        ? [{ id: "open-note", label: "打开那条笔记", primary: true, path: reply.path }]
+        : [{ id: "again", label: "再剪一段", primary: true }];
+      plan.primary = null;
+      plan.rows = false;
+      plan.preview = false;
+      render(plan);
+      return;
     }
     const plan = planForState(STATE.SUCCESS, {
       folderLabel: reply.folderLabel || folderLabel(),

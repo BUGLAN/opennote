@@ -222,6 +222,9 @@ export function newImportId() {
  * @param {boolean} [input.selection] **判定输入**，不是纯展示：true=选区，false=整页
  * @param {string|null} [input.folder]
  * @param {string[]|string} [input.tags]
+ * @param {Array<{name:string,mime:string,dataBase64:string}>} [input.assets]
+ *   ③ 图片附件（页面侧抓到的字节）。只接受三字段齐全的内联形状，非法条目**直接丢弃**
+ *   （与 lib/stage.js 的 normalizeAsset 同一纪律：不许把 `{url}` 这种契约外形状发出去）。
  * @param {string} [input.version]
  */
 export function buildEnvelope(input) {
@@ -239,6 +242,7 @@ export function buildEnvelope(input) {
     folder = null,
     tags = [],
     notePath = null,
+    assets = [],
     version = CLIENT_VERSION,
   } = input || {};
 
@@ -264,7 +268,20 @@ export function buildEnvelope(input) {
       notePath: typeof notePath === "string" && notePath.trim() ? notePath.trim() : null,
     },
     tags: filterTags(tags),
-    assets: [],
+    // ③ 附件：只收 `{name, mime, dataBase64}` 三字段齐全的条目（02 §2.5 冻结形状），
+    // 上限（件数 / 大小 / 合计）由组装方（lib/assets.js）负责，这里只做形状兜底。
+    assets: (Array.isArray(assets) ? assets : [])
+      .filter(
+        (asset) =>
+          asset &&
+          typeof asset.name === "string" &&
+          asset.name.trim() !== "" &&
+          typeof asset.mime === "string" &&
+          asset.mime.trim() !== "" &&
+          typeof asset.dataBase64 === "string" &&
+          asset.dataBase64 !== "",
+      )
+      .map((asset) => ({ name: asset.name, mime: asset.mime, dataBase64: asset.dataBase64 })),
     client: { name: CLIENT_NAME, version: String(version || CLIENT_VERSION) },
   };
   // 注意 `conflict` **默认不写**——这是本契约里最容易踩的一条：

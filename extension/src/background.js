@@ -33,8 +33,15 @@ import {
 import { readState, mutate } from "./lib/store.js";
 // A（网页版剪藏页）：暂存请求体的**形状**只有这一个产地（纯函数、可执行断言）。
 import { IMAGE_DOWNLOAD_DEFAULT, buildStageRequest as stageRequest, openUrlOf } from "./lib/stage.js";
-// ③ 图片开关：字节层的下载与降级（拿不到字节就不发这一条，正文保留原始 URL + warnings）。
-import { collectImageAssets } from "./lib/assets.js";
+// ③ 图片开关：字节由**页面侧**抓（content/fetch-images.js，页面自己的源没有跨站问题），
+// 这里只做注入与组装（上限判定、失败降级全在 lib/assets.js）。
+import {
+  collectImageAssetsFromPage,
+  MAX_ASSET_BYTES,
+  MAX_ASSETS,
+  MAX_ASSETS_TOTAL_BYTES,
+} from "./lib/assets.js";
+import { fetchImagesInPage } from "./content/fetch-images.js";
 // 元素选择失败原因（四因分离）的**单一文案来源**，popup 也从这里取（task-21）
 import { pickFailCopy } from "./lib/pick.js";
 import { makeQueueItem, enqueue, removeItem, markAttempt, takeBatch } from "./lib/queue.js";
@@ -333,7 +340,7 @@ function composeDelivery({ extraction, mode, pickedElement = null }) {
   };
 }
 
-function buildClipEnvelope({ extraction, mode, title, folder, tags, importId, version, notePath, conflict, pickedElement = null, bodyOverride = null }) {
+function buildClipEnvelope({ extraction, mode, title, folder, tags, importId, version, notePath, conflict, pickedElement = null, assets = [], bodyOverride = null }) {
   // 正文就是抽取结果本身（M2 起没有模板 `bodyFormat`、没有「## 高亮」小节）；
   // task-29 ②：用户在 popup 里改过正文时，`bodyOverride` 优先（所见即所剪）。
   const body = resolveBody(extraction, mode, pickedElement, bodyOverride);
@@ -353,6 +360,7 @@ function buildClipEnvelope({ extraction, mode, title, folder, tags, importId, ve
     tags,
     notePath: notePath || null,
     conflict: conflict || null,
+    assets,
     version,
   });
 }
@@ -649,7 +657,7 @@ async function openPopup() {
  * 否则返回 `{ mode, envelope, composed }` 交给调用方投递。
  */
 async function buildEnvelopeForTab(input) {
-  const { mode = "selection", overrides = {}, tabId = null } = input || {};
+  const { mode = "selection", overrides = {}, tabId = null, imageDownload = IMAGE_DOWNLOAD_DEFAULT } = input || {};
   const tab = tabId !== null && tabId !== undefined ? await chrome.tabs.get(tabId).catch(() => null) : await activeTab();
   if (!tab || tab.id === undefined || isRestrictedUrl(tab.url)) {
     return { reply: { status: "restricted", code: "IMP-1006", label: "这个页面不允许插件读取内容。", state: STATE.RESTRICTED_PAGE } };
@@ -665,6 +673,19 @@ async function buildEnvelopeForTab(input) {
   const pickedElement = mode === "element" ? await currentPicked(extraction.url) : null;
   const composed = composeDelivery({ extraction, mode, pickedElement });
 
+  // ③ 图片开关：开关打开时把清单交给**页面侧**抓成字节（页面在「剪藏时」的网络环境里，
+  // 同源图直接可取）。失败逐条降级：不进 assets、正文保留原始网址、原因随回执带给用户。
+  let assets = [];
+  let assetWarnings = [];
+  if (imageDownload) {
+    const candidates = await imagesForStage(tab.id, mode, pickedElement, extraction);
+    const downloaded = await downloadImagesForTab(tab.id, candidates.items || []);
+    assets = downloaded.assets;
+    assetWarnings = [...downloaded.warnings];
+    const missing = Number(candidates.dropped) || 0;
+    if (missing > 0) assetWarnings.push(`有 ${missing} 张图片没有可下载的地址，正文里保留原始网址。`);
+  }
+
   const envelope = buildClipEnvelope({
     extraction,
     mode,
@@ -677,6 +698,7 @@ async function buildEnvelopeForTab(input) {
     importId: overrides.importId,
     // task-29 ②：改过的正文（`overrides.body`）优先于抽取结果 —— 所见即所剪。
     bodyOverride: overrides.body,
+    assets,
     version: chrome.runtime.getManifest().version,
   });
 
@@ -704,19 +726,19 @@ async function buildEnvelopeForTab(input) {
       },
     };
   }
-  return { mode, envelope, composed };
+  return { mode, envelope, composed, assetWarnings };
 }
 
 /**
  * 主流程：抽取 → 建信封 → 投递到**本地接口**（或暂存）。
- * @param {{mode:"selection"|"page", overrides?:object, tabId?:number}} input
+ * @param {{mode:"selection"|"page", overrides?:object, tabId?:number, imageDownload?:boolean}} input
  */
 export async function clipActiveTab(input) {
   const built = await buildEnvelopeForTab(input);
   if (built.reply) return built.reply;
   const { mode, envelope, composed } = built;
   await mutate(() => ({ folder: composed.folder || "", tags: composed.tags, mode }));
-  return deliver({
+  const reply = await deliver({
     envelope,
     folderLabel: folderLabelOf(composed.folder),
     noteTitle: envelope.title,
@@ -724,6 +746,12 @@ export async function clipActiveTab(input) {
     conflict: composed.conflict,
     notePath: composed.notePath,
   });
+  // ③ 图片降级的逐条原因：只在**成功**回执上如实带上（失败时错误块本身就是原因），
+  // popup 把它们摆在成功消息下面 —— 不静默，也不夸大成失败。
+  if (Array.isArray(built.assetWarnings) && built.assetWarnings.length && reply && !reply.status?.startsWith?.("error")) {
+    reply.warnings = built.assetWarnings;
+  }
+  return reply;
 }
 
 /* ────────── 页面内桥：把这次剪藏交给**已打开的网页版**（契约 02 §5.7 / FR-39） ────────── */
@@ -996,6 +1024,50 @@ async function imagesForStage(tabId, mode, picked, extraction) {
 }
 
 /**
+ * 把一个标签页里的图片清单**真的抓成字节**：注入 `content/fetch-images.js`（页面侧 fetch，
+ * 同源直接可取、带 CORS 的跨域也能取 —— background 的 fetch 受 host_permissions 限制，
+ * 对任意网站必然失败，那是「图片一起保存」从不生效的根因，0.4.0 修掉）。
+ *
+ * 上限数字与 `lib/assets.js` 同一份口径；页面侧那份只是「少传必拒的大 payload」的预筛选，
+ * **不作数** —— 组装与逐条重验都在 `collectImageAssetsFromPage()`。
+ * 注入失败 ≠ 页面受限：如实降级成「一张都没带上 + 一句原因」，绝不静默成功。
+ */
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 25000;
+async function downloadImagesForTab(tabId, items) {
+  const empty = { assets: [], warnings: [], downloaded: 0, failed: 0, skipped: 0 };
+  if (!Array.isArray(items) || items.length === 0) return empty;
+  try {
+    const injection = await withTimeout(
+      chrome.scripting.executeScript({
+        target: { tabId },
+        func: fetchImagesInPage,
+        args: [
+          {
+            items,
+            maxBytes: MAX_ASSET_BYTES,
+            totalMaxBytes: MAX_ASSETS_TOTAL_BYTES,
+            limit: MAX_ASSETS,
+          },
+        ],
+      }),
+      IMAGE_DOWNLOAD_TIMEOUT_MS,
+      "图片下载",
+    );
+    const results = injection && injection[0] ? injection[0].result : null;
+    return collectImageAssetsFromPage(items, Array.isArray(results) ? results : []);
+  } catch (error) {
+    const detail = error instanceof TimeoutError ? "下载超时" : describeError(error);
+    return {
+      assets: [],
+      warnings: [`图片没能下载（${detail}），正文里保留原始网址。`],
+      downloaded: 0,
+      failed: items.length,
+      skipped: 0,
+    };
+  }
+}
+
+/**
  * 暂存一次剪藏并换回 `openUrl`。失败**不打开页面**（打开一个坏页面比失败更糟），
  * 但必须回一句能读懂的中文（绝不静默）。
  */
@@ -1010,13 +1082,13 @@ async function stageClipForWeb({ mode, body, imageDownload }) {
   }
   const normalized = normalizeMode(mode);
   const pickedElement = normalized === "element" ? await currentPicked(extraction.url) : null;
-  // ③ 打开时：先**真的把字节下下来**（拿不到就降级），再组请求体。
+  // ③ 打开时：把清单交给**页面侧**真的抓成字节（拿不到就逐条降级），再组请求体。
   // 拿不到字节的图**不进 assets[]**、正文里的原始 URL 原样保留、原因进 warnings（绝不发必拒的形状）。
   let assets = [];
   let warnings = [];
   if (imageDownload) {
     const candidates = await imagesForStage(tab.id, normalized, pickedElement, extraction);
-    const downloaded = await collectImageAssets(candidates.items || []);
+    const downloaded = await downloadImagesForTab(tab.id, candidates.items || []);
     assets = downloaded.assets;
     warnings = [...downloaded.warnings];
     // 连「候选地址」都取不到的（data: / 懒加载没填 / 超过 32 条）也如实说一句
@@ -1254,6 +1326,9 @@ async function handle(message) {
       const reply = await clipActiveTab({
         mode: message.mode,
         overrides: { title: message.title, importId: message.importId, body: message.body },
+        // ③ 图片开关：默认值与网页版通道同一份常量（lib/stage.js），popup 不传时兜底。
+        imageDownload:
+          message.imageDownload === undefined ? IMAGE_DOWNLOAD_DEFAULT : Boolean(message.imageDownload),
       });
       return { ok: true, reply };
     }

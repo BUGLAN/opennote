@@ -11,11 +11,15 @@
  *   桥会直接 422 `IMP-4003 detail.field = "assets[0].name"`，用户看到的会是一句「字段不合法」
  *   且不打开页面，恰好违反 ③ 的降级口径）。
  *
- * 权限事实（决定了「降级是常态」）：`host_permissions` 只有 127.0.0.1 的 10 条；
- * `activeTab` 只给**当前标签所在源**的临时权限 ⇒ 第三方 CDN 上的图**大概率拿不到字节**。
- * 那是**预期内的降级**，不是要靠加权限去修的缺陷（红线：不新增权限、零依赖、新增令牌 0）。
+ * 权限事实（决定了「在哪抓字节」）：`host_permissions` 只有 127.0.0.1 的 10 条，
+ * background 的 fetch 对任意网站**必然**跨站失败 —— 用户实测「勾了图片一起保存，
+ * 一张图都没落盘」就是这个原因。0.4.0 起字节改由**页面侧**抓（`content/fetch-images.js`，
+ * 内容脚本跑在页面自己的源上：同源直接可取，带 CORS 的跨域图也能取），
+ * 这里只负责把回传的 `{url, ok, base64, …}` 结果**组装成 `assets[]`** 并执行全部上限判定。
+ * 真跨域且无 CORS 的图仍然拿不到 —— 那是**预期内的降级**，不是要靠加权限去修的缺陷
+ * （红线：不新增权限、零依赖、新增令牌 0）。
  *
- * 纯函数 + 注入 fetch：所以「下载成功 / 各类失败降级」都能在 node 里用真回环服务端验。
+ * 纯函数：结果组装不碰网络，所以「成功 / 各类失败降级」都能在 node 里逐条验。
  */
 
 /** 02 §2.2：单件解码后 ≤ 8 MiB。 */
@@ -126,26 +130,48 @@ export function downloadFailureReason(error) {
   return "下载失败";
 }
 
+/** 标准 base64（不含 `data:` 前缀）→ Uint8Array；解码失败返回 null（调用方降级）。 */
+export function bytesFromBase64(base64) {
+  const raw = String(base64 || "");
+  if (!raw) return null;
+  try {
+    const binary = atob(raw);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * 逐张下载 → 逐张产出 02 §2.5 形状的资产。
+ * 把**页面侧**抓回的字节结果（`content/fetch-images.js` 的返回值）组装成 02 §2.5 形状的资产。
+ *
+ * 这里是 `assets[]` 的**唯一组装产地**，全部上限在这里执行：
+ * 单件 ≤ 8 MiB、合计 ≤ 6 MiB、件数 ≤ 32 —— 页面侧的那份拷贝只是为了少传必拒的大 payload，
+ * **不作数**（不信任注入环境的自报），这里逐条重验。
  * **失败一律降级**：这一条不进 `assets`，正文里的原始 URL 保持不变，原因进 `warnings`。
- * @returns {Promise<{assets:Array<{name:string,mime:string,dataBase64:string}>, warnings:string[], downloaded:number, failed:number}>}
+ *
+ * @param {Array<{url:string}>} items 图片候选清单（与 `extract-page.js` 的 `collectImages` 同源）
+ * @param {Array<{url:string, ok:boolean, base64?:string, byteLength?:number, mime?:string|null, error?:string}>} results
+ * @returns {{assets:Array<{name:string,mime:string,dataBase64:string}>, warnings:string[], downloaded:number, failed:number, skipped:number}}
  */
-export async function collectImageAssets(items, options = {}) {
+export function collectImageAssetsFromPage(items, results, options = {}) {
   const {
-    fetchImpl = globalThis.fetch,
-    timeoutMs = 8000,
     maxBytes = MAX_ASSET_BYTES,
     totalMaxBytes = MAX_ASSETS_TOTAL_BYTES,
     limit = MAX_ASSETS,
   } = options;
   const assets = [];
   const warnings = [];
+  const byUrl = new Map();
+  for (const result of Array.isArray(results) ? results : []) {
+    if (result && typeof result.url === "string") byUrl.set(result.url, result);
+  }
   let total = 0;
   let failed = 0;
   let skipped = 0;
-  const list = Array.isArray(items) ? items : [];
-  for (const item of list) {
+  for (const item of Array.isArray(items) ? items : []) {
     const url = item && typeof item.url === "string" ? item.url : "";
     if (!url) {
       failed += 1;
@@ -153,57 +179,48 @@ export async function collectImageAssets(items, options = {}) {
       continue;
     }
     if (assets.length >= limit) {
-      skipped += 1; // 件数上限：不下载、不报错，最后由一句汇总如实说清
+      skipped += 1; // 件数上限：不报错，最后由一句汇总如实说清
       continue;
     }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetchImpl(url, {
-        signal: controller.signal,
-        credentials: "omit",
-        cache: "no-store",
-        redirect: "follow",
-      });
-      if (!response || !response.ok) {
-        failed += 1;
-        warnings.push(`图片没能下载（服务器返回 ${response ? response.status : "无响应"}），正文里保留原始网址：${url}`);
-        continue;
-      }
-      const declared = Number(response.headers && response.headers.get ? response.headers.get("content-length") : 0);
-      if (declared && declared > maxBytes) {
-        failed += 1;
-        warnings.push(`图片太大（超过 8 MiB），正文里保留原始网址：${url}`);
-        continue;
-      }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.length > maxBytes) {
-        failed += 1;
-        warnings.push(`图片太大（超过 8 MiB），正文里保留原始网址：${url}`);
-        continue;
-      }
-      if (total + bytes.length > totalMaxBytes) {
-        failed += 1;
-        warnings.push(`这一页要下载的图片合计太大（超过 ${Math.round(totalMaxBytes / 1024 / 1024)} MiB），剩下的在正文里保留原始网址：${url}`);
-        continue;
-      }
-      const headerMime = response.headers && response.headers.get ? response.headers.get("content-type") : null;
-      const sniffed = sniffMime(bytes);
-      const mime = sniffed || mimeFromHeader(headerMime);
-      const built = assetFromBytes({ bytes, mime, name: assetNameOf(url, mime), url });
-      if (built.error) {
-        failed += 1;
-        warnings.push(`图片没能保存（${built.error}），正文里保留原始网址：${url}`);
-        continue;
-      }
-      total += bytes.length;
-      assets.push(built.asset);
-    } catch (error) {
+    const result = byUrl.get(url);
+    if (!result) {
       failed += 1;
-      warnings.push(`图片没能下载（${downloadFailureReason(error)}），正文里保留原始网址：${url}`);
-    } finally {
-      clearTimeout(timer);
+      warnings.push(`图片没能下载（页面没有返回这张图的结果），正文里保留原始网址：${url}`);
+      continue;
     }
+    if (!result.ok) {
+      failed += 1;
+      warnings.push(`图片没能下载（${result.error || "下载失败"}），正文里保留原始网址：${url}`);
+      continue;
+    }
+    const bytes = bytesFromBase64(result.base64);
+    if (!bytes || bytes.length === 0) {
+      failed += 1;
+      warnings.push(`图片没能保存（空文件），正文里保留原始网址：${url}`);
+      continue;
+    }
+    if (bytes.length > maxBytes) {
+      failed += 1;
+      warnings.push(`图片太大（超过 8 MiB），正文里保留原始网址：${url}`);
+      continue;
+    }
+    if (total + bytes.length > totalMaxBytes) {
+      failed += 1;
+      warnings.push(
+        `这一页要下载的图片合计太大（超过 ${Math.round(totalMaxBytes / 1024 / 1024)} MiB），剩下的在正文里保留原始网址：${url}`,
+      );
+      continue;
+    }
+    /* MIME 以本地重嗅为准（不信任注入环境自报的 `mime`，桥那边也会再判一次）。 */
+    const mime = sniffMime(bytes) || mimeFromHeader(result.mime);
+    const built = assetFromBytes({ bytes, mime, name: assetNameOf(url, mime), url });
+    if (built.error) {
+      failed += 1;
+      warnings.push(`图片没能保存（${built.error}），正文里保留原始网址：${url}`);
+      continue;
+    }
+    total += bytes.length;
+    assets.push(built.asset);
   }
   if (skipped > 0) {
     warnings.push(`只下载了前 ${assets.length} 张图片，其余 ${skipped} 张在正文里保留原始网址。`);

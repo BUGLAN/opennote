@@ -53,12 +53,15 @@ function topLevelDeclarations(source) {
   return decls;
 }
 
-for (const file of ["src/content/extract-page.js", "src/content/clipboard.js"]) {
+for (const file of ["src/content/extract-page.js", "src/content/clipboard.js", "src/content/fetch-images.js"]) {
   test(`${file} 只有 1 个顶层声明（可安全注入）`, () => {
     const source = readFileSync(join(ROOT, file), "utf8");
     const decls = topLevelDeclarations(source);
     assert.equal(decls.length, 1, `顶层声明不止一个：\n${decls.join("\n")}`);
-    assert.match(decls[0], /^export function extractPage\(options\)|^export function copyInPage\(text\)/);
+    assert.match(
+      decls[0],
+      /^export (async )?function (extractPage\(options\)|copyInPage\(text\)|fetchImagesInPage\(options\))/,
+    );
   });
 
   test(`${file} 没有 import / require / eval / 远程地址`, () => {

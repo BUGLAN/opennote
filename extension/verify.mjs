@@ -259,6 +259,7 @@ const EXPECTED_DIST_FILES = [
   "background.js",
   "content/clipboard.js",
   "content/extract-page.js",
+  "content/fetch-images.js",
   "content/inpage-bridge.js",
   "content/picker.js",
   "icons/icon128.png",
@@ -926,7 +927,7 @@ if (stageModule.IMAGE_DOWNLOAD_DEFAULT !== false) {
 }
 // ③ 的字节层必须在产物里（拿到字节才发），且不许出现「按网址造资产」的老写法
 const assetsDist = readDist("dist/lib/assets.js");
-for (const needle of ["export async function collectImageAssets(", "export function assetFromBytes(", "export function sniffMime("]) {
+for (const needle of ["export function collectImageAssetsFromPage(", "export function assetFromBytes(", "export function sniffMime("]) {
   if (!assetsDist.includes(needle)) fail(GROUP_V17A, `dist/lib/assets.js 缺少 ${needle}`);
 }
 if (/assets\.push\(\{\s*url/.test(readDist("dist/lib/stage.js")) || /assets\.push\(\{\s*url/.test(assetsDist)) {
