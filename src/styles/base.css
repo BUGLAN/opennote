@@ -256,6 +256,8 @@ kbd {
   justify-content: center;
   width: 22px;
   height: 22px;
+  /* 与 .empty__seal 同一份几何：SimSun 的「記」墨迹偏高，下移 0.15em 补回。 */
+  padding-top: 0.3em;
   border-radius: 5px;
   background: var(--accent);
   color: var(--accent-ink);
@@ -374,6 +376,8 @@ kbd {
   justify-content: center;
   width: 46px;
   height: 46px;
+  /* 与 .empty__seal 同一份几何：SimSun 的「記」墨迹偏高，下移 0.15em 补回。 */
+  padding-top: 0.3em;
   border-radius: 11px;
   background: var(--accent);
   color: var(--accent-ink);

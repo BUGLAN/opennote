@@ -1124,6 +1124,11 @@ mark.hit {
   justify-content: center;
   width: 52px;
   height: 52px;
+  /* flex 居中的是 em 框，而 SimSun 的「記」墨迹在 em 框里偏上 —— 实测墨迹中心
+     比方块中心高 0.15em（30px 字号时差 4.5px），字看起来浮在方块上半部。
+     padding-top 把内容区压矮，居中基整体下移半个 padding，正好补回；
+     用 em 计，随字号缩放（收件箱那枚 40px/23px 的变体直接继承这条）。 */
+  padding-top: 0.3em;
   margin-bottom: var(--s4);
   border-radius: 12px;
   background: var(--accent);
