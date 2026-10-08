@@ -49,8 +49,11 @@ import { Icon } from "./Icons";
 import { desktopBridge } from "../desktop/bridge";
 import { folderPathLabel, useLibrary } from "../data/library";
 import type { Folder, Id } from "../data/types";
-import { parentPath } from "../fs/paths";
+import { joinPath, parentPath } from "../fs/paths";
+import { decodeMarkdownHref, renderMarkdown } from "../lib/markdown";
+import { resolveImageSrc } from "../data/assets";
 import {
+  INBOX_DIR,
   INBOX_FAILED_TTL_MS,
   INBOX_FULL_MESSAGE,
   INBOX_LIMIT,
@@ -75,6 +78,12 @@ import { cn, formatBytes, formatDateTime, formatRelativeTime } from "../lib/util
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * 正文缓存上限（条）。缓存里是正文**原文**（契约单条上限 8 MiB），所以不能像 400 字摘要那版
+ * 一样无上限攒着；8 条足够覆盖「在几条之间来回比对」的真实用法。
+ */
+const BODY_CACHE_LIMIT = 8;
+
+/**
  * 筛选只有两栏（0.3.3 用户要求 #1）：`失败` 那一栏删掉，默认停在 `待确认`。
  * `failed` 条目不是不见了 —— 它们仍留在「全部」里，带原因、`还有 n 天` 与「丢弃」按钮
  * （`03` UI-03/S5：失败条目必须能在原地重试或丢弃）。
@@ -87,6 +96,24 @@ const FILTERS = [
 export type FilterId = (typeof FILTERS)[number]["id"];
 
 const FILTER_LABELS: Record<FilterId, string> = { all: "全部", pending: "待确认" };
+
+/**
+ * 右详情栏的两个标签页（0.4.x 用户要求：「红框所示位置增加两个 tab，默认为第一个预览，
+ * 第二个为信息」）。
+ *
+ * 为什么要有它：详情栏原来是一条**竖着堆到底**的长列（落点 → 来源信息 → 标签 → 附件 → 详情 →
+ * 正文预览），而「正文预览」被压在最底下、`max-height: 150px` —— 用户要看的正文反而要滚到最后
+ * 才看得见。切开之后：`预览`（默认）把整栏留给正文，`信息` 装那一整套元数据。
+ *
+ * 判据（`03` §UI-03 的 `C22`/`S14`）：两个 tab 的**标签逐字**是 `预览` / `信息`；默认选中 `预览`；
+ * 两个面板都在 DOM 里、非当前页带 `hidden`（不卸载 —— 保存到选择器是无状态受控控件，卸载会丢焦点）。
+ */
+const DETAIL_TABS = [
+  { id: "preview", label: "预览" },
+  { id: "info", label: "信息" },
+] as const;
+
+export type DetailTabId = (typeof DETAIL_TABS)[number]["id"];
 
 /** 「待确认」= 还没入库的条目（`pending` / `committing`）；`committed` / `failed` 不在这一栏。 */
 function needsReview(status: InboxEntry["status"]): boolean {
@@ -141,6 +168,38 @@ function errorMessage(error: unknown): string {
   if ("userMessage" in error) return String((error as { userMessage?: unknown }).userMessage ?? "");
   if (error instanceof Error) return error.message;
   return "";
+}
+
+/**
+ * 预览页里一张图的**处置方式**（纯函数，可逐条断言）。
+ *
+ * 两条事实决定了这里不能只画一个 `<img>` 了事：
+ *   1. 桌面 CSP 是 `img-src 'self' file: data: blob:` —— **远程图必然裂**。收件箱阶段正文里
+ *      可能还是原始网址（「剪藏配图」关着，或那张图当时没下下来）；
+ *   2. `assets/<名>` 这种客户端写法在条目里**不是**原样落盘的：`stageAssets()` 存的是
+ *      `assets/<hash8>-<名>`，正文引用与真实文件靠 `entry.json` 的 `assets[]`
+ *      （`name` → `file`）对上，**不靠名字推导**。
+ *
+ * 返回：
+ *   - `remote`：画出来必裂 → 退化成一句说明（`图片：{alt}`）；
+ *   - `ready` ：`data:` / `blob:`，`<img>` 直接用（只剩「加载失败」这一种可能，由 error 事件兜）；
+ *   - `local` ：条目相对引用 → 拿 `file` 去 `resolveImageSrc()`（读不到同样退化成说明）；
+ *   - `none`  ：空地址。
+ */
+export type PreviewImagePlan =
+  | { kind: "remote" }
+  | { kind: "ready" }
+  | { kind: "local"; file: string }
+  | { kind: "none" };
+
+export function planPreviewImage(src: string, staged: ReadonlyMap<string, string>): PreviewImagePlan {
+  const value = String(src || "").trim();
+  if (!value) return { kind: "none" };
+  if (/^https?:/i.test(value)) return { kind: "remote" };
+  if (/^(data:|blob:)/i.test(value)) return { kind: "ready" };
+  // `assets/<名>`（或裸名，`rewriteAssetRefs()` 认的两种客户端写法）→ 条目里真实落盘的路径。
+  const token = value.replace(/^\.\//, "");
+  return { kind: "local", file: staged.get(token.replace(/^assets\//, "")) ?? token };
 }
 
 /**
@@ -452,15 +511,20 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
   const [filter, setFilter] = useState<FilterId>(initialFilter ?? "pending");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /**
-   * 正文预览按**条目 id** 缓存（不是单个 `{id, text}`）。
+   * 右详情栏当前标签页（默认 `预览`）。**不随条目切换重置**：用户切到「信息」逐条比对落点/
+   * 来源时，每点一条就被弹回「预览」是最烦人的那种「聪明」。
+   */
+  const [tab, setTab] = useState<DetailTabId>("preview");
+  /**
+   * 正文**原文**按**条目 id** 缓存（不是单个 `{id, text}`）。
    *
-   * 单槽位那版每换一次条目都会先把预览清空、等 `readInboxDetail()` 回来再填上：
-   * 一帧没有「正文预览」这一块 → 详情栏高度跳一下，看起来就是「点一下闪一下」。
+   * 单槽位那版每换一次条目都会先把正文清空、等 `readInboxDetail()` 回来再填上：
+   * 一帧没有正文 → 详情栏高度跳一下，看起来就是「点一下闪一下」。
    * 外置正文（`body.md`）是收件箱的常态（`entry.json` 里的 `body` 被置空），所以这不是
-   * 罕见路径，而是每次点条目都会走。缓存之后：看过的条目瞬时出预览，没看过的只影响
+   * 罕见路径，而是每次点条目都会走。缓存之后：看过的条目瞬时出正文，没看过的只影响
    * 详情栏内部（面板本身固定高度，见 `app.css` 的 `.dialog--tall`）。
    */
-  const [previews, setPreviews] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const [bodies, setBodies] = useState<ReadonlyMap<string, string>>(() => new Map());
   const [busy, setBusy] = useState(false);
   /** 「保存到」的选择（`00` §6.14㉜）：只对当前条目生效，`folder: null` = 工作区根。 */
   const [folderPick, setFolderPick] = useState<{ id: string; folder: string | null } | null>(null);
@@ -470,6 +534,10 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
 
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  /** 详情栏的标签行（键盘移动时用它把焦点搬到新选中的那个 tab 上）。 */
+  const tabsRef = useRef<HTMLDivElement | null>(null);
+  /** 预览页渲染出来的文章本体（图片解析要走 DOM：`resolveImageSrc()` 结果只能回填给 `<img>`）。 */
+  const previewRef = useRef<HTMLElement | null>(null);
   const restoreRef = useRef<HTMLElement | null>(null);
 
   const counts = useMemo(() => {
@@ -495,6 +563,23 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
   const status = entry?.status ?? "pending";
   const committing = busy || status === "committing";
   const url = entry?.sourceUrl ?? "";
+
+  /* ------------------------------ 正文原文 ------------------------------ */
+
+  // 正文原文：缓存优先（切回来瞬时出），其次详情自带的（内联正文的条目）。
+  const bodyText = entry ? bodies.get(entry.id) ?? selected?.bodyText ?? "" : "";
+  // 正文是否为空只在正文读出来后判定（读盘期间不误禁用主按钮）。
+  const bodyLoaded = Boolean(entry) && (bodies.has(entry!.id) || Boolean(selected?.bodyText));
+  const bodyEmpty = Boolean(entry) && !entry!.title.trim() && bodyLoaded && !bodyText.trim();
+  /**
+   * 预览页 = 真 markdown 渲染（`src/lib/markdown.ts` 的同一套管线 + `prose` 排版），
+   * **不是纯文本**。0.4.x 用户实测：「预览为什么没有 markdown 预览…为啥还展示纯文本」。
+   * 摘要化（压平 + 截断）在数据层就已经是错的根源，见 `inbox.ts` 的 `bodyOf()`。
+   *
+   * 它必须**排在 effects 之前**：预览页的图片解析 effect 依赖渲染结果（`previewHtml`），
+   * 而 hooks 不许出现在 `if (!open) return null` 之后。
+   */
+  const previewHtml = useMemo(() => renderMarkdown(bodyText), [bodyText]);
 
   /* ---------------------------- 落点与说明句 ---------------------------- */
 
@@ -577,27 +662,31 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
     };
   }, [open]);
 
-  // 选中项变化 → 读正文预览（正文外置在 body.md，列表阶段不读）。读到的按条目 id 留下。
+  // 选中项变化 → 读正文原文（正文外置在 body.md，列表阶段不读）。读到的按条目 id 留下。
   useEffect(() => {
     if (!open || !selected) return;
     const id = selected.entry.id;
-    // 已经有预览（缓存里，哪怕缓存的是空串）或详情自带预览 → 不再读盘。
-    if (previews.has(id) || selected.bodyPreview) return;
+    // 已经有正文（缓存里，哪怕缓存的是空串）或详情自带正文 → 不再读盘。
+    if (bodies.has(id) || selected.bodyText) return;
     let alive = true;
     void readInboxDetail(id).then((detail) => {
       if (!alive || !detail) return;
-      const text = detail.bodyPreview;
-      setPreviews((current) => {
+      const text = detail.bodyText;
+      setBodies((current) => {
         if (current.get(id) === text) return current;
         const next = new Map(current);
+        next.delete(id); // 重新插入到末尾：Map 的插入顺序就是 LRU 顺序
         next.set(id, text);
+        // **缓存必须有上限**：缓存里现在是正文**原文**（契约单条上限 8 MiB），
+        // 不再是 400 字摘要 —— 点过 500 条就是几百 MB。只留最近看过的几条。
+        while (next.size > BODY_CACHE_LIMIT) next.delete(next.keys().next().value as string);
         return next;
       });
     });
     return () => {
       alive = false;
     };
-  }, [open, selected?.entry.id, selected?.bodyPreview, previews]);
+  }, [open, selected?.entry.id, selected?.bodyText, bodies]);
 
   // 打开时焦点落在左列表第一个条目上（mockup 520 行）。
   useEffect(() => {
@@ -606,6 +695,50 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
       listRef.current?.querySelector<HTMLElement>(".inbox__item.is-active") ?? dialogRef.current;
     node?.focus();
   }, [open, loading, selected?.entry.id]);
+
+  /**
+   * 预览页里的图片（0.4.x）：处置规则在 `planPreviewImage()` 里（纯函数、可断言），
+   * 这里只做 DOM 那一半 —— 能画的画出来，画不出来的换成一句说明。
+   * **绝不静默留个破图**（与扩展 popup 的 `imageBlock()` 同一条规矩）。
+   */
+  useEffect(() => {
+    const host = previewRef.current;
+    if (!host || !selected) return;
+    const baseDir = joinPath(INBOX_DIR, selected.dirName);
+    const staged = new Map(selected.assets.map((asset) => [asset.name, asset.file]));
+    let cancelled = false;
+    for (const img of Array.from(host.querySelectorAll("img"))) {
+      const alt = img.getAttribute("alt") || "";
+      const degrade = () => {
+        if (!img.isConnected) return;
+        const note = document.createElement("span");
+        note.className = "inbox__img-note";
+        note.textContent = alt ? `图片：${alt}` : "图片";
+        img.replaceWith(note);
+      };
+      const plan = planPreviewImage(decodeMarkdownHref(img.getAttribute("src") || ""), staged);
+      if (plan.kind === "none" || plan.kind === "remote") {
+        degrade();
+        continue;
+      }
+      if (plan.kind === "ready") {
+        img.addEventListener("error", degrade, { once: true });
+        continue;
+      }
+      void resolveImageSrc(plan.file, baseDir).then((url) => {
+        if (cancelled) return;
+        if (!url) {
+          degrade();
+          return;
+        }
+        img.addEventListener("error", degrade, { once: true });
+        img.setAttribute("src", url);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [previewHtml, selected?.dirName, selected?.assets]);
 
   /* -------------------------------- 动作 --------------------------------- */
 
@@ -689,6 +822,29 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
     switchFilter(FILTERS[(index + step + FILTERS.length) % FILTERS.length].id);
   };
 
+  /**
+   * 切换详情栏标签页。`focus` 把焦点搬到新选中的那个 tab（`←/→` 移动时用）——
+   * 与筛选分段控件同一条语言（`role="tablist"` 的 roving tabindex：只有选中的那个 `tabIndex=0`）。
+   */
+  const selectTab = useCallback((next: DetailTabId, focus = false) => {
+    setTab(next);
+    if (focus) tabsRef.current?.querySelector<HTMLElement>(`[data-tab="${next}"]`)?.focus();
+  }, []);
+
+  const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const index = DETAIL_TABS.findIndex((item) => item.id === tab);
+    const last = DETAIL_TABS.length - 1;
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? last
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + DETAIL_TABS.length) % DETAIL_TABS.length;
+    selectTab(DETAIL_TABS[next].id, true);
+  };
+
   const onListKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!visible.length) return;
     const index = selected ? visible.findIndex((detail) => detail.entry.id === selected.entry.id) : 0;
@@ -741,11 +897,7 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
 
   if (!open) return null;
 
-  // 正文预览：缓存优先（切回来瞬时出），其次详情自带的（内联正文的条目）。
-  const previewText = entry ? previews.get(entry.id) ?? selected?.bodyPreview ?? "" : "";
-  // 正文是否为空只在正文读出来后判定（读盘期间不误禁用主按钮）。
-  const previewLoaded = Boolean(entry) && (previews.has(entry!.id) || Boolean(selected?.bodyPreview));
-  const bodyEmpty = Boolean(entry) && !entry!.title.trim() && previewLoaded && !previewText.trim();
+  // 正文原文、`bodyEmpty` 与 `previewHtml` 都在上面（effects 之前）算好了，见「正文原文」段。
   /** 「目录」一栏的完整值（值可能很深，界面上截断显示，`title` 里给全）。 */
   const folderLabel = effectiveFolder ?? INBOX_ROOT_LABEL;
   const isFailed = status === "failed";
@@ -877,14 +1029,13 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
               </div>
 
               {/*
-                `key` 绑条目 id：详情栏是**自己的滚动容器**（固定高度面板），换条目要连带把
-                滚动位置归零，否则从上一条的滚动位置看新条目——那是「闪」的第二个来源。
+                `key` 绑条目 id：换条目时详情栏整体重挂一次，把**面板内部的滚动位置**归零，
+                否则从上一条的滚动位置看新条目——那是「闪」的第二个来源。
+                0.4.x 起滚动不在这一栏上（标题行与标签行固定），而在 `.inbox__panel` 里。
               */}
               <div className="inbox__detail" key={entry?.id ?? "none"}>
-                <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-                  <h3 style={{ flex: 1, fontFamily: "var(--font-serif)", fontSize: "var(--fs-lg)", fontWeight: 600 }}>
-                    {entry ? displayTitle(entry) : ""}
-                  </h3>
+                <div className="inbox__head">
+                  <h3 className="inbox__name">{entry ? displayTitle(entry) : ""}</h3>
                   {entry?.tags.slice(0, 1).map((tag) => (
                     <span key={tag} className="tag">
                       {tag}
@@ -894,132 +1045,192 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
 
                 {isFailed && entry?.message ? <div className="inbox__field-err">{entry.message}</div> : null}
 
-                <div className="inbox__group">落点</div>
-                {isCommitted ? null : (
-                  <div className="inbox__save-to">
-                    <span>保存到</span>
-                    <SaveToPicker
-                      value={effectiveFolder ?? INBOX_ROOT_VALUE}
-                      options={saveToOptions}
-                      disabled={committing}
-                      onChange={(next) => (entry ? setFolderPick({ id: entry.id, folder: next || null }) : undefined)}
+                <div
+                  ref={tabsRef}
+                  className="inbox__tabs"
+                  role="tablist"
+                  aria-label="条目内容"
+                  onKeyDown={onTabKeyDown}
+                >
+                  {DETAIL_TABS.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      role="tab"
+                      data-tab={item.id}
+                      id={`inbox-tab-${item.id}`}
+                      aria-selected={tab === item.id}
+                      aria-controls={`inbox-panel-${item.id}`}
+                      tabIndex={tab === item.id ? 0 : -1}
+                      className={cn(tab === item.id && "is-active")}
+                      onClick={() => selectTab(item.id)}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                  {/*
+                    预览页右端留一行最终落点句。**不是重复**：原则 P4 要求「入库前就能看见落点」，
+                    而默认停在预览页 —— 落点句只在信息页里就变成「点一下才看得见」。
+                    显示的串与信息页那一行**同一个产地**（`hint`），超宽时单行截断、`title` 给全。
+                  */}
+                  {tab === "preview" && hint ? (
+                    <span className="inbox__tabs-hint" title={hint}>
+                      {hint}
+                    </span>
+                  ) : null}
+                </div>
+
+                {/*
+                  预览页：整栏留给正文（原来它被压在最底下、`max-height: 150px` —— 要看的正文
+                  反而得滚到最后）。正文为空时给一句实话说清，而不是留一个空框。
+                */}
+                <div
+                  className="inbox__panel inbox__panel--preview"
+                  id="inbox-panel-preview"
+                  role="tabpanel"
+                  aria-labelledby="inbox-tab-preview"
+                  tabIndex={0}
+                  hidden={tab !== "preview"}
+                >
+                  {bodyText ? (
+                    <article
+                      ref={previewRef}
+                      className="prose inbox__prose"
+                      dangerouslySetInnerHTML={{ __html: previewHtml }}
                     />
-                  </div>
-                )}
-                <dl className="inbox__dl">
-                  <div>
-                    <dt>目录</dt>
-                    {/* 落点可能是很深的路径：`.inbox__trunc` 单行截断（`max-width`）+ 悬浮用
-                        `title` 给完整值，免得一条长目录把详情栏撑成两三行。 */}
-                    <dd className="inbox__trunc" title={folderLabel}>
-                      {folderLabel}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>文件名</dt>
-                    <dd className="inbox__mono">{landing ? landing.path.split("/").pop() : ""}</dd>
-                  </div>
-                </dl>
-                {hint ? <p className="inbox__hint">{hint}</p> : null}
+                  ) : (
+                    <p className="inbox__preview-empty">这一条没有正文。</p>
+                  )}
+                </div>
 
-                <div className="inbox__group">来源信息</div>
-                <dl className="inbox__dl">
-                  <div>
-                    <dt>来源</dt>
-                    <dd className="inbox__mono">{entry?.sourceUrl || NO_URL}</dd>
-                  </div>
-                  {selected?.pageTitle ? (
+                {/* 信息页：落点 / 来源信息 / 标签 / 附件 / 详情 —— 一整套元数据都搬到这里 */}
+                <div
+                  className="inbox__panel"
+                  id="inbox-panel-info"
+                  role="tabpanel"
+                  aria-labelledby="inbox-tab-info"
+                  hidden={tab !== "info"}
+                >
+                  <div className="inbox__group">落点</div>
+                  {isCommitted ? null : (
+                    <div className="inbox__save-to">
+                      <span>保存到</span>
+                      <SaveToPicker
+                        value={effectiveFolder ?? INBOX_ROOT_VALUE}
+                        options={saveToOptions}
+                        disabled={committing}
+                        onChange={(next) => (entry ? setFolderPick({ id: entry.id, folder: next || null }) : undefined)}
+                      />
+                    </div>
+                  )}
+                  <dl className="inbox__dl">
                     <div>
-                      <dt>网页标题</dt>
-                      <dd>{selected.pageTitle}</dd>
+                      <dt>目录</dt>
+                      {/* 落点可能是很深的路径：`.inbox__trunc` 单行截断（`max-width`）+ 悬浮用
+                          `title` 给完整值，免得一条长目录把详情栏撑成两三行。 */}
+                      <dd className="inbox__trunc" title={folderLabel}>
+                        {folderLabel}
+                      </dd>
                     </div>
-                  ) : null}
-                  {selected?.author ? (
                     <div>
-                      <dt>作者</dt>
-                      <dd>{selected.author}</dd>
+                      <dt>文件名</dt>
+                      <dd className="inbox__mono">{landing ? landing.path.split("/").pop() : ""}</dd>
                     </div>
-                  ) : null}
-                  {selected?.publishedAt ? (
+                  </dl>
+                  {hint ? <p className="inbox__hint">{hint}</p> : null}
+
+                  <div className="inbox__group">来源信息</div>
+                  <dl className="inbox__dl">
                     <div>
-                      <dt>发布时间</dt>
-                      <dd>{selected.publishedAt}</dd>
+                      <dt>来源</dt>
+                      <dd className="inbox__mono">{entry?.sourceUrl || NO_URL}</dd>
                     </div>
+                    {selected?.pageTitle ? (
+                      <div>
+                        <dt>网页标题</dt>
+                        <dd>{selected.pageTitle}</dd>
+                      </div>
+                    ) : null}
+                    {selected?.author ? (
+                      <div>
+                        <dt>作者</dt>
+                        <dd>{selected.author}</dd>
+                      </div>
+                    ) : null}
+                    {selected?.publishedAt ? (
+                      <div>
+                        <dt>发布时间</dt>
+                        <dd>{selected.publishedAt}</dd>
+                      </div>
+                    ) : null}
+                    <div>
+                      <dt>剪藏时间</dt>
+                      <dd>{entry ? formatDateTime(capturedAt(selected!)) : ""}</dd>
+                    </div>
+                    <div>
+                      <dt>客户端</dt>
+                      <dd>
+                        {selected ? `${selected.clientLabel}${selected.clientVersion ? ` ${selected.clientVersion}` : ""}` : ""}
+                      </dd>
+                    </div>
+                  </dl>
+
+                  {isFailed ? (
+                    <>
+                      <div className="inbox__group">修复方式</div>
+                      <p className="inbox__hint">在来源工具里补上正文后重新投递；也可以直接丢弃这一条。</p>
+                    </>
                   ) : null}
-                  <div>
-                    <dt>剪藏时间</dt>
-                    <dd>{entry ? formatDateTime(capturedAt(selected!)) : ""}</dd>
-                  </div>
-                  <div>
-                    <dt>客户端</dt>
-                    <dd>
-                      {selected ? `${selected.clientLabel}${selected.clientVersion ? ` ${selected.clientVersion}` : ""}` : ""}
-                    </dd>
-                  </div>
-                </dl>
 
-                {isFailed ? (
-                  <>
-                    <div className="inbox__group">修复方式</div>
-                    <p className="inbox__hint">在来源工具里补上正文后重新投递；也可以直接丢弃这一条。</p>
-                  </>
-                ) : null}
+                  {entry && entry.tags.length ? (
+                    <>
+                      <div className="inbox__group">标签</div>
+                      <div className="inbox__tags">
+                        {entry.tags.map((tag) => (
+                          <span key={tag} className="tag">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
 
-                {entry && entry.tags.length ? (
-                  <>
-                    <div className="inbox__group">标签</div>
-                    <div className="inbox__tags">
-                      {entry.tags.map((tag) => (
-                        <span key={tag} className="tag">
-                          {tag}
-                        </span>
-                      ))}
+                  {selected && selected.assets.length ? (
+                    <>
+                      <div className="inbox__group">附件 · {selected.assets.length}</div>
+                      <dl className="inbox__dl">
+                        {selected.assets.map((asset) => (
+                          <div key={asset.file || asset.name}>
+                            <dt />
+                            {/* 已入库的条目里暂存副本已被清掉（`size` 读不到 = 0）：只报名字，
+                                不报一个会误导人的 `0 B`。 */}
+                            <dd>{asset.size > 0 ? `${asset.name} · ${formatBytes(asset.size)}` : asset.name}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    </>
+                  ) : null}
+
+                  <div className="inbox__group">详情</div>
+                  <dl className="inbox__dl">
+                    <div>
+                      <dt>幂等键</dt>
+                      <dd className="inbox__mono">{entry?.id ?? ""}</dd>
                     </div>
-                  </>
-                ) : null}
-
-                {previewText ? (
-                  <>
-                    <div className="inbox__group">正文预览</div>
-                    <div className="inbox__preview">{previewText}</div>
-                  </>
-                ) : null}
-
-                {selected && selected.assets.length ? (
-                  <>
-                    <div className="inbox__group">附件 · {selected.assets.length}</div>
-                    <dl className="inbox__dl">
-                      {selected.assets.map((asset) => (
-                        <div key={asset.file || asset.name}>
-                          <dt />
-                          {/* 已入库的条目里暂存副本已被清掉（`size` 读不到 = 0）：只报名字，
-                              不报一个会误导人的 `0 B`。 */}
-                          <dd>{asset.size > 0 ? `${asset.name} · ${formatBytes(asset.size)}` : asset.name}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  </>
-                ) : null}
-
-                <div className="inbox__group">详情</div>
-                <dl className="inbox__dl">
-                  <div>
-                    <dt>幂等键</dt>
-                    <dd className="inbox__mono">{entry?.id ?? ""}</dd>
-                  </div>
-                  <div>
-                    <dt>信封</dt>
-                    <dd className="inbox__mono">{selected?.spec || "opennote.import/v1"}</dd>
-                  </div>
-                  <div>
-                    <dt>尝试</dt>
-                    <dd>{entry?.attempts ?? 0}</dd>
-                  </div>
-                  <div>
-                    <dt>更新</dt>
-                    <dd>{entry ? formatDateTime(Date.parse(entry.updatedAt)) : ""}</dd>
-                  </div>
-                </dl>
+                    <div>
+                      <dt>信封</dt>
+                      <dd className="inbox__mono">{selected?.spec || "opennote.import/v1"}</dd>
+                    </div>
+                    <div>
+                      <dt>尝试</dt>
+                      <dd>{entry?.attempts ?? 0}</dd>
+                    </div>
+                    <div>
+                      <dt>更新</dt>
+                      <dd>{entry ? formatDateTime(Date.parse(entry.updatedAt)) : ""}</dd>
+                    </div>
+                  </dl>
+                </div>
               </div>
             </div>
           )}

@@ -22,6 +22,9 @@
   grid-template-rows: var(--tabbar-h) minmax(0, 1fr);
   height: 100vh;
   height: 100dvh;
+  /* 手机上让出状态栏与手势条（见 base.css 的 --inset-*），桌面端恒为 0 */
+  padding-top: var(--inset-top);
+  padding-bottom: var(--inset-bottom);
   overflow: hidden;
 }
 
@@ -2039,7 +2042,7 @@ mark.hit {
 .toast-root {
   position: fixed;
   left: 50%;
-  bottom: 44px;
+  bottom: calc(44px + var(--inset-bottom));
   transform: translateX(-50%);
   z-index: 90;
   display: flex;
@@ -2232,10 +2235,149 @@ mark.hit {
 }
 
 .inbox__detail {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
-  /* 详情栏自己滚：换条目只带动这一栏的滚动位置（配合组件的 `key={entry.id}`）。 */
+  /*
+   * 0.4.x：滚动从「整栏」移到「当前标签页的面板」（`.inbox__panel`）。
+   * 标题行与标签行必须固定 —— 它们跟着内容一起滚的话，翻两步就看不见自己在哪一页了。
+   * 换条目时组件用 `key={entry.id}` 把这一栏整体重挂，滚动位置照旧归零。
+   */
+  overflow: hidden;
+}
+
+.inbox__head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.inbox__name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-serif);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+/*
+ * 详情栏的两个标签页（0.4.x 用户要求：红框处加「预览 / 信息」两个 tab，默认「预览」）。
+ * 视觉语言取编辑器标签栏那一套（`.tab`）：**下划线式**，选中项 2px `--accent`。
+ * 这里不用 `.segmented`（那是工具行筛选的胶囊按钮）——面板内部的层级切换用下划线更轻，
+ * 也不会和上方「全部 / 待确认」长得一模一样、让人以为是同一组筛选。
+ */
+.inbox__tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex: none;
+  margin-top: var(--s3);
+  border-bottom: 1px solid var(--rule);
+}
+
+.inbox__tabs button {
+  position: relative;
+  flex: none;
+  white-space: nowrap;
+  padding: 0 2px var(--s2);
+  color: var(--ink-3);
+  font-size: var(--fs-sm);
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.inbox__tabs button:hover {
+  color: var(--ink);
+}
+
+.inbox__tabs button.is-active {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.inbox__tabs button.is-active::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -1px 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+
+/*
+ * 预览页右端那行最终落点句（原则 P4：入库前就得看得见落点）。超宽时单行截断，
+ * 完整串挂在元素的 `title` 上 —— 与 `.inbox__trunc` 同一条做法。
+ */
+.inbox__tabs-hint {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+}
+
+/*
+ * 标签页面板：**只有当前这一页滚**（与设置面板「只有内容区滚」同一条规矩）。
+ *
+ * `.inbox__panel[hidden]` 那一条不是多余的：预览页是作者写的 `display: flex`，
+ * 按 CSS 优先级会盖掉 UA 的 `[hidden] { display: none }` —— 不补它，非当前页会照样
+ * 占位甚至显示出来。同一个坑在 `extension/src/popup/popup.css` 里踩过一次，那次记在
+ * 那里的注释里。
+ */
+.inbox__panel {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+}
+
+.inbox__panel[hidden] {
+  display: none;
+}
+
+/*
+ * 预览页：**面板不滚，正文那张纸自己滚**。
+ *
+ * 固定高度的面板里只有内容区滚（与设置面板 `.settings__pane` 同一条规矩）。上一版这里是
+ * `display:flex` + 纸 `flex:1 1 auto`：纸被 flex 压到面板高度，而它自己没有滚动条 ⇒
+ * **长正文被裁掉且滚不动**（真机/静态渲染都复现：表格与代码块直接看不见）。
+ */
+.inbox__panel--preview {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 正文铺满整栏（`max-height: 150px` 属于「挤在长列最底下」那一版的取舍，这里放开）。 */
+.inbox__panel--preview .inbox__prose {
+  flex: 1 1 auto;
+  min-height: 140px;
+  overflow-y: auto;
+}
+
+/* 正文为空（`failed` 条目 / 空正文导入）：说一句实话，不留一个空框。 */
+.inbox__preview-empty {
+  margin-top: var(--s3);
+  color: var(--ink-3);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+}
+
+/*
+ * 画不出来的图：远程图被桌面 CSP 挡下（`img-src 'self' file: data: blob:`）、
+ * 或条目里找不到那个文件 —— 退化成一句说明，**绝不静默留个破图**。
+ * 与扩展 popup 的 `imageBlock()` 同一条规矩（那里的样式叫 `.doc-image.is-broken`）。
+ */
+.inbox__img-note {
+  display: inline-block;
+  padding: 0.15em 0.5em;
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink-3);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
 }
 
 .inbox__group {
@@ -2300,18 +2442,26 @@ mark.hit {
   white-space: nowrap;
 }
 
-.inbox__preview {
+/*
+ * 预览页的正文（0.4.x）：**真 markdown 渲染**（`.prose` 那一层排版，与阅读视图/剪藏预览同一套），
+ * 外面套一张纸。上一版这里是「400 字纯文本摘要」，用户实测
+ * 「预览为什么没有 markdown 预览, 都已经叫预览了, 为啥还展示纯文本」。
+ *
+ * 排版本身一行都不在这里重写：`.prose`（`prose.css`）负责标题/列表/引用/表格/代码/图片，
+ * 这里只管这块纸的材质与它在面板里的尺寸。
+ */
+.inbox__prose {
   margin-top: var(--s3);
-  padding: var(--s3);
+  padding: var(--s3) var(--s4);
   border: 1px solid var(--rule);
   border-radius: var(--radius);
   background: var(--paper);
-  font-family: var(--font-serif);
-  font-size: var(--fs-sm);
-  line-height: 1.8;
-  color: var(--ink-2);
-  max-height: 150px;
-  overflow: auto;
+}
+
+/* 宽表格/长代码块在 470px 的面板里会横向溢出：让正文自己横滚，不裁内容（`prose.css` 的
+   `.prose table{overflow:hidden}` 是给编辑器列宽写的，在面板里会把右侧几列直接切掉）。 */
+.inbox__prose :is(table, pre) {
+  overflow-x: auto;
 }
 
 .inbox__hint {
@@ -2455,11 +2605,12 @@ mark.hit {
     display: none;
   }
 
-  /* 抽屉从**顶行下面**滑出：头部一直留在上面，那个「展开」按钮才始终点得到。 */
+  /* 抽屉从**顶行下面**滑出：头部一直留在上面，那个「展开」按钮才始终点得到。
+     fixed 定位以视口为参照，要把安全区加回来（`.app` 的 padding 对它无效）。 */
   .sidebar {
     position: fixed;
-    top: var(--tabbar-h);
-    bottom: 0;
+    top: calc(var(--tabbar-h) + var(--inset-top));
+    bottom: var(--inset-bottom);
     left: 0;
     z-index: 58;
     width: min(84vw, 320px);
@@ -2479,7 +2630,7 @@ mark.hit {
 
   /* 遮罩也让开顶行：头部与它的按钮保持可用，点它就能把抽屉收回去。 */
   .scrim--drawer {
-    top: var(--tabbar-h);
+    top: calc(var(--tabbar-h) + var(--inset-top));
   }
 
   .app.is-sidebar-open .scrim--menu {

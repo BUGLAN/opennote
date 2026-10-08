@@ -1224,7 +1224,7 @@ describe("外部投递（Verifier 的手工场景）", () => {
 
     // 外置正文按需读出。
     const withBody = await readInboxDetailById(detail.entry.id);
-    expect(withBody?.bodyPreview).toContain("在应用没运行时投递的正文。");
+    expect(withBody?.bodyText).toContain("在应用没运行时投递的正文。");
   });
 
   it("同 importId 的第二个条目只处理第一个：第二个标 failed + IMP-4017，且不反复写盘", async () => {
@@ -1317,6 +1317,177 @@ describe("InboxPanel 首屏（逐字文案冻结）", () => {
     // 丢弃是销毁动作：面板里不得出现任何「恢复」入口。
     expect(html).not.toContain("恢复");
     expect(html).not.toMatch(/30\s*天/);
+  });
+
+  /*
+   * 0.4.x（用户原话「红框所示位置增加两个 tab，默认为第一个预览，第二个为信息」）：
+   * 右详情栏从「一条竖着堆到底的长列」改成两个标签页 —— 预览页整栏留给正文（原来正文被压在
+   * 最底下、`max-height: 150px`），信息页装落点 / 来源信息 / 标签 / 附件 / 详情那一整套。
+   * 下面三条分别咬住：**结构**（默认选中谁、谁带 hidden）、**内容归属**（谁在谁的页里，
+   * 判据是 DOM 顺序而不是「字符串在不在」）、以及正文为空时那页不许留空框。
+   */
+  it("详情栏两个标签页：默认「预览」，正文归预览页、元数据归信息页", async () => {
+    await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    const html = await renderPanel();
+
+    // ① 标签行：role=tablist + 恰好两个 role=tab，标签逐字「预览」「信息」。
+    expect(html).toContain('role="tablist"');
+    const tabs = html.match(/<button[^>]*role="tab"[^>]*>[^<]*<\/button>/g) ?? [];
+    expect(tabs).toHaveLength(2);
+    expect(tabs[0]).toContain(">预览</button>");
+    expect(tabs[1]).toContain(">信息</button>");
+
+    // ② 默认停在第一个（预览）；roving tabindex —— 只有选中的那个是 0（`←/→` 才搬得动焦点）。
+    expect(tabs[0]).toContain('aria-selected="true"');
+    expect(tabs[1]).toContain('aria-selected="false"');
+    expect(tabs[0]).toContain('tabindex="0"');
+    expect(tabs[1]).toContain('tabindex="-1"');
+    expect(tabs[0]).toContain('aria-controls="inbox-panel-preview"');
+    expect(tabs[1]).toContain('aria-controls="inbox-panel-info"');
+
+    // ③ 两个面板都在 DOM 里（不卸载：保存到选择器是无状态受控控件，卸载会丢焦点），
+    //    非当前页带 `hidden` —— 这一条还顺带盯住 `.inbox__panel[hidden]{display:none}`
+    //    那条 CSS：预览页是作者写的 `display:flex`，少了它非当前页会照样显示出来。
+    const previewPanel = (html.match(/<div class="inbox__panel inbox__panel--preview"[^>]*>/) ?? [])[0] ?? "";
+    const infoPanel = (html.match(/<div class="inbox__panel" id="inbox-panel-info"[^>]*>/) ?? [])[0] ?? "";
+    expect(previewPanel).not.toBe("");
+    expect(infoPanel).not.toBe("");
+    expect(previewPanel).not.toContain("hidden");
+    expect(infoPanel).toContain("hidden");
+
+    // ④ 内容归属：**按 DOM 切片**判，而不是「字符串在不在」——
+    //    预览面板里只有正文文章，信息面板里只有那一整套元数据，两块互不越界。
+    //    （`react-dom/server` 不跑 effect，所以正文还没从 `body.md` 读回来，预览页此刻是空态那一句；
+    //    真机上读回来之后进的是同一个 `.inbox__prose` 文章。）
+    const previewAt = html.indexOf('id="inbox-panel-preview"');
+    const infoAt = html.indexOf('id="inbox-panel-info"');
+    expect(previewAt).toBeGreaterThan(-1);
+    expect(infoAt).toBeGreaterThan(previewAt);
+    const previewSlice = html.slice(previewAt, infoAt);
+    const infoSlice = html.slice(infoAt);
+    expect(previewSlice).toContain('class="inbox__preview-empty"');
+    expect(previewSlice).not.toContain("落点");
+    expect(infoSlice).not.toContain("inbox__prose");
+    for (const infoText of ["落点", "来源信息", "入库到「读书笔记」。", "标签", "详情"]) {
+      expect(infoSlice).toContain(infoText);
+    }
+    // 「正文预览」这个分组标题随标签页一起退场：页面名就叫「预览」，再来一行分组标题是说两遍。
+    expect(html).not.toContain("正文预览");
+  });
+
+  /*
+   * 0.4.x 用户实测（原话：「预览为什么没有 markdown 预览, 都已经叫预览了, 为啥还展示纯文本」）：
+   * 预览页**必须**是渲染后的 markdown，不是纯文本。根因在数据层 —— 上一版 `previewOf()`
+   * 把正文压平成 400 字摘要（去掉 `#`、合并空行、截断），标题/列表/表格/代码块全被抹掉，
+   * 界面再怎么写都只能显示纯文本。下面两条一条咬数据层（原文 + 不截断）、一条咬界面层（真渲染）。
+   */
+  it("预览页渲染的是 markdown：标题/加粗/行内代码/列表/引用/代码块都在，标记本身不在", async () => {
+    const body = [
+      "# 中文排版指北",
+      "",
+      "一份**写给中文写作者**的排版速查，带 `行内代码`。",
+      "",
+      "- 行高与字距",
+      "- 段落间距",
+      "",
+      "> 引用一行。",
+      "",
+      "```js",
+      "const a = 1;",
+      "```",
+    ].join("\n");
+    // 用**内联正文**的条目（手工投递的那一类）：`readDir()` 当场就把 `bodyText` 填好，
+    // 所以这一帧（`renderToStaticMarkup` 不跑 effect）预览页已经有真内容。
+    // 外置 `body.md` 的条目要等 effect 读盘，走下面那条 `readInboxDetail()` 的判据。
+    const dir = `${INBOX_DIR}/20261008T120000-markdown1`;
+    testBackend.seed(
+      `${dir}/entry.json`,
+      JSON.stringify({
+        spec: "opennote.import/v1",
+        importId: "markdown-body-0001",
+        title: "中文排版指北",
+        body,
+        source: { url: "https://example.com/typography-cn", site: "example.com", capturedAt: "2026-09-29T14:26:00+08:00" },
+        target: { folder: "读书笔记", notePath: null },
+        conflict: "new",
+        tags: ["排版"],
+        client: { name: "chrome-extension", version: "0.3.0" },
+        enqueuedAt: "2026-09-29T14:26:00+08:00",
+      }),
+    );
+    testBackend.seed(
+      `${dir}/state.json`,
+      JSON.stringify({ status: "pending", attempts: 0, lastError: null, committedPath: null, updatedAt: "2026-09-29T14:26:00.000Z" }),
+    );
+    await refreshInbox();
+    const html = await renderPanel();
+    const previewAt = html.indexOf('id="inbox-panel-preview"');
+    const slice = html.slice(previewAt, html.indexOf('id="inbox-panel-info"'));
+
+    // 块级与行内结构真的渲染出来了（`src/lib/markdown.ts` 的同一套管线 + `.prose` 排版）。
+    expect(slice).toContain('class="prose inbox__prose"');
+    expect(slice).toContain("<h1>中文排版指北</h1>");
+    expect(slice).toContain("<strong>写给中文写作者</strong>");
+    expect(slice).toContain("<code>行内代码</code>");
+    expect(slice).toContain("<li>行高与字距</li>");
+    expect(slice).toContain("<blockquote>");
+    expect(slice).toContain("<pre>");
+    // 反面证据：markdown 标记**不许**以原文出现在预览里 —— 那正是用户报的现象。
+    expect(slice).not.toContain("# 中文排版指北");
+    expect(slice).not.toContain("**写给中文写作者**");
+    expect(slice).not.toContain("`行内代码`");
+  });
+
+  it("正文原文：`readInboxDetail()` 交回的是完整 markdown（不压平、不截断到 400 字）", async () => {
+    const tail = "尾".repeat(600);
+    const body = ["# 标题", "", "**加粗**", "", tail].join("\n");
+    await enqueueInbox(JSON.stringify({ ...ENVELOPE, importId: "raw-body-0001", body }), META);
+    const detail = await readInboxDetailById("raw-body-0001");
+
+    expect(detail?.bodyText).toContain("# 标题");
+    expect(detail?.bodyText).toContain("**加粗**");
+    expect(detail?.bodyText).toContain(tail); // 没有被截断（旧实现的 400 字上限）
+    // 空行保留（旧实现把连续空行并成一个换行，段落结构随之消失）。
+    expect(detail?.bodyText).toContain("# 标题\n\n**加粗**");
+  });
+
+  it("预览页右端留一行最终落点句（P4：入库前看得见落点），与信息页同一产地", async () => {
+    await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    const html = await renderPanel();
+    // 预览页那一行是紧凑写法（`--fs-xs` `--ink-3` + `title` 给全），信息页那一行是完整写法；
+    // 两处逐字相同 —— 它们读的是同一个 `hint`，不是两份文案。
+    expect(html).toContain('<span class="inbox__tabs-hint" title="入库到「读书笔记」。">入库到「读书笔记」。</span>');
+    expect(html).toContain('<p class="inbox__hint">入库到「读书笔记」。</p>');
+  });
+
+  it("正文为空的条目：预览页说一句实话，不留空框", async () => {
+    await enqueueInbox(JSON.stringify({ ...ENVELOPE, importId: "empty-body-0001", body: "" }), META);
+    const html = await renderPanel();
+    expect(html).toContain('<p class="inbox__preview-empty">这一条没有正文。</p>');
+  });
+
+  /*
+   * 预览页里的图片处置（纯函数那一半；DOM 那一半与 `ReadingView` 同款、node 环境下没有 jsdom）。
+   * 两条事实：桌面 CSP 是 `img-src 'self' file: data: blob:`（远程图必裂）；
+   * `assets/<名>` 在条目里落盘成 `assets/<hash8>-<名>`（靠 `assets[]` 的 name→file 对上）。
+   */
+  it("预览里的图片：远程图退化成说明、`assets/<名>` 换成条目里的真实文件、data:/blob: 直接用", async () => {
+    const { planPreviewImage } = await import("../components/InboxPanel");
+    const staged = new Map([["a.png", "assets/ab12cd34-a.png"]]);
+
+    // 远程图：画出来必裂 → 说明句（不是破图）。
+    expect(planPreviewImage("https://cdn.test/a.png", staged)).toEqual({ kind: "remote" });
+    // 客户端写法 `assets/<名>`（含 `./` 变体）→ 条目里真实落盘的 `<hash8>-<名>`。
+    expect(planPreviewImage("assets/a.png", staged)).toEqual({ kind: "local", file: "assets/ab12cd34-a.png" });
+    expect(planPreviewImage("./assets/a.png", staged)).toEqual({ kind: "local", file: "assets/ab12cd34-a.png" });
+    // 裸名（`rewriteAssetRefs()` 认的第二种写法）同样按 `assets[]` 换名。
+    expect(planPreviewImage("a.png", staged)).toEqual({ kind: "local", file: "assets/ab12cd34-a.png" });
+    // 未声明的名字原样试读（读不到再由 error/空结果退化成说明，不静默）。
+    expect(planPreviewImage("assets/未声明.png", staged)).toEqual({ kind: "local", file: "assets/未声明.png" });
+    // `data:` / `blob:` 直接可用。
+    expect(planPreviewImage("data:image/png;base64,AAA", staged)).toEqual({ kind: "ready" });
+    expect(planPreviewImage("blob:http://127.0.0.1/xyz", staged)).toEqual({ kind: "ready" });
+    expect(planPreviewImage("", staged)).toEqual({ kind: "none" });
   });
 
   it("目录：最高宽度单行截断，完整值挂在 title 上（0.3.3 #2）", async () => {

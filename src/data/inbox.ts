@@ -82,9 +82,6 @@ const REFRESH_DEBOUNCE_MS = 450;
 const MAX_ASSET_BYTES = 8 * 1024 * 1024;
 const MAX_ASSETS = 32;
 
-/** 正文预览截断长度（只是预览，不是正文上限）。 */
-const PREVIEW_LIMIT = 400;
-
 /* ============================== 错误模型 =============================== */
 
 /**
@@ -187,8 +184,11 @@ export interface InboxDetail {
    */
   external: boolean;
   assets: InboxAssetInfo[];
-  /** 正文预览（外置正文需要 `readInboxDetail()` 才会填充）。 */
-  bodyPreview: string;
+  /**
+   * 正文**原文**（外置正文需要 `readInboxDetail()` 才会填充）——`预览` 页拿它走
+   * `renderMarkdown()`。是 markdown，不是压平后的摘要（见 `bodyOf()` 的说明）。
+   */
+  bodyText: string;
   /** `entry.json` 的 `bodyFile`（外置正文的条目相对路径），没有则为 null。 */
   bodyFile: string | null;
 }
@@ -396,12 +396,23 @@ function hostOf(url: string): string {
   }
 }
 
-function previewOf(text: string): string {
-  const flat = text.replace(/\r\n?/g, "\n").trim();
+/**
+ * 正文（`body.md` 或内联 `body`）的**原文**，供 `预览` 页渲染 markdown。
+ *
+ * 只做两件事：统一换行、剥掉可能存在的 front-matter。
+ *
+ * **不许在这里压平或截断**（0.4.x 用户实测：「预览为什么没有 markdown 预览…为啥还展示纯文本」）：
+ * 上一版把它压成 400 字的纯文本摘要（去掉 `#` 标记、把空行并成一个换行），
+ * 于是「预览」页拿到的根本不是 markdown —— 标题、列表、表格、代码块与加粗全被抹掉了。
+ * 正文块的结构就是预览要显示的东西，**保持原样**交给 `renderMarkdown()`。
+ *
+ * 长度不在这里设限：正文本身已被契约的 8 MiB 上限（`IMP-4004`）与通道上限约束，
+ * 而同一个渲染管线（`src/lib/markdown.ts`）本来就要渲染整篇笔记（`ReadingView`）。
+ */
+function bodyOf(text: string): string {
+  const flat = String(text || "").replace(/\r\n?/g, "\n").trim();
   if (!flat) return "";
-  const body = flat.startsWith("---") ? flat.replace(/^---\n[\s\S]*?\n---\n?/, "") : flat;
-  const trimmed = body.replace(/^#{1,6}\s+/gm, "").replace(/\n{2,}/g, "\n").trim();
-  return trimmed.length > PREVIEW_LIMIT ? `${trimmed.slice(0, PREVIEW_LIMIT)}…` : trimmed;
+  return flat.startsWith("---") ? flat.replace(/^---\n[\s\S]*?\n---\n?/, "").trim() : flat;
 }
 
 function safeJoinWithin(dirName: string, relative: string): string | null {
@@ -512,7 +523,7 @@ async function readDir(target: FileSystemBackend, dirName: string): Promise<Inbo
     clientVersion: typeof envelope?.client?.version === "string" && envelope.client.version ? envelope.client.version : null,
     external: clientName === "other",
     assets,
-    bodyPreview: previewOf(inlineBody),
+    bodyText: bodyOf(inlineBody),
     bodyFile,
   };
 }
@@ -625,13 +636,14 @@ async function findDir(
   return found ? { dirName: found.dirName, detail: found } : null;
 }
 
-/** 带上正文预览（外置正文要多读一次 `body.md`）。 */
+/** 补上正文原文（外置正文要多读一次 `body.md`）。 */
 async function withBody(target: FileSystemBackend, detail: InboxDetail): Promise<InboxDetail> {
-  if (!detail.bodyFile || detail.bodyPreview) return detail;
+  // 内联正文的条目在 `readDir()` 里已经填好了，不必再读盘。
+  if (!detail.bodyFile || detail.bodyText) return detail;
   const path = safeJoinWithin(detail.dirName, detail.bodyFile);
   if (!path) return detail;
   const text = await target.readText(path).catch(() => "");
-  return { ...detail, bodyPreview: previewOf(text) };
+  return { ...detail, bodyText: bodyOf(text) };
 }
 
 export async function readInboxDetail(id: string): Promise<InboxDetail | null> {
