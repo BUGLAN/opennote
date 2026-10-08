@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Opennote 剪藏",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "把网页上的整块元素或整页正文剪藏到本机的 Opennote 笔记本（默认先进收件箱）。",
   "minimum_chrome_version": "116",
   "icons": {

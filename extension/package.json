@@ -1,6 +1,6 @@
 {
   "name": "opennote-clip-extension",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Opennote 浏览器剪藏扩展（Manifest V3）· 与主项目物理隔离的独立构建单元",
   "type": "module",
