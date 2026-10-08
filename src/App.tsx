@@ -96,6 +96,7 @@ import { InboxPanel } from "./components/InboxPanel";
 import { ConflictDialogHost, installImportConflictDialog, uninstallImportConflictDialog } from "./components/ConflictDialog";
 import { DialogHost, MenuHost, Toasts, openMenu } from "./components/Overlays";
 import { Outline } from "./components/Outline";
+import { ReadingView } from "./components/ReadingView";
 import { Sidebar, currentFolderId, type Scope } from "./components/Sidebar";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { StatusBar } from "./components/StatusBar";
@@ -322,6 +323,24 @@ export default function App(): ReactNode {
   useEffect(() => {
     setImportNotifications(ui.importNotify);
   }, [ui.importNotify]);
+
+  /*
+   * ③ 剪藏配图的兜底下载（0.4.0）：扩展侧受 host_permissions 限制，跨站图拿不到字节；
+   * 桌面 CSP 又不放行远程图片 —— 字节只能由主进程取（`net.downloadImages`）。
+   * 装钩子的地方判两件事：是不是桌面端、设置里开关是否打开。没装 = 没有下载能力
+   * （web / CLI / 单测），行为与 0.3.x 完全一致。
+   */
+  useEffect(() => {
+    const api = bridge;
+    if (!api || typeof api.net?.downloadImages !== "function" || !ui.importDownloadImages) {
+      setRemoteImageSource(null);
+      return;
+    }
+    setRemoteImageSource((urls, options) =>
+      api.net.downloadImages({ urls, referer: options?.referer ?? null }),
+    );
+    return () => setRemoteImageSource(null);
+  }, [bridge, ui.importDownloadImages]);
 
   // R8「记录本地接口日志」：真实行为在主进程（决定是否往 bridge.log 落行）。
   // 启动时也要推一次，否则用户上次关掉的开关会在重启后悄悄失效。
@@ -1248,7 +1267,7 @@ export default function App(): ReactNode {
         <EditorPane
           noteId={activeId}
           content={activeNote?.content ?? ""}
-          hidden={!activeNote}
+          hidden={!activeNote || activeLocked}
           locked={activeLocked}
           /*
            * 这里**不再**传 `baseDir`：`noteId` 本身就是笔记的工作区相对路径，而
@@ -1270,6 +1289,10 @@ export default function App(): ReactNode {
             viewRef.current = view;
           }}
         />
+
+        {/* 只读锁 = 阅读视图（0.4.0 用户反馈）：锁上时编辑器留在挂载状态（undo/光标都在），
+            上面整篇渲染成文章排版 —— 读笔记就该是读文章，不是盯着一个不能打字的光标。 */}
+        {hasWorkspace && activeNote && activeLocked ? <ReadingView note={activeNote} /> : null}
 
         <StatusBar
           counts={counts}

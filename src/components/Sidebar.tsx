@@ -18,8 +18,9 @@ import {
   renameFolder,
   renameNote,
   restoreNote,
-  searchFolders,
+  revealNoteInTree,
   searchNotes,
+  treeFilterFor,
   setStarred,
   starredNotes,
   trashNote,
@@ -111,6 +112,20 @@ export function Sidebar(props: SidebarProps): ReactNode {
   }, [library.notes, library.trash]);
 
   const tags = useMemo(() => allTags(library), [library]);
+
+  /*
+   * 两处过滤都走**同一棵树 + 一个可见集合**（用户原话「直接使用原来的那一份加个筛选就行了」）：
+   * 集合由 `treeFilterFor()` 算（命中笔记 + 祖先目录 + 文件夹名命中），
+   * 树本身（`TreeBody`/`FolderBranch`）一行都没改样式 —— 目录行的 caret 照旧能展开能收缩。
+   */
+  const nameFilter = useMemo(
+    () => (filter.trim() && ui.searchFolders ? treeFilterFor(filter) : null),
+    [library, filter, ui.searchFolders],
+  );
+  const searchFilter = useMemo(
+    () => (query.trim() && ui.searchFolders ? treeFilterFor(query) : null),
+    [library, query, ui.searchFolders],
+  );
 
   const handleDrop = (folderId: Id | null) => {
     const payload = dragPayload;
@@ -385,8 +400,9 @@ function TreeBody(props: TreeProps): ReactNode {
   // 默认收起，与文件夹树一致（`DEFAULT_UI.expanded` 是空数组）。
   const [starredOpen, setStarredOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
-  const roots = childFolders(library, null);
-  const loose = notesInFolder(library, null, { sort: ui.sort });
+  const filter = props.filter ?? null;
+  const roots = childFolders(library, null).filter((folder) => !filter || filter.folders.has(folder.id));
+  const loose = notesInFolder(library, null, { sort: ui.sort }).filter((note) => !filter || filter.notes.has(note.id));
 
   const dropZoneProps = (key: string, folderId: Id | null) => ({
     onDragOver: (event: React.DragEvent) => {
@@ -434,7 +450,7 @@ function TreeBody(props: TreeProps): ReactNode {
         </>
       ) : null}
 
-      {!roots.length && !loose.length ? (
+      {!filter && !roots.length && !loose.length ? (
         <p className="tree__empty">
           这个文件夹里还没有 Markdown 文件。
           <br />
@@ -571,10 +587,17 @@ interface BranchProps extends TreeProps {
 
 function FolderBranch({ folder, depth, dropZoneProps, ...props }: BranchProps): ReactNode {
   const { library, ui, scope, activeId } = props;
-  const children = childFolders(library, folder.id);
-  const notes = notesInFolder(library, folder.id, { sort: ui.sort });
+  const filter = props.filter ?? null;
+  // 过滤时：只留可见集合里的子目录与笔记（祖先目录由 `treeFilterFor` 一并放进集合）。
+  const children = childFolders(library, folder.id).filter((child) => !filter || filter.folders.has(child.id));
+  const notes = notesInFolder(library, folder.id, { sort: ui.sort }).filter((note) => !filter || filter.notes.has(note.id));
   const hasChildren = children.length > 0 || notes.length > 0;
-  const open = ui.expanded.includes(folder.id);
+  /*
+   * 过滤时**默认展开**：命中路径要一眼看得见（否则用户还得一层层点开才知道结果在哪）。
+   * 但**仍然可以手动收起** —— 复用现成的 `ui.collapsed` 列表：`expandFolder/collapseFolder`
+   * 两个动作原样生效，目录行的 caret 也是树上那一枚（这是上一版手写行样式缺的东西）。
+   */
+  const open = filter ? !ui.collapsed.includes(folder.id) : ui.expanded.includes(folder.id);
   const stats = folderStats(library, folder.id);
   const active = scope.kind === "folder" && scope.id === folder.id;
 
@@ -1123,6 +1146,11 @@ function FilteredNotes({
   }, [library.notes, filter]);
 
   if (!notes.length) return <p className="tree__empty">没有匹配「{filter}」的笔记。</p>;
+  /*
+   * **平铺列表**（设置里的「搜索时显示文件夹」关掉时用）：只有笔记行，没有目录行。
+   * 「显示文件夹」打开时走的是 `TreeBody` + `treeFilterFor()` —— 那是**同一棵树**加过滤，
+   * 目录行仍是树上那一行（真 caret、能展开能收缩），不再另写一套层级样式。
+   */
   return (
     <div className="tree">
       {notes.map((note) => (
@@ -1146,22 +1174,21 @@ function SearchBody({
   onQuery,
   activeId,
   onOpen,
-  onScope,
   showFolders,
+  tree,
 }: {
   inputRef: React.RefObject<HTMLInputElement | null>;
   query: string;
   onQuery: (value: string) => void;
   activeId: Id | null;
   onOpen: (id: Id) => void;
-  /** 点文件夹命中 = 选中那个文件夹（列表切到它的范围），与树里点文件夹一致。 */
-  onScope: (scope: Scope) => void;
-  /** 设置里的「搜索时显示文件夹」；关掉时行为与 0.3.x 完全一致。 */
+  /** 设置里的「搜索时显示文件夹」：开 = 树 + 过滤（同一棵树，可展开可收缩）；关 = 平铺列表。 */
   showFolders: boolean;
+  /** 「显示文件夹」打开时由调用方传进来的**那一棵树**（带过滤集合），本组件不再自己画行。 */
+  tree: ReactNode;
 }): ReactNode {
   const trimmed = query.trim();
   const hits = useMemo(() => (trimmed ? searchNotes(trimmed, { limit: 60 }) : []), [trimmed]);
-  const folderHits = useMemo(() => (showFolders && trimmed ? searchFolders(trimmed) : []), [showFolders, trimmed]);
 
   return (
     <>
@@ -1181,49 +1208,36 @@ function SearchBody({
           多个关键词用空格分隔。
         </p>
       ) : null}
-      {trimmed && !hits.length && !folderHits.length ? (
-        <p className="tree__empty">没有找到包含「{query}」的笔记或文件夹。</p>
-      ) : null}
-      <div className="tree">
-        {folderHits.map((hit) => (
-          <button
-            key={hit.folder.id}
-            type="button"
-            className="tree__row tree__row--stacked"
-            title={`${hit.path} · ${hit.notes} 篇`}
-            onClick={() => {
-              expandFolder(hit.folder.id);
-              onScope({ kind: "folder", id: hit.folder.id });
-            }}
-          >
-            <span className="tree__icon">
-              <Icon name="folder" size={14} />
-            </span>
-            <span className="tree__label">
-              {hit.folder.name}
-              <span className="tree__note-snippet">
-                {hit.notes} 篇 · {hit.path}
+      {trimmed && !hits.length ? <p className="tree__empty">没有找到包含「{query}」的笔记或文件夹。</p> : null}
+      {/*
+       * 开 = 直接用文件树本体（调用方传进来的 `tree`）：命中笔记挂在**它们真实的目录层级**里，
+       * 目录行是树上那一行（真 caret、能展开能收缩、右键菜单/拖放都在）。
+       * 关 = 平铺列表（0.3.x 的行为）。
+       */}
+      {trimmed && showFolders ? tree : null}
+      {trimmed && !showFolders && hits.length ? (
+        <div className="tree">
+          {hits.map((hit) => (
+            <button
+              key={hit.note.id}
+              type="button"
+              className={cn("tree__row", "tree__row--stacked", activeId === hit.note.id && "is-active")}
+              onClick={() => {
+                revealNoteInTree(hit.note.id);
+                onOpen(hit.note.id);
+              }}
+            >
+              <span className="tree__icon">
+                <Icon name="note" size={14} />
               </span>
-            </span>
-          </button>
-        ))}
-        {hits.map((hit) => (
-          <button
-            key={hit.note.id}
-            type="button"
-            className={cn("tree__row", "tree__row--stacked", activeId === hit.note.id && "is-active")}
-            onClick={() => onOpen(hit.note.id)}
-          >
-            <span className="tree__icon">
-              <Icon name="note" size={14} />
-            </span>
-            <span className="tree__label">
-              {hit.note.title}
-              <span className="tree__note-snippet">{hit.snippet}</span>
-            </span>
-          </button>
-        ))}
-      </div>
+              <span className="tree__label">
+                {hit.note.title}
+                <span className="tree__note-snippet">{hit.snippet}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </>
   );
 }

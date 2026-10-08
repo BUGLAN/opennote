@@ -1114,6 +1114,19 @@ mark.hit {
   cursor: default;
 }
 
+/* 只读锁的阅读视图：与编辑器**同一列**（同样的 --measure 与 56px 顶距），
+   锁上 / 解锁时文字不跳位；整篇按文章排版滚动阅读。 */
+.reading {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 56px 10px 30vh;
+  overflow-y: auto;
+  outline: none;
+}
+
 .empty {
   flex: 1;
   display: grid;

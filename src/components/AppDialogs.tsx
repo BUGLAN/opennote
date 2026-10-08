@@ -232,6 +232,8 @@ export function SettingsDialog({
                 onImportConflict={(value) => patchUi({ importConflict: value })}
                 importNotify={settings.importNotify}
                 onImportNotify={(value) => patchUi({ importNotify: value })}
+                downloadImages={settings.importDownloadImages}
+                onDownloadImages={(value) => patchUi({ importDownloadImages: value })}
                 bridgeLog={settings.bridgeLog}
                 onBridgeLog={(value) => patchUi({ bridgeLog: value })}
                 onOpenInbox={onOpenInbox}

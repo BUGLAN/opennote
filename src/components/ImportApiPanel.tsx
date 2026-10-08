@@ -52,6 +52,15 @@ export interface ImportApiPanelProps {
   /** R2 入库后提示。 */
   importNotify?: boolean;
   onImportNotify?(value: boolean): void;
+  /**
+   * ③ 剪藏配图：把正文里的**网络图片**下载到笔记本本地（默认开）。
+   *
+   * 为什么需要这个开关：桌面 CSP 是 `img-src 'self' file: data: blob:`，远程配图在界面里
+   * 加载不了；而扩展侧 host_permissions 只有 127.0.0.1 的十条，跨站图拿不到字节 ——
+   * 字节由主进程代下（`net.downloadImages`）。关掉后正文里保留原始网址。
+   */
+  downloadImages?: boolean;
+  onDownloadImages?(value: boolean): void;
   /** R8 诊断日志开关（主进程侧经 `isLogEnabled()` 生效）。 */
   bridgeLog?: boolean;
   onBridgeLog?(value: boolean): void;
@@ -259,6 +268,8 @@ export function ImportApiPanel({
   onImportConflict,
   importNotify,
   onImportNotify,
+  downloadImages,
+  onDownloadImages,
   bridgeLog,
   onBridgeLog,
   onOpenInbox,
@@ -585,6 +596,24 @@ export function ImportApiPanel({
           />
           显示可撤销提示
         </label>
+      </SettingRow>
+
+      <SettingRow label="剪藏配图" hint="网页剪藏时把正文里的网络图片存进笔记本（桌面端）">
+        <label className="switch">
+          <input
+            type="checkbox"
+            checked={downloadImages ?? true}
+            disabled={!onDownloadImages}
+            onChange={(event) => onDownloadImages?.(event.target.checked)}
+          />
+          下载网络图片到本地
+        </label>
+        {downloadImages === false ? (
+          <p style={HINT}>
+            关掉后正文里保留原始网址。桌面端 CSP 不放行远程图片，那些图在界面上不会显示；
+            浏览器版笔记本则取决于网站是否允许跨站加载。
+          </p>
+        ) : null}
       </SettingRow>
 
       <SettingRow label="本地接口" hint="桌面版提供的本机导入通道，默认关闭">
