@@ -230,7 +230,7 @@ export function Sidebar(props: SidebarProps): ReactNode {
           onClick={() => props.onSwitcherOpen(!props.switcherOpen)}
           title={props.workspace ? workspaceLocation(props.workspace) : "还没有打开笔记本"}
         >
-          <Icon name={props.workspace?.kind === "node" ? "folder" : props.workspace ? "layers" : "info"} size={13} />
+                    <Icon name={props.workspace?.kind === "node" ? "folder" : props.workspace ? "layers" : "info"} size={13} />
           <span className="truncate">{props.workspace?.name ?? "未打开笔记本"}</span>
           <Icon name="chevronDown" size={12} className="workspace__caret" />
         </button>
@@ -321,10 +321,22 @@ export function Sidebar(props: SidebarProps): ReactNode {
                 onChange={(event) => setFilter(event.target.value)}
               />
             </div>
-            {filter.trim() ? (
-              <FilteredNotes library={library} filter={filter.trim()} activeId={activeId} onOpen={props.onOpenNote} />
+            {filter.trim() && !props.ui.searchFolders ? (
+              <FilteredNotes
+                library={library}
+                filter={filter.trim()}
+                activeId={activeId}
+                onOpen={props.onOpenNote}
+              />
             ) : (
-              <TreeBody {...props} counts={counts} dropTarget={dropTarget} setDropTarget={setDropTarget} onDropOn={handleDrop} />
+              <TreeBody
+                {...props}
+                counts={counts}
+                dropTarget={dropTarget}
+                setDropTarget={setDropTarget}
+                onDropOn={handleDrop}
+                filter={nameFilter}
+              />
             )}
           </>
         ) : null}
@@ -391,11 +403,22 @@ function workspaceLocation(record: WorkspaceRecord): string {
 
 /* =============================== tree body ============================== */
 
+/**
+ * 过滤（搜索 / 筛选）时树里可见的东西：命中的笔记 + 要显示的目录（含祖先）。
+ * `null` = 不过滤（渲染整棵树）。集合由 `treeFilterFor()` 算，组件只负责「照它渲染」。
+ */
+export interface TreeFilter {
+  notes: Set<Id>;
+  folders: Set<Id>;
+}
+
 interface TreeProps extends SidebarProps {
   counts: { all: number; starred: number; trash: number };
   dropTarget: string | null;
   setDropTarget: (key: string | null) => void;
   onDropOn: (folderId: Id | null) => void;
+  /** 有值时只渲染可见集合里的笔记与目录（搜索 / 筛选）；目录行仍是树上那一行（可展开可收缩）。 */
+  filter?: TreeFilter | null;
 }
 
 function TreeBody(props: TreeProps): ReactNode {
@@ -467,65 +490,71 @@ function TreeBody(props: TreeProps): ReactNode {
         </p>
       ) : null}
 
-      {/* ㊷：「其他」像文件夹那样可展开/收起，条目缩进一级，父子关系看得见。 */}
-      <button
-        type="button"
-        className="tree__group tree__group--toggle"
-        aria-expanded={othersOpen}
-        onClick={() => setOthersOpen((open) => !open)}
-      >
-        <span className={cn("tree__caret", othersOpen && "is-open")}>
-          <Icon name="chevronRight" size={12} />
-        </span>
-        其他
-      </button>
-      {othersOpen ? (
+      {/* 过滤时只画命中的那部分树：星标 / 回收站 / 收件箱是**另一条轴**的东西，
+          混进搜索结果里只会把「我搜到的那几篇」淹掉。 */}
+      {filter ? null : (
         <>
-          <ScopeRow
-            depth={1}
-            icon="star"
-            label="星标笔记"
-            count={counts.starred}
-            active={scope.kind === "starred"}
-            open={starredOpen}
-            onClick={() => {
-              props.onScope({ kind: "starred" });
-              setStarredOpen((open) => !open);
-            }}
+          {/* ㊷：「其他」像文件夹那样可展开/收起，条目缩进一级，父子关系看得见。 */}
+          <button
+            type="button"
+            className="tree__group tree__group--toggle"
+            aria-expanded={othersOpen}
+            onClick={() => setOthersOpen((open) => !open)}
           >
-            <StarredNotes
-              library={library}
-              activeId={activeId}
-              onOpen={props.onOpenNote}
-              dropTarget={props.dropTarget}
-              setDropTarget={props.setDropTarget}
-            />
-          </ScopeRow>
-          <ScopeRow
-            depth={1}
-            icon="trash"
-            label="回收站"
-            count={counts.trash}
-            active={scope.kind === "trash"}
-            open={trashOpen}
-            onClick={() => {
-              props.onScope({ kind: "trash" });
-              setTrashOpen((open) => !open);
-            }}
-          >
-            <TrashList library={library} onOpen={props.onOpenNote} />
-          </ScopeRow>
-          {/* 外部导入的待确认内容在这里，不属于文件树，所以不参与 scope 高亮。 */}
-          <ScopeRow
-            depth={1}
-            icon="download"
-            label="收件箱"
-            count={props.inboxPending}
-            active={false}
-            onClick={() => props.onOpenInbox()}
-          />
+            <span className={cn("tree__caret", othersOpen && "is-open")}>
+              <Icon name="chevronRight" size={12} />
+            </span>
+            其他
+          </button>
+          {othersOpen ? (
+            <>
+              <ScopeRow
+                depth={1}
+                icon="star"
+                label="星标笔记"
+                count={counts.starred}
+                active={scope.kind === "starred"}
+                open={starredOpen}
+                onClick={() => {
+                  props.onScope({ kind: "starred" });
+                  setStarredOpen((open) => !open);
+                }}
+              >
+                <StarredNotes
+                  library={library}
+                  activeId={activeId}
+                  onOpen={props.onOpenNote}
+                  dropTarget={props.dropTarget}
+                  setDropTarget={props.setDropTarget}
+                />
+              </ScopeRow>
+              <ScopeRow
+                depth={1}
+                icon="trash"
+                label="回收站"
+                count={counts.trash}
+                active={scope.kind === "trash"}
+                open={trashOpen}
+                onClick={() => {
+                  props.onScope({ kind: "trash" });
+                  setTrashOpen((open) => !open);
+                }}
+              >
+                <TrashList library={library} onOpen={props.onOpenNote} />
+              </ScopeRow>
+              {/* 外部导入的待确认内容在这里，不属于文件树，所以不参与 scope 高亮。 */}
+              <ScopeRow
+                depth={1}
+                icon="download"
+                label="收件箱"
+                count={props.inboxPending}
+                active={false}
+                onClick={() => props.onOpenInbox()}
+              />
+            </>
+          ) : null}
         </>
-      ) : null}
+      )}
     </div>
   );
 }
