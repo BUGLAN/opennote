@@ -336,8 +336,17 @@ export function Sidebar(props: SidebarProps): ReactNode {
             onQuery={setQuery}
             activeId={activeId}
             onOpen={props.onOpenNote}
-            onScope={props.onScope}
             showFolders={props.ui.searchFolders}
+            tree={
+              <TreeBody
+                {...props}
+                counts={counts}
+                dropTarget={dropTarget}
+                setDropTarget={setDropTarget}
+                onDropOn={handleDrop}
+                filter={searchFilter}
+              />
+            }
           />
         ) : null}
 

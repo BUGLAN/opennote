@@ -55,6 +55,7 @@ import {
   setImportChannelContext,
   setImportLandingPreference,
   setImportNotifications,
+  setRemoteImageSource,
   undoImport,
   type ImportUndoResult,
   type ImportReceipt,
