@@ -53,6 +53,10 @@ function load(): UiSettings {
     // Guard against theme ids removed in a later version.
     if (!THEMES.some((theme) => theme.id === ui.theme)) ui.theme = DEFAULT_UI.theme;
     if (!ui.tabs.every((id) => typeof id === "string")) ui.tabs = [];
+    // 只读锁是后来加的键：手改过 localStorage / 旧版本残留都可能不是数组，兜底成「没锁」。
+    if (!Array.isArray(ui.lockedNotes) || !ui.lockedNotes.every((id) => typeof id === "string")) {
+      ui.lockedNotes = [];
+    }
     // 宽度是**用户拖出来的**：旧版本没有这个键、手改过 localStorage、拖到窗口外
     // 都会留下越界值，所以读取时统一夹一次，别让坏值把布局撑坏。
     ui.sidebarWidth = clampSidebarWidth(ui.sidebarWidth);

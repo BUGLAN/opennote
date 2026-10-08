@@ -8,14 +8,17 @@ interface TabBarProps {
   notes: Record<Id, Note>;
   activeId: Id | null;
   dirty: Record<Id, true>;
+  /** 当前活动笔记是否处于只读锁定（`ui.lockedNotes`）。 */
+  locked: boolean;
   onSelect(id: Id): void;
   onClose(id: Id): void;
-  onNew(): void;
+  /** 切换当前笔记的只读锁定。0.4.0 起新建笔记走命令面板（⌘）与 Ctrl/⌘ + N，这颗位置让给锁。 */
+  onToggleLock(): void;
   onPalette(): void;
   onContextMenu(event: React.MouseEvent, id: Id): void;
 }
 
-export function TabBar({ tabs, notes, activeId, dirty, onSelect, onClose, onNew, onPalette, onContextMenu }: TabBarProps): ReactNode {
+export function TabBar({ tabs, notes, activeId, dirty, locked, onSelect, onClose, onToggleLock, onPalette, onContextMenu }: TabBarProps): ReactNode {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   return (
@@ -73,8 +76,15 @@ export function TabBar({ tabs, notes, activeId, dirty, onSelect, onClose, onNew,
         })}
       </div>
       <div className="tabbar__actions">
-        <button type="button" className="icon-btn" title="新建笔记 (Ctrl/⌘ + N)" onClick={onNew}>
-          <Icon name="plus" />
+        <button
+          type="button"
+          className={cn("icon-btn", "tabbar__lock", locked && "is-locked")}
+          title={locked ? "只读中 — 点击解锁编辑" : "只读模式（锁定编辑）"}
+          aria-pressed={locked}
+          disabled={!activeId}
+          onClick={onToggleLock}
+        >
+          <Icon name={locked ? "lock" : "unlock"} />
         </button>
         <button type="button" className="icon-btn" title="命令面板 (Ctrl/⌘ + K)" onClick={onPalette}>
           <Icon name="command" />

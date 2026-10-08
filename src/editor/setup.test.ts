@@ -9,6 +9,7 @@ function hooks(overrides: Partial<EditorHooks> = {}): EditorHooks {
     settings: { spellcheck: true },
     getTitles: () => [],
     getTags: () => [],
+    readOnly: () => false,
     onChange: () => {},
     onCursor: () => {},
     onSave: () => {},
@@ -59,5 +60,12 @@ describe("buildEditorExtensions", () => {
     // the decoration facet is provided by the live preview field
     expect(state.field(editorSettingsField)).toBeDefined();
     expect(() => state.update({ selection: { anchor: 3 } })).not.toThrow();
+  });
+
+  it("只读锁：readOnly facet 随锁切换（视图据它拦输入，程序性 update 不受拦）", () => {
+    const locked = makeState({ readOnly: () => true });
+    expect(locked.facet(EditorState.readOnly)).toBe(true);
+    const unlocked = makeState({ readOnly: () => false });
+    expect(unlocked.facet(EditorState.readOnly)).toBe(false);
   });
 });

@@ -1104,6 +1104,16 @@ mark.hit {
 
 /* ============================== empty state ============================= */
 
+/* 只读锁（标签栏）：锁着的图标用强调色，一眼和旁边的命令面板按钮分开。 */
+.tabbar__lock.is-locked {
+  color: var(--accent);
+}
+
+/* 只读中的编辑器：鼠标提示「这不是输入框」，正文照常可选、可搜索、可复制。 */
+.md-readonly .cm-content {
+  cursor: default;
+}
+
 .empty {
   flex: 1;
   display: grid;

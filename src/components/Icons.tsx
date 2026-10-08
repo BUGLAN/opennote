@@ -40,7 +40,9 @@ export type IconName =
   | "layers"
   | "shield"
   | "move"
-  | "print";
+  | "print"
+  | "lock"
+  | "unlock";
 
 const PATHS: Record<IconName, JSX.Element> = {
   file: (
@@ -121,6 +123,18 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   command: <path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3z" />,
+  lock: (
+    <>
+      <rect x="5.5" y="10.5" width="13" height="9.5" rx="2.2" />
+      <path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3" />
+    </>
+  ),
+  unlock: (
+    <>
+      <rect x="5.5" y="10.5" width="13" height="9.5" rx="2.2" />
+      <path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 6.9-.9" />
+    </>
+  ),
   edit: (
     <>
       <path d="M4.5 19.5l4.2-1 9.3-9.3a2.1 2.1 0 0 0-3-3L5.7 15.5z" />

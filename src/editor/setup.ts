@@ -21,6 +21,8 @@ export interface EditorHooks {
   settings: Partial<EditorSettings>;
   getTitles(): string[];
   getTags(): string[];
+  /** 只读锁（标签栏）。构建时读一次，之后由 EditorPane 经 `readOnlyCompartment` 切换。 */
+  readOnly(): boolean;
   onChange(doc: string): void;
   onCursor(info: { line: number; column: number; selected: number }): void;
   onSave(): void;
@@ -69,6 +71,17 @@ const typewriterScroll = ViewPlugin.fromClass(
 
 /** Lets the host toggle spellcheck without rebuilding the editor. */
 export const spellcheckCompartment = new Compartment();
+
+/**
+ * 只读锁（0.4.0 标签栏的锁按钮）：`EditorState.readOnly` 挡住一切改动事务，
+ * `EditorView.editable:false` 连光标都不显示 —— 是「查看」而不是「待输入」。
+ * 用 Compartment 切换，不重建编辑器（切笔记的 undo 历史得以保留）。
+ */
+export const readOnlyCompartment = new Compartment();
+
+export function readOnlyExtensions(locked: boolean): Extension {
+  return readOnlyCompartment.of([EditorState.readOnly.of(locked), EditorView.editable.of(!locked)]);
+}
 
 function contentAttributes(spellcheck: boolean): Extension {
   return spellcheckCompartment.of(
@@ -126,6 +139,7 @@ export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
     EditorState.allowMultipleSelections.of(true),
     EditorState.tabSize.of(2),
     EditorView.lineWrapping,
+    readOnlyExtensions(hooks.readOnly()),
     contentAttributes(hooks.settings.spellcheck ?? true),
     editorSettingsField,
     autocompletion({

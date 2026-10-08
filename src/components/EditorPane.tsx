@@ -5,7 +5,7 @@ import { syntaxTree } from "@codemirror/language";
 import { imageUrlStore } from "../data/assets";
 import type { Id, UiSettings } from "../data/types";
 import { editorSettingsField, refreshDecorations, setEditorSettings, type EditorSettings } from "../editor/settings";
-import { buildEditorExtensions, spellcheckCompartment } from "../editor/setup";
+import { buildEditorExtensions, readOnlyCompartment, spellcheckCompartment } from "../editor/setup";
 import { notify } from "../lib/toast";
 import { cn } from "../lib/utils";
 
@@ -25,6 +25,11 @@ interface EditorPaneProps {
   noteId: Id | null;
   content: string;
   hidden: boolean;
+  /**
+   * 只读锁（0.4.0 标签栏的锁按钮 → `ui.lockedNotes`）。锁定时编辑器不收任何输入，
+   * 光标也不显示 —— 是「查看」而不是「待输入」。
+   */
+  locked: boolean;
   settings: UiSettings;
   onDocChange(doc: string): void;
   onCursor(info: CursorInfo): void;
@@ -58,6 +63,7 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
           settings: { ...propsRef.current.settings },
           getTitles: () => propsRef.current.getTitles(),
           getTags: () => propsRef.current.getTags(),
+          readOnly: () => propsRef.current.locked,
           onChange: (doc) => {
             expectedRef.current = doc;
             propsRef.current.onDocChange(doc);
@@ -179,6 +185,18 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
     });
   }, [props.settings.spellcheck]);
 
+  /* 只读锁切换：用 Compartment 换掉 readOnly/editable，不重建编辑器（undo 历史保留）。 */
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: readOnlyCompartment.reconfigure([
+        EditorState.readOnly.of(props.locked),
+        EditorView.editable.of(!props.locked),
+      ]),
+    });
+  }, [props.locked]);
+
   /* images resolve lazily from disk — redraw the document when they arrive */
   useEffect(() => {
     return imageUrlStore.subscribe(() => {
@@ -204,6 +222,7 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
         props.settings.typewriter && "md-typewriter",
         props.settings.focus && "md-focus-mode",
         props.content === "" && "md-empty",
+        props.locked && "md-readonly",
       )}
       ref={hostRef}
     />

@@ -136,6 +136,8 @@ export default function App(): ReactNode {
   // `.opennote/trash/…`）—— active 所以要能在两个桶里都找得到。
   const activeId = ui.activeId && (library.notes[ui.activeId] || library.trash[ui.activeId]) ? ui.activeId : null;
   const activeNote = activeId ? library.notes[activeId] ?? library.trash[activeId] : null;
+  /** 当前笔记的只读锁（标签栏的锁按钮 → EditorPane 的 readOnly）。 */
+  const activeLocked = activeId !== null && ui.lockedNotes.includes(activeId);
   const deferredContent = useDeferredValue(activeNote?.content ?? "");
   const hasWorkspace = Boolean(library.workspace);
   const bridge = useMemo(() => desktopBridge(), []);
@@ -1130,9 +1132,20 @@ export default function App(): ReactNode {
             notes={library.notes}
             activeId={activeId}
             dirty={library.dirty}
+            locked={activeLocked}
             onSelect={(id) => openNote(id)}
             onClose={closeTab}
-            onNew={() => newNote()}
+            onToggleLock={() => {
+              if (!activeId) return;
+              // 只读锁：锁定的笔记编辑器不收输入（EditorPane 里用 Compartment 切），
+              // 状态随 `ui.lockedNotes` 落盘 —— 重启后还锁着，删掉的笔记残留 id 无副作用。
+              const locked = ui.lockedNotes.includes(activeId);
+              patchUi({
+                lockedNotes: locked
+                  ? ui.lockedNotes.filter((id) => id !== activeId)
+                  : [...ui.lockedNotes, activeId],
+              });
+            }}
             onPalette={() => setPalette("all")}
             onContextMenu={(event, id) => {
               event.preventDefault();
@@ -1236,6 +1249,7 @@ export default function App(): ReactNode {
           noteId={activeId}
           content={activeNote?.content ?? ""}
           hidden={!activeNote}
+          locked={activeLocked}
           /*
            * 这里**不再**传 `baseDir`：`noteId` 本身就是笔记的工作区相对路径，而
            * 附件目录、图片相对引用的基准都能从它派生（`EditorPane` 内部派生）。
