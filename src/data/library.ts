@@ -22,7 +22,14 @@ import { countText, deriveTags, deriveTitle, normalizeEol, splitFrontMatter, str
 // 附件目录的**唯一产地**（`<目录>/<笔记名>.assets/`）。这里只 import，绝不自己再写一遍
 // 派生规则 —— 剪藏接收端（`src/lib/clip/receive.ts`）用的是同一个函数，两个产地会漂移。
 // 同理，引用文本的写法（带空格时要写成 `<…>`）也只从 `markdownRef` 来。
-import { assetsDirFor, markdownRef } from "../lib/clip/landing";
+import {
+  assetFinalName,
+  assetsDirFor,
+  markdownRef,
+  rebaseSharedAssetRefs,
+  relativeAssetRef,
+  sharedAssetFilesIn,
+} from "../lib/clip/landing";
 import { desktopBridge } from "../desktop/bridge";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
 import type { Folder, FolderChoice, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
@@ -226,6 +233,18 @@ function setState(updater: (prev: LibraryState) => LibraryState): void {
 
 function patchNotes(updater: (notes: Record<Id, Note>) => Record<Id, Note>): void {
   setState((prev) => ({ ...prev, notes: updater(prev.notes) }));
+}
+
+/**
+ * 只换一篇笔记的正文（移动时重算图片引用前缀后同步内存）。
+ *
+ * 内存与磁盘必须**一起**变：只写盘会让编辑器/预览拿着旧正文继续渲染（图是裂的），
+ * 而且下一次 `flushNote` 会把旧正文写回去，等于白改。
+ */
+function patchNoteContent(id: Id, content: string): void {
+  const note = libraryStore.get().notes[id];
+  if (!note || note.content === content) return;
+  patchNotes((notes) => ({ ...notes, [id]: { ...note, content } }));
 }
 
 function patchFolders(updater: (folders: Record<Id, Folder>) => Record<Id, Folder>): void {
@@ -1214,9 +1233,10 @@ export async function moveNote(id: Id, folderId: Id | null): Promise<MoveNoteRes
     await target.move(id, nextPath);
     remapIds(id, nextPath);
     await moveHistory(target, id, nextPath);
-    // 换目录就是换路径 ⇒ 派生附件目录必须跟着换（否则单篇笔记挪走后正文引用指空）。
-    const assetsWarning = await moveNoteAssets(target, id, nextPath);
-    return { path: nextPath, assetsWarning };
+    // 换目录 = 引用前缀变了 ⇒ 把指向共享 `.assets/` 的引用按新位置重算（图片本身不搬）。
+    const assets = await rebaseNoteAssets(target, id, nextPath);
+    if (assets.content) patchNoteContent(nextPath, assets.content);
+    return { path: nextPath, assetsWarning: assets.warning };
   } catch (error) {
     reportError(error, "移动笔记失败");
     return NO_MOVE;
@@ -1241,31 +1261,41 @@ export function touchNoteOpened(id: Id): void {
 /* --------------------------------------------------------------------- trash */
 
 /**
- * 图片跟笔记走（用户原话「从收件箱移动到其他位置时，图片位置也应改变」）。
+ * 图片**不再跟着笔记搬**（0.4.0 用户裁定：整库共用一个 `.assets/`，git 里只有一个附件目录）。
  *
- * 剪藏落盘的笔记把附件放在**按笔记名派生**的 `<笔记名>.assets/` 里，所以「笔记换到哪条路径」
- * 就决定了「附件应该在哪条路径」——搬笔记时**必须**把附件目录一起搬，否则正文里的
- * `./foo.assets/x.png` 就指空（图丢了，而且不报错）。
+ * 取而代之的是**改写正文引用**：笔记换了目录层数，`../../.assets/x.png` 这段前缀就得跟着变，
+ * 否则「编辑器里能显示、搬一次变裂图」——而且不报错。
  *
- * 两个方向都要走同一条派生规则（`assetsDirFor`，唯一产地）：
- *   入回收站：`assetsDirFor(笔记原路径)` → `assetsDirFor(回收站路径)`
- *   恢复/移动：`assetsDirFor(来源路径)` → `assetsDirFor(目标路径)`
+ * 两条护栏：
+ *   1. **同目录改名不动一个字**（层数没变、前缀没变）——绝大多数改名走这条，零风险；
+ *   2. 只改**字面指向 `.assets/`** 的引用（`rebaseSharedAssetRefs`）：旧布局
+ *      （`<笔记名>.assets/…`、公共 `assets/<笔记名>/…`）一格不碰，旧数据零迁移。
  *
- * 目标已存在 → **绝不静默覆盖**（那是丢图的第二种写法）：如实报告，把原目录留在原地。
- * 返回值就是那句报告（`null` = 没有异常）；调用方决定它在界面上怎么出现。
+ * 返回值：`content` = **新的正文**（没变 = `null`）；`warning` = 必须如实告诉用户的那句话
+ * （写盘/读盘失败时非空，绝不假装成功）。
  */
-async function moveNoteAssets(target: FileSystemBackend, fromNote: Id, toNote: Id): Promise<string | null> {
-  const from = assetsDirFor(fromNote);
-  const to = assetsDirFor(toNote);
-  if (from === to) return null;
-  if (!(await target.exists(from))) return null;
-  if (await target.exists(to)) {
-    const message = `图片目录已存在，未覆盖：${to}`;
-    reportError(new Error(message), "图片未随笔记移动");
-    return message;
+async function rebaseNoteAssets(
+  target: FileSystemBackend,
+  fromNote: Id,
+  toNote: Id,
+): Promise<{ content: string | null; warning: string | null }> {
+  const nothing = { content: null, warning: null };
+  if (fromNote === toNote) return nothing;
+  if (parentPath(fromNote) === parentPath(toNote)) return nothing;
+  const content = await readOptionalText(target, toNote).catch(() => undefined);
+  if (content === undefined) {
+    // 读不到就什么都不做：笔记文件已经搬好了，引用最多维持原样，不会更坏。
+    return { content: null, warning: `图片引用没能随笔记更新（读不到 ${toNote}）` };
   }
-  await target.move(from, to);
-  return null;
+  const next = rebaseSharedAssetRefs(content, toNote);
+  if (next === content) return nothing;
+  try {
+    await target.writeText(toNote, next);
+  } catch (error) {
+    reportError(error, "图片引用未更新");
+    return { content: null, warning: `图片引用没能随笔记更新：${toNote}` };
+  }
+  return { content: next, warning: null };
 }
 
 export async function trashNote(id: Id): Promise<void> {
@@ -1279,8 +1309,9 @@ export async function trashNote(id: Id): Promise<void> {
     const trashPath = await resolveAvailablePath(target, requested, taken, id);
     await target.move(id, trashPath);
     await moveHistory(target, id, trashPath);
-    // 附件目录随笔记进回收站：留着它就会变成「删了再恢复，图丢了」（或在 trash 里留孤儿）。
-    await moveNoteAssets(target, id, trashPath);
+    // 回收站比工作区深两层 ⇒ 指向共享 `.assets/` 的引用要跟着加前缀，
+    // 否则「删了再恢复」或「在回收站里看一眼」时图片全是裂图（而且不报错）。
+    const assets = await rebaseNoteAssets(target, id, trashPath);
     // 显示名的键跟到回收站路径下：重扫时回收站里的这一条也要保持用户改过的名字。
     moveTitleOverride(id, trashPath);
     const current = libraryStore.get().notes[id] ?? note;
@@ -1290,7 +1321,16 @@ export async function trashNote(id: Id): Promise<void> {
       return {
         ...prev,
         notes,
-        trash: { ...prev.trash, [trashPath]: { ...current, id: trashPath, trashed: true, trashedAt: Date.now() } },
+        trash: {
+          ...prev.trash,
+          [trashPath]: {
+            ...current,
+            content: assets.content ?? current.content,
+            id: trashPath,
+            trashed: true,
+            trashedAt: Date.now(),
+          },
+        },
       };
     });
     closeTab(id);
@@ -1315,10 +1355,8 @@ export async function restoreNote(id: Id): Promise<void> {
     if (await target.exists(sourceAssets) && !(await target.exists(restoredAssets))) {
       await target.move(sourceAssets, restoredAssets);
     }
-    // 派生附件目录（`<笔记名>.assets/`）按**恢复后的最终路径**搬回来。
-    // 必须用 `nextPath` 而不是 `id`：`id` 还在回收站前缀下，派生出来的目录会指错地方
-    // （“方向反了”就是这一条：两个方向用了同一个基准，等于一个方向都没修）。
-    await moveNoteAssets(target, id, nextPath);
+    // 共享 `.assets/` 的引用按恢复后的路径重算前缀（回收站深两层，回来就要去掉）。
+    const assets = await rebaseNoteAssets(target, id, nextPath);
     // 恢复后的路径可能带序号（`第一章 2.md`）：显示名的键跟着落到最终路径上。
     moveTitleOverride(id, nextPath);
     setState((prev) => {
@@ -1327,7 +1365,17 @@ export async function restoreNote(id: Id): Promise<void> {
       return {
         ...prev,
         trash,
-        notes: { ...prev.notes, [nextPath]: { ...note, id: nextPath, folderId: parentPath(nextPath) || null, trashed: false, trashedAt: null } },
+        notes: {
+          ...prev.notes,
+          [nextPath]: {
+            ...note,
+            content: assets.content ?? note.content,
+            id: nextPath,
+            folderId: parentPath(nextPath) || null,
+            trashed: false,
+            trashedAt: null,
+          },
+        },
       };
     });
     // Rebuild every ancestor folder node, otherwise a restore into a folder
@@ -1378,17 +1426,28 @@ function otherNoteInFolder(dir: Id, except: Id): boolean {
 }
 
 /**
- * Snapshots and the note's own `assets/` folder used to outlive the note (D16).
- * A shared `assets/` folder is only dropped when no other note lives there —
- * images in it may belong to the siblings that are still around.
+ * Snapshots and the note's own images used to outlive the note (D16).
+ *
+ * 三处各自清算，顺序就是「最专属 → 最公共」：
+ *   1. 前像目录（`history/<id>`）—— 只属于这一篇，直接删；
+ *   2. **旧布局**的 `<笔记名>.assets/` —— 也只属于这一篇（它是按笔记名派生的），跟着删；
+ *   3. **共享 `.assets/`** —— 这里**只删这篇笔记正文真正引用的那些文件**。
+ *      曾经这里是 `remove(assetsDirFor(id), { recursive: true })`：落点改成整库一个
+ *      `.assets/` 之后，那句话的含义就变成「删掉这一整本笔记的图片」——**别人的图一起没**。
+ *      所以必须按引用挑（`sharedAssetFilesIn`），而且别的笔记也引用同一个文件时**不删**。
+ *   4. 老的公共 `<目录>/assets/`：只有那个目录里没有别的笔记时才收（图可能是邻居的）。
  */
 async function removeNoteArtifacts(target: FileSystemBackend, id: Id): Promise<void> {
   const history = joinPath(HISTORY_DIR, id);
   if (await target.exists(history)) await target.remove(history, { recursive: true });
-  // 派生附件目录是**这一篇笔记自己的**（按笔记名派生），所以没有兄弟笔记共用的问题：
-  // 笔记被真删了，它就必须一起消失，否则回收站里永远留着孤儿图片。
-  const own = assetsDirFor(id);
-  if (await target.exists(own)) await target.remove(own, { recursive: true });
+
+  // 旧布局的自有附件目录（按笔记名派生）：笔记真删了它就该消失，否则回收站里永远留着孤儿图片。
+  const stem = sanitizeName(stripExtension(baseName(id)), "未命名");
+  const legacyOwn = joinPath(parentPath(id), `${stem}.assets`);
+  if (await target.exists(legacyOwn)) await target.remove(legacyOwn, { recursive: true });
+
+  await removeSharedAssetsOfNote(target, id);
+
   const folders = new Set<Id>([parentPath(id)]);
   // A trashed note keeps the path it came from, and its images stay there.
   if (id.startsWith(`${TRASH_DIR}/`)) folders.add(parentPath(id.slice(TRASH_DIR.length + 1)));
@@ -1397,6 +1456,42 @@ async function removeNoteArtifacts(target: FileSystemBackend, id: Id): Promise<v
     if (!(await target.exists(assets))) continue;
     if (otherNoteInFolder(dir, id)) continue;
     await target.remove(assets, { recursive: true });
+  }
+}
+
+/**
+ * 共享 `.assets/` 里属于**这一篇**的文件：正文引用得到、且没有别的笔记也引用同一个文件。
+ *
+ * 「别的笔记也引用」这一条是必要的：复制笔记（`duplicateNote`）与手工复用都会让两篇笔记
+ * 指向同一个文件，按引用删就会把还活着的那篇的图删掉。邻居的正文就在内存里（`content`），
+ * 判断是白拿的。
+ */
+async function removeSharedAssetsOfNote(target: FileSystemBackend, id: Id): Promise<void> {
+  const state = libraryStore.get();
+  const note = state.notes[id] ?? state.trash[id];
+  if (!note) return;
+  const dir = assetsDirFor();
+  if (!(await target.exists(dir))) return;
+  const mine = sharedAssetFilesIn(note.content);
+  if (!mine.length) return;
+  const others = new Set<string>();
+  for (const item of [...Object.values(state.notes), ...Object.values(state.trash)]) {
+    if (item.id === id) continue;
+    for (const file of sharedAssetFilesIn(item.content)) others.add(file);
+  }
+  for (const file of mine) {
+    if (others.has(file)) continue;
+    try {
+      await target.remove(joinPath(dir, file));
+    } catch {
+      /* 已经不在了：按「删过了」处理，不报错 */
+    }
+  }
+  try {
+    const left = await target.list(dir);
+    if (!left.length) await target.remove(dir);
+  } catch {
+    /* 目录已经没了：不是失败 */
   }
 }
 
@@ -1817,6 +1912,21 @@ export function expandFolder(id: Id): void {
   scheduleMeta();
 }
 
+/**
+ * 把一篇笔记的**祖先目录链全部展开**（0.4.0 用户要求：从搜索结果点开一篇笔记时，
+ * 左侧目录层级也要跟着打开 —— 不然「这篇是从哪个目录来的」在树里看不到）。
+ *
+ * 用 `folderPath()` 走 `parentId` 链（文件夹 id 不是路径，不能靠字符串切分），
+ * 逐个 `expandFolder()`：它同时维护 `ui.expanded` 与 `state.json` 的 meta，
+ * 是「展开一个目录」的唯一实现，不在这里另写一份。
+ */
+export function revealNoteInTree(id: Id): void {
+  const state = libraryStore.get();
+  const note = state.notes[id] ?? state.trash[id];
+  if (!note || !note.folderId) return;
+  for (const folder of folderPath(note.folderId, state.folders)) expandFolder(folder.id);
+}
+
 export function collapseFolder(id: Id): void {
   const ui = getUi();
   const expanded = ui.expanded.filter((folderId) => folderId !== id);
@@ -2186,6 +2296,41 @@ export function foldersArray(state: LibraryState = libraryStore.get()): Folder[]
   return Object.values(state.folders);
 }
 
+/**
+ * 过滤（搜索 / 筛选）时**文件树里可见的东西**：命中的笔记 + 要显示的目录。
+ *
+ * 为什么是「集合」而不是「另一套搜索结果组件」：用户原话「直接使用原来的那一份加个筛选就行了」——
+ * 侧栏只应该有一棵树（`TreeBody`/`FolderBranch`），过滤只是给它一个可见集合：
+ * 命中的笔记照常渲染在**它们真实的目录层级**里，目录行仍是树上那一行（真 caret、能展开能收缩）。
+ *
+ * 两类命中都收进来：
+ *   - 正文/标题/标签命中（`searchNotes`）→ 笔记 + 它的**祖先目录链**（`folderPath`）；
+ *   - **文件夹名命中**（`searchFolders`）→ 那个目录 + 它的直接笔记（搜「操作系统」时想看的是
+ *     那个目录里的东西，而不是「没有找到」）。
+ *
+ * 返回 `null` = 没有查询词（调用方据此渲染未过滤的整棵树）。
+ */
+export function treeFilterFor(query: string): { notes: Set<Id>; folders: Set<Id> } | null {
+  const text = query.trim();
+  if (!text) return null;
+  const state = libraryStore.get();
+  const notes = new Set<Id>();
+  const folders = new Set<Id>();
+
+  for (const hit of searchNotes(text)) {
+    notes.add(hit.note.id);
+    if (!hit.note.folderId) continue;
+    for (const folder of folderPath(hit.note.folderId, state.folders)) folders.add(folder.id);
+  }
+  for (const hit of searchFolders(text)) {
+    for (const folder of folderPath(hit.folder.id, state.folders)) folders.add(folder.id);
+    for (const note of Object.values(state.notes)) {
+      if (note.folderId === hit.folder.id) notes.add(note.id);
+    }
+  }
+  return { notes, folders };
+}
+
 /* ----------------------------------------------------------------- snapshots */
 
 /**
@@ -2343,10 +2488,10 @@ export async function restoreSnapshot(snapshot: Snapshot): Promise<void> {
 /**
  * Persist an image next to the note and return the markdown-ready relative path.
  *
- * 第三参是**最终笔记路径**（`归档/foo 2.md`），不是笔记所在目录 —— 附件目录按笔记名派生
- * （`assetsDirFor`：`归档/foo 2.md` → `归档/foo 2.assets/`），这样「只把一篇笔记挪走」
- * 时图片跟着走，不依赖任何搬迁代码记得搬。旧数据不迁移：老笔记的图仍在公共
- * `<目录>/assets/` 里，正文照旧引用 `./assets/x.png`，照样能读。
+ * 第三参是**最终笔记路径**（`归档/foo 2.md`），不是笔记所在目录 —— 引用要按**笔记所在目录**
+ * 到共享附件目录的层数现算（`relativeAssetRef`：`归档/foo 2.md` + `.assets/x.png`
+ * → `../.assets/x.png`）。旧数据不迁移：老笔记的图仍在 `<笔记名>.assets/` 或公共
+ * `<目录>/assets/` 里，正文照旧引用，照样能读。
  */
 export async function saveImage(
   blob: Blob,
@@ -2357,8 +2502,8 @@ export async function saveImage(
    * 守卫：第三参必须是**笔记文件路径**，不是笔记所在目录。
    *
    * 为什么需要它：这两个参数的**类型都是 `string`**，TypeScript 一个字都拦不住 ——
-   * 调用方仍旧传目录时（`assetsDirFor("")` → `未命名.assets/`）编译通过、类型检查通过、
-   * 单测也可能照样绿，只有用户会发现图片跑去了一个莫名其妙的目录。
+   * 附件引用是按笔记**所在目录**算前缀的，传目录进来会算出少一层的前缀，编译通过、
+   * 类型检查通过、单测也可能照样绿，只有用户会发现图片是裂图。
    * 这类「静默接错来源」正是本轮 P0 的根因形态（`body: payload.body` 那次）。
    * 所以把一个**语义**约束写成一条**运行期**断言：错了就大声报，绝不猜。
    */
@@ -2366,16 +2511,23 @@ export async function saveImage(
     throw new Error(`saveImage 的第三参必须是笔记路径（如 归档/foo.md），收到的是「${notePath || "(空)"}」`);
   }
   const target = requireBackend();
-  const dir = assetsDirFor(notePath);
+  const dir = assetsDirFor();
   const existing = await listOptionalDirectory(target, dir);
   const taken = new Set(existing.map((entry) => entry.name));
-  const name = uniquePath(sanitizeName(suggestedName, `图片-${Date.now()}.png`), taken);
+  /*
+   * 粘贴/拖进来的图与剪藏落盘的图**同一套命名规则**（`assetFinalName`，唯一产地）：
+   * `<内容派生的 uuid>.<ext>`。0.4.0 用户原话「复制过来的默认路径不对，默认为 …uuid 命名即可」——
+   * 名字里不再出现原始文件名（截图会叫 `图片-1738…png`、网页图会带一长串 URL 片段）。
+   * `uniquePath` 仍兜底：同内容重复粘贴时，先命中同名再退让成 ` 2`。
+   */
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const name = uniquePath(await assetFinalName(bytes, suggestedName), taken);
   const path = joinPath(dir, name);
-  await target.writeBytes(path, blob);
-  // 引用里的目录名从**同一个派生结果**现取，别在这里再拼一次 `<笔记名>.assets`。
-  // 目标串再过一次 `markdownRef`（唯一产地）：笔记名带空格时（`备注 2.md`、`无标题 2.md`）
-  // 目录名也带空格，裸写会被**空格截断** —— 图片不渲染，而且不报错。
-  return { path, markdown: markdownRef(`./${baseName(dir)}/${name}`) };
+  await target.writeBytes(path, bytes);
+  // 引用从**笔记所在目录**算到附件路径（`relativeAssetRef`，唯一产地），不在这里手拼一层前缀：
+  // 笔记嵌在 `操作系统/产品/` 里就该是 `../../.assets/x.png`，少一层就是裂图。
+  // 目标串再过一次 `markdownRef`：路径带空格时写成 `<…>`，否则会被**空格截断**、图片不渲染。
+  return { path, markdown: markdownRef(relativeAssetRef(notePath, path)) };
 }
 
 /* ------------------------------------------------------------------ bootstrap */

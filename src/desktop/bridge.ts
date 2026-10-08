@@ -190,6 +190,23 @@ export interface InboxChanged {
   pending: number;
 }
 
+/**
+ * 主进程代下的图片结果（`net.downloadImages`，0.4.0）。
+ *
+ * 形状与扩展侧 `extension/src/content/fetch-images.js` 的返回值**逐字一致** ——
+ * 应用侧只有一套组装逻辑（`lib/assets.js` 与 `lib/clip/receive.ts` 的同一份上限判定）。
+ */
+export interface RemoteImageResult {
+  url: string;
+  ok: boolean;
+  /** 纯 base64（不带 `data:` 前缀），`ok:true` 时必有。 */
+  base64?: string;
+  byteLength?: number;
+  mime?: string | null;
+  /** 失败原因（中文、可直接给用户看）。 */
+  error?: string;
+}
+
 /** 本地桥转交来的信封（`opennote:import:receipt`）。 */
 export interface ImportReceiptRequest {
   reqId: string;
@@ -374,15 +391,26 @@ export interface OpennoteBridge {
     replyToImport(reqId: string, outcome: ImportReply): void;
   };
   /**
+   * 主进程代下的网络图片（剪藏配图落地用，0.4.0）。
+   *
+   * 为什么必须有这一层：桌面 CSP 是 `img-src 'self' file: data: blob:` —— 远程配图在
+   * 界面里根本加载不了；扩展侧（MV3）的 `host_permissions` 只有 127.0.0.1 的十条，
+   * 跨站图拿不到字节。主进程没有这两道限制。
+   *
+   * **只下载**：落盘与正文引用改写全在渲染层的入库管线里（`lib/clip/receive.ts` 是唯一产地）。
+   */
+  net: {
+    /** `referer` = 剪藏来源页地址（CDN 常按它放行）；非法值在主进程被忽略。 */
+    downloadImages(options: { urls: string[]; referer?: string | null }): Promise<RemoteImageResult[]>;
+  };
+  /**
    * `opennote://` 深链（00 号 §6.14㉛）。**未实现或非法的链接不会走到这里**——
    * 主进程用系统对话框如实告知「暂不支持」，绝不静默无反应（0.2.0 那个
    * 「打开 Opennote 设置」死按钮就是协议从未注册导致的）。
    */
-  onDeepLink(
-    callback: (
-      link: { ok: true; kind: "settings"; section: "import" } | { ok: true; kind: "open"; path: string },
-    ) => void,
-  ): () => void;
+  onDeepLink(callback: (
+    link: { ok: true; kind: "settings"; section: "import" } | { ok: true; kind: "open"; path: string },
+  ) => void): () => void;
   /**
    * 桌面端自更新（`opennote:update:*`）。只有打包版 Windows x64 上
    * `status().supported` 才为真；其余平台界面不显示更新入口。

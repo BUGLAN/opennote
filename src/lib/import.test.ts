@@ -2,13 +2,13 @@
  * 导入路径的附件落点（Lead 本轮裁定，三条一起看才没有歧义）：
  *
  * 1. **zip 导入 = 旧数据不动**：zip 里的正文是外部给的，写的就是旧写法 `./assets/x.png`，
- *    那些图按公共 `<目录>/assets/` 原样落地，正文**不改写**成 `<笔记名>.assets/`
+ *    那些图按公共 `<目录>/assets/` 原样落地，正文**不改写**成共享 `.assets/`
  *    （「不迁移旧数据」的直接推论；半改会比不改更坏 —— 正文与磁盘会各说一套）。
  * 2. **独立导入一张图片 = 裸附件**：没有笔记就没有「笔记名」这个事实，不许凭空造一个
  *    `<图片名>.assets/`（那会造出「暗示存在同名笔记」的目录）。这是公共 `assets/` 的
  *    **唯一例外** —— 所以同一条用例必须同时证明「编辑器粘贴的图不走这条路」。
  * 3. **`asset://` 老数据迁移 = 我们自己生成的引用**：图是我们写的、正文引用是我们改的，
- *    必须跟新约定 `<笔记名>.assets/`；同一个 assetId 被两篇笔记引用时**各写一份**
+ *    必须跟新约定（共享 `.assets/` + 内容派生 uuid）；同一个 assetId 在两篇笔记里各写一份
  *    （附件目录按笔记名派生，跨笔记共用一份缓存会让第二篇的引用指到第一篇的目录里）。
  *
  * 判据盯用户看得见的路径：磁盘上哪个文件在哪、正文里的相对引用能不能解析回它。
@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LegacyFolder, LegacyNote } from "../data/legacy";
 import type { WorkspaceRecord } from "../data/workspaces";
 import { MemoryBackend } from "../lib/clip/testing/memoryBackend";
+import { assetFinalName } from "../lib/clip/landing";
 
 let testBackend: MemoryBackend;
 let legacyNotes: LegacyNote[] = [];
@@ -109,7 +110,7 @@ describe("zip 导入：旧布局原样落地（正文写着 ./assets/，就不�
     // ③ 正文引用被改写到实际落点（`handleZip` 的改写循环没动过）。
     const text = testBackend.text("备注.md");
     expect(text).toContain("![图](./assets/图片 2.png)");
-    // ④ 这条路径**不产生** `<笔记名>.assets/`：zip 是旧数据，不迁移。
+    // ④ 这条路径**不产生**共享 `.assets/`：zip 是旧数据，不迁移。
     expect(workspacePaths().some((path) => path.includes(".assets/"))).toBe(false);
   });
 
@@ -134,13 +135,13 @@ describe("zip 导入：旧布局原样落地（正文写着 ./assets/，就不�
 });
 
 describe("独立导入一张图片：公共 assets/ 的唯一例外，且只此一处", () => {
-  it("没有笔记的裸附件落公共 <目标目录>/assets/；编辑器粘贴的图同一时刻仍只进 <笔记名>.assets/", async () => {
+  it("没有笔记的裸附件落公共 <目标目录>/assets/；编辑器粘贴的图同一时刻进共享 `.assets/`", async () => {
     const result = await importIntoWorkspace([imageFile("散图.png")], null);
 
     expect(result.attachments).toBe(1);
     expect(testBackend.files.has("assets/散图.png")).toBe(true);
-    // 不猜笔记名：没有 `<图片名>.assets/` 这种「暗示存在同名笔记」的目录。
-    expect(workspacePaths().some((path) => path.includes(".assets/"))).toBe(false);
+    // 裸附件没有笔记可依附 ⇒ 不进共享附件目录（那是**笔记的**图片的家）。
+    expect(workspacePaths().some((path) => path.startsWith(".assets/"))).toBe(false);
 
     // 同一条用例的另一半：有笔记的图**不走**这条路径 ——
     // 否则这就不是「唯一例外」，而是「半个例外」。
@@ -149,15 +150,17 @@ describe("独立导入一张图片：公共 assets/ 的唯一例外，且只此�
       imageMode: "asset",
       notify: () => undefined,
     });
-    expect(snippets).toEqual(["![笔记图.png](./备注.assets/笔记图.png)"]);
-    expect(testBackend.files.has("归档/备注.assets/笔记图.png")).toBe(true);
+    const asset = await assetFinalName(OTHER_PNG, "笔记图.png");
+    // 笔记在 `归档/` 下一层 ⇒ 一条 `../`；共享目录与 uuid 名都不含空格。
+    expect(snippets).toEqual([`![笔记图.png](../.assets/${asset})`]);
+    expect(testBackend.files.has(`.assets/${asset}`)).toBe(true);
     // 公共 assets/ 里仍然**只有**裸附件那一个文件（编辑器一个字节都没往公共目录写）。
     expect(assetsPaths()).toEqual(["assets/散图.png"]);
   });
 });
 
 describe("asset:// 老数据迁移：我们自己生成的引用跟新约定走", () => {
-  it("图落 <笔记名>.assets/、正文引用指得对；同一个 id 被两篇笔记引用时**各写一份**", async () => {
+  it("图落共享 `.assets/`、正文引用指得对；同一个 id 被两篇笔记引用时**各写一份**", async () => {
     legacyAssets = new Map([["AAAA", new Blob([PNG as unknown as BlobPart])]]);
     legacyFolders = [{ id: "f1", name: "子", parentId: null }];
     legacyNotes = [
@@ -171,14 +174,14 @@ describe("asset:// 老数据迁移：我们自己生成的引用跟新约定走"
 
     expect(result.notes).toBe(2);
     expect(result.attachments).toBe(2);
-    // ① 甲：目录按笔记名派生，重复引用只留一份图，两处引用都指到它。
-    expect(testBackend.text("甲.md")).toContain("![图](./甲.assets/legacy-AAAA.png)");
+    // ① 甲（根目录）：同一篇里重复引用只写一份图，两处引用都指到它；根笔记前缀为空。
+    expect(testBackend.text("甲.md")).toContain("![图](.assets/legacy-AAAA.png)");
     expect(testBackend.text("甲.md")).not.toContain("asset://");
-    expect(testBackend.files.has("甲.assets/legacy-AAAA.png")).toBe(true);
-    // ② 乙（在子目录里）：引用前缀是**乙自己的**目录名，不是甲的。
-    expect(testBackend.text("子/乙.md")).toContain("![图](./乙.assets/legacy-AAAA.png)");
-    expect(testBackend.files.has("子/乙.assets/legacy-AAAA.png")).toBe(true);
-    expect(testBackend.bytes("子/乙.assets/legacy-AAAA.png")).toEqual(PNG);
+    expect(testBackend.files.has(".assets/legacy-AAAA.png")).toBe(true);
+    // ② 乙（在子目录里，用的是**另一个**落盘名）：前缀是一条 `../`，指回同一个共享目录。
+    expect(testBackend.text("子/乙.md")).toContain("![图](../.assets/legacy-AAAA 2.png)");
+    expect(testBackend.files.has(".assets/legacy-AAAA 2.png")).toBe(true);
+    expect(testBackend.bytes(".assets/legacy-AAAA 2.png")).toEqual(PNG);
     // ③ 这条路径不是「裸附件」，所以公共 assets/ 里一个字节都不许出现。
     expect(assetsPaths()).toEqual([]);
   });
@@ -190,7 +193,7 @@ describe("asset:// 老数据迁移：我们自己生成的引用跟新约定走"
     await migrateLegacyData();
 
     const text = testBackend.text("备注 2.md");
-    expect(text).toContain("![图](./备注 2.assets/legacy-BBBB.png)");
-    expect(testBackend.files.has("备注 2.assets/legacy-BBBB.png")).toBe(true);
+    expect(text).toContain("![图](.assets/legacy-BBBB.png)");
+    expect(testBackend.files.has(".assets/legacy-BBBB.png")).toBe(true);
   });
 });

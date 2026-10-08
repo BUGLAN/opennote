@@ -52,3 +52,23 @@ export async function contentHashOf(sourceHash: string, bodyHash: string): Promi
 export async function contentHash8(bytes: Uint8Array): Promise<string> {
   return (await sha256Hex(bytes)).slice(0, 8);
 }
+
+/**
+ * 附件落盘名用的 **UUID 形态标识**（0.4.0 用户要求：「默认为 …uuid 命名即可」）。
+ *
+ * 由**内容**派生（不是随机）：同一份字节永远得到同一个 uuid —— 重试、重复剪藏都命中
+ * 同一路径，「同名不覆盖、不堆 `x-2.png` 垃圾」的性质原样保留。
+ *
+ * 为什么必须换掉旧名：旧名是 `contentHash8 + "-" + 原始名`，而原始名来自图片 URL 末段 ——
+ * 有些站点（聊天页/图床）把整条 URL 编成十六进制塞在路径里，于是文件名长成
+ * `63e80eb9-68747470733a2f2f7169616e77656e2d7265732e6f73732d636e2d6265696a696e67…`（用户实测截图）。
+ *
+ * 取 sha256 前 16 字节，按 RFC 4122 摆成 `8-4-4-4-12`：版本位写 5（内容派生），变体位写 10xx。
+ */
+export async function contentUuid(bytes: Uint8Array): Promise<string> {
+  const hex = (await sha256Hex(bytes)).slice(0, 32);
+  const variant = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  return [hex.slice(0, 8), hex.slice(8, 12), `5${hex.slice(13, 16)}`, `${variant}${hex.slice(17, 20)}`, hex.slice(20, 32)].join(
+    "-",
+  );
+}

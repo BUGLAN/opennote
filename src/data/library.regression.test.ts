@@ -216,8 +216,10 @@ import {
   renameNote,
   rescanWorkspace,
   restoreNote,
+  revealNoteInTree,
   searchFolders,
   searchNotes,
+  treeFilterFor,
   setSidebarTab,
   trashNote,
   updateNoteContent,
@@ -475,9 +477,91 @@ describe("搜索文件夹（0.4.0 设置「搜索时显示文件夹」的数据�
 
   it("关闭开关是纯界面行为：数据层不读这个设置，开关不影响 searchNotes", async () => {
     await openSingle((b) => b.seed("递归/笔记.md", "# 递归"));
-    // 数据层只提供 searchFolders()；「要不要显示」由 SearchBody 按 ui.searchFolders 决定
+    // 数据层只提供 searchFolders()；「要不要显示」由侧栏按 ui.searchFolders 决定
     expect(searchFolders("递归").length).toBe(1);
     expect(searchNotes("递归").length).toBe(1);
+  });
+});
+
+/**
+ * 搜索/筛选**不再另写一套层级组件**（用户原话「直接使用原来的那一份加个筛选就行了」）：
+ * 数据层只交出「树里可见的东西」——命中笔记 + 要显示的目录，由文件树本体照着渲染。
+ * 这一组咬的就是这个集合本身（组件层不再有第二份层级推导）。
+ */
+describe("treeFilterFor：树过滤集合（搜索/筛选的唯一产地）", () => {
+  it("空查询返回 null（调用方据此渲染未过滤的整棵树）", async () => {
+    await openSingle((b) => b.seed("甲/笔记.md", "# 笔记"));
+    expect(treeFilterFor("")).toBeNull();
+    expect(treeFilterFor("   ")).toBeNull();
+  });
+
+  it("命中笔记 + **它的祖先目录链**都进集合（树才画得出层级）", async () => {
+    await openSingle((b) => {
+      b.seed("甲/乙/丙/命中.md", "# 命中的正文");
+      b.seed("甲/乙/别的.md", "# 无关");
+    });
+    const filter = treeFilterFor("命中的正文")!;
+    expect(filter).not.toBeNull();
+    expect([...filter.notes]).toEqual(["甲/乙/丙/命中.md"]);
+    // 祖先三级全在（少了任何一级，树里就看不到这条结果挂在哪）
+    for (const folderId of ["甲", "甲/乙", "甲/乙/丙"]) expect(filter.folders.has(folderId)).toBe(true);
+    // 没命中的笔记不进集合
+    expect(filter.notes.has("甲/乙/别的.md")).toBe(false);
+  });
+
+  it("根目录的笔记：只进 notes，不进 folders（它没有祖先）", async () => {
+    await openSingle((b) => b.seed("根笔记.md", "# 根上的关键词"));
+    const filter = treeFilterFor("根上的关键词")!;
+    expect([...filter.notes]).toEqual(["根笔记.md"]);
+    expect(filter.folders.size).toBe(0);
+  });
+
+  it("文件夹名命中：目录与它的直接笔记都进集合（搜「操作系统」不该说没有找到）", async () => {
+    await openSingle((b) => {
+      b.seed("操作系统/启动过程.md", "# 启动过程");
+      b.seed("操作系统/死锁.md", "# 死锁");
+      b.seed("别的/无关.md", "# 无关");
+    });
+    const filter = treeFilterFor("操作系统")!;
+    expect(filter.folders.has("操作系统")).toBe(true);
+    expect(filter.notes.has("操作系统/启动过程.md")).toBe(true);
+    expect(filter.notes.has("操作系统/死锁.md")).toBe(true);
+    expect(filter.notes.has("别的/无关.md")).toBe(false);
+  });
+
+  it("没有任何命中：空集合（不是 null）—— 界面据此说「没有找到」而不是画出整棵树", async () => {
+    await openSingle((b) => b.seed("甲/笔记.md", "# 笔记"));
+    const filter = treeFilterFor("QAMARKER-NOPE-7")!;
+    expect(filter.notes.size).toBe(0);
+    expect(filter.folders.size).toBe(0);
+  });
+});
+
+describe("revealNoteInTree（从搜索结果点开时展开目录链，0.4.0 用户要求）", () => {
+  it("把这篇笔记的祖先目录全部展开", async () => {
+    await openSingle((b) => b.seed("甲/乙/丙/笔记.md", "# 丙"));
+    const id = "甲/乙/丙/笔记.md";
+    const lib = getLibrary();
+    const note = lib.notes[id];
+    expect(note).toBeDefined();
+    // 祖先链从数据里现取：文件夹 id 是不透明标识，不能靠路径字符串切
+    const chain: string[] = [];
+    let cursor = note.folderId;
+    while (cursor) {
+      chain.push(cursor);
+      cursor = lib.folders[cursor]?.parentId ?? null;
+    }
+    expect(chain.length).toBeGreaterThan(1);
+    revealNoteInTree(id);
+    for (const folderId of chain) expect(getUi().expanded).toContain(folderId);
+  });
+
+  it("根目录的笔记与不存在的 id 都不炸、也不改 expanded", async () => {
+    await openSingle((b) => b.seed("根.md", "# 根"));
+    const before = [...getUi().expanded];
+    revealNoteInTree("根.md");
+    revealNoteInTree("不存在的笔记.md");
+    expect(getUi().expanded).toEqual(before);
   });
 });
 

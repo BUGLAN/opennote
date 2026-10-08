@@ -24,7 +24,7 @@ import {
   updateNoteContent,
 } from "../data/library";
 import type { Id } from "../data/types";
-import { assetsDirFor } from "../lib/clip/landing";
+import { assetsDirFor, relativeAssetRef } from "../lib/clip/landing";
 import { normalizeEol, readFileAsText, uid } from "./utils";
 
 export interface ImportResult {
@@ -243,11 +243,15 @@ export async function migrateLegacyData(): Promise<ImportResult> {
     const title = sanitizeName(note.title || stripExtension(baseName(`legacy-${uid()}.md`)), "旧笔记");
     const path = await resolveAvailablePath(backend, joinPath(folderId ?? "", `${title}.md`), taken);
     taken.add(path);
-    const dir = assetsDirFor(path);
-    const refPrefix = `./${baseName(dir)}/`;
-    // `asset://` 的 id 是**全局**的，但附件目录按笔记名派生 ⇒ 同一个 id 被两篇笔记引用时
-    // 必须**各写一份**：跨笔记共用一张缓存表会让第二篇的引用指向第一篇的目录（图看起来"在"，
-    // 但换目录/删笔记之后就断）。所以缓存按**这一篇**笔记的作用域建。
+    const dir = assetsDirFor();
+    /*
+     * 引用前缀从**笔记所在目录**算到共享 `.assets/`（`relativeAssetRef`，唯一产地）：
+     * 笔记嵌在 `操作系统/产品/` 里就该是 `../../.assets/x.png`，少一层就是裂图。
+     * 旧版这里是 `./${baseName(dir)}/`，那是「附件目录与笔记同级」时代的写法。
+     */
+    const refPrefix = relativeAssetRef(path, dir) + "/";
+    // `asset://` 的 id 是**全局**的，但**同一篇笔记里**重复引用同一个 id 只写一份：
+    // 缓存按这一篇的作用域建，跨笔记共用一张表会让第二篇的引用指向前一篇的落点。
     const assetNames = new Map<string, string>();
     let content = note.content ?? "";
     for (const match of content.matchAll(/asset:\/\/([A-Za-z0-9-]+)/g)) {

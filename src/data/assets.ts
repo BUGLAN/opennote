@@ -1,5 +1,5 @@
 import { createStore } from "../lib/store";
-import { joinPath, normalizePath } from "../fs";
+import { normalizePath } from "../fs";
 import { currentBackend, libraryStore } from "./library";
 import { getUi, uiStore } from "./ui";
 import { getLegacyAsset } from "./legacy";
@@ -51,10 +51,20 @@ export function resolveWorkspacePath(src: string, baseDir: string): string | nul
   const value = src.trim().replace(/^<|>$/g, "").split(/[?#]/)[0];
   if (!value) return null;
   if (value.startsWith("asset://")) return null;
-  const clean = normalizePath(value);
-  if (!clean) return null;
-  if (value.startsWith("/")) return clean;
-  return joinPath(baseDir, clean);
+  if (value.startsWith("/")) {
+    const absolute = normalizePath(value);
+    return absolute || null;
+  }
+  /*
+   * **先拼接、再归一**（0.4.0 修）：`..` 必须在**目录语义**下被吃掉。
+   *
+   * 旧写法是 `joinPath(baseDir, normalizePath(value))` —— 而 `normalizePath` 把 `..` 当
+   * 冗余段直接丢弃，于是 `操作系统/产品/a.md` 里的 `../../.assets/x.png` 会先被压成
+   * `.assets/x.png`，再拼成 `操作系统/产品/.assets/x.png`：**指到一个不存在的地方**。
+   * 共享附件目录（工作区根的 `.assets/`）全靠这条语义，图才不会「编辑器里是裂图」。
+   */
+  const joined = normalizePath(`${baseDir}/${value}`);
+  return joined || null;
 }
 
 export async function ensureImageUrl(path: string, candidates: string[] = []): Promise<string | null> {

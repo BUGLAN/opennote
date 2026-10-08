@@ -51,6 +51,7 @@ import {
   validateImportEnvelope,
   utf8Bytes,
   warningText,
+  decodeBase64,
   MAX_REQUEST_BYTES,
   serializeEnvelopeJson,
   type ImportEnvelope,
@@ -62,10 +63,12 @@ import {
   allocateAssetPath,
   allocateNotePath,
   assetsDirFor,
+  collectRemoteImageUrls,
   ensureFolderDirs,
   findUndeclaredAssetRefs,
   requestedNotePath,
   rewriteAssetRefs,
+  rewriteRemoteImageUrls,
   type AssetRename,
 } from "./landing";
 
@@ -269,6 +272,147 @@ let conflictResolver: ImportConflictResolver | null = null;
 export function setImportConflictResolver(resolver: ImportConflictResolver | null): void {
   conflictResolver = resolver;
 }
+
+/* ============================== 远程配图兜底下载 ============================== */
+
+/**
+ * 「图片一起保存」的**兜底层**（0.4.0）。
+ *
+ * 为什么需要它：扩展侧（MV3）的 `host_permissions` 只有 127.0.0.1 的十条（红线），
+ * 跨站配图拿不到字节 —— 而绝大多数文章配图都在 CDN 上；桌面 CSP 又是
+ * `img-src 'self' file: data: blob:`，正文里留着的 https 地址在界面里根本加载不了
+ * （用户实测：「图片一起保存」勾了，桌面端还是没有图）。字节只能由**主进程**取
+ * （`electron/fetch-images.cjs`，无 CORS 与 CSP 限制）。
+ *
+ * 注入而不是直接 import 桌面桥：`lib/clip` 不认识 `window.desktopBridge`（web 版没有它），
+ * 而且「设置里的开关是否打开」是界面层的事 —— 装钩子的地方（App.tsx）一次性判掉。
+ * 没装 = 没有下载能力（web / CLI / 单测），行为与 0.3.x 完全一致。
+ */
+export interface RemoteImageResult {
+  url: string;
+  ok: boolean;
+  base64?: string;
+  byteLength?: number;
+  mime?: string | null;
+  error?: string;
+}
+
+export type RemoteImageSource = (
+  urls: string[],
+  options?: { referer?: string | null },
+) => Promise<RemoteImageResult[] | null>;
+
+let remoteImageSource: RemoteImageSource | null = null;
+
+export function setRemoteImageSource(source: RemoteImageSource | null): void {
+  remoteImageSource = source;
+}
+
+/** 与扩展侧 `lib/assets.js` 同一份上限（02 §2.2：件数 ≤ 32）。 */
+const REMOTE_IMAGE_LIMIT = 32;
+
+/**
+ * 正文里的远程配图：下载 → 追加进 `assets[]` → 把引用改写成 `assets/<名>`。
+ *
+ * 后续落盘与最终引用改写交给既有管线（`writeAssets` + `rewriteAssetRefs`）——
+ * **不另造一条写路径**，也**不在这里推导落点名**（那是 `allocateAssetPath` 的唯一职责）。
+ * 拿不到的逐条降级：引用原样保留 + 一句汇总 warning（绝不静默）。
+ */
+async function downloadRemoteImages(envelope: ImportEnvelope, warnings: string[]): Promise<void> {
+  if (!remoteImageSource) return;
+  const urls = collectRemoteImageUrls(envelope.body).slice(0, REMOTE_IMAGE_LIMIT);
+  if (!urls.length) return;
+  let results: RemoteImageResult[] | null = null;
+  try {
+    // 带上来源页地址：不少 CDN 用 Referer 判断是不是被别的站盗链（0.4.0）。
+    results = await remoteImageSource(urls, { referer: envelope.source.url ?? null });
+  } catch (error) {
+    warnings.push(`有 ${urls.length} 张图片没能下载到本地，正文里保留原始网址。`);
+    return;
+  }
+  if (!Array.isArray(results)) return;
+  const byUrl = new Map<string, RemoteImageResult>();
+  for (const result of results) {
+    if (result && typeof result.url === "string") byUrl.set(result.url, result);
+  }
+  const used = new Set(envelope.assets.map((asset) => asset.name));
+  const uniqueName = (base: string): string => {
+    const clean = String(base || "image").trim() || "image";
+    if (!used.has(clean)) {
+      used.add(clean);
+      return clean;
+    }
+    const dot = clean.lastIndexOf(".");
+    const stem = dot > 0 ? clean.slice(0, dot) : clean;
+    const ext = dot > 0 ? clean.slice(dot) : "";
+    for (let index = 2; index < 100; index += 1) {
+      const candidate = `${stem}-${index}${ext}`;
+      if (!used.has(candidate)) {
+        used.add(candidate);
+        return candidate;
+      }
+    }
+    const fallback = `${stem}-${Date.now().toString(36)}${ext}`;
+    used.add(fallback);
+    return fallback;
+  };
+  const mappings: Array<{ url: string; name: string }> = [];
+  let failed = 0;
+  for (const url of urls) {
+    const result = byUrl.get(url);
+    if (!result || !result.ok || !result.base64) {
+      failed += 1;
+      continue;
+    }
+    const bytes = decodeBase64(result.base64);
+    if (!bytes || bytes.length === 0) {
+      failed += 1;
+      continue;
+    }
+    const name = uniqueName(assetNameFromUrl(url, result.mime || ""));
+    envelope.assets.push({
+      name,
+      mime: result.mime || "",
+      dataBase64: result.base64,
+      file: null,
+      bytes,
+    });
+    mappings.push({ url, name });
+  }
+  if (failed > 0) {
+    warnings.push(`有 ${failed} 张图片没能下载到本地，正文里保留原始网址。`);
+  }
+  if (mappings.length) {
+    envelope.body = rewriteRemoteImageUrls(envelope.body, mappings);
+  }
+}
+
+/** 从 URL 末段推一个文件名（与扩展侧 `assetNameOf` 同一套清洗：只留安全字符）。 */
+function assetNameFromUrl(url: string, mime: string): string {
+  let base = "image";
+  try {
+    const parsed = new URL(url);
+    const last = parsed.pathname.split("/").filter(Boolean).pop() || "";
+    base = decodeURIComponent(last).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").trim() || "image";
+  } catch {
+    base = "image";
+  }
+  const ext = MIME_EXT[mime] || "";
+  const current = (base.match(/\.[A-Za-z0-9]{1,5}$/) || [])[0];
+  if (!current) base += ext;
+  else if (ext && current.toLowerCase() !== ext) base = base.slice(0, -current.length) + ext;
+  return base.slice(0, 80);
+}
+
+const MIME_EXT: Record<string, string> = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+  "image/avif": ".avif",
+  "image/svg+xml": ".svg",
+  "image/bmp": ".bmp",
+};
 
 /* ============================== 通知开关 ============================== */
 
@@ -540,8 +684,8 @@ async function createNew(backend: FileSystemBackend, envelope: ImportEnvelope, h
   await ensureFolderDirs(backend, envelope.target.folder);
   const requested = requestedNotePath(envelope.target.folder, envelope.title);
   const path = await allocateNotePath(backend, requested, taken);
-  const assets = await writeAssets(backend, path, envelope, taken, warnings);
-  const text = renderMarkdown(envelope, rewriteAssetRefs(envelope.body, assets.renames));
+  const assets = await writeAssets(backend, envelope, taken, warnings);
+  const text = renderMarkdown(envelope, rewriteAssetRefs(envelope.body, assets.renames, path));
   try {
     await backend.writeText(path, text);
   } catch (error) {
@@ -644,11 +788,11 @@ async function appendTo(
 
   const preimage = await recordPreimage(backend, envelope, path, existingBytes, "appended", warnings);
   const taken = new Set<string>(Object.keys(libraryStore.get().notes));
-  const assets = await writeAssets(backend, path, envelope, taken, warnings);
+  const assets = await writeAssets(backend, envelope, taken, warnings);
   const next = renderAppended(
     existingText,
     envelope,
-    rewriteAssetRefs(envelope.body, assets.renames),
+    rewriteAssetRefs(envelope.body, assets.renames, path),
     Date.parse(envelope.source.capturedAt),
   );
   try {
@@ -706,8 +850,8 @@ async function overwriteTarget(
   const preimage = await recordPreimage(backend, envelope, path, existingBytes, "overwritten", warnings);
   if (!preimage) return null;
   const taken = new Set<string>(Object.keys(libraryStore.get().notes));
-  const assets = await writeAssets(backend, path, envelope, taken, warnings);
-  const text = renderMarkdown(envelope, rewriteAssetRefs(envelope.body, assets.renames));
+  const assets = await writeAssets(backend, envelope, taken, warnings);
+  const text = renderMarkdown(envelope, rewriteAssetRefs(envelope.body, assets.renames, path));
   try {
     await backend.writeText(path, text);
   } catch (error) {
@@ -942,13 +1086,16 @@ async function recordPreimage(
 
 async function writeAssets(
   backend: FileSystemBackend,
-  notePath: string,
   envelope: ImportEnvelope,
   taken: Set<string>,
   warnings: string[],
 ): Promise<{ paths: string[]; renames: AssetRename[] }> {
   const paths: string[] = [];
   const renames: AssetRename[] = [];
+  // ③ 兜底：正文里还留着的远程配图（扩展侧没拿到字节的那批）先由主进程下下来，
+  // 追加进 `assets[]` 并把引用改写成 `assets/<名>` —— 之后与「客户端自带的资产」
+  // 走**完全相同**的一条落盘与改写链，没有第二套逻辑。
+  await downloadRemoteImages(envelope, warnings);
   const assets = await resolveAssetBytes(backend, envelope, paths);
   if (!assets.length) {
     const declared: string[] = [];
@@ -956,7 +1103,7 @@ async function writeAssets(
     if (undeclared.length) warnings.push(warningText("IMP-W002"));
     return { paths, renames };
   }
-  const dir = assetsDirFor(notePath);
+  const dir = assetsDirFor();
   try {
     await backend.mkdir(dir);
   } catch (error) {
@@ -1147,14 +1294,14 @@ async function runUndo(receipt: ImportReceipt): Promise<ImportUndoResult> {
         await backend.writeBytes(path, bytes);
         // 正文回到导入前了，**这次新增的图片也必须跟着回退**：还原后的正文不再引用它们，
         // 留着就是孤儿（用户看不到、磁盘上却在）。复用的旧图片不动（见 `rollbackImportAssets`）。
-        const leftover = await rollbackImportAssets(backend, path, receipt, decodeUtf8(bytes));
+        const leftover = await rollbackImportAssets(backend, receipt, decodeUtf8(bytes));
         await markImportUndone(receipt.importId).catch(() => false);
         await rescanWorkspace();
         return {
           ok: true,
           mode: "preimage",
           message: leftover
-            ? `已还原《${title}》到导入前的版本；但这次新增的 ${leftover} 个图片文件没能清理，请手动删除 ${assetsDirFor(path)}。`
+            ? `已还原《${title}》到导入前的版本；但这次新增的 ${leftover} 个图片文件没能清理，请手动删除 ${assetsDirFor()}。`
             : `已还原《${title}》到导入前的版本。`,
         };
       } catch (error) {
@@ -1198,11 +1345,10 @@ async function runUndo(receipt: ImportReceipt): Promise<ImportUndoResult> {
  */
 async function rollbackImportAssets(
   backend: FileSystemBackend,
-  notePath: string,
   receipt: ImportReceipt,
   restoredBody: string,
 ): Promise<number> {
-  const dir = assetsDirFor(notePath);
+  const dir = assetsDirFor();
   if (!receipt.assets.length || !(await backend.exists(dir))) return 0;
   let failed = 0;
   for (const file of receipt.assets) {

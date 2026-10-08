@@ -32,6 +32,14 @@ const path = require('node:path')
 const { DEEPLINK_CHANNEL, PROTOCOL, deeplinkMessage, findDeeplinkInArgv, parseOpennoteUrl } =
   require('./deeplink.cjs')
 
+// 剪藏图片的下载器（0.4.0）：桌面 CSP 的 `img-src` 只放行 `'self' file: data: blob:`，
+// 远程配图在界面里加载不了；扩展侧 host_permissions 又只有 127.0.0.1 的十条。
+// 主进程没有这两道限制 —— 「图片一起保存」真正落地就靠这一层。纯函数，可单测。
+const { downloadImages: downloadImagesInMain } = require('./fetch-images.cjs')
+
+/** 图片下载通道（preload 用同一个常量；verify-contract 的 C-12a 靠常量名配对两侧）。 */
+const NET_DOWNLOAD_IMAGES_CHANNEL = 'opennote:net:downloadImages'
+
 const APP_ID = 'com.opennote.app'
 const APP_NAME = 'Opennote'
 const RECENT_LIMIT = 12
@@ -925,6 +933,7 @@ function registerIpcHandlers() {
   registerShellHandlers()
   registerAppHandlers()
   registerImportHandlers()
+  registerNetHandlers()
   registerUpdateHandlers()
 
   // 主题切换时同步标题栏按钮（叠加层）的底色与符号色。
@@ -1795,6 +1804,25 @@ async function resumeUpdateOnStartup() {
   }
   // 上一次覆盖的结果**不在这里消费**：它随渲染层第一次 `status` 调用一起交付
   // （`updateStatusForRenderer`），否则窗口还没订阅时发出去就等于丢了。
+}
+
+/**
+ * 图片下载通道（0.4.0）：主进程代下剪藏正文里的远程配图。
+ *
+ * 只做「下载 + 魔数校验 + 上限」，**不落盘、不改正文** —— 落盘与引用改写全在渲染层的
+ * 入库管线里（`src/lib/clip/receive.ts`，那是唯一产地）。返回形状与扩展侧
+ * `content/fetch-images.js` 逐字一致，应用侧只有一套组装逻辑。
+ */
+function registerNetHandlers() {
+  handle(
+    NET_DOWNLOAD_IMAGES_CHANNEL,
+    async (options) =>
+      downloadImagesInMain({
+        urls: options && options.urls,
+        referer: options && options.referer,
+      }),
+    '下载图片失败',
+  )
 }
 
 /**

@@ -56,7 +56,7 @@ import { resetImportIndexCache } from "../../data/importLog";
 import { toastStore } from "../toast";
 import type { ImportResult } from "../../desktop/bridge";
 import { encodeBase64, IMPORT_ERRORS, ImportRejection, importProblem } from "./envelope";
-import { DUPLICATE_MESSAGE, getImportLandingPreference, receiveEnvelope, receiveEnvelopeOutcome, resetImportChannelContext, resetImportLandingPreference, setImportChannelContext, setImportConflictResolver, setImportLandingPreference, setImportNotifications, undoImport, type ImportLandingPreference, type ImportReceipt } from "./receive";
+import { DUPLICATE_MESSAGE, getImportLandingPreference, receiveEnvelope, receiveEnvelopeOutcome, resetImportChannelContext, resetImportLandingPreference, setImportChannelContext, setImportConflictResolver, setImportLandingPreference, setImportNotifications, setRemoteImageSource, undoImport, type ImportLandingPreference, type ImportReceipt } from "./receive";
 
 const RECORD: WorkspaceRecord = {
   id: "test",
@@ -129,6 +129,8 @@ beforeEach(async () => {
   resetImportLandingPreference();
   setImportConflictResolver(null);
   setImportNotifications(false);
+  // ③ 远程配图兜底下载：默认**没装**（web / CLI / 单测）——每个用例自己装。
+  setRemoteImageSource(null);
   inboxCalls.length = 0;
   inboxState.failWith = null;
   inboxState.entries.length = 0;
@@ -563,20 +565,20 @@ describe("L2 接收端 · 不丢字与外部改动（D08 / 00 号 §6.3）", () 
 describe("L2 接收端 · 附件（契约 §3.4）", () => {
   const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-  it("落盘到笔记同级的 `<笔记名>.assets/<hash8>-<name>`，正文引用被改写成相对路径", async () => {
+  it("落盘到工作区根的 `.assets/<uuid>.<ext>`，正文引用被改写成相对路径", async () => {
     const body = "看图：\n\n![图](./assets/diagram.png)\n";
     const receipt = await receiveEnvelope(
       raw({ importId: ID1, title: "带图", body, assets: [{ name: "diagram.png", mime: "image/png", dataBase64: encodeBase64(png) }] }),
     );
     expect(receipt.assets).toHaveLength(1);
-    // 目录**按笔记名派生**（`带图.md` → `带图.assets/`），图片跟笔记走。
-    expect(receipt.assets[0]).toMatch(/^带图\.assets\/[0-9a-f]{8}-diagram\.png$/);
+    // 落点是**整库共用的** `.assets/`（0.4.0 用户裁定），文件名是内容派生的 uuid。
+    expect(receipt.assets[0]).toMatch(/^\.assets\/[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.png$/);
     expect(testBackend.bytes(receipt.assets[0])).toEqual(png);
     const text = testBackend.text(receipt.path!)!;
-    const ref = receipt.assets[0].slice("带图.assets/".length);
-    expect(text).toContain(`![图](带图.assets/${ref})`);
+    const ref = `.assets/${receipt.assets[0].slice(".assets/".length)}`;
+    expect(text).toContain(`![图](${ref})`);
     expect(receipt.warnings).toEqual([]);
-    expect(resolveRef(receipt.path!, `带图.assets/${ref}`)).toBe(receipt.assets[0]);
+    expect(resolveRef(receipt.path!, ref)).toBe(receipt.assets[0]);
   });
 
   it("重试不产生「 2」垃圾：同名附件命中同一内容哈希路径", async () => {
@@ -1106,5 +1108,94 @@ describe("L2 接收端 · 落点偏好（00 §6.14㉕㉖）", () => {
     expect(all).not.toContain("还没有打开笔记本，");
     expect(all).not.toContain("请先打开一个文件夹");
     expect(all).not.toContain("新建浏览器笔记本");
+  });
+});
+
+
+describe("③ 剪藏配图兜底下载（0.4.0：主进程代下，桌面 CSP 不放行远程图）", () => {
+  const REMOTE = "https://cdn.test/photo.png";
+  /** 最小 PNG 头（魔数校验只看开头）。 */
+  const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+  it("真回环 + 真下载器 + 真入库：图片落进共享 `.assets/`，引用指得对", async () => {
+    // 这一条不 mock 下载器：起一个真 127.0.0.1 服务端，用主进程那个**真的**下载器
+    // （`electron/fetch-images.cjs`）取字节，再走真的落盘管线 —— ① 在应用侧的
+    // 「网络 → 字节 → 落盘 → 正文改写」整条链一次跑通。
+    const { createServer } = await import("node:http");
+    const require = (await import("node:module")).createRequire(import.meta.url);
+    const { downloadImages } = require("../../../electron/fetch-images.cjs") as {
+      downloadImages: (options: { urls: string[] }) => Promise<Array<{ url: string; ok: boolean; base64?: string }>>;
+    };
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "image/png" });
+      response.end(Buffer.from(PNG));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as { port: number }).port;
+    const remote = `http://127.0.0.1:${port}/photo.png`;
+    try {
+      setRemoteImageSource((urls) => downloadImages({ urls }));
+      const receipt = await receiveEnvelope(raw({ body: `看图：\n\n![图](${remote})` }));
+      expect(receipt.status).toBe("created");
+      const text = testBackend.text(receipt.path!)!;
+      expect(text).not.toContain(remote);
+      const refs = [...text.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map((match) => match[1]);
+      expect(refs).toHaveLength(1);
+      expect(testBackend.files.has(resolveRef(receipt.path!, refs[0]))).toBe(true);
+      expect(Buffer.from(testBackend.bytes(resolveRef(receipt.path!, refs[0]))!).equals(Buffer.from(PNG))).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("正文里的远程图片：装上下载器 → 落盘到共享 `.assets/` + 引用改写", async () => {
+    const asked: string[][] = [];
+    setRemoteImageSource(async (urls) => {
+      asked.push(urls);
+      return [{ url: REMOTE, ok: true, base64: encodeBase64(PNG), byteLength: PNG.length, mime: "image/png" }];
+    });
+    const receipt = await receiveEnvelope(raw({ body: `看图：\n\n![图](${REMOTE})` }));
+    expect(receipt.status).toBe("created");
+    expect(asked).toEqual([[REMOTE]]);
+    const text = testBackend.text(receipt.path!)!;
+    expect(text).not.toContain(REMOTE);
+    const refs = [...text.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map((match) => match[1]);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].startsWith(".assets/")).toBe(true);
+    expect(testBackend.files.has(resolveRef(receipt.path!, refs[0]))).toBe(true);
+    expect(receipt.assets).toHaveLength(1);
+  });
+
+  it("下载失败：引用原样保留 + 一句汇总 warning（绝不静默）", async () => {
+    setRemoteImageSource(async () => [{ url: REMOTE, ok: false, error: "服务器返回 403" }]);
+    const receipt = await receiveEnvelope(raw({ body: `![图](${REMOTE})` }));
+    expect(testBackend.text(receipt.path!)).toContain(REMOTE);
+    expect(receipt.warnings.some((item) => item.includes("没能下载到本地"))).toBe(true);
+    expect(receipt.assets).toEqual([]);
+  });
+
+  it("没装下载器（web / CLI / 单测）：一个字节都不动，行为与 0.3.x 一致", async () => {
+    setRemoteImageSource(null);
+    const receipt = await receiveEnvelope(raw({ body: `![图](${REMOTE})` }));
+    expect(testBackend.text(receipt.path!)).toContain(REMOTE);
+    expect(receipt.assets).toEqual([]);
+  });
+
+  it("客户端已自带字节的图（扩展侧抓到了）不会再下一遍：正文里没有远程 URL", async () => {
+    let called = 0;
+    setRemoteImageSource(async () => {
+      called += 1;
+      return [];
+    });
+    const receipt = await receiveEnvelope(
+      raw({
+        body: "![图](assets/photo.png)",
+        assets: [{ name: "photo.png", mime: "image/png", dataBase64: encodeBase64(PNG) }],
+      }),
+    );
+    expect(called).toBe(0);
+    const text = testBackend.text(receipt.path!)!;
+    expect(text).not.toContain(REMOTE);
+    expect(receipt.assets).toHaveLength(1);
   });
 });

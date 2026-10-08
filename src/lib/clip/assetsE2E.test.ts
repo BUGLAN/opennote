@@ -122,18 +122,18 @@ describe("端到端 · 收件箱入库带着图片一起走", () => {
     expect(result?.status).toBe("created");
     expect(result?.path).toBe("归档/带图的剪藏.md");
 
-    // ③ 笔记与附件目录**都在最终目录**。
+    // ③ 笔记与附件都在最终位置：笔记在 `归档/`，附件在**工作区根**的共享 `.assets/`。
     const notePath = result!.path!;
     const text = testBackend.text(notePath)!;
     expect(text.startsWith("---\n")).toBe(true);
     const refs = imageRefs(text);
     expect(refs).toHaveLength(2);
-    // 每条引用都指向**笔记同级**的 `<笔记名>.assets/`（不是公共 `assets/`）。
-    for (const ref of refs) expect(ref, `引用应该指向 带图的剪藏.assets/：${ref}`).toMatch(/^带图的剪藏\.assets\/[^/]+$/);
+    // 笔记在 `归档/` 下一层 ⇒ 每条引用都带一条 `../`（共享目录的代价，读取端会吃掉 `..`）。
+    for (const ref of refs) expect(ref, `引用应该指向 共享 .assets/：${ref}`).toMatch(/^\.\.\/\.assets\/[^/]+$/);
     const resolved = refs.map((ref) => resolveRef(notePath, ref)).sort();
     for (const path of resolved) {
-      expect(testBackend.files.has(path), `资产应该在最终目录里：${path}`).toBe(true);
-      expect(path.startsWith("归档/带图的剪藏.assets/")).toBe(true);
+      expect(testBackend.files.has(path), `资产应该在共享目录里：${path}`).toBe(true);
+      expect(path.startsWith(".assets/")).toBe(true);
     }
     // 图片内容逐字节保真。
     expect([...testBackend.bytes(resolved.find((path) => path.endsWith(".png"))!)!]).toEqual([...PNG]);
@@ -184,13 +184,13 @@ describe("端到端 · 收件箱入库带着图片一起走", () => {
     const removed = await cleanupInbox(Date.now() + INBOX_COMMITTED_TTL_MS + 1000);
     expect(removed).toBe(1);
     expect(testBackend.paths().some((path) => path.startsWith(entryDir))).toBe(false);
-    // 最终落点的图**不受**清理影响。
-    expect(testBackend.paths().some((path) => path.startsWith("归档/带图的剪藏.assets/"))).toBe(true);
+    // 最终落点的图**不受**清理影响（共享 `.assets/` 里的那两个文件还在）。
+    expect(testBackend.paths().some((path) => path.startsWith(".assets/"))).toBe(true);
   });
 });
 
 /**
- * Lead 裁定②：**统一到 `<笔记名>.assets/`，但不迁移旧数据** ——
+ * 裁定②：**统一到共享 `.assets/`，但不迁移旧数据** ——
  * 老笔记的图留在公共 `<目录>/assets/` 里，正文照旧引用 `./assets/x.png`，**照样能读**。
  *
  * 这一组守的就是这条承诺最容易被违反的方式：**新路径顺手把公共目录也改了 / 迁移了 / 清掉了**。
@@ -217,7 +217,7 @@ describe("端到端 · 不迁移旧数据（老笔记 + 公共 assets/ 必须一
     expect(testBackend.files.has(resolveRef(LEGACY_NOTE, "./assets/old.png"))).toBe(true);
   }
 
-  it("收件箱入库到已有老数据的目录：老笔记/老图逐字节不动，新图只进 `<笔记名>.assets/`", async () => {
+  it("收件箱入库到已有老数据的目录：老笔记/老图逐字节不动，新图只进共享 `.assets/`", async () => {
     seedLegacy();
     setImportChannelContext({ channel: "local-bridge" });
     const pending = await receiveEnvelope(raw());
@@ -226,12 +226,12 @@ describe("端到端 · 不迁移旧数据（老笔记 + 公共 assets/ 必须一
     expect(result?.path).toBe("归档/带图的剪藏.md");
 
     expectLegacyUntouched();
-    // 新图只进新笔记自己的目录，公共 `assets/` 一个字节都没被写过。
+    // 新图只进共享目录，公共 `assets/` 一个字节都没被写过。
     const refs = imageRefs(testBackend.text(result!.path!)!);
     expect(refs).toHaveLength(2);
     for (const ref of refs) {
       const path = resolveRef(result!.path!, ref);
-      expect(path.startsWith("归档/带图的剪藏.assets/")).toBe(true);
+      expect(path.startsWith(".assets/")).toBe(true);
       expect(testBackend.files.has(path)).toBe(true);
     }
     expect(assetsOutsideMeta().filter((path) => path.startsWith("归档/assets/"))).toEqual([LEGACY_IMAGE]);
@@ -252,7 +252,7 @@ describe("端到端 · 不迁移旧数据（老笔记 + 公共 assets/ 必须一
     );
     expect(receipt.status).toBe("created");
     expect(receipt.path).toBe("归档/直接剪藏.md");
-    expect(receipt.assets[0].startsWith("归档/直接剪藏.assets/")).toBe(true);
+    expect(receipt.assets[0].startsWith(".assets/")).toBe(true);
 
     expectLegacyUntouched();
     const ref = imageRefs(testBackend.text(receipt.path!)!)[0];

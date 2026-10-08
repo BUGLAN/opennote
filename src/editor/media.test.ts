@@ -4,6 +4,7 @@ import { collectImagePaths, resolveWorkspacePath } from "../data/assets";
 import type { WorkspaceRecord } from "../data/workspaces";
 import { parentPath } from "../fs";
 import { MemoryBackend } from "../lib/clip/testing/memoryBackend";
+import { assetFinalName } from "../lib/clip/landing";
 import { renderMarkdown } from "../lib/markdown";
 import { findLinkAt } from "./media";
 import { markdownSupport } from "./markdown";
@@ -84,7 +85,7 @@ describe("D27 findLinkAt 仍然能打开正常链接", () => {
 });
 
 /* ---------------------------------------------------------------------------
- * 粘贴/拖拽的附件落点：`<目录>/<笔记名>.assets/`
+ * 粘贴/拖拽的附件落点：工作区根的共享 `.assets/`
  *
  * 判据盯的是**用户看得见的那条路径**：粘贴一张图之后，磁盘上多出来的文件在哪、
  * 正文里写下的相对引用能不能解析回那个文件。两条一起咬，因为「落盘对了但引用指空」
@@ -131,7 +132,7 @@ function rendersAsImage(snippet: string): boolean {
   return /<img\b[^>]*\bsrc=/i.test(renderMarkdown(snippet));
 }
 
-describe("粘贴/拖拽的图片：落 <目录>/<笔记名>.assets/，引用能解析回它", () => {
+describe("粘贴/拖拽的图片：落共享 .assets/，引用能解析回它", () => {
   const notePath = "归档/备注 2.md";
 
   beforeEach(async () => {
@@ -144,43 +145,45 @@ describe("粘贴/拖拽的图片：落 <目录>/<笔记名>.assets/，引用能�
     vi.restoreAllMocks();
   });
 
-  it("编辑器字段带的是**笔记路径**；图片落在 `归档/备注 2.assets/`，引用按笔记所在目录解析回该文件", async () => {
+  it("编辑器字段带的是**笔记路径**；图片落在工作区根的 `.assets/`，引用按笔记所在目录解析回该文件", async () => {
     const state = EditorState.create({ extensions: [editorSettings({ notePath })] });
     const fromField = state.field(editorSettingsField).notePath;
     expect(fromField).toBe(notePath);
 
+    // 落盘名 = 内容派生的 uuid + 扩展名（`assetFinalName` 是唯一产地，这里不抄公式）。
+    const asset = await assetFinalName(PNG, "截图.png");
     const snippets = await insertFileSnippets([pngFile("截图.png")], {
       notePath: fromField,
       imageMode: "asset",
       notify: () => undefined,
     });
-    expect(snippets).toEqual(["![截图.png](<./备注 2.assets/截图.png>)"]);
-    // 目标里带空格 ⇒ 必须走 `<…>` 形式。断言「渲染得出来」而不是「字符串长这样」：
-    // 裸写 `](./备注 2.assets/截图.png)` 时 markdown-it 原样输出文本、**一个 img 都没有**。
+    // `归档/备注 2.md` 在 `归档/` 下一层 ⇒ 引用带一条 `../`；共享目录与 uuid 名都不含空格，
+    // 所以不再需要 `<…>` 形式（`markdownRef` 仍然兜底）。
+    expect(snippets).toEqual([`![截图.png](../.assets/${asset})`]);
     expect(rendersAsImage(snippets[0]), `引用没有被渲染成图片：${snippets[0]}`).toBe(true);
 
-    // 引用解析的基准仍是**笔记所在目录**（`resolveImageSrc(src, baseDir)` 的契约没变）。
+    // 引用解析的基准仍是**笔记所在目录**（`resolveImageSrc(src, baseDir)` 的契约没变）：
+    // `..` 必须在目录语义下被吃掉，否则图在编辑器里是裂图（而且不报错）。
     const resolved = resolveWorkspacePath(refOf(snippets[0]), parentPath(fromField));
-    expect(resolved).toBe("归档/备注 2.assets/截图.png");
-    expect(testBackend.paths()).toEqual(["归档/备注 2.assets/截图.png"]);
+    expect(resolved).toBe(`.assets/${asset}`);
+    expect(testBackend.paths()).toEqual([`.assets/${asset}`]);
 
-    // 同一个事实的另一面：新图**不再**进公共 `assets/`，也不会再出现 `未命名.assets/`
-    // （`assetsDirFor("")` 的产物，正是把目录当笔记路径传进去时留下的指纹）。
+    // 同一个事实的另一面：新图**不再**进公共 `assets/`，也不会再出现按笔记名派生的目录。
     expect(testBackend.calls.some((call) => call.includes("归档/assets/"))).toBe(false);
-    expect(testBackend.paths().some((path) => path.includes("未命名.assets"))).toBe(false);
+    expect(testBackend.paths().some((path) => path.includes("备注 2.assets"))).toBe(false);
   });
 
-  it("笔记在根目录、名字带空格：`备注 2.md` → `备注 2.assets/`", async () => {
+  it("笔记在根目录：引用就是 `.assets/<uuid>`（前缀为空）", async () => {
+    const asset = await assetFinalName(PNG, "截图.png");
     const snippets = await insertFileSnippets([pngFile("截图.png")], {
       notePath: "备注 2.md",
       imageMode: "asset",
       notify: () => undefined,
     });
-    expect(snippets).toEqual(["![截图.png](<./备注 2.assets/截图.png>)"]);
-    expect(resolveWorkspacePath(refOf(snippets[0]), parentPath("备注 2.md"))).toBe("备注 2.assets/截图.png");
-    expect(testBackend.paths()).toEqual(["备注 2.assets/截图.png"]);
-    // 「目录名 + 去重序号都带空格」的两种来源一次咬住：产出的引用必须在应用自己的
-    // 渲染器里真的变成 `<img>`（空格截断目标时这里会红，而文字断言看不出任何异常）。
+    expect(snippets).toEqual([`![截图.png](.assets/${asset})`]);
+    expect(resolveWorkspacePath(refOf(snippets[0]), parentPath("备注 2.md"))).toBe(`.assets/${asset}`);
+    expect(testBackend.paths()).toEqual([`.assets/${asset}`]);
+    // 产出的引用必须在应用自己的渲染器里真的变成 `<img>`。
     expect(rendersAsImage(snippets[0]), `引用没有被渲染成图片：${snippets[0]}`).toBe(true);
   });
 
@@ -199,8 +202,9 @@ describe("粘贴/拖拽的图片：落 <目录>/<笔记名>.assets/，引用能�
   it("新旧两个位置并存（公共 assets/ 有老图、派生目录里已有同名图）：新图只进派生目录，两个旧位置逐字节不动", async () => {
     // 旧世界留下的图：公共 `归档/assets/` —— 一个字节都不许动（旧数据不迁移）。
     testBackend.seedBytes("归档/assets/老图.png", PNG);
-    // 派生目录里已经有一张同名图：新图必须去重成 `图 2.png`，绝不静默覆盖。
-    testBackend.seedBytes("归档/备注.assets/图.png", PNG);
+    // 共享目录里已经把同一 uuid 占住了（用户手放的、或极端哈希碰撞）：新图必须去重，绝不静默覆盖。
+    const asset = await assetFinalName(OTHER_PNG, "图.png");
+    testBackend.seedBytes(`.assets/${asset}`, PNG);
 
     const snippets = await insertFileSnippets([pngFile("图.png", OTHER_PNG)], {
       notePath: "归档/备注.md",
@@ -208,14 +212,13 @@ describe("粘贴/拖拽的图片：落 <目录>/<笔记名>.assets/，引用能�
       notify: () => undefined,
     });
 
-    expect(snippets).toEqual(["![图.png](<./备注.assets/图 2.png>)"]);
-    // 去重序号（`uniquePath` 的「空格 + 2」）也会让目标带空格 ⇒ 同样必须走 `<…>` 形式。
-    // 判据盯「渲染得出来」，不是「字符串长这样」。
+    // 去重序号 ` 2` 带空格 ⇒ 必须走 `<…>` 形式，否则空格截断目标、图片不渲染。
+    expect(snippets).toEqual([`![图.png](<../.assets/${asset.replace(/\.png$/, " 2.png")}>)`]);
     expect(rendersAsImage(snippets[0]), `引用没有被渲染成图片：${snippets[0]}`).toBe(true);
-    expect(testBackend.files.has("归档/备注.assets/图.png")).toBe(true);
-    expect(testBackend.bytes("归档/备注.assets/图.png")).toEqual(PNG);
-    expect(testBackend.files.has("归档/备注.assets/图 2.png")).toBe(true);
-    expect(testBackend.bytes("归档/备注.assets/图 2.png")).toEqual(OTHER_PNG);
+    expect(testBackend.files.has(`.assets/${asset}`)).toBe(true);
+    expect(testBackend.bytes(`.assets/${asset}`)).toEqual(PNG);
+    expect(testBackend.files.has(`.assets/${asset.replace(/\.png$/, " 2.png")}`)).toBe(true);
+    expect(testBackend.bytes(`.assets/${asset.replace(/\.png$/, " 2.png")}`)).toEqual(OTHER_PNG);
     // 公共目录里**只有**那张老图（新图一个字节都没往那里写）。
     expect(testBackend.paths().filter((path) => path.startsWith("归档/assets/"))).toEqual(["归档/assets/老图.png"]);
     expect(testBackend.bytes("归档/assets/老图.png")).toEqual(PNG);

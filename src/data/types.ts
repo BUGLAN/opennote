@@ -159,6 +159,15 @@ export interface UiSettings {
   importConflict: ImportConflictPreference;
   /** 入库成功后是否弹提示（关掉后仍写导入日志，只是不打扰）。 */
   importNotify: boolean;
+  /**
+   * ③ 剪藏配图：把正文里的**网络图片**下载到笔记本本地（**默认开**）。
+   *
+   * 桌面 CSP 是 `img-src 'self' file: data: blob:` —— 远程配图在界面里加载不了；
+   * 扩展侧 host_permissions 又只有 127.0.0.1 的十条，跨站图拿不到字节。
+   * 所以「图片一起保存」真正落地靠的是这一层：主进程代下（`net.downloadImages`），
+   * 落盘后正文引用改写成 `<笔记名>.assets/<hash8>-<名>`。关掉则保留原始网址。
+   */
+  importDownloadImages: boolean;
   /** 是否记录 `userData/bridge.log`（关掉后桥照样工作，只是不留痕）。 */
   bridgeLog: boolean;
   /**
@@ -228,6 +237,7 @@ export const DEFAULT_UI: UiSettings = {
   // 改成直接入库仍可（设置 · 文件 · 导入与接口 → R1）。
   importConflict: "inbox",
   importNotify: true,
+  importDownloadImages: true,
   bridgeLog: true,
   searchFolders: true,
   lockedNotes: [],

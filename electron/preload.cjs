@@ -73,6 +73,13 @@ const IMPORT_REQUEST_CHANNEL = 'opennote:import:request'
 const IMPORT_REPLY_CHANNEL = 'opennote:import:reply'
 
 /**
+ * 剪藏图片的**主进程下载**（0.4.0）。桌面 CSP 的 `img-src` 只放行 `'self' file: data: blob:`，
+ * 远程配图在界面里加载不了；扩展侧 host_permissions 又只有 127.0.0.1 的十条 ——
+ * 跨站图片的字节只能由主进程取。落盘与正文改写仍在渲染层的入库管线里（唯一产地）。
+ */
+const NET_DOWNLOAD_IMAGES_CHANNEL = 'opennote:net:downloadImages'
+
+/**
  * 自更新（`electron/update.cjs` 是唯一产地）。
  *
  * 渲染层在这里能做的只有五件事：读状态、检查、下载、取消、重启。**没有**「传 URL」、
@@ -221,6 +228,15 @@ const bridge = {
    * 由主进程用系统对话框如实告知（绝不静默）。arity 1。
    */
   onDeepLink: (callback) => subscribe(DEEPLINK_CHANNEL, callback),
+
+  /**
+   * 主进程代下的网络图片（剪藏配图落地用，0.4.0）。arity 1。
+   * 入参 `{ urls: string[] }`，返回与扩展侧同形状的
+   * `[{ url, ok, base64?, byteLength?, mime?, error? }]`（上限、超时、魔数校验都在主进程）。
+   */
+  net: {
+    downloadImages: (options) => invoke(NET_DOWNLOAD_IMAGES_CHANNEL, options),
+  },
 
   /**
    * 桌面端自更新。**只在打包版 Windows x64 上 `supported` 为真**；

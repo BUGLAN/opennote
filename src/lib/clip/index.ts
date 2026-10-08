@@ -82,6 +82,8 @@ export {
   resetImportLandingPreference,
   setImportConflictResolver,
   setImportNotifications,
+  // ③ 剪藏配图的兜底下载：桌面端把主进程的下载能力装进来（设置可关）。
+  setRemoteImageSource,
   DUPLICATE_MESSAGE,
   UNDO_WINDOW_MS,
 } from "./receive";
@@ -134,19 +136,25 @@ export {
   yamlScalar,
 } from "./frontmatter";
 
-export { bodyHashOf, contentHash8, contentHashOf, sha256Hex, sha256Ref, shortRef, sourceHashOf } from "./hash";
+export { bodyHashOf, contentHash8, contentHashOf, contentUuid, sha256Hex, sha256Ref, shortRef, sourceHashOf } from "./hash";
 
 export {
   allocateAssetPath,
   allocateNotePath,
   assetFinalName,
+  assetPathOfRef,
   assetsDirFor,
+  collectRemoteImageUrls,
   ensureFolderDirs,
   findUndeclaredAssetRefs,
   isAppendOf,
   markdownRef,
+  rebaseSharedAssetRefs,
+  relativeAssetRef,
   requestedNotePath,
   rewriteAssetRefs,
+  rewriteRemoteImageUrls,
+  sharedAssetFilesIn,
 } from "./landing";
 
 export type { AssetRename, AssetTarget } from "./landing";

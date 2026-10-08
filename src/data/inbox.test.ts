@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { resolveWorkspacePath } from "./assets";
 import { baseName, joinPath, parentPath } from "../fs/paths";
 import type { EntryInfo, FileSystemBackend } from "../fs/types";
 import type { ImportResult } from "../desktop/bridge";
@@ -759,13 +760,14 @@ describe("commitInboxResult(id, { folder })：入库前选落点", () => {
 /* ------------------ 资产随笔记一起入库（task-31：图片跟笔记走） ------------------ */
 
 /**
- * 设计（Lead 冻结，用户确认）：笔记在 `<目录>/foo.md` → 图片在 `<目录>/foo.assets/`，
- * 正文里的引用是**相对路径**；从收件箱确认入库到 `{folder}` 时，资产必须**跟着笔记走**。
+ * 设计（0.4.0 用户裁定）：图片统一落在**工作区根**的共享 `.assets/`（整库一个目录，
+ * git 里不再每篇笔记多一个目录），正文引用是**按笔记所在目录层数**算出来的相对路径；
+ * 从收件箱确认入库到 `{folder}` 时，引用必须跟着新位置重算。
  *
  * 端到端断言咬的是**性质**而不是散落的字面量：
- * ① `资产目录 = 笔记同目录下、由笔记名派生的 <noteName>.assets/`；
- * ② `正文里的相对引用 join(笔记目录, ref)` **恰好等于**那个资产文件。
- * 这两条正是「图片跟笔记走」的定义 —— 「没搬资产」「搬了资产但正文没重写」「退回公共
+ * ① 资产落点在共享 `.assets/` 里（不是条目目录、也不是按笔记名派生的目录）；
+ * ② `正文里的相对引用` 按查看器语义（吃掉 `..`）解析后**恰好等于**那个资产文件。
+ * 这两条正是「图片指得准」的定义 —— 「没搬资产」「搬了资产但正文没重写」「退回公共
  * `assets/`」三种情况都会红。落盘目录名由 C1 的 `landing.ts` 决定，字面断言在那边。
  */
 describe("资产随笔记一起入库（task-31）", () => {
@@ -795,7 +797,7 @@ describe("资产随笔记一起入库（task-31）", () => {
   const firstImageRef = (body: string) => /!\[[^\]]*\]\(([^)]+)\)/.exec(body)?.[1] ?? "";
   const bytesAt = (path: string) => new Uint8Array(testBackend.files.get(path) as Uint8Array);
 
-  it("端到端：入到 {folder} → 笔记与资产都在最终目录，正文相对引用指得准（① ②）", async () => {
+  it("端到端：入到 {folder} → 笔记在目标目录、资产在共享 `.assets/`，正文引用指得准（① ②）", async () => {
     const entry = await enqueueInbox(assetEnvelope(), assetMeta());
     const dirName = await firstDirName();
     // 待确认期间：资产在条目自己的 `assets/` 下，`entry.json` 的 `assets[].file` 是条目相对路径。
@@ -806,23 +808,18 @@ describe("资产随笔记一起入库（task-31）", () => {
     const notePath = result?.path ?? "";
 
     expect(notePath).toBe("剪藏/技术/带图笔记.md");
-    // ① 资产跟着笔记搬到了**最终目录**（不是留在收件箱，也不是旧目录），字节原样。
+    // ① 资产落进**共享** `.assets/`（不是留在收件箱、不是按笔记名派生的目录），字节原样。
     expect(result?.assets).toHaveLength(1);
     const assetPath = result!.assets[0];
-    // 冻结命名（Lead 裁定）：资产目录 = 笔记同目录下、由**笔记名**派生的 `<noteName>.assets/`。
-    // 断言从 `notePath` 派生而不是写死字面量 —— 「图片跟笔记走」这条性质本身才是要咬的东西：
-    // 公共 `<目录>/assets/` 会让这条红（那种布局下单篇笔记挪走就断图）。
-    const noteDir = parentPath(notePath);
-    const assetsDir = parentPath(assetPath);
-    expect(assetsDir).toBe(`${noteDir}/${baseName(notePath).replace(/\.md$/, "")}.assets`);
-    expect(assetsDir.startsWith(`${noteDir}/`)).toBe(true);
+    expect(parentPath(assetPath)).toBe(".assets");
     expect(bytesAt(assetPath)).toEqual(PNG);
-    // ② 正文里的引用是相对路径，且 join(笔记目录, 引用) 恰好等于那个资产文件。
+    // ② 正文里的引用是相对路径，且按查看器语义解析后**恰好**是那个资产文件。
+    //    笔记在 `剪藏/技术/` 下两层 ⇒ 引用带两条 `../`，少了就是裂图（而且不报错）。
     const ref = firstImageRef(String(testBackend.files.get(notePath)));
     expect(ref).not.toBe("");
     expect(ref.startsWith("/")).toBe(false);
-    expect(ref).not.toContain("..");
-    expect(joinPath(noteDir, ref.replace(/^\.\//, ""))).toBe(assetPath);
+    expect(ref.startsWith("../../.assets/")).toBe(true);
+    expect(resolveWorkspacePath(ref, parentPath(notePath))).toBe(assetPath);
     // 源目录无残留：条目里的**暂存副本**已删（条目本身按 24h 保留期留着当记录）。
     expect(testBackend.dirs.has(`${INBOX_DIR}/${dirName}/assets`)).toBe(false);
     expect(testBackend.pathsUnder(`${INBOX_DIR}/${dirName}/assets`)).toEqual([]);

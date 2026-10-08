@@ -4738,10 +4738,11 @@ const C13_IDS = ["C-13a", "C-13b", "C-13c", "C-13d", "C-13e", "C-13f", "C-13g", 
 /* ==================================================================== §16 */
 /* §16 C-14 · B4「三条写图路径统一到 `assetsDirFor`」（task-5；Lead 2026-09-30 指派复核）
  *
- * 判据盯**用户看得见的那条路径**：给一篇笔记粘一张图 → 图落在 `<目录>/<笔记名>.assets/`；
- * 把这篇笔记删了再恢复 → 图还在（不是「删了再恢复，图丢了」）；单独把一篇笔记挪到别的目录 →
- * 正文里的 `./foo.assets/x.png` 仍然指得对。
- * **旧数据不迁移**：公共 `<目录>/assets/` 里的老图一个字节都不许动。
+ * 判据盯**用户看得见的那条路径**：给一篇笔记粘一张图 → 图落在工作区根的共享 `.assets/`、
+ * 正文引用按笔记所在目录的层数写成相对路径；把这篇笔记删了再恢复 → 引用跟着重算、图还在；
+ * 单独把一篇笔记挪到别的目录 → 引用前缀跟着变，仍然指得对。
+ * **旧数据不迁移**：公共 `<目录>/assets/` 与老的 `<笔记名>.assets/` 里的图一个字节都不许动。
+ * **永久删除按引用删**：整目录递归删共享 `.assets/` 会把别人的图一起删掉。
  */
 function assetsPathChecks(inp) {
   const code = (text) => stripCommentsKeepLines(text).text;
@@ -4750,16 +4751,17 @@ function assetsPathChecks(inp) {
   const imp = code(inp.importTs);
   const result = {};
 
-  // C-14a ── `saveImage` 的第三参是**最终笔记路径**，目录由 `assetsDirFor` 派生
+  // C-14a ── `saveImage` 的落点是**整库共用**的 `.assets/`，引用按笔记所在目录现算
   {
     const body = bodyAfter(lib, "export async function saveImage(");
-    const derivesFromNotePath = /assetsDirFor\(\s*notePath\s*\)/.test(body);
+    const sharedDir = /assetsDirFor\(\s*\)/.test(body);
+    const derivesRef = /relativeAssetRef\(\s*notePath\s*,/.test(body);
     const noPublicAssets = !/ASSETS_DIR/.test(body);
     result["C-14a"] = {
-      title: "`saveImage(blob, suggestedName, notePath)`：第三参是**最终笔记路径**（如 `归档/foo 2.md`），"
-        + "目录由 `assetsDirFor(notePath)` 派生（`foo 2.md` → `foo 2.assets/`）——**不自己拼公共 `assets/`**",
-      ok: body !== "" && derivesFromNotePath && noPublicAssets,
-      detail: `saveImage 体内 \`assetsDirFor(notePath)\`=${derivesFromNotePath}｜体内出现公共 ASSETS_DIR=${!noPublicAssets}`,
+      title: "`saveImage(blob, suggestedName, notePath)`：落点是共享 `assetsDirFor()`（整库一个 `.assets/`），"
+        + "引用由 `relativeAssetRef(notePath, path)` 按**笔记所在目录**现算 —— 既不拼公共 `assets/`，也不拼按笔记名派生的目录",
+      ok: body !== "" && sharedDir && derivesRef && noPublicAssets,
+      detail: `saveImage 体内 \`assetsDirFor()\`=${sharedDir}｜\`relativeAssetRef(notePath,…)\`=${derivesRef}｜体内出现公共 ASSETS_DIR=${!noPublicAssets}`,
     };
   }
 
@@ -4772,36 +4774,40 @@ function assetsPathChecks(inp) {
     const args = call ? splitTopLevel(call) : [];
     const thirdArg = (args[2] || "").trim();
     const mediaPassesNotePath = args.length === 3 && /notePath/.test(thirdArg);
-    const importDerives = /assetsDirFor\(/.test(imp);
-    const libDerives = /assetsDirFor\(/.test(lib);
+    const importDerives = /assetsDirFor\(\s*\)/.test(imp) && /relativeAssetRef\(/.test(imp);
+    const libDerives = /assetsDirFor\(\s*\)/.test(lib);
     result["C-14b"] = {
-      title: "三条写图路径统一到同一条派生规则：编辑器粘贴/拖拽把**笔记路径**传给 `saveImage`（**第三个实参**）、"
-        + "`src/lib/import.ts` 的新图落盘用 `assetsDirFor`、`library.ts` 的 `saveImage` 用 `assetsDirFor`"
-        + "（**新图一律写 `<笔记名>.assets/`**）",
+      title: "三条写图路径统一到同一条规则：编辑器粘贴/拖拽把**笔记路径**传给 `saveImage`（**第三个实参**）、"
+        + "`src/lib/import.ts` 的新图落盘用 `assetsDirFor()` + `relativeAssetRef`、`library.ts` 的 `saveImage` 用 `assetsDirFor()`"
+        + "（**新图一律落共享 `.assets/`**）",
       ok: mediaPassesNotePath && importDerives && libDerives,
-      detail: `media.ts saveImage 第三实参=${JSON.stringify(thirdArg)}｜import.ts 用 assetsDirFor=${importDerives}｜library.ts 用 assetsDirFor=${libDerives}`,
+      detail: `media.ts saveImage 第三实参=${JSON.stringify(thirdArg)}｜import.ts 共享落点+前缀=${importDerives}｜library.ts 用 assetsDirFor()=${libDerives}`,
     };
   }
 
-  // C-14c ── 删除 / 恢复**两个方向**都按「笔记路径」派生；恢复必须用**最终路径**
+  // C-14c ── 删除 / 恢复 / 移动：**改写引用**而不是搬目录；永久删除**按引用删**
   {
-    /* 两个方向都要在**各自的函数体里**判：`moveNote()` 里还有一处同形状的 `moveNoteAssets(id, nextPath)`，
+    /* 三个方向都要在**各自的函数体里**判：同一个形状的调用在三个函数里各有一处，
      * 在全文里找会让「恢复方向反了」这个变异**落地却不翻红**（第一版就是这样）。 */
     const trashBody = bodyAfter(lib, "export async function trashNote(");
     const restoreBody = bodyAfter(lib, "export async function restoreNote(");
-    const trashCall = /moveNoteAssets\(\s*target\s*,\s*id\s*,\s*trashPath\s*\)/.test(trashBody);
-    const restoreCall = /moveNoteAssets\(\s*target\s*,\s*id\s*,\s*nextPath\s*\)/.test(restoreBody);
-    const helperDerives = /const from = assetsDirFor\(fromNote\)/.test(lib) && /const to = assetsDirFor\(toNote\)/.test(lib);
-    /* 旧数据不迁移：公共 `assets/` 只在**搬迁/恢复**时被处理，且不许出现删除公共目录的动作。 */
-    const legacyHandled = /joinPath\(parentPath\(nextPath\), ASSETS_DIR\)/.test(restoreBody);
-    const noLegacyDelete = !/remove\(\s*(?:sourceAssets|legacyAssets|joinPath\([^)]*ASSETS_DIR)/.test(lib);
+    const moveBody = bodyAfter(lib, "export async function moveNote(");
+    const trashRebase = /rebaseNoteAssets\(\s*target\s*,\s*id\s*,\s*trashPath\s*\)/.test(trashBody);
+    const restoreRebase = /rebaseNoteAssets\(\s*target\s*,\s*id\s*,\s*nextPath\s*\)/.test(restoreBody);
+    const moveRebase = /rebaseNoteAssets\(\s*target\s*,\s*id\s*,\s*nextPath\s*\)/.test(moveBody);
+    /* 永久删除**必须**按引用挑文件：整目录 `remove(assetsDirFor(), { recursive: true })`
+     * 会把共享目录里**别人的图**一起删掉 —— 这是这套布局最危险的一处。 */
+    const refBasedDelete = /sharedAssetFilesIn\(/.test(lib);
+    const noWholesaleDelete = !/remove\(\s*assetsDirFor\(\s*\)\s*,\s*\{\s*recursive/.test(lib);
+    /* 旧布局的自有附件目录仍要清算（老笔记真删了，它就该消失）。 */
+    const legacyKept = /joinPath\(parentPath\(id\), `\$\{stem\}\.assets`\)/.test(lib);
     result["C-14c"] = {
-      title: "删除/恢复**两个方向**都走同一条派生规则（`assetsDirFor`）：入回收站用**原路径→回收站路径**、"
-        + "恢复用**最终路径 `nextPath`**（不是回收站里的 `id` —— 用 id 就是「方向反了」）；"
-        + "旧公共 `assets/` 仍被搬迁处理但**一个字节都不删**（旧数据不迁移）",
-      ok: trashCall && restoreCall && helperDerives && legacyHandled && noLegacyDelete,
-      detail: `trashNote 体内 moveNoteAssets(id → trashPath)=${trashCall}｜restoreNote 体内 moveNoteAssets(id → nextPath)=${restoreCall}`
-        + `｜helper 两侧都派生=${helperDerives}｜restoreNote 里处理旧公共 assets=${legacyHandled}｜无删除旧目录动作=${noLegacyDelete}`,
+      title: "删除/恢复/移动都**改写正文引用**（`rebaseNoteAssets(target, id, 新路径)`），不再搬目录；"
+        + "永久删除**按引用删**（`sharedAssetFilesIn`）且**绝不整目录递归删共享 `.assets/`**（那会删掉别人的图）；"
+        + "旧布局的 `<笔记名>.assets/` 仍按目录清算",
+      ok: trashRebase && restoreRebase && moveRebase && refBasedDelete && noWholesaleDelete && legacyKept,
+      detail: `trashNote rebase=${trashRebase}｜restoreNote rebase=${restoreRebase}｜moveNote rebase=${moveRebase}`
+        + `｜按引用删=${refBasedDelete}｜无整目录递归删=${noWholesaleDelete}｜旧目录清算保留=${legacyKept}`,
     };
   }
 
@@ -4824,17 +4830,28 @@ const C14_IDS = ["C-14a", "C-14b", "C-14c"];
   }
   const c14mut = [
     { name: "saveimage-public-assets（saveImage 退回公共 `<目录>/assets/`）", target: "C-14a", expect: "red",
-      apply: (i) => ({ ...i, library: i.library.replace("assetsDirFor(notePath)", "joinPath(parentPath(notePath), ASSETS_DIR)") }) },
+      /* ⚠️ 必须锚在 `saveImage` 的**函数体**里：`assetsDirFor()` 在 library.ts 里出现多次
+       * （`removeSharedAssetsOfNote` 里也有一处），非全局 replace 会打中**第一处**（不是 saveImage）
+       * → 变异落地却不翻红。 */
+      apply: (i) => ({ ...i, library: i.library.replace(
+        /(export async function saveImage\([\s\S]*?)const dir = assetsDirFor\(\);/,
+        "$1const dir = joinPath(parentPath(notePath), ASSETS_DIR);",
+      ) }) },
     { name: "media-passes-empty（编辑器不再把笔记路径传下去）", target: "C-14b", expect: "red",
       /* ⚠️ 必须锚在 `saveImage(` 的**实参**上：`options.notePath` 在文件里出现多次（还有一处
        * `if (!options.notePath)`），非全局 `replace` 会打中**第一处**（不是实参）→ 变异落地却不翻红。 */
       apply: (i) => ({ ...i, media: i.media.replace(/(saveImage\([\s\S]*?,\s*)options\.notePath(\s*\))/, '$1""$2') }) },
     { name: "restore-uses-id（恢复方向反了：用回收站 id 而不是 nextPath）", target: "C-14c", expect: "red",
-      /* ⚠️ 只替换**恢复那一处**（`moveNote` 里还有一处同形状的调用 —— 非全局 replace 会打错目标，
+      /* ⚠️ 只替换**恢复那一处**（`trashNote`/`moveNote` 里还有同形状的调用 —— 非全局 replace 会打错目标，
        * 第一版就因此「变异落地了但判据没翻红」）。 */
       apply: (i) => ({ ...i, library: i.library.replace(
-        /(export async function restoreNote[\s\S]*?)await moveNoteAssets\(target, id, nextPath\)/,
-        "$1await moveNoteAssets(target, id, id)",
+        /(export async function restoreNote[\s\S]*?)await rebaseNoteAssets\(target, id, nextPath\)/,
+        "$1await rebaseNoteAssets(target, id, id)",
+      ) }) },
+    { name: "purge-whole-shared-dir（永久删除整目录递归删共享 `.assets/`：会删掉别人的图）", target: "C-14c", expect: "red",
+      apply: (i) => ({ ...i, library: i.library.replace(
+        "await removeSharedAssetsOfNote(target, id);",
+        "await target.remove(assetsDirFor(), { recursive: true });",
       ) }) },
   ];
   const failures14 = [];
@@ -4866,8 +4883,9 @@ const C14_IDS = ["C-14a", "C-14b", "C-14c"];
       `${bt.total} 个用例全部正确（两类「签名里也有 ` + "`{}`" + `」的形态是踩过的坑）`,
       `用例不成立：${bt.bad.join(" | ")}`);
   }
-  info("C-14·覆盖面", "这条线**只做静态契约面**；行为面（粘贴落 `<笔记名>.assets/`、搬迁两处都处理、旧数据不动）"
-    + "在 `src/editor/*.test.ts` / `src/lib/import*.test.ts` / `src/lib/clip/assets.test.ts` 与 `pnpm test` 里（703 passed）",
+  info("C-14·覆盖面", "这条线**只做静态契约面**；行为面（粘贴/剪藏落共享 `.assets/`、移动/回收站/恢复改写引用、"
+    + "永久删除按引用删、旧数据不动）在 `src/editor/*.test.ts` / `src/lib/import*.test.ts` / `src/lib/clip/assets*.test.ts`"
+    + " / `src/data/library.files.test.ts` 与 `pnpm test` 里",
     `library.ts ${baseAssetsInp.library.length} 字符｜media.ts ${baseAssetsInp.media.length}｜import.ts ${baseAssetsInp.importTs.length}`);
 }
 

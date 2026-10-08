@@ -7,18 +7,16 @@
 
 import {
   assertSafeRelative,
-  baseName,
   extName,
   joinPath,
   normalizePath,
   parentPath,
   sanitizeName,
-  stripExtension,
 } from "../../fs/paths";
 import type { FileSystemBackend } from "../../fs/types";
 import { resolveAvailablePath } from "../../data/library";
 import { ImportRejection, importProblem, normalizeFolder } from "./envelope";
-import { contentHash8 } from "./hash";
+import { contentUuid } from "./hash";
 
 /**
  * 请求路径 = `joinPath(folder, sanitizeName(title, "未命名") + ".md")`（契约 §3.1）。
@@ -72,31 +70,125 @@ export async function allocateNotePath(
 }
 
 /**
- * 附件目录：与笔记**同级**、**按笔记名派生**的 `<noteName>.assets/`。
+ * 附件目录：**整个笔记本共用一个**，在工作区根下、以点开头。
  *
- * 为什么不是公共 `assets/`（Lead 裁定 + 用户原话「从收件箱移动到其他位置时，图片位置也应改变」）：
- * 公共目录只有在「整个目录一起搬」时才成立；一旦**只把一篇笔记挪到别处**（或从收件箱用
- * `{folder}` 把它入库到另一个目录），`./assets/x.png` 就指空。按笔记名派生后，
- * 「图片跟笔记走」是**路径结构**保证的，不依赖任何搬迁代码记得搬。
+ * 0.4.0 用户裁定（原话「很多笔记都是用 git 管理的，这样每次都会多一个文件夹」）：
+ * 旧规则是按笔记名派生 `<笔记名>.assets/` —— 每剪一篇带图的文章就在 git 里多一个目录，
+ * 而且目录名跟着（可能很长的）笔记标题走。现在统一落在工作区根的 `.assets/`：
+ *   - git 里**只有一个**附件目录；
+ *   - 点开头 ⇒ `isHiddenPath()` 已经把它挡在左栏目录树与剪藏落点候选之外，无需额外排除。
  *
- * 不复用 `src/fs/paths.ts` 的 `ASSETS_DIR`：那个常量还被收件箱条目的 `entry/assets/`
- * 用着（`src/data/inbox.ts`），改它会波及无关功能。这里在 clip 层派生。
+ * 代价（用户已知晓并接受）：图片不再跟着笔记搬。移动/回收站/恢复改走
+ * `rebaseNoteAssetRefs()` 重写正文引用（见 `src/data/library.ts`），图本身留在原地。
+ *
+ * 为什么不是公共 `assets/`（老的 `ASSETS_DIR`）：那个常量还被收件箱条目的 `entry/assets/`
+ * 用着（`src/data/inbox.ts`），动它会波及无关功能；这里是独立的新目录。
  */
-export function assetsDirFor(notePath: string): string {
-  const stem = sanitizeName(stripExtension(baseName(notePath)), "未命名");
-  return joinPath(parentPath(notePath), `${stem}.assets`);
+export const SHARED_ASSETS_DIR = ".assets";
+
+/** 附件目录（唯一产地）。不带参数：落点与笔记路径无关了。 */
+export function assetsDirFor(): string {
+  return SHARED_ASSETS_DIR;
 }
 
 /**
- * 附件最终名：`contentHash8(bytes) + "-" + sanitizeName(name, "attachment")`（契约 §3.4）。
+ * 取正文里那条**相对引用**：从笔记所在目录走到附件路径。
  *
- * 比 `sanitizeName` 多一步：**空白折成 `-`**。因为这个名字要直接出现在正文的
- * Markdown 相对引用里，而**空格会截断链接目标**（`![x](foo.assets/a1b2-C Windows.png)`
- * 在多数渲染器里指不到文件；`sanitizeName` 会把 `:`、`/` 等换成空格，所以很容易撞上）。
- * 只影响附件文件名，不动笔记名（笔记名走 `sanitizeName`，那个位置没有 Markdown 语法）。
+ * `操作系统/产品/a.md` + `.assets/x.png` → `../../.assets/x.png`
+ * `a.md` + `.assets/x.png`              → `.assets/x.png`
+ *
+ * 不能借道 `normalizePath`：它把 `..` 当冗余段**吃掉**（`../.assets/x.png` → `.assets/x.png`），
+ * 前缀必须在这里按目录层数现算。写入时算、读取时由 `resolveWorkspacePath()` 反向吃掉 `..`。
+ */
+export function relativeAssetRef(notePath: string, assetPath: string): string {
+  const fromDir = parentPath(notePath);
+  const from = fromDir ? fromDir.split("/") : [];
+  const target = normalizePath(assetPath).split("/");
+  const file = target.pop() ?? "";
+  let common = 0;
+  while (common < from.length && common < target.length && from[common] === target[common]) common += 1;
+  return [...Array(from.length - common).fill(".."), ...target.slice(common), file].filter(Boolean).join("/");
+}
+
+/**
+ * {@link relativeAssetRef} 的逆运算：一条引用 + 笔记路径 → 它指向的**工作区路径**。
+ *
+ * 移动/回收站/恢复要按新位置重算前缀、永久删除要知道该删哪些文件，两处都靠它。
+ * 远程/`data:`/`blob:`/旧的 `asset://` 一律返回空串（没有工作区路径可言）。
+ */
+export function assetPathOfRef(notePath: string, ref: string): string {
+  const value = ref.trim().replace(/^<|>$/g, "").split(/[?#]/)[0];
+  if (!value || /^(https?:|data:|blob:|asset:)/i.test(value)) return "";
+  // 以 `/` 开头的是**工作区绝对**引用（`resolveWorkspacePath` 的既有语义），不接目录前缀。
+  const base = value.startsWith("/") ? "" : parentPath(notePath);
+  return normalizePath(`${base}/${value}`);
+}
+
+/**
+ * 正文里引用了**共享附件目录**的那些文件名（`../.assets/x.png` → `x.png`）。
+ *
+ * 直接扫 `.assets/<名>` 这个片段，不解析整篇 Markdown：Markdown 的 `](…)`、带 `<>` 的写法、
+ * 内联 `<img src="…">` 一网打尽，而且**只认共享目录**——旧布局（`<笔记名>.assets/`、
+ * 公共 `assets/<笔记名>/`）不会被卷进来，旧数据零迁移。
+ */
+export function sharedAssetFilesIn(content: string): string[] {
+  const found = new Set<string>();
+  /*
+   * `.assets/` 前面那个字符必须是**路径起点**（`](`、空白、引号、`/`、行首）。
+   * 少了这道边界，`测试标题.assets/x.png` 这种**旧布局**引用也会被扫成「共享目录里的 x.png」——
+   * 而它在永久删除时会被拿去删 `.assets/x.png`：删到别人的图。
+   */
+  for (const match of String(content ?? "").matchAll(/(?:^|[(<"'/\s])\.assets\/([^\s)"'<>)\]]+)/g)) found.add(match[1]);
+  return [...found];
+}
+
+/**
+ * 笔记换了路径之后，把正文里指向**共享附件目录**的引用按新位置重算前缀
+ * （`a.md` 里的 `.assets/x.png` 搬进 `操作系统/` 后 → `../.assets/x.png`）。
+ *
+ * 只改「字面指向 `.assets/`」的引用：旧布局引用（`<笔记名>.assets/…`、`assets/<笔记名>/…`）
+ * 一格都不碰 —— 那些笔记的图本来就在原处，改了反而指空。
+ *
+ * 两种落点写法都覆盖：Markdown 的 `](…)` / `](<…>)`，以及内联 `<img src="…">`。
+ */
+export function rebaseSharedAssetRefs(content: string, toNotePath: string): string {
+  const dir = parentPath(toNotePath);
+  const prefix = dir ? "../".repeat(dir.split("/").length) : "";
+  const relocate = (file: string): string => `${prefix}.assets/${file}`;
+  let next = String(content ?? "");
+  // Markdown：`](../.assets/x.png)` 与 `](<../../.assets/x.png>)`（可选标题串一起吃掉）。
+  next = next.replace(
+    /\]\((<)?((?:\.\.\/)*)\.assets\/([^\s)">]+)(>)?(\s+"[^"]*")?\)/g,
+    (_match, open: string | undefined, _ups: string, file: string, close: string | undefined, title: string | undefined) =>
+      `](${open && close ? `<${relocate(file)}>` : relocate(file)}${title ?? ""})`,
+  );
+  // HTML：`<img src="../.assets/x.png">`
+  next = next.replace(
+    /(<img\b[^>]*?\bsrc\s*=\s*["'])(?:\.\.\/)*\.assets\/([^\s"'>]+)(["'])/gi,
+    (_match, head: string, file: string, tail: string) => `${head}${relocate(file)}${tail}`,
+  );
+  return next;
+}
+
+/**
+ * 附件最终名：`<uuid>.<ext>`（0.4.0 用户裁定：**默认就用 uuid 命名**）。
+ *
+ * 名字里的 uuid 由**内容**派生（`contentUuid`，同一份字节同一个名字）：
+ * 重试幂等、重复剪藏命中同一路径、不产生 `x-2.png` 垃圾 —— 这些性质一条不少。
+ * 保留原名的**扩展名**（`.png` / `.jpg`…）：系统与编辑器靠它认文件类型，不能丢。
+ *
+ * 旧规则是 `contentHash8(bytes) + "-" + sanitizeName(name)`：名叫「原始名」的那一段
+ * 直接来自图片 URL 末段，而有些站点把整条 URL 编成十六进制塞进路径，
+ * 文件名于是长成 `63e80eb9-68747470733a2f2f7169616e77656e…`（用户实测截图）。
+ * 顺带把「名字本身当路径逃逸入口」这条路彻底堵死：落盘名里只剩 uuid 与扩展名。
  */
 export async function assetFinalName(bytes: Uint8Array, name: string): Promise<string> {
-  return `${await contentHash8(bytes)}-${sanitizeName(name, "attachment").replace(/\s+/g, "-")}`;
+  const sanitized = sanitizeName(name, "attachment");
+  const ext = extName(sanitized);
+  // 扩展名只认「点 + 1~6 位字母数字」：`evil.png/../x` 这种被 sanitize 成带空格的名字，
+  // 取不到合法扩展名时就不带扩展名，绝不把名字里的怪字符带回路径。
+  const safeExt = /^\.[A-Za-z0-9]{1,6}$/.test(ext) ? ext.toLowerCase() : "";
+  return `${await contentUuid(bytes)}${safeExt}`;
 }
 
 export interface AssetTarget {
@@ -210,8 +302,7 @@ export interface AssetRename {
 }
 
 /**
- * 正文引用改写（契约 §3.4）：把**客户端写法**的两种形态改成
- * **笔记同级 `<noteName>.assets/<新名>` 的相对引用**（Lead 裁定：`foo.assets/img-1.png`）。
+ * 正文引用改写（契约 §3.4）：把**客户端写法**的两种形态改成**指向共享 `.assets/` 的相对引用**。
  *
  * 两趟、各管一种形态，而不是「三次 `split/join`」：
  * - 后者会把已经改写过的结果再匹配一遍（`foo.assets/x.png` 里含有子串 `assets/x.png`），
@@ -220,21 +311,23 @@ export interface AssetRename {
  *   取第一个能匹配的，`](./assets/x.png)` 会被 `](` 分支吃掉整个路径，于是永远匹配不上。
  *
  * 表里查不到的名字**原样保留**（未声明的引用不静默删除，配合 `IMP-W002`）。
- * 新引用前缀**从 `finalPath` 现取**（`归档/foo.assets/a1b2-photo.png` → `foo.assets/a1b2-photo.png`），
+ * 新引用**从最终落盘路径现取**（`relativeAssetRef(notePath, finalPath)`），
  * 不重复推导笔记名——落盘在哪，正文就指哪，两边不可能漂移。
  * 目标串一律过 {@link markdownRef}（带空格时写成 `<…>`，否则图片不会渲染）。
+ *
+ * **`assets/` 前面必须有边界**（0.4.0）：应用自己产出的引用长这样 `](.assets/<uuid>.png)`，
+ * 若不加边界，改写器会把**自己刚写出来的引用**再当成客户端写法扫一遍。
+ * 客户端写法前面永远是 `](`、空白或行首，不会是 `.`/字母/数字。
  */
-export function rewriteAssetRefs(body: string, renames: AssetRename[]): string {
+export function rewriteAssetRefs(body: string, renames: AssetRename[], notePath: string): string {
   if (!renames.length) return body;
   const refs = new Map<string, string>();
   for (const { name, finalPath } of renames) {
-    const file = baseName(finalPath);
-    const dir = baseName(parentPath(finalPath));
-    refs.set(name, markdownRef(dir ? `${dir}/${file}` : file));
+    refs.set(name, markdownRef(relativeAssetRef(notePath, finalPath)));
   }
   const lookup = (token: string): string | undefined => refs.get(token);
   // ① 带目录的写法：`./assets/x` 与 `assets/x`（客户端约定的两种变体）。
-  const next = body.replace(/(?:\.\/)?assets\/([^\s)"'<>\]]+)/g, (match, token: string) => lookup(token) ?? match);
+  const next = body.replace(/(?<![\w.-])(?:\.\/)?assets\/([^\s)"'<>\]]+)/g, (match, token: string) => lookup(token) ?? match);
   // ② 裸名写法：`](x)`（同目录引用，不含 `/` 才算裸名，路径交给 ① 处理）。
   return next.replace(/\]\(([^)\s/]+)\)/g, (match, token: string) => {
     const target = lookup(token);
@@ -245,12 +338,58 @@ export function rewriteAssetRefs(body: string, renames: AssetRename[]): string {
 /** 正文里引用了 `assets/xxx` 但 `assets[]` 未声明 → `IMP-W002`（原样保留，不静默删除）。 */
 export function findUndeclaredAssetRefs(body: string, declaredNames: string[]): string[] {
   const found = new Set<string>();
-  const pattern = /(?:\.\/)?assets\/([^\s)"'<>\]]+)/gi;
+  // 与 `rewriteAssetRefs` 同一条边界规则：`.assets/<uuid>` 是**我们自己写出来的**最终引用，
+  // 不是「客户端声明过的名字」，不能被当成未声明引用报 IMP-W002。
+  const pattern = /(?<![\w.-])(?:\.\/)?assets\/([^\s)"'<>\]]+)/gi;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(body))) {
     if (!declaredNames.includes(match[1])) found.add(match[1]);
   }
   return [...found];
+}
+
+/**
+ * 正文里的**远程图片地址**（markdown 图片 `![alt](url)` 与内联 `<img src="url">`），
+ * 去重、只收 `http(s)`、保持出现顺序。
+ *
+ * 用途：0.4.0 的「图片一起保存」兜底 —— 扩展侧受 `host_permissions` 限制，跨站图
+ * 拿不到字节（正文里就留着原始网址）；设置开着时由主进程代下（见 `receive.ts` 的
+ * `setRemoteImageSource`），落盘后再把引用改写成 `assets/<名>`。
+ */
+export function collectRemoteImageUrls(body: string): string[] {
+  const found = new Set<string>();
+  const push = (value: string | undefined) => {
+    const url = String(value || "").trim().replace(/^<|>$/g, "");
+    if (/^https?:\/\//i.test(url)) found.add(url);
+  };
+  // 单次扫描保**文档顺序**（分两趟会把所有 `<img>` 排到所有 markdown 图后面）。
+  // 尖括号写法 `<url>` 里允许空格（URL 带空格时 markdown 必须这么写）；裸写法到空白或 `)` 为止。
+  const pattern = /!\[[^\]]*\]\(\s*(<[^>]+>|[^)\s]+)|<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(body))) push(match[1] ?? match[2]);
+  return [...found];
+}
+
+/**
+ * 把远程图片引用改写成**契约 §3.4 的客户端写法** `assets/<名>`。
+ *
+ * 与扩展侧 `extension/src/lib/assets.js` 的 `rewriteRemoteImageRefs()` 同一件事、
+ * 同一套替换形状：先归一到 `assets/<名>`，再由 {@link rewriteAssetRefs} 统一映射到
+ * `<笔记名>.assets/<hash8>-<名>` 的最终相对引用 —— 一条改写链，不做第二套「直接替换成
+ * 最终路径」的实现（那样就会有两处推导落点名，迟早漂移）。
+ *
+ * 精确整串替换（`split/join`，不是正则）：URL 里的 `?`、`&`、`%`、`(` 都不是正则安全的。
+ */
+export function rewriteRemoteImageUrls(body: string, mappings: Array<{ url: string; name: string }>): string {
+  let next = String(body || "");
+  for (const entry of Array.isArray(mappings) ? mappings : []) {
+    const url = entry && typeof entry.url === "string" ? entry.url : "";
+    const name = entry && typeof entry.name === "string" ? entry.name : "";
+    if (!url || !name) continue;
+    next = next.split(`](${url})`).join(`](assets/${name})`);
+    next = next.split(`](<${url}>)`).join(`](assets/${name})`);
+  }
+  return next;
 }
 
 /**

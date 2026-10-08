@@ -227,96 +227,96 @@ describe("重命名改的是显示名，不是「派生标题的一次性覆盖�
 });
 
 /**
- * 图片跟笔记走（用户原话「从收件箱移动到其他位置时，图片位置也应改变」）。
+ * 图片**不再跟着笔记搬**（0.4.0 用户裁定：整库共用一个 `.assets/`，git 里只有一个附件目录）。
  *
- * 判据盯的是**用户看得见的那条路径**：正文里写着 `./第一章.assets/图.png`，
- * 那么这条引用在删除/恢复/移动之后必须仍然指得到文件。
- *
- * 两个方向**一起**咬：「删了再恢复，图丢了」和「恢复到了一个名字被占用的路径，
- * 图留在旧名字的目录里」是同一类缺陷（一个方向修了、另一个方向没修 = 没修）。
+ * 判据盯的是**用户看得见的那条路径**：正文里那条引用在删除 / 恢复 / 移动之后必须仍然指得到文件。
+ * 机制从「搬目录」换成了「按新层数重写前缀」（`rebaseSharedAssetRefs`），
+ * 两个方向（进回收站 / 恢复）一起咬：一个方向修了、另一个方向没修 = 没修。
  */
-describe("图片跟笔记走：<笔记名>.assets/ 的删除 / 恢复 / 移动", () => {
-  const DERIVED = "故事/第一章.assets/图.png";
-  const TRASHED_DERIVED = ".opennote/trash/故事/第一章.assets/图.png";
+describe("共享 .assets/ 的引用：删除 / 恢复 / 移动时按新层数重写", () => {
+  const IMAGE = ".assets/图.png";
+  const NOTE = "故事/第一章.md";
+  const BODY = "# 第一章\n初稿\n\n![图](../.assets/图.png)\n";
   const LEGACY = "故事/assets/封面.png";
 
-  beforeEach(() => {
-    testBackend.seed(DERIVED, "derived-pixels");
+  beforeEach(async () => {
+    testBackend.seed(IMAGE, "derived-pixels");
+    testBackend.seed(NOTE, BODY);
+    await rescanWorkspace();
   });
 
-  it("删除 → 恢复：附件目录跟着进回收站、再回到原路径，字节相同；公共 assets/ 一个字节没动", async () => {
-    await trashNote("故事/第一章.md");
-    expect(testBackend.files.get(TRASHED_DERIVED)).toBe("derived-pixels");
-    expect(testBackend.files.has(DERIVED)).toBe(false);
-    expect(testBackend.files.get(LEGACY)).toBe("pixels");
+  it("删除 → 恢复：图留在共享目录、引用加前缀再还原；公共 assets/ 一个字节没动", async () => {
+    await trashNote(NOTE);
+    const trashed = ".opennote/trash/故事/第一章.md";
+    // 图**留在共享目录里**（撤销/删除时删掉它才是真丢，恢复就再也找不回来了）。
+    expect(testBackend.files.get(IMAGE)).toBe("derived-pixels");
+    // 引用按回收站的层数重算：`.opennote/trash/故事/` 是三层 ⇒ 三条 `../`。
+    expect(testBackend.files.get(trashed)).toContain("![图](../../../.assets/图.png)");
 
-    await restoreNote(".opennote/trash/故事/第一章.md");
-    expect(testBackend.files.get("故事/第一章.md")).toBe("# 第一章\n初稿");
-    expect(testBackend.files.get(DERIVED)).toBe("derived-pixels");
-    expect(testBackend.files.has(TRASHED_DERIVED)).toBe(false);
-    // 旧数据的图仍留在公共 assets/ 里，**一个字节都不许动**（也不许被顺手删掉）。
+    await restoreNote(trashed);
+    expect(testBackend.files.get(NOTE)).toBe(BODY);
+    expect(testBackend.files.get(IMAGE)).toBe("derived-pixels");
+    // 旧数据的图仍留在公共 assets/ 里，**一个字节都不许动**。
     expect(testBackend.files.get(LEGACY)).toBe("pixels");
   });
 
-  it("恢复到一个被占用的名字：附件目录按**恢复后的最终路径**派生（第一章 2.assets），不是拿回收站里的旧名字凑", async () => {
-    await trashNote("故事/第一章.md");
+  it("恢复到一个被占用的名字：引用按**恢复后的最终路径**重算，仍指得到图", async () => {
+    await trashNote(NOTE);
     // 原来的名字被别人占了：恢复只能落到 `第一章 2.md`。
-    testBackend.seed("故事/第一章.md", "# 后来者");
+    testBackend.seed(NOTE, "# 后来者");
     await rescanWorkspace();
 
     await restoreNote(".opennote/trash/故事/第一章.md");
-    expect(testBackend.files.get("故事/第一章 2.md")).toBe("# 第一章\n初稿");
-    expect(testBackend.files.get("故事/第一章 2.assets/图.png")).toBe("derived-pixels");
-    // 两个「方向反了」的写法都会在这里露出来：
-    // 用回收站里的 id 派生 → 图仍躺在 .opennote/trash/... 里；
-    // 用旧名字派生 → 图落在 `第一章.assets`（而笔记已经叫 `第一章 2.md`），引用指空。
-    expect(testBackend.files.has(TRASHED_DERIVED)).toBe(false);
-    expect(testBackend.files.has("故事/第一章.assets/图.png")).toBe(false);
-    expect(testBackend.files.get(LEGACY)).toBe("pixels");
+    const restored = "故事/第一章 2.md";
+    expect(testBackend.files.get(restored)).toBe(BODY);
+    expect(testBackend.files.get(IMAGE)).toBe("derived-pixels");
+    // 用回收站里的 id 算前缀 → 会留下三条 `../`（指到工作区外，图变裂图）。
+    expect(testBackend.files.get(restored)).not.toContain("../../../.assets");
   });
 
-  it("移动到别的目录：附件目录跟着换目录（不是留在原地）", async () => {
+  it("移动到别的目录：引用前缀按新层数重算（跨层才变），图一个字节不动", async () => {
     testBackend.seed("资料/别的.md", "# 别的");
     await rescanWorkspace();
-    await moveNote("故事/第一章.md", "资料");
-    expect(testBackend.files.get("资料/第一章.md")).toBe("# 第一章\n初稿");
-    expect(testBackend.files.get("资料/第一章.assets/图.png")).toBe("derived-pixels");
-    expect(testBackend.files.has(DERIVED)).toBe(false);
+    // 同层移动（故事 → 资料）：前缀不变。
+    await moveNote(NOTE, "资料");
+    expect(testBackend.files.get("资料/第一章.md")).toContain("![图](../.assets/图.png)");
+    expect(testBackend.files.get(IMAGE)).toBe("derived-pixels");
+
+    // 跨层移动（资料/ → 工作区根）：前缀清空。
+    await moveNote("资料/第一章.md", null);
+    expect(testBackend.files.get("第一章.md")).toContain("![图](.assets/图.png)");
+    expect(testBackend.files.get(IMAGE)).toBe("derived-pixels");
   });
 
-  /**
-   * 「移动到…」这条 UI 路径**必须能如实报告两件事各自成败**。
-   *
-   * 图片目录搬不动时笔记已经在新位置了 —— 只说「移动失败」会让用户以为笔记没动，
-   * 只说「移动成功」则会把「图丢了」这件事整个藏起来（而正文里的引用已经指空，
-   * 且**不报错**）。所以 `moveNote()` 返回 `{ path, assetsWarning }`。
-   */
-  it("移动到别的目录：成功时返回新路径，且没有图片告警", async () => {
+  it("移动成功时不报图片告警；重写引用写不进去时**如实报**（不假装成功）", async () => {
     testBackend.seed("资料/别的.md", "# 别的");
     await rescanWorkspace();
-    const result = await moveNote("故事/第一章.md", "资料");
-    expect(result.path).toBe("资料/第一章.md");
-    expect(result.assetsWarning).toBeNull();
-  });
+    const ok = await moveNote(NOTE, "资料");
+    expect(ok.path).toBe("资料/第一章.md");
+    expect(ok.assetsWarning).toBeNull();
 
-  it("目标目录已有同名 .assets：笔记照样搬、图片**不覆盖**，并把这件事如实报出来", async () => {
-    testBackend.seed("资料/别的.md", "# 别的");
-    // 目标位置已经有一个同名附件目录：内容不是我们的，绝不能静默覆盖。
-    testBackend.seed("资料/第一章.assets/别人的图.png", "someone-elses-pixels");
-    await rescanWorkspace();
+    // 让「重写引用」这一步写不进去：笔记照样搬到位，但必须有一句如实报告 ——
+    // 只说「移动成功」会把「引用还指着旧层数」这件事整个藏起来（而图就是裂的，且不报错）。
     const warn = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // 让「重写引用」这一步读不到正文（`readOptionalText` → `readText`）：笔记照样搬到位，
+    // 但必须有一句如实报告 —— 只说「移动成功」会把「引用还指着旧层数」整个藏起来。
+    const read = vi.spyOn(testBackend, "readText").mockRejectedValueOnce(new Error("EIO"));
+    const failed = await moveNote("资料/第一章.md", null);
+    expect(failed.path).toBe("第一章.md");
+    expect(failed.assetsWarning).toContain("第一章.md");
+    read.mockRestore();
+    warn.mockRestore();
+  });
 
-    const result = await moveNote("故事/第一章.md", "资料");
+  it("共享目录里别人的图：移动笔记时一个字节都不动", async () => {
+    testBackend.seed(".assets/别人的图.png", "someone-elses-pixels");
+    testBackend.seed("资料/别的.md", "# 别的");
+    await rescanWorkspace();
 
-    // 笔记到位（用户看得见的那一步成功）。
+    const result = await moveNote(NOTE, "资料");
     expect(result.path).toBe("资料/第一章.md");
-    expect(testBackend.files.get("资料/第一章.md")).toBe("# 第一章\n初稿");
-    // 告警里带着目标路径，用户才知道该去哪手工处理。
-    expect(result.assetsWarning).toContain("资料/第一章.assets");
-    expect(warn).toHaveBeenCalled();
-    // 两边的图都还在：既没覆盖别人的，也没把原来的删掉。
-    expect(testBackend.files.get("资料/第一章.assets/别人的图.png")).toBe("someone-elses-pixels");
-    expect(testBackend.files.get(DERIVED)).toBe("derived-pixels");
+    expect(testBackend.files.get(".assets/别人的图.png")).toBe("someone-elses-pixels");
+    expect(testBackend.files.get(IMAGE)).toBe("derived-pixels");
   });
 
   it("笔记没有派生附件目录时：移动成功且不报图片告警（不误报）", async () => {
@@ -333,14 +333,30 @@ describe("图片跟笔记走：<笔记名>.assets/ 的删除 / 恢复 / 移动",
     expect(result.path).toBeNull();
     expect(result.assetsWarning).toBeNull();
     // 文件一个字节都没动。
-    expect(testBackend.files.get("故事/第一章.md")).toBe("# 第一章\n初稿");
+    expect(testBackend.files.get("故事/第一章.md")).toBe(BODY);
   });
 
-  it("彻底删除：附件目录一起消失，回收站里不留孤儿图片", async () => {
+  it("彻底删除：只删这篇引用的图，`.assets/` 空了才收目录，回收站不留孤儿", async () => {
+    // 别人的图也在同一个共享目录里 —— 永久删除**绝不能**把它一起带走。
+    testBackend.seed(".assets/别人的图.png", "someone-elses-pixels");
+    await rescanWorkspace();
+
     await trashNote("故事/第一章.md");
     await purgeNote(".opennote/trash/故事/第一章.md");
-    expect(testBackend.files.has(TRASHED_DERIVED)).toBe(false);
+
+    expect(testBackend.files.has(IMAGE)).toBe(false);
     expect(testBackend.files.has(".opennote/trash/故事/第一章.md")).toBe(false);
+    // 共享目录还在（里面有别人的图），别人的图逐字节没动。
+    expect(testBackend.files.get(".assets/别人的图.png")).toBe("someone-elses-pixels");
+  });
+
+  it("彻底删除：`.assets/` 里没有别的文件时，空目录一起收掉（不留空壳）", async () => {
+    await trashNote("故事/第一章.md");
+    await purgeNote(".opennote/trash/故事/第一章.md");
+
+    expect(testBackend.files.has(IMAGE)).toBe(false);
+    // 目录本身也收掉了：不留空壳 `.assets/`（下一次写入会重新建）。
+    expect(testBackend.dirs.has(".assets")).toBe(false);
   });
 });
 
