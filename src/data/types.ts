@@ -161,6 +161,16 @@ export interface UiSettings {
   importNotify: boolean;
   /** 是否记录 `userData/bridge.log`（关掉后桥照样工作，只是不留痕）。 */
   bridgeLog: boolean;
+  /**
+   * 搜索时是否把**文件夹名**的命中也列进结果（0.4.0 用户建议，默认开）：
+   * 关掉后搜索只查笔记，行为与 0.3.x 一致。
+   */
+  searchFolders: boolean;
+  /**
+   * 只读锁定的笔记 id（标签栏的锁按钮）。持久化让「锁了再重启还是锁着」，
+   * 删掉的笔记残留 id 无副作用（找不到就当没锁）。
+   */
+  lockedNotes: Id[];
 }
 
 /** R1「导入方式」：外部导入的默认落法。`overwrite` 不在其中，这是有意的。 */
@@ -219,4 +229,6 @@ export const DEFAULT_UI: UiSettings = {
   importConflict: "inbox",
   importNotify: true,
   bridgeLog: true,
+  searchFolders: true,
+  lockedNotes: [],
 };

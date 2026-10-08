@@ -389,6 +389,16 @@ export function SettingsDialog({
                     专注
                   </label>
                 </div>
+                <div className="switch-row" style={{ marginTop: 10 }}>
+                  <label className="switch" title="搜索时把文件夹名的命中也列在结果最上面">
+                    <input
+                      type="checkbox"
+                      checked={settings.searchFolders}
+                      onChange={(event) => patchUi({ searchFolders: event.target.checked })}
+                    />
+                    搜索时显示文件夹
+                  </label>
+                </div>
                 <div className="swatches" style={{ marginTop: 10 }}>
                   <button type="button" className="btn" onClick={toggleAppearance}>
                     <Icon name={settings.appearance === "dark" ? "sun" : "moon"} size={14} />

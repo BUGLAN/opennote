@@ -18,6 +18,7 @@ import {
   renameFolder,
   renameNote,
   restoreNote,
+  searchFolders,
   searchNotes,
   setStarred,
   starredNotes,
@@ -314,7 +315,15 @@ export function Sidebar(props: SidebarProps): ReactNode {
         ) : null}
 
         {tab === "search" ? (
-          <SearchBody inputRef={searchInputRef} query={query} onQuery={setQuery} activeId={activeId} onOpen={props.onOpenNote} />
+          <SearchBody
+            inputRef={searchInputRef}
+            query={query}
+            onQuery={setQuery}
+            activeId={activeId}
+            onOpen={props.onOpenNote}
+            onScope={props.onScope}
+            showFolders={props.ui.searchFolders}
+          />
         ) : null}
 
         {tab === "tags" ? (
@@ -1137,14 +1146,22 @@ function SearchBody({
   onQuery,
   activeId,
   onOpen,
+  onScope,
+  showFolders,
 }: {
   inputRef: React.RefObject<HTMLInputElement | null>;
   query: string;
   onQuery: (value: string) => void;
   activeId: Id | null;
   onOpen: (id: Id) => void;
+  /** 点文件夹命中 = 选中那个文件夹（列表切到它的范围），与树里点文件夹一致。 */
+  onScope: (scope: Scope) => void;
+  /** 设置里的「搜索时显示文件夹」；关掉时行为与 0.3.x 完全一致。 */
+  showFolders: boolean;
 }): ReactNode {
-  const hits = useMemo(() => (query.trim().length >= 1 ? searchNotes(query, { limit: 60 }) : []), [query]);
+  const trimmed = query.trim();
+  const hits = useMemo(() => (trimmed ? searchNotes(trimmed, { limit: 60 }) : []), [trimmed]);
+  const folderHits = useMemo(() => (showFolders && trimmed ? searchFolders(trimmed) : []), [showFolders, trimmed]);
 
   return (
     <>
@@ -1157,15 +1174,39 @@ function SearchBody({
           onChange={(event) => onQuery(event.target.value)}
         />
       </div>
-      {!query.trim() ? (
+      {!trimmed ? (
         <p className="tree__empty">
-          输入关键词，搜索所有笔记的标题、标签与正文。
+          输入关键词，搜索所有笔记的标题、标签与正文{showFolders ? "，以及文件夹名" : ""}。
           <br />
           多个关键词用空格分隔。
         </p>
       ) : null}
-      {query.trim() && !hits.length ? <p className="tree__empty">没有找到包含「{query}」的笔记。</p> : null}
+      {trimmed && !hits.length && !folderHits.length ? (
+        <p className="tree__empty">没有找到包含「{query}」的笔记或文件夹。</p>
+      ) : null}
       <div className="tree">
+        {folderHits.map((hit) => (
+          <button
+            key={hit.folder.id}
+            type="button"
+            className="tree__row tree__row--stacked"
+            title={`${hit.path} · ${hit.notes} 篇`}
+            onClick={() => {
+              expandFolder(hit.folder.id);
+              onScope({ kind: "folder", id: hit.folder.id });
+            }}
+          >
+            <span className="tree__icon">
+              <Icon name="folder" size={14} />
+            </span>
+            <span className="tree__label">
+              {hit.folder.name}
+              <span className="tree__note-snippet">
+                {hit.notes} 篇 · {hit.path}
+              </span>
+            </span>
+          </button>
+        ))}
         {hits.map((hit) => (
           <button
             key={hit.note.id}

@@ -2131,6 +2131,57 @@ export function notesArray(state: LibraryState = libraryStore.get()): Note[] {
   return Object.values(state.notes);
 }
 
+export interface FolderSearchHit {
+  folder: Folder;
+  /** 工作区相对路径（含自身名字），给次行展示。 */
+  path: string;
+  /** 文件夹里（含子树）的笔记数，给次行展示。 */
+  notes: number;
+}
+
+/**
+ * 按**文件夹名**搜索（0.4.0 用户建议）。与 `searchNotes` 同一套打分习惯：
+ * 名字里命中比路径里命中高分，越靠前越高分；多关键词是 AND。
+ * 只有一个调用方（侧栏搜索页），上限给小值就够 —— 文件夹本来就少。
+ */
+export function searchFolders(query: string, options: { limit?: number } = {}): FolderSearchHit[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const limit = options.limit ?? 12;
+  const state = libraryStore.get();
+  const terms = q.split(/\s+/).filter(Boolean);
+  const raw: { folder: Folder; score: number }[] = [];
+
+  for (const folder of Object.values(state.folders)) {
+    const name = folder.name.toLowerCase();
+    const path = folderPathLabel(folder.id, state.folders).toLowerCase();
+    let score = 0;
+    let matchedAll = true;
+    for (const term of terms) {
+      const inName = name.indexOf(term);
+      const inPath = path.indexOf(term);
+      if (inName < 0 && inPath < 0) {
+        matchedAll = false;
+        break;
+      }
+      if (inName >= 0) score += 60 - Math.min(30, inName);
+      else score += 20;
+    }
+    if (!matchedAll) continue;
+    score += Math.max(0, 8 - Math.floor((Date.now() - folder.updatedAt) / 86_400_000));
+    raw.push({ folder, score });
+  }
+
+  return raw
+    .sort((a, b) => b.score - a.score || a.folder.name.localeCompare(b.folder.name, "zh-Hans-CN"))
+    .slice(0, limit)
+    .map((entry) => ({
+      folder: entry.folder,
+      path: folderPathLabel(entry.folder.id, state.folders),
+      notes: folderStats(state, entry.folder.id).notes,
+    }));
+}
+
 export function foldersArray(state: LibraryState = libraryStore.get()): Folder[] {
   return Object.values(state.folders);
 }

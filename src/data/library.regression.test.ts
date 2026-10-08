@@ -216,6 +216,7 @@ import {
   renameNote,
   rescanWorkspace,
   restoreNote,
+  searchFolders,
   searchNotes,
   setSidebarTab,
   trashNote,
@@ -448,6 +449,35 @@ describe("D05 全文搜索缓存", () => {
     await openRecord("big");
     expect(searchNotes("关键词-0")).toHaveLength(1);
     expect(searchNotes("关键词-419")).toHaveLength(1);
+  });
+});
+
+describe("搜索文件夹（0.4.0 设置「搜索时显示文件夹」的数据层）", () => {
+  it("文件夹名与路径段都能命中；名字命中排在路径命中前面", async () => {
+    await openSingle((b) => {
+      b.seed("递归/笔记.md", "# 递归");
+      b.seed("算法/递归入门/笔记.md", "# 入门");
+    });
+    const hits = searchFolders("递归");
+    expect(hits.length).toBe(2);
+    // 名字就是「递归」的排在「路径里带递归」的前面
+    expect(hits[0].folder.name).toBe("递归");
+    expect(hits[0].notes).toBe(1);
+    expect(hits[1].folder.name).toBe("递归入门");
+  });
+
+  it("多关键词是 AND；没有命中返回空数组（不抛错）", async () => {
+    await openSingle((b) => b.seed("算法/动态规划/笔记.md", "# 规划"));
+    expect(searchFolders("算法 规划")).toHaveLength(1);
+    expect(searchFolders("算法 递归")).toHaveLength(0);
+    expect(searchFolders("")).toEqual([]);
+  });
+
+  it("关闭开关是纯界面行为：数据层不读这个设置，开关不影响 searchNotes", async () => {
+    await openSingle((b) => b.seed("递归/笔记.md", "# 递归"));
+    // 数据层只提供 searchFolders()；「要不要显示」由 SearchBody 按 ui.searchFolders 决定
+    expect(searchFolders("递归").length).toBe(1);
+    expect(searchNotes("递归").length).toBe(1);
   });
 });
 
