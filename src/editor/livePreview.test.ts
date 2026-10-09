@@ -1,3 +1,4 @@
+import { ensureSyntaxTree } from "@codemirror/language";
 import { EditorSelection, EditorState, type TransactionSpec } from "@codemirror/state";
 import type { DecorationSet } from "@codemirror/view";
 import { Decoration } from "@codemirror/view";
@@ -70,6 +71,25 @@ function bigDoc(blocks: number): string {
     parts.push("- 列表项一", "- [ ] 任务项", "", "> 引用一行", "");
   }
   return parts.join("\n");
+}
+
+/**
+ * 头less 测试里没有 view，语言解析靠 `setTimeout`（`Work.MaxPause` 500ms 一拍）
+ * **异步**推进，每拍按**墙钟预算**（约 100ms 切片）解析多少字符取决于机器快慢
+ * （见 `node_modules/@codemirror/language/dist/index.js` 的 parseWorker 调度与
+ * `Work.Slice`）。而增量路径正是拿 `tree.length` 与 `value.parsedTo` 比，于是
+ * 「增量 == 全量重建」这条断言会因「断言那一刻解析推进到哪」而分叉 —— CI 实测
+ * step 38 多出一条过期 BulletWidget，本地却绿。
+ *
+ * D24 的等价性用例**不该测量解析时序**。这里把两件事都定死：
+ *   1. `ensureSyntaxTree()` 同步把整篇解析完 —— 「现算的全量重建」拿到完整的树；
+ *   2. 补一个「只改选区」的事务 —— 字段的 `updateDecorations()` 会走
+ *      `tree.length > value.parsedTo` 那条分支，按完整的树重算一遍。
+ * 之后两侧看到的是同一棵完整的树，比的才是增量算法本身。
+ */
+function settled(state: EditorState): EditorState {
+  ensureSyntaxTree(state, state.doc.length, 60_000);
+  return state.update({ selection: state.selection }).state;
 }
 
 /* ------------------------------------------------------------ D13 · 未闭合公式 */
@@ -305,11 +325,13 @@ describe("D24 大文档增量重建", () => {
     expect(doc.length).toBeGreaterThan(FULL_REBUILD_LENGTH);
     const setSpy = vi.spyOn(Decoration, "set");
 
-    const medium = stateFor(doc);
+    const medium = settled(stateFor(doc));
     setSpy.mockClear();
     const grown = medium.update({ changes: { from: Math.floor(doc.length / 2), insert: "x" } }).state;
     expect(setSpy).not.toHaveBeenCalled();
-    expect(currentKeys(grown)).toEqual(fullKeys(grown));
+    // 先断言「没走全量重建」，再定死解析进度做等价比较（settled 自己会补一个事务）。
+    const settledGrown = settled(grown);
+    expect(currentKeys(settledGrown)).toEqual(fullKeys(settledGrown));
 
     const small = stateFor("## 标题\n\n正文 **粗体**\n");
     setSpy.mockClear();
@@ -320,7 +342,7 @@ describe("D24 大文档增量重建", () => {
   });
 
   it("stays equal to a full rebuild through a scripted edit session", () => {
-    let state = stateFor(doc, { anchor: 0 });
+    let state = settled(stateFor(doc, { anchor: 0 }));
     const ops: { label: string; spec: (s: EditorState) => TransactionSpec }[] = [
       { label: "在中间插入字符", spec: () => ({ changes: { from: 20000, insert: "新" } }) },
       { label: "拆分段落", spec: () => ({ changes: { from: 20010, insert: "\n" } }) },
@@ -346,7 +368,7 @@ describe("D24 大文档增量重建", () => {
       },
     ];
     for (const op of ops) {
-      state = state.update(op.spec(state)).state;
+      state = settled(state.update(op.spec(state)).state);
       expect(currentKeys(state), op.label).toEqual(fullKeys(state));
     }
   });
@@ -357,7 +379,7 @@ describe("D24 大文档增量重建", () => {
       seed = (seed * 1103515245 + 12345) & 0x7fffffff;
       return seed / 0x7fffffff;
     };
-    let state = stateFor(doc, { anchor: 0 });
+    let state = settled(stateFor(doc, { anchor: 0 }));
     for (let step = 0; step < 60; step += 1) {
       const len = state.doc.length;
       const roll = random();
@@ -377,12 +399,14 @@ describe("D24 大文档增量重建", () => {
         const from = Math.floor(random() * (len - 10));
         state = state.update({ selection: { anchor: from, head: from + Math.floor(random() * 10) } }).state;
       }
+      // 解析推进到哪与机器快慢有关：比较前先定死（见 `settled()` 的说明）。
+      state = settled(state);
       expect(currentKeys(state), `step ${step}`).toEqual(fullKeys(state));
     }
   });
 
   it("keeps multiple cursors consistent", () => {
-    let state = stateFor(doc, { anchor: 0 });
+    let state = settled(stateFor(doc, { anchor: 0 }));
     state = state.update({
       selection: EditorSelection.create([
         EditorSelection.cursor(1000),
@@ -390,23 +414,24 @@ describe("D24 大文档增量重建", () => {
         EditorSelection.range(15000, 15050),
       ]),
     }).state;
+    state = settled(state);
     expect(currentKeys(state)).toEqual(fullKeys(state));
   });
 
   it("rebuilds fully when the settings change", () => {
-    let state = stateFor(doc, { anchor: 0 });
-    state = state.update({ effects: setEditorSettings.of({ focus: true }) }).state;
+    let state = settled(stateFor(doc, { anchor: 0 }));
+    state = settled(state.update({ effects: setEditorSettings.of({ focus: true }) }).state);
     expect(keysContaining(currentKeys(state), "md-focus-on").length).toBeGreaterThan(0);
     expect(currentKeys(state)).toEqual(fullKeys(state));
   });
 
   it("stays equal to a full rebuild in focus mode", () => {
     const near = Math.floor(doc.length / 5);
-    let state = stateFor(doc, { anchor: near, settings: { focus: true } });
+    let state = settled(stateFor(doc, { anchor: near, settings: { focus: true } }));
     expect(currentKeys(state)).toEqual(fullKeys(state));
-    state = state.update({ selection: { anchor: doc.length - 5 } }).state;
+    state = settled(state.update({ selection: { anchor: doc.length - 5 } }).state);
     expect(currentKeys(state)).toEqual(fullKeys(state));
-    state = state.update({ changes: { from: doc.length - 5, insert: "文字" } }).state;
+    state = settled(state.update({ changes: { from: doc.length - 5, insert: "文字" } }).state);
     expect(currentKeys(state)).toEqual(fullKeys(state));
   });
 });
