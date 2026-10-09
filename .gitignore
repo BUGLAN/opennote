@@ -16,3 +16,9 @@ coverage
 # DSH 工具在本地跑诊断时留下的报告目录，不属于本项目产物
 .dsh-acl-report/
 .tmp-shots
+
+# AgentTeams 协作状态与本地调研/验证/迁移的临时产物（.tmp-migrate 里是真实笔记本的整库备份，绝不能进库）
+.agent-teams/
+.tmp-title/
+.tmp-verify/
+.tmp-migrate/
