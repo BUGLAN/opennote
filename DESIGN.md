@@ -1303,6 +1303,9 @@ tokens.css  →  base.css  →  prose.css  →  editor.css  →  app.css
 默认：--ink-2 字
 hover：--paper-3 底 + --ink 字 + 图标转 --accent
 激活（is-active）：--accent-soft 底 + --ink 字 + font-weight 550
+当前（is-current）：左侧 2px --accent 竖条 + 图标 --accent + --ink 字 + font-weight 550，**没有底色**
+                    —— 「当前」不是「选中」：整棵树里 is-active 只有一行（编辑器里打开的那篇笔记），
+                    文件夹行 / 星标 / 回收站 / 标签行的 is-current 只表示「新建落点 / 正在看的集合」
 拖放（is-drop）：--accent-soft 底 + inset 0 0 0 1.5px --accent-line
 ```
 

@@ -115,6 +115,14 @@ export function Sidebar(props: SidebarProps): ReactNode {
   const tags = useMemo(() => allTags(library), [library]);
 
   /*
+   * 「新建到哪儿」= 文件夹行那枚 `is-current` 记号的**唯一**含义。那枚记号是故意做弱的
+   * （没有底色，因为它不是选中态 —— 见 `app.css` 的 `.tree__row.is-current`），
+   * 所以同一件事在这里再写一遍：鼠标停在「新建」上就能读到落点的完整路径。
+   */
+  const createTarget = currentFolderId(scope);
+  const createWhere = folderPathLabel(createTarget, library.folders);
+
+  /*
    * 两处过滤都走**同一棵树 + 一个可见集合**（用户原话「直接使用原来的那一份加个筛选就行了」）：
    * 集合由 `treeFilterFor()` 算（命中笔记 + 祖先目录 + 文件夹名命中），
    * 树本身（`TreeBody`/`FolderBranch`）一行都没改样式 —— 目录行的 caret 照旧能展开能收缩。
@@ -202,13 +210,17 @@ export function Sidebar(props: SidebarProps): ReactNode {
               ) : null}
             </button>
           ) : null}
-          <button className="icon-btn" title="新建笔记 (Ctrl/⌘ + N)" onClick={() => props.onNewNote(currentFolderId(scope))}>
+          <button
+            className="icon-btn"
+            title={`新建笔记 (Ctrl/⌘ + N) · 将建在「${createWhere}」`}
+            onClick={() => props.onNewNote(createTarget)}
+          >
             <Icon name="plus" />
           </button>
           <button
             className="icon-btn"
-            title="新建文件夹 (Ctrl/⌘ + Shift + N)"
-            onClick={() => props.onNewFolder(currentFolderId(scope))}
+            title={`新建文件夹 (Ctrl/⌘ + Shift + N) · 将建在「${createWhere}」`}
+            onClick={() => props.onNewFolder(createTarget)}
           >
             <Icon name="folder" />
           </button>
@@ -473,7 +485,9 @@ function TreeBody(props: TreeProps): ReactNode {
       {/*
        * 这里原本有一行 `全部笔记 {counts.all}`。删掉它：它不是筛选项，而是一个**什么也不筛**的
        * 高亮行 —— 文件树本身就把所有笔记都摊在这里了，点它只是把 scope 设回 `all`，
-       * 让「当前文件夹」变回空。真正需要「新建到哪里」的行为由文件夹行的高亮承担，
+       * 让「当前文件夹」变回空。真正需要「新建到哪里」的行为由文件夹行承担：那行挂
+       * `is-current` 记号（左侧强调条 + 强调色图标，**没有底色**，见 `app.css`），
+       * 而不是选中态 —— 整棵树里的选中底色只属于编辑器里打开的那篇笔记。
        * 整棵树的空白处依旧是拖到根目录的投放区（见上面的 `dropZoneProps("root", null)`）。
        */}
       {roots.length ? <div className="tree__group">文件夹</div> : null}
@@ -530,7 +544,7 @@ function TreeBody(props: TreeProps): ReactNode {
                 icon="star"
                 label="星标笔记"
                 count={counts.starred}
-                active={scope.kind === "starred"}
+                current={scope.kind === "starred"}
                 open={starredOpen}
                 onClick={() => {
                   props.onScope({ kind: "starred" });
@@ -550,7 +564,7 @@ function TreeBody(props: TreeProps): ReactNode {
                 icon="trash"
                 label="回收站"
                 count={counts.trash}
-                active={scope.kind === "trash"}
+                current={scope.kind === "trash"}
                 open={trashOpen}
                 onClick={() => {
                   props.onScope({ kind: "trash" });
@@ -559,13 +573,13 @@ function TreeBody(props: TreeProps): ReactNode {
               >
                 <TrashList library={library} onOpen={props.onOpenNote} />
               </ScopeRow>
-              {/* 外部导入的待确认内容在这里，不属于文件树，所以不参与 scope 高亮。 */}
+              {/* 外部导入的待确认内容在这里，不属于文件树，所以不参与 scope 记号。 */}
               <ScopeRow
                 depth={1}
                 icon="download"
                 label="收件箱"
                 count={props.inboxPending}
-                active={false}
+                current={false}
                 onClick={() => props.onOpenInbox()}
               />
             </>
@@ -580,7 +594,7 @@ function ScopeRow({
   icon,
   label,
   count,
-  active,
+  current,
   onClick,
   depth = 0,
   open,
@@ -589,7 +603,8 @@ function ScopeRow({
   icon: IconName;
   label: string;
   count: number;
-  active: boolean;
+  /** 「当前集合」记号（星标 / 回收站）：见 `.tree__row.is-current` —— 不是选中态。 */
+  current: boolean;
   onClick: () => void;
   /** 缩进层级；与 FolderBranch 用同一公式，保证「其他」的子项和文件夹子项对齐。 */
   depth?: number;
@@ -607,9 +622,10 @@ function ScopeRow({
       <div
         role="treeitem"
         tabIndex={0}
-        aria-selected={active}
+        aria-selected={false}
+        aria-current={current ? "true" : undefined}
         aria-expanded={hasChildren ? open : undefined}
-        className={cn("tree__row", active && "is-active")}
+        className={cn("tree__row", current && "is-current")}
         style={{ paddingLeft: 6 + depth * 13 }}
         onClick={onClick}
         onKeyDown={(event) => {
@@ -654,7 +670,13 @@ function FolderBranch({ folder, depth, dropZoneProps, ...props }: BranchProps): 
    */
   const open = filter ? !ui.collapsed.includes(folder.id) : ui.expanded.includes(folder.id);
   const stats = folderStats(library, folder.id);
-  const active = scope.kind === "folder" && scope.id === folder.id;
+  /*
+   * 文件夹行不是「选中」那一行 —— 它承载的是「新建笔记的落点」（`scope`），
+   * 所以走 `is-current`（左侧强调条 + 强调色图标，**没有底色**），
+   * 把整棵树里唯一的选中底色（`is-active`）留给编辑器里打开的那篇笔记。
+   * 两件事以前共用 `is-active`，看起来就是「文件夹和笔记被同时选中了」。
+   */
+  const current = scope.kind === "folder" && scope.id === folder.id;
 
   return (
     <>
@@ -662,9 +684,10 @@ function FolderBranch({ folder, depth, dropZoneProps, ...props }: BranchProps): 
         role="treeitem"
         tabIndex={0}
         aria-expanded={hasChildren ? open : undefined}
-        aria-selected={active}
+        aria-selected={false}
+        aria-current={current ? "true" : undefined}
         draggable
-        className={cn("tree__row", active && "is-active", props.dropTarget === `folder:${folder.id}` && "is-drop")}
+        className={cn("tree__row", current && "is-current", props.dropTarget === `folder:${folder.id}` && "is-drop")}
         style={{ paddingLeft: 6 + depth * 13 }}
         onClick={() => {
           props.onScope({ kind: "folder", id: folder.id });
@@ -1339,7 +1362,8 @@ function TagsBody({
           <button
             key={tag}
             type="button"
-            className={cn("tree__row", activeTag === tag && "is-active")}
+            aria-current={activeTag === tag ? "true" : undefined}
+            className={cn("tree__row", activeTag === tag && "is-current")}
             onClick={() => onScope({ kind: "tag", tag })}
           >
             <span className="tree__icon">

@@ -689,6 +689,41 @@
   font-weight: 550;
 }
 
+/*
+ * 「当前」≠「选中」。
+ *
+ * 整棵树里同一时刻只有一行是**选中态**（`is-active`，S-C8：`--accent-soft` 底 + 550 字重）
+ * = 编辑器里打开的那篇笔记。文件夹行、星标 / 回收站行、标签行持有的是**另一种**状态：
+ * 「新建笔记会落到这儿」「正在看的是这个集合」——它们走 `is-current`：
+ * 左侧 2px 强调条 + 强调色图标 + `--ink` 的 550 字重，**没有底色**。
+ * 用户报过「文件和文件夹能够被同时选中」，根因就是这两种状态此前共用同一个 `is-active`
+ * （`Sidebar.tsx` 里 `scope` 行与 `activeId` 行各画一遍同样的选中块）。
+ * 所以这条规则里**不许写 background** —— `src/data/treeSelection.test.ts` 盯着这一点。
+ * （`.outline__item.is-current` 是同名的另一种场合：大纲里没有「选中」这一说，它敢直接用底色；
+ * 文件树这边有一行真·选中，就不能再上。）
+ */
+.tree__row.is-current {
+  /* 只为自己定位那根竖条，不影响别的行。 */
+  position: relative;
+  color: var(--ink);
+  font-weight: 550;
+}
+
+.tree__row.is-current::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 5px;
+  bottom: 5px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+.tree__row.is-current .tree__icon {
+  color: var(--accent);
+}
+
 .tree__row.is-drop {
   box-shadow: inset 0 0 0 1.5px var(--accent-line);
   background: var(--accent-soft);
