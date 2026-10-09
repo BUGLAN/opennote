@@ -19,6 +19,7 @@ import {
   reconcileTabs,
   rescanWorkspace,
   seedWelcome,
+  setEditorComposing,
   setSidebarTab,
   setStarred,
   trashNote,
@@ -117,6 +118,12 @@ export default function App(): ReactNode {
   const tab = ui.sidebarTab;
   const setTab = setSidebarTab;
   const [cursor, setCursor] = useState<CursorInfo>({ line: 1, column: 1, selected: 0 });
+  /*
+   * `cursor` 只服务状态栏显示，**不**下推到数据层：曾经有一条「光标还在标题那一行就不
+   * 自动改名」的判据，靠 `setEditorCursorLine` 把行号推给数据层 —— 真机实测（2026-10-09）
+   * 证明它在主场景里必然成立（打完标题光标必然停在标题行），功能一次都不会触发，已删除。
+   * 「用户还在编辑标题」由 5 秒防抖保证，不需要光标位置。
+   */
   const [palette, setPalette] = useState<null | "all" | "commands">(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 从命令面板 / `opennote://settings/import` 直接落到「导入与接口」。 */
@@ -1300,7 +1307,8 @@ export default function App(): ReactNode {
             if (!activeId) return;
             updateNoteContent(activeId, doc);
           }}
-          onCursor={setCursor}
+          onCursor={(value) => setCursor(value)}
+          onComposing={(composing) => setEditorComposing(activeId, composing)}
           onSave={() => flushAll()}
           onReady={(view) => {
             viewRef.current = view;

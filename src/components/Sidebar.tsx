@@ -890,7 +890,9 @@ function NoteRow({
             title: "重命名笔记",
             value: note.title,
             label: "标题",
-            note: "重命名只改显示名；正文里的一级标题不会被改写。",
+            note:
+              "重命名会同时改文件名与侧栏显示名；正文里的一级标题不会被改写。改过名之后，这篇笔记不再跟随正文标题自动改名。" +
+              "（只有还叫「无标题」「未命名」的笔记，才会在写完标题 5 秒后自动跟随正文标题；可在「设置 · 文件」里关掉。）",
             confirmLabel: "重命名",
           });
           if (name) renameNote(note.id, name);

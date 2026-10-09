@@ -212,16 +212,41 @@ describe("粘贴/拖拽的图片：落共享 .assets/，引用能解析回它", 
       notify: () => undefined,
     });
 
-    // 去重序号 ` 2` 带空格 ⇒ 必须走 `<…>` 形式，否则空格截断目标、图片不渲染。
-    expect(snippets).toEqual([`![图.png](<../.assets/${asset.replace(/\.png$/, " 2.png")}>)`]);
+    // 去重序号 `-2`（无空格）：与剪藏落点 `allocateAssetPath` 同一形态。
+    expect(snippets).toEqual([`![图.png](../.assets/${asset.replace(/\.png$/, "-2.png")})`]);
     expect(rendersAsImage(snippets[0]), `引用没有被渲染成图片：${snippets[0]}`).toBe(true);
     expect(testBackend.files.has(`.assets/${asset}`)).toBe(true);
     expect(testBackend.bytes(`.assets/${asset}`)).toEqual(PNG);
-    expect(testBackend.files.has(`.assets/${asset.replace(/\.png$/, " 2.png")}`)).toBe(true);
-    expect(testBackend.bytes(`.assets/${asset.replace(/\.png$/, " 2.png")}`)).toEqual(OTHER_PNG);
+    expect(testBackend.files.has(`.assets/${asset.replace(/\.png$/, "-2.png")}`)).toBe(true);
+    expect(testBackend.bytes(`.assets/${asset.replace(/\.png$/, "-2.png")}`)).toEqual(OTHER_PNG);
     // 公共目录里**只有**那张老图（新图一个字节都没往那里写）。
     expect(testBackend.paths().filter((path) => path.startsWith("归档/assets/"))).toEqual(["归档/assets/老图.png"]);
     expect(testBackend.bytes("归档/assets/老图.png")).toEqual(PNG);
+  });
+
+  it("同一张图连粘两次只留**一个**文件：内容相同 → 复用同一个 uuid 路径，不再堆 `-2` 副本", async () => {
+    const first = await saveImage(pngFile("截图.png"), "截图.png", notePath);
+    const second = await saveImage(pngFile("截图.png"), "截图.png", notePath);
+
+    // 与剪藏落点 `allocateAssetPath` 同一套语义：存在 + 字节相同 → 复用（不写、不覆盖）。
+    expect(second.path).toBe(first.path);
+    expect(testBackend.paths()).toEqual([`.assets/${await assetFinalName(PNG, "截图.png")}`]);
+  });
+
+  it("不同内容同名 → 让位成 `-2`（无空格），两份字节都在、谁也没被覆盖", async () => {
+    /*
+     * 「同名不同内容」在编辑器路径上的真实触发条件：落盘名是**内容**派生的 uuid，所以
+     * 不同内容天然得到不同的 uuid；只有当 `.assets/<那个 uuid>` 已经被**别的内容**占住时
+     * （用户手放的同名文件、极端哈希碰撞）才轮到让位。这里把那一步显式造出来。
+     */
+    const candidate = `.assets/${await assetFinalName(PNG, "图.png")}`;
+    testBackend.seedBytes(candidate, OTHER_PNG);
+
+    const saved = await saveImage(pngFile("图.png"), "图.png", notePath);
+
+    expect(saved.path).toBe(candidate.replace(/\.png$/, "-2.png"));
+    expect(testBackend.bytes(candidate)).toEqual(OTHER_PNG); // 先到的那份一个字节没动
+    expect(testBackend.bytes(saved.path)).toEqual(PNG);
   });
 
   it("负例：把**目录**当成笔记路径传进来会被守卫当场拦下，而不是静默写进 `未命名.assets/`", async () => {

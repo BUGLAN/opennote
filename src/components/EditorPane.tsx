@@ -33,10 +33,58 @@ interface EditorPaneProps {
   settings: UiSettings;
   onDocChange(doc: string): void;
   onCursor(info: CursorInfo): void;
+  /**
+   * 输入法（IME）是否正在合成。
+   *
+   * 为什么必须有这条：中文输入法合成期间用户可能停顿数秒，而「停笔 5 秒自动改名」正好会在
+   * 这段停顿里开火 —— 标题还在合成中就被拿去当文件名，等于用半个词改名。
+   *
+   * 判定放在这里而不是数据层：合成是**编辑器 DOM 的事件**（`compositionstart` /
+   * `compositionend` 冒泡到编辑器宿主元素），数据层看不到；而数据层只认 `setEditorComposing()`
+   * 下推的状态，两边各管一段、不重复判定。
+   */
+  onComposing(composing: boolean): void;
   onSave(): void;
   onReady(view: EditorView | null): void;
   getTitles(): string[];
   getTags(): string[];
+}
+
+/** 只要「能挂事件监听」就够：浏览器里是宿主 `<div>`，单测里是 `EventTarget`。 */
+export type CompositionEventHost = {
+  addEventListener(type: string, listener: EventListener): void;
+  removeEventListener(type: string, listener: EventListener): void;
+};
+
+/**
+ * 把**宿主元素上的 composition 事件**翻译成 `onComposing(true/false)`，返回退订函数。
+ *
+ * 为什么监听 DOM 事件而不是看 CodeMirror 的事务标注：合成是编辑区 DOM 的事实，
+ * `compositionstart` / `compositionend` 会从 contenteditable 的编辑区冒泡到宿主元素。
+ * 抽成一个独立函数是为了**能在 DOM 层单测**（数据层只认 `setEditorComposing()` 下推的
+ * 状态，两边各管一段）。
+ *
+ * 两条契约（都有用例）：
+ *   1. **只在状态变化时上报** —— 连续 `compositionstart` 不会重复上报 `true`；
+ *   2. 退订时若仍在合成，**补报一次 `false`** —— 否则那篇笔记会被一条永远为真的合成状态
+ *      卡住自动改名（编辑器卸载/换笔记时最容易踩）。
+ */
+export function attachCompositionReporter(host: CompositionEventHost, report: (composing: boolean) => void): () => void {
+  let composing = false;
+  const set = (next: boolean) => {
+    if (next === composing) return;
+    composing = next;
+    report(next);
+  };
+  const onStart = () => set(true);
+  const onEnd = () => set(false);
+  host.addEventListener("compositionstart", onStart);
+  host.addEventListener("compositionend", onEnd);
+  return () => {
+    host.removeEventListener("compositionstart", onStart);
+    host.removeEventListener("compositionend", onEnd);
+    set(false);
+  };
 }
 
 /**
@@ -96,7 +144,10 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
       };
     }
     propsRef.current.onReady(view);
+    // 输入法合成状态 → 宿主（数据层用它抑制「停笔 5 秒自动改名」）。
+    const detachComposing = attachCompositionReporter(host, (composing) => propsRef.current.onComposing(composing));
     return () => {
+      detachComposing();
       view.destroy();
       viewRef.current = null;
       propsRef.current.onReady(null);

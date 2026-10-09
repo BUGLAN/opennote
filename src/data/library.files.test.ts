@@ -11,8 +11,11 @@ vi.mock("./workspaces", () => ({
 }));
 
 import {
+  autoRenameFromPlaceholder,
+  autoRenameOutcomeLog,
   childFolders,
   closeWorkspace,
+  createNote,
   deleteFolder,
   flushAll,
   flushMeta,
@@ -20,15 +23,26 @@ import {
   folderChoiceTrail,
   folderChoiceTree,
   getLibrary,
+  hasPendingAutoRename,
   moveNote,
   openWorkspace,
   purgeNote,
   renameNote,
+  resetAutoRenameHistoryForTests,
   rescanWorkspace,
   restoreNote,
+  saveImage,
+  setAutoRenameDelayForTests,
+  setEditorComposing,
+  shouldAutoRename,
   trashNote,
   updateNoteContent,
+  type AutoRenameContext,
 } from "./library";
+import { assetFinalName } from "./assetPaths";
+import { DEFAULT_UI } from "./types";
+import { patchUi } from "./ui";
+import { attachCompositionReporter } from "../components/EditorPane";
 
 class MemoryBackend implements FileSystemBackend {
   readonly kind = "node";
@@ -524,5 +538,774 @@ describe("folderChoiceTree / folderChoiceTrail：拍平候选 ↔ 树形互转",
     const choices = folderChoiceList(null);
     expect(folderChoiceTrail(choices, "速记").map((choice) => choice.path)).toEqual(["速记"]);
     expect(folderChoiceTrail(choices, "不存在的目录")).toEqual([]);
+  });
+});
+
+/**
+ * 编辑器粘贴路径的**字节级复用**（`saveImage`）——语义必须与剪藏落点
+ * `allocateAssetPath`（`src/lib/clip/landing.ts`）逐条一致：
+ *   1. 目标不存在 → 写它；
+ *   2. 目标存在 + 字节相同 → **复用**（不写、不改 mtime）；
+ *   3. 目标存在 + 字节不同 → `-2` 让位（**绝不静默覆盖**）。
+ *
+ * 为什么盯这一条：`saveImage` 原来只认**文件名清单**（`uniquePath`），第二次粘贴同一张图时
+ * `assetFinalName` 明明算出了同一个 uuid，却被推成 `X 2.png` —— 与用户「uuid 命名 = 复用」
+ * 的裁定直接冲突（调研报告 §1.4）。
+ *
+ * 这里刻意用**单字节 ASCII** 当附件内容：本文件的 `MemoryBackend` 是文本后端
+ * （`readBytes` 经 UTF-8 往返），非 ASCII 字节会被解码成 U+FFFD 而**改变长度**，那是后端
+ * 的局限、不是 `saveImage` 的行为。逐字节保真由 `src/editor/media.test.ts` 的二进制
+ * `MemoryBackend` 覆盖（同一批用例，两边一起看）。
+ */
+describe("saveImage：同一内容复用同一个文件，不同内容绝不互相覆盖", () => {
+  const IMAGE = new Uint8Array([65, 66, 67, 68, 69, 70, 71, 72]);
+
+  function pngFile(bytes: Uint8Array, name = "截图.png"): File {
+    return new File([bytes as unknown as BlobPart], name, { type: "image/png" });
+  }
+
+  beforeEach(async () => {
+    testBackend = new MemoryBackend();
+    await openWorkspace(record, { silent: true });
+  });
+
+  afterEach(async () => {
+    await flushAll();
+    await flushMeta();
+    vi.restoreAllMocks();
+  });
+
+  it("同一内容连粘两次 → 只留一个文件，第二次复用同一个路径（不重写）", async () => {
+    const first = await saveImage(pngFile(IMAGE), "截图.png", "归档/备注.md");
+    const second = await saveImage(pngFile(IMAGE), "截图.png", "归档/备注.md");
+
+    expect(second.path).toBe(first.path);
+    expect(second.markdown).toBe(first.markdown);
+    const shared = [...testBackend.files.keys()].filter((path) => path.startsWith(".assets/"));
+    expect(shared).toEqual([`.assets/${await assetFinalName(IMAGE, "截图.png")}`]);
+  });
+
+  it("不同内容同名 → 按 `-2` 让位，两份字节都在（先到的那份一个字节没动）", async () => {
+    const candidate = `.assets/${await assetFinalName(IMAGE, "图.png")}`;
+    testBackend.seed(candidate, "先到的那份（内容不同）");
+
+    const saved = await saveImage(pngFile(IMAGE, "图.png"), "图.png", "归档/备注.md");
+
+    expect(saved.path).toBe(candidate.replace(/\.png$/, "-2.png"));
+    expect(testBackend.files.get(candidate)).toBe("先到的那份（内容不同）");
+    expect([...(testBackend.files.get(saved.path) as Uint8Array)]).toEqual([...IMAGE]);
+  });
+});
+
+/* ===== 占位名笔记的「正文标题停笔 5 秒落盘」 ===== */
+/** 停笔窗口：25ms 足够区分「同一拍里重排」与「两次独立触发」，又不拖慢测试。 */
+const DELAY = 25;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 磁盘上的**笔记**文件名（`.opennote/` 里的状态、历史快照不算「文件名」）。
+ *
+ * 排除 `故事/`：本文件顶层的 `beforeEach` 会种下 `故事/第一章.md`、`故事/子目录/第二章.md`
+ * 与 `故事/assets/封面.png`（那是共享 `.assets/` 那组用例的夹具）。这里只关心本段自己
+ * 种下去的那些占位名笔记，不然每一条断言都要跟着别人的夹具改。
+ */
+function placeholderFileNames(): string[] {
+  return [...testBackend.files.keys()]
+    .filter((path) => !path.startsWith(".opennote/") && !path.startsWith("故事/"))
+    .sort();
+}
+
+/** 轮询到 `check()` 为真（或超时）—— 定时器 + 异步 `move` 的落地时刻不由测试决定。 */
+async function waitFor(check: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await sleep(10);
+  }
+  throw new Error(`等待超时；磁盘上是 ${JSON.stringify(placeholderFileNames())}`);
+}
+
+/** 等「自动改名真的落过一次盘」：拿自动改名读数当证据，不用猜文件名。 */
+async function renamedCount(): Promise<number> {
+  return autoRenameOutcomeLog().filter((entry) => entry.status === "renamed").length;
+}
+
+/**
+ * `shouldAutoRename` 的基线上下文：**其余条件全部满足**，逐条用例只改一个字段。
+ *
+ * 为什么要有它：判定有十几条，散落的字面量一旦漏字段就会在 `tsc` 里红一片、
+ * 或者更糟 —— 悄悄测成了别的分支。基线只描述「一篇正常的占位名笔记、刚写完标题」。
+ */
+function autoRenameCtx(overrides: Partial<AutoRenameContext> = {}): AutoRenameContext {
+  const now = Date.now();
+  return {
+    id: "无标题.md",
+    stem: "无标题",
+    placeholderOrigin: true,
+    content: "## 修改提示词\n",
+    titleOverride: null,
+    trashed: false,
+    createdAt: now - 60_000,
+    now,
+    composing: false,
+    creating: false,
+    locked: false,
+    lastAutoRenameAt: null,
+    explicitRenamedAt: null,
+    pinnedAt: null,
+    inFlight: false,
+    autoTitleFromPlaceholder: true,
+    ...overrides,
+  };
+}
+
+async function renameCount(from: string): Promise<number> {
+  return testBackend.calls.filter((call) => call.startsWith(`move:${from}->`)).length;
+}
+
+/**
+ * 本段复用文件顶部的 `beforeEach`（新建 MemoryBackend + `openWorkspace`）与
+ * `afterEach`（`flushAll` / `flushMeta`），只额外把「停笔窗口」缩短 —— 真实 5 秒
+ * 不可能塞进单测，而窗口的语义（窗口内再敲字 = 取消 + 重排）由 `scheduleAutoRename`
+ * 的 `clearTimeout` 保证。`closeWorkspace()` 在 `resetWorkspaceTransients()` 里
+ * 复位成默认值，所以不担心污染别的用例。
+ */
+beforeEach(() => {
+  setAutoRenameDelayForTests(DELAY);
+});
+
+describe("占位名笔记停笔 5 秒自动改名：入口条件只有占位名", () => {
+  it("★ 非占位名笔记写标题：文件名一格不动、零 move（真实笔记本 476 篇走的都是这条）", async () => {
+    testBackend.seed("系统设计.md", "# 旧标题\n");
+    await rescanWorkspace();
+    updateNoteContent("系统设计.md", "# 全新标题\n");
+    await sleep(DELAY * 4);
+    await flushAll();
+
+    expect(placeholderFileNames()).toEqual(["系统设计.md"]);
+    expect(await renameCount("系统设计.md")).toBe(0);
+    expect(hasPendingAutoRename("系统设计.md")).toBe(false);
+  });
+
+  it("占位名笔记写 H1：停笔后磁盘文件名跟着标题走", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "# 修改提示词\n\n正文");
+    await waitFor(() => testBackend.files.has("修改提示词.md"));
+
+    expect(testBackend.files.get("修改提示词.md")).toBe("# 修改提示词\n\n正文");
+    expect(testBackend.files.has("无标题.md")).toBe(false);
+  });
+
+  it("带序号变体（`无标题 2.md` / `未命名.md`）同样触发", async () => {
+    testBackend.seed("无标题 2.md", "");
+    testBackend.seed("未命名.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题 2.md", "## 恋爱模拟器综合设计\n");
+    updateNoteContent("未命名.md", "## 恋爱模拟器设计提示词\n");
+    await waitFor(() => testBackend.files.has("恋爱模拟器综合设计.md") && testBackend.files.has("恋爱模拟器设计提示词.md"));
+  });
+
+  it("`无标题 副本.md` 不是占位名（正则要求 `\\s\\d+`）—— 创建副本的产物不许被改名", async () => {
+    testBackend.seed("无标题 副本.md", "# 原笔记标题\n");
+    await rescanWorkspace();
+    updateNoteContent("无标题 副本.md", "# 原笔记标题\n\n加一段");
+    await sleep(DELAY * 4);
+    await flushAll();
+
+    expect(testBackend.files.has("无标题 副本.md")).toBe(true);
+    expect(await renameCount("无标题 副本.md")).toBe(0);
+  });
+
+  it("只保留扩展名：`.txt` 笔记改名后仍是 `.txt`", async () => {
+    testBackend.seed("未命名.txt", "");
+    await rescanWorkspace();
+    updateNoteContent("未命名.txt", "# 会议记录\n");
+    await waitFor(() => testBackend.files.has("会议记录.txt"));
+    expect(testBackend.files.has("未命名.txt")).toBe(false);
+  });
+});
+
+describe("derivePlaceholderTitle 的落地语义（认 H1–H6，扫不到就什么都不做）", () => {
+  it("H1–H6 每一级都能落地（用户 5 篇占位笔记里 H1 为 0，只认 H1 等于功能没做）", async () => {
+    for (const level of [1, 2, 3, 4, 5, 6]) {
+      testBackend.seed("无标题.md", "");
+      await rescanWorkspace();
+      updateNoteContent("无标题.md", `${"#".repeat(level)} 第${level}级标题\n`);
+      await waitFor(() => testBackend.files.has(`第${level}级标题.md`));
+      expect(testBackend.files.has("无标题.md")).toBe(false);
+      testBackend.files.delete(`第${level}级标题.md`);
+    }
+  });
+
+  it("★ 全文只有一行图片 → 空操作（绝不产出 `3f1c9589….png.md` 这种垃圾名）", async () => {
+    testBackend.seed("无标题.md", "![3f1c9589f284944860bef0e22aecc5b0_720.png](.assets/ac44629b-1.png)\n");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "![3f1c9589f284944860bef0e22aecc5b0_720.png](.assets/ac44629b-1.png)\n\n");
+    await sleep(DELAY * 4);
+    await flushAll();
+
+    expect(placeholderFileNames()).toEqual(["无标题.md"]);
+    expect(await renameCount("无标题.md")).toBe(0);
+  });
+
+  it("空文件（0 字节）→ 空操作", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "\n");
+    await sleep(DELAY * 4);
+    await flushAll();
+
+    expect(placeholderFileNames()).toEqual(["无标题.md"]);
+  });
+
+  it("标题洗成 fallback（`# ///`）→ 空操作（不改成 `无标题.md`，更不改成 `未命名.md`）", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "# ///\n正文\n");
+    await sleep(DELAY * 4);
+    await flushAll();
+
+    expect(placeholderFileNames()).toEqual(["无标题.md"]);
+  });
+
+  it("正文首行是普通段落、后面才有真标题 → 用真标题（不是首行）", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "随便写一句\n\n## 真标题在下面\n");
+    await waitFor(() => testBackend.files.has("真标题在下面.md"));
+  });
+});
+
+describe("改名走独立路径：不写 titleOverride，通道不会被永久锁死", () => {
+  it("★ 第一次自动改名后 `titleOverride` 仍为 null，第二次改标题文件名还会跟随", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+
+    updateNoteContent("无标题.md", "## 会议记录\n");
+    await waitFor(() => testBackend.files.has("会议记录.md"));
+    // 不写 override：否则 `refresh()` 的 `titleOverride ?? deriveTitle(...)` 会把通道锁死。
+    expect(getLibrary().notes["会议记录.md"]?.titleOverride).toBeNull();
+    expect(getLibrary().notes["会议记录.md"]?.title).toBe("会议记录");
+
+    // 第二次改标题：文件名必须**再跟一次**（复用 `renameNote()` 的实现会在这里失败）。
+    // 30 秒节流由下一条用例单独咬（真实语义就是「同篇 30 秒内不再改」）。
+    resetAutoRenameHistoryForTests();
+    updateNoteContent("会议记录.md", "## 会议记录 2026\n");
+    await waitFor(() => testBackend.files.has("会议记录 2026.md"));
+    expect(getLibrary().notes["会议记录 2026.md"]?.titleOverride).toBeNull();
+    expect(testBackend.files.has("会议记录.md")).toBe(false);
+  });
+
+  it("自动改名不写 `titlePinnedAt`（state.json 里只有用户手定的名字才进这张表）", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "## 会议记录\n");
+    await waitFor(() => testBackend.files.has("会议记录.md"));
+
+    await flushMeta();
+    const state = JSON.parse(testBackend.files.get(".opennote/state.json") as string) as Record<string, unknown>;
+    expect(state.titlePinnedAt).toBeUndefined();
+    expect(state.titleOverrides).toBeUndefined();
+  });
+
+  it("改名后计时器按**新路径**重挂：改名落定之后再打字，第二次改名仍然发生", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+
+    updateNoteContent("无标题.md", "## 第一版\n");
+    await waitFor(() => testBackend.files.has("第一版.md"));
+    // 第一次改名落定 ⇒ 30 秒节流开始计时（真实语义见下一条用例）。这里显式声明
+    // 「这 30 秒已经过去」，才能验证「改名之后计时器挂在新路径上」这一条。
+    resetAutoRenameHistoryForTests();
+
+    // 对新路径再打一次字 = 对新路径重排一次；第二次改名必须发生。
+    updateNoteContent("第一版.md", "## 第二版\n");
+    await waitFor(() => testBackend.files.has("第二版.md"));
+
+    expect(placeholderFileNames()).toEqual(["第二版.md"]);
+  });
+});
+
+describe("用户显式命名过的笔记绝不被顶掉", () => {
+  it("★ A7b 场景：`renameNote` 之后改正文标题，文件名与显示名都不动", async () => {
+    testBackend.seed("无标题.md", "## 系统设计\n");
+    await rescanWorkspace();
+    await renameNote("无标题.md", "系统设计ABC");
+    expect(getLibrary().notes["系统设计ABC.md"]?.title).toBe("系统设计ABC");
+
+    // 改正文标题（`titleOverride` 存在 ⇒ 永久停用自动改名）。
+    updateNoteContent("系统设计ABC.md", "## 完全不同的标题\n");
+    await sleep(DELAY * 4);
+    await flushAll();
+
+    expect(placeholderFileNames()).toEqual(["系统设计ABC.md"]);
+    expect(getLibrary().notes["系统设计ABC.md"]?.title).toBe("系统设计ABC");
+    expect(getLibrary().notes["系统设计ABC.md"]?.titleOverride).toBe("系统设计ABC");
+  });
+
+  it("刚显式重命名过：30 秒静默期由 `shouldAutoRename` 逐条判（纯函数，能精确咬住时间边界）", () => {
+    const base = autoRenameCtx({ content: "## 系统设计\n" });
+    // 没有任何静默期 → 允许改（其余条件都满足）。
+    expect(shouldAutoRename(base)).toBeNull();
+    // 刚显式重命名过（本会话时间戳）：静默期内拦掉。
+    expect(shouldAutoRename({ ...base, explicitRenamedAt: base.now - 1_000 })).toContain("刚显式重命名过");
+    expect(shouldAutoRename({ ...base, explicitRenamedAt: base.now - 29_999 })).toContain("刚显式重命名过");
+    expect(shouldAutoRename({ ...base, explicitRenamedAt: base.now - 30_000 })).toBeNull();
+    // `state.json` 里持久化的 pin 同样算静默期（重开笔记本之后也拦得住）。
+    expect(shouldAutoRename({ ...base, pinnedAt: base.now - 1_000 })).toContain("刚显式重命名过");
+    expect(shouldAutoRename({ ...base, pinnedAt: base.now - 30_000 })).toBeNull();
+    // 两张表取**更晚**的那个。
+    expect(shouldAutoRename({ ...base, explicitRenamedAt: base.now - 40_000, pinnedAt: base.now - 5_000 })).toContain(
+      "刚显式重命名过",
+    );
+  });
+
+  it("待执行的自动改名被显式重命名取消：不会在用户点完重命名后又搬一次文件", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "## 自动算出来的名字\n");
+    // 定时器还没到点，用户先自己改了名。
+    await renameNote("无标题.md", "我自己起的名字");
+    await sleep(DELAY * 4);
+    await flushAll();
+
+    expect(placeholderFileNames()).toEqual(["我自己起的名字.md"]);
+    expect(await renameCount("无标题.md")).toBe(1);
+  });
+});
+
+describe("5 秒防抖 = 取消 + 重排（不是并发两个改名）", () => {
+  it("窗口内再敲字：计时器重排、文件名只在最后一次内容上落定", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+
+    updateNoteContent("无标题.md", "# 一");
+    await sleep(DELAY / 2);
+    expect(testBackend.files.has("一.md")).toBe(false);
+
+    updateNoteContent("无标题.md", "# 一二");
+    await sleep(DELAY / 2);
+    expect(testBackend.files.has("一二.md")).toBe(false);
+
+    updateNoteContent("无标题.md", "# 一二三");
+    await waitFor(() => testBackend.files.has("一二三.md"));
+
+    // 全程只搬了一次，中间那两个名字一次都没落盘。
+    expect(placeholderFileNames()).toEqual(["一二三.md"]);
+    expect(await renameCount("无标题.md")).toBe(1);
+  });
+
+  it("改名途中再敲字：不产生第二个并发 `move`，正文一个字不丢", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "## 第一版\n");
+    await waitFor(() => testBackend.files.has("第一版.md"));
+    // 放开 30 秒节流：本用例咬的是「并发」，不是节流。
+    resetAutoRenameHistoryForTests();
+
+    // 改名落定后立刻打字：定时器挂在新路径上，窗口内再敲字只会重排。
+    updateNoteContent("第一版.md", "## 第二版\n");
+    await sleep(DELAY / 2);
+    updateNoteContent("第一版.md", "## 第二版\n\n又加了一段\n");
+    await waitFor(() => testBackend.files.has("第二版.md"));
+
+    expect(await renameCount("第一版.md")).toBe(1);
+    expect(testBackend.files.get("第二版.md")).toBe("## 第二版\n\n又加了一段\n");
+    expect(getLibrary().dirty["第一版.md"]).toBeUndefined();
+  });
+});
+
+describe("抑制条件", () => {
+  it("光标停在标题那一行**不再拦截**（真机教训 2026-10-09）：停笔后照常改名，无需任何光标配合", async () => {
+    // 自然流程 = 新建 → 打标题 → 停笔，此时光标**必然**还在标题行。曾经有一条
+    // 「光标在标题行就不改名」，叠加排定时器时的预检，让功能在主场景里一次都不触发。
+    // 判据删除后：没有光标概念，停笔窗口一到就改。
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+
+    updateNoteContent("无标题.md", "## 修改提示词\n");
+    await waitFor(() => testBackend.files.has("修改提示词.md"));
+    expect(testBackend.files.has("无标题.md")).toBe(false);
+  });
+
+  it("输入法合成中 → 到点不改名并转入短重试；合成一结束**无需再改内容** → 正常改名", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+
+    setEditorComposing("无标题.md", true);
+    updateNoteContent("无标题.md", "## 修改提示词\n");
+    await sleep(DELAY * 4);
+    await flushAll();
+    expect(placeholderFileNames()).toEqual(["无标题.md"]);
+
+    // 合成结束（compositionend）本身就是停笔的自然终点：数据层会主动重排一次，
+    // 不再要求用户「再改一次内容」才触发改名。
+    setEditorComposing("无标题.md", false);
+    await waitFor(() => testBackend.files.has("修改提示词.md"));
+  });
+
+  it("旧布局 `<旧文件名>.assets/` 引用（本机第 3 篇的真实形态）→ 跳过，不裂图", async () => {
+    // `项目实战/system_panel/无标题.md` 的正文里有 5 处 `./无标题.assets/image.png`。
+    const legacy = "## 修改提示词\n\n![image.png](./无标题.assets/image.png)\n";
+    testBackend.seed("无标题.md", legacy);
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", `${legacy}\n![image 2.png](./无标题.assets/image 2.png)\n`);
+    await sleep(DELAY * 4);
+    await flushAll();
+
+    expect(placeholderFileNames()).toEqual(["无标题.md"]);
+    expect(await renameCount("无标题.md")).toBe(0);
+  });
+
+  it("目标名已被占用 → 让位成 `X 2.md`，且 override 仍为 null", async () => {
+    testBackend.seed("无标题.md", "");
+    testBackend.seed("修改提示词.md", "# 别人的笔记\n");
+    await rescanWorkspace();
+
+    updateNoteContent("无标题.md", "## 修改提示词\n");
+    await waitFor(() => testBackend.files.has("修改提示词 2.md"));
+
+    expect(testBackend.files.get("修改提示词.md")).toBe("# 别人的笔记\n");
+    expect(getLibrary().notes["修改提示词 2.md"]?.titleOverride).toBeNull();
+  });
+
+  it("幂等：文件名已经等于标题时，再触发一次不产生 `X 2.md`", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "## 修改提示词\n");
+    await waitFor(() => testBackend.files.has("修改提示词.md"));
+    const movesAfterFirst = await renameCount("修改提示词.md");
+    const renamesBefore = await renamedCount();
+
+    // 再跑一次执行体：应当被「与当前文件名相同」拦掉，既不搬也不产生 `X 2.md`。
+    // （30 秒节流先放开：本用例咬的是「同名空操作」，不是节流。）
+    resetAutoRenameHistoryForTests();
+    const outcome = await autoRenameFromPlaceholder("修改提示词.md");
+    expect(outcome.status).toBe("skipped");
+    expect(outcome.reason).toContain("与当前文件名相同");
+    expect(await renameCount("修改提示词.md")).toBe(movesAfterFirst);
+    expect(await renamedCount()).toBe(renamesBefore);
+    expect(placeholderFileNames()).toEqual(["修改提示词.md"]);
+  });
+
+  it("只差大小写 → 走 `moveCaseOnly`，不产生 ` 2.md`", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "## ABC\n");
+    await waitFor(() => testBackend.files.has("ABC.md"));
+    // 再改成小写：路径只差大小写，必须原地换名（`uniquePath` 会误判成被自己占用）。
+    resetAutoRenameHistoryForTests();
+    updateNoteContent("ABC.md", "## abc\n");
+    await waitFor(() => testBackend.files.has("abc.md"));
+
+    expect(placeholderFileNames()).toEqual(["abc.md"]);
+  });
+
+  it("同一篇笔记两次自动改名之间至少隔 30 秒（文件监听 500ms 抖动防抖）", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", "## 第一版\n");
+    await waitFor(() => testBackend.files.has("第一版.md"));
+
+    updateNoteContent("第一版.md", "## 第二版\n");
+    await sleep(DELAY * 4);
+    await flushAll();
+    // 30 秒最小间隔：这一拍不许改（文件名停在第一版，`title` 已经是第二版）。
+    expect(placeholderFileNames()).toEqual(["第一版.md"]);
+    expect(getLibrary().notes["第一版.md"]?.title).toBe("第二版");
+  });
+});
+
+describe("真实笔记本 §3 的 5 篇占位文件逐篇形态", () => {
+  it("第 1 篇：`AI智能时代/无标题.md` 是 0 字节空文件 → 保持不动", async () => {
+    testBackend.seed("AI智能时代/无标题.md", "");
+    await rescanWorkspace();
+    updateNoteContent("AI智能时代/无标题.md", "");
+    await sleep(DELAY * 4);
+    await flushAll();
+    expect(placeholderFileNames()).toEqual(["AI智能时代/无标题.md"]);
+  });
+
+  it("第 2 篇：根目录 `无标题.md` 全文只有一行图片 → 保持不动", async () => {
+    const only = "![3f1c9589f284944860bef0e22aecc5b0_720.png](.assets/ac44629b-1.png)";
+    testBackend.seed("无标题.md", only);
+    await rescanWorkspace();
+    updateNoteContent("无标题.md", `${only}\n`);
+    await sleep(DELAY * 4);
+    await flushAll();
+    expect(placeholderFileNames()).toEqual(["无标题.md"]);
+  });
+
+  it("第 3 篇：`项目实战/system_panel/无标题.md` 含旧布局引用 → 本次跳过（等附件迁移后才会改）", async () => {
+    const body = "## 修改提示词\n\n![image.png](./无标题.assets/image.png)\n";
+    testBackend.seed("项目实战/system_panel/无标题.md", body);
+    await rescanWorkspace();
+    updateNoteContent("项目实战/system_panel/无标题.md", `${body}\n![image 2.png](./无标题.assets/image 2.png)\n`);
+    await sleep(DELAY * 4);
+    await flushAll();
+    expect(placeholderFileNames()).toEqual(["项目实战/system_panel/无标题.md"]);
+  });
+
+  it("第 4/5 篇：`项目实战/恋爱模拟器/无标题 2.md` 与 `无标题 3.md`（h2）→ 各自改名", async () => {
+    testBackend.seed("项目实战/恋爱模拟器/无标题 2.md", "## 恋爱模拟器综合设计\n");
+    testBackend.seed("项目实战/恋爱模拟器/无标题 3.md", "## 恋爱模拟器设计提示词\n");
+    await rescanWorkspace();
+    updateNoteContent("项目实战/恋爱模拟器/无标题 2.md", "## 恋爱模拟器综合设计\n\n正文\n");
+    updateNoteContent("项目实战/恋爱模拟器/无标题 3.md", "## 恋爱模拟器设计提示词\n\n正文\n");
+    await waitFor(
+      () =>
+        testBackend.files.has("项目实战/恋爱模拟器/恋爱模拟器综合设计.md") &&
+        testBackend.files.has("项目实战/恋爱模拟器/恋爱模拟器设计提示词.md"),
+    );
+    expect(testBackend.files.has("项目实战/恋爱模拟器/无标题 2.md")).toBe(false);
+    expect(testBackend.files.has("项目实战/恋爱模拟器/无标题 3.md")).toBe(false);
+  });
+
+  it("第 6/7 篇（方案定稿之后才出现）：`system_panel/无标题 2.md` 会改、`恋爱模拟器/无标题.md` 不会", async () => {
+    // 第 6 篇：`项目实战/system_panel/无标题 2.md`，正文 `## 当前存在问题` → 会改名。
+    testBackend.seed("项目实战/system_panel/无标题 2.md", "## 当前存在问题\n");
+    // 第 7 篇：`项目实战/恋爱模拟器/无标题.md`，首行是普通段落、正文里没有真标题行 → 不改名。
+    testBackend.seed("项目实战/恋爱模拟器/无标题.md", "这一段只是说明，不是标题。\n\n更多说明。\n");
+    await rescanWorkspace();
+
+    updateNoteContent("项目实战/system_panel/无标题 2.md", "## 当前存在问题\n\n正文\n");
+    updateNoteContent("项目实战/恋爱模拟器/无标题.md", "这一段只是说明，不是标题。\n\n更多说明。\n");
+    await waitFor(() => testBackend.files.has("项目实战/system_panel/当前存在问题.md"));
+    await sleep(DELAY * 4);
+    await flushAll();
+
+    // 第 7 篇一动不动（首行不当标题 —— 这正是「垃圾名」那条护栏）。
+    expect(testBackend.files.has("项目实战/恋爱模拟器/无标题.md")).toBe(true);
+    expect(testBackend.files.has("项目实战/恋爱模拟器/这一段只是说明，不是标题。.md")).toBe(false);
+  });
+});
+
+/* ===== 复核 R1：重命名撞名时写进 titleOverride 的必须是**落盘名** ===== */
+
+describe("重命名撞名：写进 titleOverride 的是落盘名（方案 §7.1 指定断言）", () => {
+  it("同目录已有「系统设计.md」时，重命名后 title 与 titleOverride 都等于「系统设计 2」", async () => {
+    testBackend.seed("系统设计.md", "# 别人的笔记\n");
+    testBackend.seed("无标题.md", "## 系统设计\n");
+    await rescanWorkspace();
+
+    await renameNote("无标题.md", "系统设计");
+
+    // 落盘名让位成 `系统设计 2.md`：显示名必须跟着**落盘名**，不能停在请求名上。
+    expect(testBackend.files.has("系统设计 2.md")).toBe(true);
+    expect(getLibrary().notes["系统设计 2.md"]?.title).toBe("系统设计 2");
+    expect(getLibrary().notes["系统设计 2.md"]?.titleOverride).toBe("系统设计 2");
+    // 别人的笔记一个字节没动。
+    expect(testBackend.files.get("系统设计.md")).toBe("# 别人的笔记\n");
+
+    // 落盘：`state.json` 里那条 override 也是落盘名 —— 否则重扫之后显示名会变回「系统设计」，
+    // 与磁盘上的 `系统设计 2.md` 永久分叉（这正是 R1 描述的静默分叉）。
+    await flushMeta();
+    const state = JSON.parse(testBackend.files.get(".opennote/state.json") as string) as Record<string, unknown>;
+    expect((state.titleOverrides as Record<string, string>)["系统设计 2.md"]).toBe("系统设计 2");
+
+    await rescanWorkspace();
+    expect(getLibrary().notes["系统设计 2.md"]?.title).toBe("系统设计 2");
+  });
+});
+
+/* ===== 复核 R2：`autoTitleFromPlaceholder` 开关（默认开、可关） ===== */
+
+describe("设置开关 autoTitleFromPlaceholder：默认开、可关", () => {
+  it("默认值是 true（旧 localStorage 缺这个键时 `{ ...DEFAULT_UI, ...parsed }` 也落到 true）", () => {
+    expect(DEFAULT_UI.autoTitleFromPlaceholder).toBe(true);
+  });
+
+  it("关掉之后 `shouldAutoRename` 直接返回「设置里已关闭自动改名」（其余条件全部满足也不改）", () => {
+    expect(shouldAutoRename(autoRenameCtx())).toBeNull();
+    expect(shouldAutoRename(autoRenameCtx({ autoTitleFromPlaceholder: false }))).toBe("设置里已关闭自动改名");
+  });
+
+  it("关掉之后占位名笔记不再自动改名；重新打开后同一个内容再触发一次就跟随", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+
+    patchUi({ autoTitleFromPlaceholder: false });
+    try {
+      updateNoteContent("无标题.md", "## 修改提示词\n");
+      await sleep(DELAY * 4);
+      await flushAll();
+      expect(placeholderFileNames()).toEqual(["无标题.md"]);
+      expect(hasPendingAutoRename("无标题.md")).toBe(false);
+
+      patchUi({ autoTitleFromPlaceholder: true });
+      updateNoteContent("无标题.md", "## 修改提示词\n\n正文\n");
+      await waitFor(() => testBackend.files.has("修改提示词.md"));
+    } finally {
+      // 开关是模块级 uiStore，不能漏回默认值去污染同文件里的其他用例。
+      patchUi({ autoTitleFromPlaceholder: true });
+    }
+  });
+});
+
+/* ===== 复核 R5：回收站往返不丢「占位名出身」 ===== */
+
+describe("回收站往返不丢「占位名出身」（R5）", () => {
+  it("createNote → trashNote → restoreNote → 写标题 → 停笔后改名", async () => {
+    const created = createNote({ title: "无标题", content: "" });
+    await flushAll();
+    expect(testBackend.files.has(created.id)).toBe(true);
+
+    await trashNote(created.id);
+    // 真实桌面端在回收站里必然至少重扫一次（文件监听 500ms）—— 显式走一遍，
+    // 因为「重扫会不会把出身标记丢掉」正是这条缺陷的关键。
+    await rescanWorkspace();
+    const trashed = Object.keys(getLibrary().trash)[0];
+    expect(trashed).toContain(".opennote/trash/");
+
+    await restoreNote(trashed);
+    await rescanWorkspace();
+    expect(Object.keys(getLibrary().notes)).toContain(created.id);
+
+    // 重扫把 `createdAt` 换成磁盘 mtime（MemoryBackend 恒为 1）⇒ 绕开「新建 10 秒静默期」，
+    // 本用例咬的是「回收站往返之后还能不能自动改名」。
+    updateNoteContent(created.id, "## 还原之后写的标题\n");
+    await waitFor(() => testBackend.files.has("还原之后写的标题.md"));
+    expect(testBackend.files.has(created.id)).toBe(false);
+  });
+
+  it("已经被自动改名过的笔记：进回收站再还原后仍然跟随正文标题（出身标记不丢）", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+
+    updateNoteContent("无标题.md", "## 修改提示词\n");
+    await waitFor(() => testBackend.files.has("修改提示词.md"));
+    // 名字已经不是占位名了：这时「出身」只存在于内存的那张表里，最容易在搬键时丢掉。
+    expect(getLibrary().notes["修改提示词.md"]?.titleOverride).toBeNull();
+
+    await trashNote("修改提示词.md");
+    await rescanWorkspace();
+    const trashed = Object.keys(getLibrary().trash)[0];
+    await restoreNote(trashed);
+    await rescanWorkspace();
+    expect(Object.keys(getLibrary().notes)).toContain("修改提示词.md");
+
+    // 30 秒节流与显式重命名静默期不是本用例要咬的东西（它们各有自己的用例）。
+    resetAutoRenameHistoryForTests();
+    updateNoteContent("修改提示词.md", "## 修改提示词 2026\n");
+    await waitFor(() => testBackend.files.has("修改提示词 2026.md"));
+  });
+});
+
+/* ===== 复核 R6：导入 / 剪藏的静默期口径 = 「复用新建 10 秒」 ===== */
+
+describe("导入 / 剪藏的静默期：复用「新建 10 秒」（方案 §2.5 口径）", () => {
+  it("刚落盘的笔记（`createdAt` 就是刚刚）在窗口内不动；窗口过去后同一篇会跟随", async () => {
+    // 导入 / 剪藏落盘后的现场：文件名是 fallback（`未命名.md`），正文里已经有标题。
+    const imported = createNote({ title: "未命名", content: "" });
+    await flushAll();
+
+    updateNoteContent(imported.id, "# 导入带来的正文标题\n");
+    await sleep(DELAY * 4);
+    await flushAll();
+    expect(testBackend.files.has("导入带来的正文标题.md")).toBe(false);
+    expect(testBackend.files.has(imported.id)).toBe(true);
+
+    // 时间过去（重扫把 `createdAt` 换成磁盘 mtime）：同一个内容再触发一次就改名。
+    await rescanWorkspace();
+    updateNoteContent(imported.id, "# 导入带来的正文标题\n\n正文\n");
+    await waitFor(() => testBackend.files.has("导入带来的正文标题.md"));
+  });
+
+  it("纯函数：`createdAt` 就是此刻 ⇒ 被「新建笔记静默期（10 秒）」拦下；过了 10 秒放行", () => {
+    const now = Date.now();
+    expect(shouldAutoRename(autoRenameCtx({ createdAt: now, now }))).toBe("新建笔记静默期（10 秒）");
+    expect(shouldAutoRename(autoRenameCtx({ createdAt: now - 10_000, now }))).toBe("新建笔记静默期（10 秒）");
+    expect(shouldAutoRename(autoRenameCtx({ createdAt: now - 10_001, now }))).toBeNull();
+  });
+});
+
+/* ===== 复核 R10：目标路径上残留 titlePinnedAt 的防御分支 ===== */
+
+describe("防御分支：目标路径上残留的 titlePinnedAt 会被清掉（R10）", () => {
+  it("手工塞一个 pin 在目标路径上 → 自动改名之后 meta.titlePinnedAt 被清掉", async () => {
+    testBackend.seed("无标题.md", "## 修改提示词\n");
+    // 造一个「pin 存在、但没有 override」的坏状态（手改过 state.json 的现场）——
+    // 正常路径到不了这里，所以只能这样把那条防御分支逼出来。
+    await closeWorkspace();
+    testBackend.seed(
+      ".opennote/state.json",
+      `${JSON.stringify(
+        {
+          version: 1,
+          starred: [],
+          expanded: [],
+          lastOpened: null,
+          titlePinnedAt: { "修改提示词.md": Date.now() - 5 * 60_000 },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await openWorkspace(record, { silent: true });
+    setAutoRenameDelayForTests(DELAY);
+
+    updateNoteContent("无标题.md", "## 修改提示词\n\n正文\n");
+    await waitFor(() => testBackend.files.has("修改提示词.md"));
+
+    await flushMeta();
+    const state = JSON.parse(testBackend.files.get(".opennote/state.json") as string) as Record<string, unknown>;
+    // 残留的 pin 被清掉：否则它会把这篇笔记之后的自动改名按 30 秒静默期一直拦住。
+    expect(state.titlePinnedAt).toBeUndefined();
+    // 自动改名仍然不写 override（这是 t7 的阻断级约束，这里顺手再咬一次）。
+    expect(state.titleOverrides).toBeUndefined();
+  });
+});
+
+/* ===== 复核 R7：编辑器宿主的 IME composition 接线（DOM 层） ===== */
+
+/**
+ * 为什么这条 DOM 层用例放在这个文件里：本轮 in-scope 的文件清单里没有给
+ * `src/components/EditorPane.test.ts` 留位置（只有 `EditorPane.tsx` 本身），
+ * 所以它寄居在库侧测试文件里，用一个只属于它的 describe 段隔开。
+ * 用的是 Node 自带的 `EventTarget` / `Event`，不引第三方 DOM 实现。
+ */
+describe("编辑器宿主的 IME composition 接线（DOM 层，R7）", () => {
+  it("compositionstart / compositionend → onComposing(true/false)，只在变化时上报，退订补报 false", () => {
+    const host = new EventTarget();
+    const seen: boolean[] = [];
+    const detach = attachCompositionReporter(host, (composing) => seen.push(composing));
+
+    host.dispatchEvent(new Event("compositionstart"));
+    host.dispatchEvent(new Event("compositionstart")); // 重复的开始事件不该重复上报
+    host.dispatchEvent(new Event("compositionend"));
+    host.dispatchEvent(new Event("compositionend"));
+    expect(seen).toEqual([true, false]);
+
+    // 合成中卸载（换笔记 / 编辑器销毁）：必须补报一次 false，
+    // 否则那篇笔记会被一条永远为真的合成状态卡住自动改名。
+    host.dispatchEvent(new Event("compositionstart"));
+    detach();
+    expect(seen).toEqual([true, false, true, false]);
+
+    // 退订之后事件不再上报。
+    host.dispatchEvent(new Event("compositionend"));
+    expect(seen).toEqual([true, false, true, false]);
+  });
+
+  it("合成状态真的会传到数据层：`setEditorComposing(true)` 期间不改名（端到端咬一口）", async () => {
+    testBackend.seed("无标题.md", "");
+    await rescanWorkspace();
+
+    const host = new EventTarget();
+    const detach = attachCompositionReporter(host, (composing) => setEditorComposing("无标题.md", composing));
+    host.dispatchEvent(new Event("compositionstart"));
+    updateNoteContent("无标题.md", "## 修改提示词\n");
+    await sleep(DELAY * 4);
+    await flushAll();
+    expect(placeholderFileNames()).toEqual(["无标题.md"]);
+
+    host.dispatchEvent(new Event("compositionend"));
+    detach();
+    updateNoteContent("无标题.md", "## 修改提示词\n\n正文\n");
+    await waitFor(() => testBackend.files.has("修改提示词.md"));
   });
 });

@@ -180,6 +180,18 @@ export interface UiSettings {
    * 删掉的笔记残留 id 无副作用（找不到就当没锁）。
    */
   lockedNotes: Id[];
+  /**
+   * 占位名笔记的「停笔 5 秒自动改名」总开关（**默认开**）。
+   *
+   * 只影响文件名是占位名（`无标题` / `未命名` / `untitled` 及带序号变体）的笔记：
+   * 关掉之后它们一律不动，其余笔记本来就不在候选集里。关掉不会撤销已经改过的名字。
+   *
+   * 兜底：`data/ui.ts` 的 `load()` 是 `{ ...DEFAULT_UI, ...parsed }`，所以**旧
+   * localStorage 缺这个键时天然落到 `true`**（老用户升级后行为与默认一致）。手改过
+   * localStorage 塞进非布尔值时，读取侧（`shouldAutoRename`）按 `!== false` 兜底成「开」——
+   * 与「默认开」一致，失败方向是「功能可用」而不是「静默失效」。
+   */
+  autoTitleFromPlaceholder: boolean;
 }
 
 /** R1「导入方式」：外部导入的默认落法。`overwrite` 不在其中，这是有意的。 */
@@ -241,4 +253,6 @@ export const DEFAULT_UI: UiSettings = {
   bridgeLog: true,
   searchFolders: true,
   lockedNotes: [],
+  // 用户明确要过这个开关：默认开，但必须能关（方案 §8.1 U1）。
+  autoTitleFromPlaceholder: true,
 };

@@ -7,16 +7,31 @@
 
 import {
   assertSafeRelative,
-  extName,
   joinPath,
   normalizePath,
   parentPath,
+  sameBytes,
   sanitizeName,
 } from "../../fs/paths";
 import type { FileSystemBackend } from "../../fs/types";
+/*
+ * 附件落点与引用文本的**纯路径运算**搬到了 `src/data/assetPaths.ts`（唯一产地不变）：
+ * 旧附件迁移器（`src/data/migrateAssets.ts`，命令行也要跑）必须用同一套规则，而它不能
+ * import 本模块 —— 本模块还 import 着 `../data/library`（React / idb / localStorage）。
+ * 这里 re-export，所以 `from "../lib/clip/landing"` 的既有导入路径一个字都不用改。
+ */
+import {
+  assetFinalName,
+  assetsDirFor,
+  dedupeAssetName,
+  markdownRef,
+  relativeAssetRef,
+  SHARED_ASSETS_DIR,
+} from "../../data/assetPaths";
 import { resolveAvailablePath } from "../../data/library";
 import { ImportRejection, importProblem, normalizeFolder } from "./envelope";
-import { contentUuid } from "./hash";
+
+export { assetFinalName, assetsDirFor, markdownRef, relativeAssetRef, SHARED_ASSETS_DIR };
 
 /**
  * 请求路径 = `joinPath(folder, sanitizeName(title, "未命名") + ".md")`（契约 §3.1）。
@@ -69,46 +84,11 @@ export async function allocateNotePath(
   return candidate;
 }
 
-/**
- * 附件目录：**整个笔记本共用一个**，在工作区根下、以点开头。
- *
- * 0.4.0 用户裁定（原话「很多笔记都是用 git 管理的，这样每次都会多一个文件夹」）：
- * 旧规则是按笔记名派生 `<笔记名>.assets/` —— 每剪一篇带图的文章就在 git 里多一个目录，
- * 而且目录名跟着（可能很长的）笔记标题走。现在统一落在工作区根的 `.assets/`：
- *   - git 里**只有一个**附件目录；
- *   - 点开头 ⇒ `isHiddenPath()` 已经把它挡在左栏目录树与剪藏落点候选之外，无需额外排除。
- *
- * 代价（用户已知晓并接受）：图片不再跟着笔记搬。移动/回收站/恢复改走
- * `rebaseNoteAssetRefs()` 重写正文引用（见 `src/data/library.ts`），图本身留在原地。
- *
- * 为什么不是公共 `assets/`（老的 `ASSETS_DIR`）：那个常量还被收件箱条目的 `entry/assets/`
- * 用着（`src/data/inbox.ts`），动它会波及无关功能；这里是独立的新目录。
+/*
+ * 附件目录常量与「相对引用 / 角括号引用 / 最终名」的纯运算都在 `../../data/assetPaths.ts`：
+ * 剪藏落盘、编辑器粘贴、旧附件迁移器三条路必须用同一套规则，而迁移器（命令行也要跑）
+ * 不能 import 本模块（本模块还 import 着 `../data/library`）。上面的 re-export 让既有导入路径不变。
  */
-export const SHARED_ASSETS_DIR = ".assets";
-
-/** 附件目录（唯一产地）。不带参数：落点与笔记路径无关了。 */
-export function assetsDirFor(): string {
-  return SHARED_ASSETS_DIR;
-}
-
-/**
- * 取正文里那条**相对引用**：从笔记所在目录走到附件路径。
- *
- * `操作系统/产品/a.md` + `.assets/x.png` → `../../.assets/x.png`
- * `a.md` + `.assets/x.png`              → `.assets/x.png`
- *
- * 不能借道 `normalizePath`：它把 `..` 当冗余段**吃掉**（`../.assets/x.png` → `.assets/x.png`），
- * 前缀必须在这里按目录层数现算。写入时算、读取时由 `resolveWorkspacePath()` 反向吃掉 `..`。
- */
-export function relativeAssetRef(notePath: string, assetPath: string): string {
-  const fromDir = parentPath(notePath);
-  const from = fromDir ? fromDir.split("/") : [];
-  const target = normalizePath(assetPath).split("/");
-  const file = target.pop() ?? "";
-  let common = 0;
-  while (common < from.length && common < target.length && from[common] === target[common]) common += 1;
-  return [...Array(from.length - common).fill(".."), ...target.slice(common), file].filter(Boolean).join("/");
-}
 
 /**
  * {@link relativeAssetRef} 的逆运算：一条引用 + 笔记路径 → 它指向的**工作区路径**。
@@ -171,37 +151,14 @@ export function rebaseSharedAssetRefs(content: string, toNotePath: string): stri
 }
 
 /**
- * 附件最终名：`<uuid>.<ext>`（0.4.0 用户裁定：**默认就用 uuid 命名**）。
- *
- * 名字里的 uuid 由**内容**派生（`contentUuid`，同一份字节同一个名字）：
- * 重试幂等、重复剪藏命中同一路径、不产生 `x-2.png` 垃圾 —— 这些性质一条不少。
- * 保留原名的**扩展名**（`.png` / `.jpg`…）：系统与编辑器靠它认文件类型，不能丢。
- *
- * 旧规则是 `contentHash8(bytes) + "-" + sanitizeName(name)`：名叫「原始名」的那一段
- * 直接来自图片 URL 末段，而有些站点把整条 URL 编成十六进制塞进路径，
- * 文件名于是长成 `63e80eb9-68747470733a2f2f7169616e77656e…`（用户实测截图）。
- * 顺带把「名字本身当路径逃逸入口」这条路彻底堵死：落盘名里只剩 uuid 与扩展名。
+ * 附件最终名与去重名都在 `../../data/assetPaths.ts`（{@link assetFinalName} /
+ * {@link dedupeAssetName}）：编辑器粘贴（`saveImage`）与旧附件迁移器都要用同一份实现。
  */
-export async function assetFinalName(bytes: Uint8Array, name: string): Promise<string> {
-  const sanitized = sanitizeName(name, "attachment");
-  const ext = extName(sanitized);
-  // 扩展名只认「点 + 1~6 位字母数字」：`evil.png/../x` 这种被 sanitize 成带空格的名字，
-  // 取不到合法扩展名时就不带扩展名，绝不把名字里的怪字符带回路径。
-  const safeExt = /^\.[A-Za-z0-9]{1,6}$/.test(ext) ? ext.toLowerCase() : "";
-  return `${await contentUuid(bytes)}${safeExt}`;
-}
 
 export interface AssetTarget {
   path: string;
   /** `true` = 命中了**内容相同**的已存在路径（重试幂等，不重复写、不覆盖）。 */
   reused: boolean;
-}
-
-/** 字节相同判定（重试幂等靠它，而不是靠「路径存在」）。 */
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) return false;
-  for (let i = 0; i < a.byteLength; i += 1) if (a[i] !== b[i]) return false;
-  return true;
 }
 
 /**
@@ -213,8 +170,11 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
  * 但「路径已存在」**不等于**「内容就是我们的」：用户完全可能在附件目录里手放一个
  * 同名文件（或极端哈希碰撞）。所以：
  * 1. 路径存在 + 字节相同 → 复用（不写、不覆盖）✅
- * 2. 路径存在 + 字节不同 → **可读化去重**（`x 2.png`、`x 3.png`…），**绝不静默覆盖** ✅
+ * 2. 路径存在 + 字节不同 → **可读化去重**（`x-2.png`、`x-3.png`…），**绝不静默覆盖** ✅
  * 3. 落点必须过 `assertSafeRelative()` **且父目录就是附件目录**：资产名不是路径逃逸入口（D-④）✅
+ *
+ * 「字节相同」的判据是 `sameBytes()`（`src/fs/paths.ts`，唯一产地）：编辑器粘贴路径
+ * （`saveImage`）用的是同一个函数，两条路径的复用语义不许漂移。
  */
 export async function allocateAssetPath(
   backend: FileSystemBackend,
@@ -245,18 +205,12 @@ export async function allocateAssetPath(
   // 可读化去重：`a1b2-diagram.png` → `a1b2-diagram-2.png`（用 `-2` 而不是 ` 2`：
   // 这个名字会出现在正文的 Markdown 引用里，空格会截断链接目标）。
   for (let index = 2; index <= 52; index += 1) {
-    const next = assetDedupeName(candidate, index);
+    const next = dedupeAssetName(candidate, index);
     if (taken.has(next) || (await backend.exists(next))) continue;
     taken.add(next);
     return { path: next, reused: false };
   }
   throw new ImportRejection(importProblem("IMP-4010", { requested: candidate }));
-}
-
-/** `foo/assets/a1b2-x.png` + 3 → `foo/assets/a1b2-x-3.png`（扩展名之前插序号）。 */
-function assetDedupeName(candidate: string, index: number): string {
-  const ext = extName(candidate);
-  return ext ? `${candidate.slice(0, candidate.length - ext.length)}-${index}${ext}` : `${candidate}-${index}`;
 }
 
 /** 词法护栏：附件落点的**整条**路径必须是安全的工作区相对路径。 */
@@ -275,24 +229,12 @@ function safeAssetPath(path: string, name: string): string {
   }
 }
 
-/**
- * Markdown 链接/图片目标的**唯一产地**（`](…)` 里那个字符串）。
- *
- * 为什么需要它：附件目录是**按笔记名派生**的，而笔记名可以带空格（`备注 2.md` → `备注 2.assets/`，
- * 而且 `uniquePath` 给每一篇重名笔记加序号也会产生空格）。**空格会截断链接目标**：
- *   - `![x](./备注 2.assets/a.png)` ⇒ markdown-it 不产 `<img>`（原样输出文本）、lezer 不产 URL 子节点
- *     ⇒ 编辑器里图片不显示，而且**不报错**；
- *   - `![x](<./备注 2.assets/a.png>)` ⇒ 两边都正常。
- *
- * CommonMark 的**角度括号目标**是唯一既能表达空格、又被 markdown-it / lezer / Typora / VS Code
- * 共同支持的写法（百分号编码要靠各渲染器愿意解码，不可靠）。
- * 注意：这里说的是**引用文本**的写法；落盘目录名**不改**（00 号 §6.16（51）逐字是 `<笔记名>.assets/`）。
- * 把两个产地（`saveImage` 的 markdown、剪藏的 `rewriteAssetRefs`）都接到这一个函数上，
- * 免得一处转义、另一处不转义。
+/*
+ * `markdownRef`（`](…)` 里那个字符串的唯一产地）也搬去了 `../../data/assetPaths.ts`：
+ * 空格会**截断链接目标**（`![x](./备注 2.assets/a.png)` 在 markdown-it 里不产 `<img>`，
+ * 而且不报错），所以附件路径带空格时一律写成 CommonMark 的角括号目标 `<…>`。
+ * 编辑器粘贴与剪藏落盘共用这一个函数，免得一处转义、另一处不转义。
  */
-export function markdownRef(path: string): string {
-  return /[\s()<>]/.test(path) ? `<${path}>` : path;
-}
 
 export interface AssetRename {
   /** 信封里的原始 `name`（正文引用的就是它）。 */

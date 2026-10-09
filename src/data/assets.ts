@@ -1,8 +1,13 @@
 import { createStore } from "../lib/store";
-import { normalizePath } from "../fs";
+// 引用解析的**唯一产地**在 `../fs/workspaceRef`（迁移器与命令行也要用同一套语义，
+// 而它们不能把 `library` / `ui` / `legacy` 那一串前端运行时拉起来）。这里 re-export，
+// 保持既有导入路径（`from "../data/assets"`）一个字都不用改。
+import { resolveWorkspacePath } from "../fs/workspaceRef";
 import { currentBackend, libraryStore } from "./library";
 import { getUi, uiStore } from "./ui";
 import { getLegacyAsset } from "./legacy";
+
+export { resolveWorkspacePath };
 
 /**
  * Images live in a directory derived from the note's own path
@@ -45,26 +50,6 @@ export function collectImagePaths(markdown: string): string[] {
     out.add(src);
   }
   return [...out];
-}
-
-export function resolveWorkspacePath(src: string, baseDir: string): string | null {
-  const value = src.trim().replace(/^<|>$/g, "").split(/[?#]/)[0];
-  if (!value) return null;
-  if (value.startsWith("asset://")) return null;
-  if (value.startsWith("/")) {
-    const absolute = normalizePath(value);
-    return absolute || null;
-  }
-  /*
-   * **先拼接、再归一**（0.4.0 修）：`..` 必须在**目录语义**下被吃掉。
-   *
-   * 旧写法是 `joinPath(baseDir, normalizePath(value))` —— 而 `normalizePath` 把 `..` 当
-   * 冗余段直接丢弃，于是 `操作系统/产品/a.md` 里的 `../../.assets/x.png` 会先被压成
-   * `.assets/x.png`，再拼成 `操作系统/产品/.assets/x.png`：**指到一个不存在的地方**。
-   * 共享附件目录（工作区根的 `.assets/`）全靠这条语义，图才不会「编辑器里是裂图」。
-   */
-  const joined = normalizePath(`${baseDir}/${value}`);
-  return joined || null;
 }
 
 export async function ensureImageUrl(path: string, candidates: string[] = []): Promise<string | null> {

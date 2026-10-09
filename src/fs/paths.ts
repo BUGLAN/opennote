@@ -74,6 +74,27 @@ export function isHiddenPath(path: string): boolean {
     .some((segment) => segment.startsWith("."));
 }
 
+/**
+ * 两份字节**完全相同**吗（长度 + 逐字节）。
+ *
+ * 「这个路径已经存在」不等于「里面的内容就是我们的」：附件目录里可能有用户手放的
+ * 同名文件，也可能发生（极端的）哈希碰撞。凡是要拿内容当判据的地方都走这一条：
+ *   - 剪藏落点 `allocateAssetPath`（`src/lib/clip/landing.ts`）；
+ *   - 编辑器粘贴 `saveImage`（`src/data/library.ts`）—— 两条路径的语义必须一致；
+ *   - 旧附件迁移的「复制后逐字节校验」与「已存在同名文件是否可复用」
+ *     （`src/data/migrateAssets.ts`）。
+ *
+ * 放在 `paths.ts` 是因为三个调用方都要用它，而它只是「两份字节」的比较、没有别的前提；
+ * 常量时间比较（哈希）会引入「哈希碰撞即误判」的新风险，逐字节比不会。
+ */
+export function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let index = 0; index < a.byteLength; index += 1) {
+    if (a[index] !== b[index]) return false;
+  }
+  return true;
+}
+
 /** Metadata directory that travels with a workspace. */
 export const META_DIR = ".opennote";
 export const ASSETS_DIR = "assets";

@@ -11,6 +11,7 @@ import {
   isMarkdownPath,
   joinPath,
   parentPath,
+  sameBytes,
   sanitizeName,
   stripExtension,
   uniquePath,
@@ -18,7 +19,17 @@ import {
   type FileSystemBackend,
 } from "../fs";
 import { createStore, useStore } from "../lib/store";
-import { countText, deriveTags, deriveTitle, normalizeEol, splitFrontMatter, stripMarkdown, uid } from "../lib/utils";
+import {
+  countText,
+  derivePlaceholderTitle,
+  deriveTags,
+  deriveTitle,
+  isPlaceholderName,
+  normalizeEol,
+  splitFrontMatter,
+  stripMarkdown,
+  uid,
+} from "../lib/utils";
 // 附件目录的**唯一产地**（`<目录>/<笔记名>.assets/`）。这里只 import，绝不自己再写一遍
 // 派生规则 —— 剪藏接收端（`src/lib/clip/receive.ts`）用的是同一个函数，两个产地会漂移。
 // 同理，引用文本的写法（带空格时要写成 `<…>`）也只从 `markdownRef` 来。
@@ -99,6 +110,21 @@ interface WorkspaceMeta {
    * 键跟着笔记走（重命名 / 移动 / 进回收站 / 恢复）。
    */
   titleOverrides?: Record<Id, string>;
+  /**
+   * 「这个名字是用户手定的」的**来源标记与时间戳**，按笔记路径存，与 `titleOverrides`
+   * 一一对应。并行映射而不是把 `titleOverrides` 的值升级成对象 —— 后者是 `state.json`
+   * 的破坏性格式变更（旧版本读不了新文件），这里只加一个键。
+   *
+   * 用途：① 排查「这个名字是谁写的」（用户手定的 vs 正文派生的）；
+   *       ② 将来做「撤销自动改名」时判断来源。
+   * 语义边界：**存在** = 用户手定过这个名字，不代表当前文件名的来源 ——
+   * 自动改名（`autoRenameFromPlaceholder`）**不写、不删**这张表，所以它永远不会
+   * 因为一次自动改名而被写上。
+   *
+   * 旧的 `state.json` 没有这个键 → `undefined` → 所有既有笔记视为「早已过静默期」，
+   * 行为与不引入该字段时一致。
+   */
+  titlePinnedAt?: Record<Id, number>;
 }
 
 const defaultMeta: WorkspaceMeta = { version: 1, starred: [], expanded: [], lastOpened: null };
@@ -109,6 +135,16 @@ function readTitleOverrides(value: unknown): Record<Id, string> | null {
   const out: Record<Id, string> = {};
   for (const [path, title] of Object.entries(value as Record<string, unknown>)) {
     if (path && typeof title === "string" && title) out[path] = title;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** `state.json` 里的 `titlePinnedAt`：只留「非空路径 → 有限正数」，别的一律丢掉（照 `readTitleOverrides`）。 */
+function readTitlePinnedAt(value: unknown): Record<Id, number> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const out: Record<Id, number> = {};
+  for (const [path, at] of Object.entries(value as Record<string, unknown>)) {
+    if (path && typeof at === "number" && Number.isFinite(at) && at > 0) out[path] = at;
   }
   return Object.keys(out).length ? out : null;
 }
@@ -137,6 +173,112 @@ const SNAPSHOT_KEEP = 60;
 const SNAPSHOT_NAME_MEMORY = 200;
 /** Backend calls a workspace scan keeps in flight — the walk used to be one IPC call at a time (D25). */
 const SCAN_CONCURRENCY = 12;
+
+/* ------------------------------------------------- 占位名笔记的自动改名（停笔 5 秒）
+
+   背景（用户实测 0.5.0）：「重命名完成后，文件名又会恢复，或者直接就不修改」的镜像问题 ——
+   用户在 `无标题.md` 里写了个标题，**磁盘文件名一格不动**。全仓 14 个 `target.move(`
+   调用点里没有一处的输入是正文标题，这条通道从来没有存在过。
+
+   三条硬约束（调研报告 t2 的阻断级发现，实现里逐条落地）：
+     1. **绝不复用 `renameNote()`** —— 它写 `titleOverride`，而 `refresh()` 是
+        `titleOverride ?? deriveTitle(...)`。复用一次就把该笔记的「正文标题 → 文件名」
+        通道**永久锁死**，用户第二次改标题时文件名不再跟随（现象与修复前完全一样）。
+        所以另开一条 `autoRenameFromPlaceholder()`，不写 override、不写 pinnedAt。
+     2. **必须抑制「用户手改过名字」的笔记** —— `titleOverride` 存在即永久跳过，
+        另外给「刚显式重命名过」加 30 秒静默期（防止用户点了重命名、旧标题立刻顶回去）。
+     3. **光标行判定不能用 React state** —— 此条已随「光标还在标题行」判据一起删除
+        （真机教训 2026-10-09：打完标题光标必然停在标题行，该判据让功能永不触发；
+        「用户还在编辑标题」由 5 秒防抖保证，不需要光标位置）。
+
+   范围**只有占位名**（`无标题` / `未命名` / `untitled` 及带序号变体）：真实笔记本
+   （`E:\repo\notes`）的占位名笔记只有个位数，其余几百篇一律不动 —— 入口条件唯一，
+   爆炸半径因此为 0。
+
+   ⚠️ **不要在注释里写死「N 篇」**：真实笔记本每天都在变（本方案定稿时 5 篇占位名，
+   到复核时已经是 7 篇）。**当前读数与逐篇判定统一记在
+   `docs/标题命名规则-改动方案.md` §3**（附只读盘点脚本与日期），要引用数字就引用那里。
+   代码里只表达机制：「只有占位名出身的笔记进候选集」。 */
+
+/** 停笔多久才落盘（方案 §2.4：窗口内再敲字 = 取消 + 重排，不是排队）。 */
+const AUTO_RENAME_DELAY = 5000;
+/** 同一篇笔记两次自动改名之间的最小间隔（文件监听 500ms 抖动 + 重扫会反复触发）。 */
+const AUTO_RENAME_MIN_INTERVAL = 30_000;
+/** 用户显式重命名之后的静默期。 */
+const EXPLICIT_RENAME_QUIET_MS = 30_000;
+/**
+ * 新建笔记的静默期：刚 `createNote()` 的笔记正文还空着，别急着改名。
+ *
+ * **导入 / 剪藏走的是同一条**（口径已按实际实现统一，见方案 §2.5 的口径说明）：
+ * 方案 #6 原本要一张独立的 `importQuietUntil: Map<Id, number>`（60 秒），实际没有实现它，
+ * 而是复用本条件 —— `import.ts` 与 `clip/receive.ts` 落盘后都会 `rescanWorkspace()`，
+ * 而 `makeNote()` 的 `createdAt` 取的就是**刚写下去的文件 mtime**，所以「刚导入的笔记」
+ * 天然落在本窗口内。差 60s → 10s 的代价是：导入后第 10~60 秒之间若用户编辑正文，
+ * 文件会被改名（导入时带来的文件名会被正文标题顶掉）。判据 N9 覆盖本窗口内的行为。
+ * 补 `importQuietUntil` 需要动 `src/lib/import.ts` / `src/lib/clip/`（本轮 in-scope 之外）。
+ */
+const NEW_NOTE_QUIET_MS = 10_000;
+
+/**
+ * 瞬态拦截的重试参数。**真机教训 2026-10-09**：排定时器时的预检曾经把「光标在标题行 /
+ * 输入法合成中 / 新建静默期」这类**瞬态**拦截当成终态，定时器整个不排 —— 而打字的整个
+ * 过程里这些条件必然成立，停笔后没有任何新触发点，功能在它的主场景里（新建 → 打标题 →
+ * 停笔等 5 秒）**一次都不会触发**。现在：瞬态失败照排定时器，到点再判；仍不满足就按
+ * `AUTO_RENAME_RETRY_MS` 短重试（至多 `AUTO_RENAME_MAX_RETRIES` 次 ≈ 90 秒）；只有
+ * **稳定**失败（非占位 / 有 override / 无真标题 / 旧附件引用 / 只读锁…）才直接放弃。
+ */
+const AUTO_RENAME_RETRY_MS = 2_000;
+const AUTO_RENAME_MAX_RETRIES = 45;
+
+/** 测试缝：停笔窗口（真实计时器下 5 秒太慢，测试改成 20ms 之类）。 */
+let autoRenameDelay = AUTO_RENAME_DELAY;
+/** 待执行的自动改名定时器，按笔记 id 一张表 —— 与 `writeTimers` / `scheduleMeta` 互不取消。 */
+const autoRenameTimers = new Map<Id, ReturnType<typeof setTimeout>>();
+/** 正在改名途中的笔记：期间再敲字只重排，绝不并发第二个 `move`。 */
+const autoRenameInFlight = new Set<Id>();
+/**
+ * 瞬态拦截原因（`shouldAutoRename` 的返回值）：到点仍不满足就短重试，而不是放弃。
+ * 判据清单与 `shouldAutoRename` 逐条对齐；时间窗类条件到期自然放行，所以重试必然收敛。
+ */
+const AUTO_RENAME_TRANSIENT_REASONS = new Set<string>([
+  "新建笔记静默期（10 秒）",
+  "刚显式重命名过（30 秒静默期）",
+  "新建 preflight 还没落定",
+  "输入法合成中",
+  "距上次自动改名不足 30 秒",
+  "正在改名途中",
+]);
+/** 每篇笔记已重试的次数（内容一变就清零；防两个笔记互踩无上限空转）。 */
+const autoRenameRetries = new Map<Id, number>();
+/** 用户显式重命名的时间戳（30 秒静默期）。 */
+const explicitRenamedAt = new Map<Id, number>();
+/** 同一篇笔记上一次自动改名的时间戳（30 秒最小间隔）。 */
+const lastAutoRenameAt = new Map<Id, number>();
+/** 界面下推的输入法合成状态：中文输入法合成期间用户可能停顿数秒，不许在这期间搬文件。 */
+const editorComposing = new Map<Id, boolean>();
+/**
+ * **占位名出身的笔记**（当前文件名是占位名，或者曾经是 —— 被自动改名之后就不再是了）。
+ *
+ * 为什么需要它：入口条件不能只看「当前文件名是不是占位名」。第一次自动改名之后文件名
+ * 就变成正文标题了，若按当前名字判定，用户**第二次**改标题时文件名不会再跟随 ——
+ * 那正是本次要修的原始缺陷，等于没修。所以记住「这篇笔记是占位名出身的」：
+ *   ① 扫描时：文件名匹配占位名的笔记入集；
+ *   ② `createNote()`：新建笔记（`无标题.md` / `无标题 2.md`）入集；
+ *   ③ 自动改名：**留在集里**（键跟着新路径走），所以下一次改标题还会跟随；
+ *   ④ 用户显式重命名：出集（用户手定的名字之后不再自动跟随，见 `renameNote`）。
+ */
+const placeholderOrigin = new Set<Id>();
+
+/** 一次自动改名的结果，供测试与排查用（只增不改，测试读它当证据）。 */
+export interface AutoRenameOutcome {
+  at: number;
+  from: Id;
+  to: Id | null;
+  status: "renamed" | "skipped";
+  /** `renamed` 时是落盘名；`skipped` 时是**被哪一条拦下的**（不用猜）。 */
+  reason: string;
+}
+const autoRenameOutcomes: AutoRenameOutcome[] = [];
 
 /** Bumped by every open/close: a slow scan must never publish into a newer workspace (D02). */
 let generation = 0;
@@ -195,6 +337,8 @@ function makeNote(path: string, content: string, mtimeMs: number, options: { sta
   const text = normalizeEol(content);
   const counts = countText(text);
   const stamp = mtimeMs || Date.now();
+  // 占位名出身：扫描到的第一篇 `无标题.md` 就靠这一行进候选集（自动改名的入口条件）。
+  if (!options.trashed && isPlaceholderName(stripExtension(baseName(path)))) placeholderOrigin.add(path);
   return {
     id: path,
     folderId: parentPath(path) || null,
@@ -300,6 +444,7 @@ async function readMeta(target: FileSystemBackend): Promise<WorkspaceMeta> {
     const parsed = JSON.parse(raw) as Partial<WorkspaceMeta>;
     const sidebarTab = parsed.ui?.sidebarTab;
     const titleOverrides = readTitleOverrides(parsed.titleOverrides);
+    const titlePinnedAt = readTitlePinnedAt(parsed.titlePinnedAt);
     return {
       version: 1,
       starred: Array.isArray(parsed.starred) ? parsed.starred.map(String) : [],
@@ -307,6 +452,7 @@ async function readMeta(target: FileSystemBackend): Promise<WorkspaceMeta> {
       lastOpened: parsed.lastOpened ? String(parsed.lastOpened) : null,
       ...(isSidebarTab(sidebarTab) ? { ui: { sidebarTab } } : {}),
       ...(titleOverrides ? { titleOverrides } : {}),
+      ...(titlePinnedAt ? { titlePinnedAt } : {}),
     };
   } catch (error) {
     const backup = await backupCorruptState(target, raw);
@@ -603,6 +749,16 @@ function resetWorkspaceTransients(): void {
   createGuards.clear();
   for (const timer of writeTimers.values()) clearTimeout(timer);
   writeTimers.clear();
+  // 自动改名与写盘同层：离开笔记本时未到点的定时器一律取消（否则它会在下一个笔记本上开火）。
+  for (const timer of autoRenameTimers.values()) clearTimeout(timer);
+  autoRenameTimers.clear();
+  autoRenameInFlight.clear();
+  autoRenameRetries.clear();
+  explicitRenamedAt.clear();
+  lastAutoRenameAt.clear();
+  editorComposing.clear();
+  placeholderOrigin.clear();
+  autoRenameDelay = AUTO_RENAME_DELAY;
 }
 
 /** Make sure the workspace has the folders the notebook expects. */
@@ -745,6 +901,9 @@ export async function rescanWorkspace(): Promise<void> {
   // writes it, but a scan that raced with a slow write can still read the older
   // bytes, so these ids are compared against the scan before publishing (D01/D08).
   const dirtyBefore = new Set(Object.keys(libraryStore.get().dirty));
+  // 重扫会重建整个 `notes`，但「占位名出身」不是能从磁盘读出来的事实（自动改名之后的
+  // 文件名已经是正文标题了）—— 所以这一份必须原样保住，否则重扫一次第二次改名就没了。
+  const originBefore = new Set(placeholderOrigin);
   await flushAll();
   if (myGen !== generation || target !== backend) return;
   const scanned = await scanWorkspace(target);
@@ -795,6 +954,9 @@ export async function rescanWorkspace(): Promise<void> {
   // A kept note whose write already finished has no timer left: arm one so the
   // "unsaved" marker clears by itself instead of staying forever.
   for (const id of keptDirty) if (!writeTimers.has(id)) persistNoteSoon(id, 300);
+  // 扫描会把当前名字仍是占位名的笔记补进集里（新出现的 `无标题.md`）；这一句保住
+  // 「已经被自动改名过、名字不再是占位名」的那些（见上面 `originBefore` 的注释）。
+  for (const id of originBefore) if (libraryStore.get().notes[id] || libraryStore.get().trash[id]) placeholderOrigin.add(id);
   reconcileTabs();
   flushMetaWarning();
 }
@@ -990,6 +1152,7 @@ export function createNote(options: { folderId?: Id | null; content?: string; ti
   const taken = new Set(Object.keys(libraryStore.get().notes));
   const path = target ? uniquePath(joinPath(folderId ?? "", fileName), taken) : fileName;
   const content = options.content ?? "";
+  // `makeNote` 会把名字匹配占位名的笔记记进「占位名出身」（新建笔记走的就是这条）。
   const note = makeNote(path, content, Date.now());
   patchNotes((notes) => ({ ...notes, [note.id]: note }));
   markDirty(note.id);
@@ -1034,6 +1197,389 @@ function replaceExpandedId(oldId: Id, newId: Id): void {
   patchUi({ expanded: [...new Set(ui.expanded.map((id) => (id === oldId ? newId : id)))] });
 }
 
+/* --------------------------------------- 占位名笔记的自动改名：判定、调度、执行体 */
+
+/** 判定自动改名要看的**全部**输入，由 `autoRenameContext()` 现取 —— 纯函数便于逐条写单测。 */
+export interface AutoRenameContext {
+  /** 笔记当前路径（= 磁盘文件名）。 */
+  id: Id;
+  /** `stripExtension(baseName(id))`。 */
+  stem: string;
+  /** 这篇笔记是不是**占位名出身**（当前名字是占位名，或曾经是）。 */
+  placeholderOrigin: boolean;
+  /** 正文（已 `normalizeEol`）。 */
+  content: string;
+  /** `Note.titleOverride`。 */
+  titleOverride: string | null;
+  /** 是否在回收站里。 */
+  trashed: boolean;
+  /** 创建时间（毫秒）。 */
+  createdAt: number;
+  /** 当前时刻。 */
+  now: number;
+  /** 输入法是否正在合成。 */
+  composing: boolean;
+  /** 新建 preflight 还没落定（`createGuards`）。 */
+  creating: boolean;
+  /** 只读锁（`ui.lockedNotes`）。 */
+  locked: boolean;
+  /** 同一篇笔记上一次自动改名的时间戳。 */
+  lastAutoRenameAt: number | null;
+  /** 用户显式重命名的时间戳（本会话）。 */
+  explicitRenamedAt: number | null;
+  /** `state.json` 里持久化的「这个名字是用户手定的」时间戳。 */
+  pinnedAt: number | null;
+  /** 正在改名途中。 */
+  inFlight: boolean;
+  /** 设置里的总开关（`ui.autoTitleFromPlaceholder`，默认开、可关）。 */
+  autoTitleFromPlaceholder: boolean;
+}
+
+/**
+ * 「这篇笔记现在能不能自动改名」—— 收窄后**唯一**的入口判定，纯函数，逐条可测。
+ *
+ * 返回 `null` = 可以改；返回字符串 = 不能改的**原因**（写进 `AutoRenameOutcome`，
+ * 排查时不用猜是哪一条拦的）。
+ */
+export function shouldAutoRename(ctx: AutoRenameContext): string | null {
+  // 条件 -1：设置里的总开关（设置 · 文件 → 「写完标题自动改名」，默认开）。
+  // 关掉之后**所有**占位名笔记一律不动 —— 这是用户能自己收回这个功能的那条路。
+  if (!ctx.autoTitleFromPlaceholder) return "设置里已关闭自动改名";
+  // 条件 0 ★ 本次收窄的核心：只有**占位名出身**的笔记才在候选集里，其余笔记一律不动。
+  // （`placeholderOrigin` 而不是「当前名字是占位名」：第一次自动改名之后名字就变了，
+  //   按当前名字判定会让第二次改标题不再跟随 —— 那正是本次要修的缺陷。）
+  if (!ctx.placeholderOrigin) return "非占位名笔记";
+  // 条件 1：回收站里的名字是「还原后的名字」，自动改会与 `moveTitleOverride` 打架。
+  if (ctx.trashed) return "在回收站里";
+  // 条件 2 ★ 用户显式命名过 ⇒ 永久停用（【实测】A7b：不判就会顶掉用户手改的名字）。
+  if (ctx.titleOverride) return "有 titleOverride（用户显式命名过）";
+  // 条件 3/4：正文里必须有**真正的标题行**（H1–H6），且绝不是「正文首行」兜底。
+  const title = derivePlaceholderTitle(ctx.content);
+  if (!title) return "正文里没有真标题行";
+  // 条件 5/6：净化后与当前文件名逐字相同 = 空操作（只差大小写走 `moveCaseOnly`，不算相同）。
+  const clean = sanitizeName(title, "无标题");
+  if (!clean || clean === "无标题") return "标题全是非法字符";
+  if (`${clean}${extName(ctx.id) || ".md"}` === ctx.id) return "与当前文件名相同（空操作）";
+  // 条件 7：刚新建的笔记正文还空着/还在变，先让它安静下来。
+  if (ctx.now - ctx.createdAt <= NEW_NOTE_QUIET_MS) return "新建笔记静默期（10 秒）";
+  // 条件 8 ★ 用户刚点了「重命名」：别让旧标题立刻把名字顶回去（30 秒静默期）。
+  const renamedAt = Math.max(ctx.explicitRenamedAt ?? 0, ctx.pinnedAt ?? 0);
+  if (renamedAt && ctx.now - renamedAt < EXPLICIT_RENAME_QUIET_MS) return "刚显式重命名过（30 秒静默期）";
+  // 条件 10：`createGuards` 的 gate 不参与 `remapIds`，改名会让写入闸门指错 id。
+  if (ctx.creating) return "新建 preflight 还没落定";
+  // 条件 11：只读笔记不该被应用改文件。
+  if (ctx.locked) return "只读锁";
+  // 条件 12 ★ 旧布局 `<旧文件名>.assets/`：改名不会搬那个目录 ⇒ 图立刻全裂。
+  //   【实测】本机 `项目实战/system_panel/无标题.md` 正是这一态（5 处 `./无标题.assets/…`）。
+  //
+  //   为什么这里**只跳过、不弹提示**（复核 R8 的裁定，见方案 §6.2 的「未做」记录）：
+  //   附件迁移是一次性 CLI，顺序由流程保证（先关 Opennote、先跑迁移、再上线自动改名），
+  //   而条件 12 已经保证「不裂图」这条数据安全底线。界面提示是另一件事，本轮不做。
+  if (hasLegacyAssetRef(ctx.content, ctx.stem)) return "正文里有按旧文件名写死的附件引用";
+  // 条件 13：文件监听 500ms + 重扫会反复触发，同一篇笔记两次改名之间要隔开。
+  if (ctx.lastAutoRenameAt && ctx.now - ctx.lastAutoRenameAt < AUTO_RENAME_MIN_INTERVAL) return "距上次自动改名不足 30 秒";
+  // 条件 14：改名途中不再排第二个（改完由 `remapIds` 按新路径重挂）。
+  if (ctx.inFlight) return "正在改名途中";
+  // 条件（§2.4）：中文输入法合成期间用户可能停顿数秒，不许在这期间搬文件。
+  //   【真机教训 2026-10-09】曾经还有一条「光标还在标题那一行就不改名」——已删除。
+  //   自然流程（新建 → 打标题 → 停笔）里光标**必然**停在标题行，这条判据等于让功能
+  //   在它的主场景里永不触发；「用户还在编辑」由 5 秒防抖保证，不需要光标位置。
+  if (ctx.composing) return "输入法合成中";
+  return null;
+}
+
+/** 正文里有没有按旧文件名写死的附件引用（旧布局 `<旧名>.assets/…`，改名即裂图）。 */
+export function hasLegacyAssetRef(content: string, stem: string): boolean {
+  if (!stem) return false;
+  const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // 允许前面是空白、引号、括号、`./`、`../` 或路径分隔符 —— 真实正文里这几种写法都出现过
+  // （`![image.png](./无标题.assets/image.png)`、`](无标题.assets/x.png)`）。
+  // 前面的边界必须存在，否则 `A无标题.assets/` 也会被算成命中（那不是这篇笔记的附件目录）。
+  return new RegExp(`(^|[\\s("'<]|/|\\.\\./)\\.?${escaped}\\.assets/`).test(content);
+}
+
+/** 从当前状态现取判定输入 —— 定时器回调里**必须**现取，绝不闭包捕获 `Note` 对象。 */
+function autoRenameContext(id: Id, now = Date.now()): AutoRenameContext | null {
+  const state = libraryStore.get();
+  const note = state.notes[id];
+  const trashed = Boolean(state.trash[id]);
+  const subject = note ?? state.trash[id];
+  if (!subject) return null;
+  return {
+    id,
+    stem: stripExtension(baseName(id)),
+    placeholderOrigin: placeholderOrigin.has(id) || isPlaceholderName(stripExtension(baseName(id))),
+    content: subject.content,
+    titleOverride: subject.titleOverride,
+    trashed,
+    createdAt: subject.createdAt,
+    now,
+    composing: editorComposing.get(id) === true,
+    creating: createGuards.has(id),
+    locked: getUi().lockedNotes.includes(id),
+    lastAutoRenameAt: lastAutoRenameAt.get(id) ?? null,
+    explicitRenamedAt: explicitRenamedAt.get(id) ?? null,
+    pinnedAt: meta.titlePinnedAt?.[id] ?? null,
+    inFlight: autoRenameInFlight.has(id),
+    // 兜底成「开」：`data/ui.ts` 的 `load()` 已经用 `{ ...DEFAULT_UI, ...parsed }` 覆盖了
+    // 「旧 localStorage 缺键」，这里再兜一次手改 localStorage 塞进来的非布尔值 ——
+    // 失败方向选「功能可用」，而不是「静默失效」。
+    autoTitleFromPlaceholder: getUi().autoTitleFromPlaceholder !== false,
+  };
+}
+
+/**
+ * 界面下推输入法合成状态（§2.4 的 IME 保护）。
+ *
+ * 合成结束时（`composing=false`）**顺手重排一次**：定时器可能在合成期间到点、被瞬态
+ * 重试兜着，合成一结束就该按正常 5 秒窗口重新计时 —— 否则用户得再敲一个字才触发改名
+ * （真机教训 2026-10-09：合成结束是停笔的自然终点，不能要求用户「再改一次内容」）。
+ */
+export function setEditorComposing(id: Id | null, composing: boolean): void {
+  if (!id) return;
+  if (composing) editorComposing.set(id, true);
+  else {
+    editorComposing.delete(id);
+    scheduleAutoRename(id);
+  }
+}
+
+/** 内容变化时排定时器：**每次变化都重排**（连续打字永远不会触发改名）。 */
+function scheduleAutoRename(id: Id): void {
+  const existing = autoRenameTimers.get(id);
+  if (existing) {
+    clearTimeout(existing);
+    autoRenameTimers.delete(id);
+  }
+  // 内容一变，重试计数就作废：这是全新的一轮观察。
+  autoRenameRetries.delete(id);
+  // 预检只拦**稳定**失败（非占位 / 有 override / 无真标题 / 旧附件引用 / 只读锁 / 总开关关）。
+  // **瞬态**失败（合成中 / 新建静默期 / preflight / 改名途中 / 30 秒窗口）必须照排定时器：
+  // 这些条件在打字过程里必然成立，如果在这里就放弃，停笔后没有任何新触发点，功能永不触发。
+  // 到点时 `autoRenameFromPlaceholder()` 会拿最新状态再判一遍，瞬态未消就短重试。
+  const ctx = autoRenameContext(id);
+  const reason = ctx ? shouldAutoRename(ctx) : "笔记不存在";
+  if (reason !== null && !AUTO_RENAME_TRANSIENT_REASONS.has(reason)) return;
+  armAutoRename(id, autoRenameDelay);
+}
+
+/** 挂一个到点开火的定时器（schedule 与瞬态重试共用同一条开火路径）。 */
+function armAutoRename(id: Id, delay: number): void {
+  autoRenameTimers.set(
+    id,
+    setTimeout(() => {
+      autoRenameTimers.delete(id);
+      void fireAutoRename(id);
+    }, delay),
+  );
+}
+
+/** 定时器到点：改一次名；被瞬态条件拦下就按短窗口重试（有上限），稳定失败才放弃。 */
+async function fireAutoRename(id: Id): Promise<void> {
+  const outcome = await autoRenameFromPlaceholder(id);
+  if (outcome.status !== "skipped" || !outcome.reason || !AUTO_RENAME_TRANSIENT_REASONS.has(outcome.reason)) {
+    autoRenameRetries.delete(id);
+    return;
+  }
+  const tries = (autoRenameRetries.get(id) ?? 0) + 1;
+  if (tries > AUTO_RENAME_MAX_RETRIES) {
+    autoRenameRetries.delete(id);
+    return;
+  }
+  autoRenameRetries.set(id, tries);
+  armAutoRename(id, AUTO_RENAME_RETRY_MS);
+}
+
+/** 取消一篇笔记待执行的自动改名（重命名 / 删除 / 移动 / 离开笔记本时都要清）。 */
+function cancelAutoRename(id: Id): void {
+  const timer = autoRenameTimers.get(id);
+  if (timer) clearTimeout(timer);
+  autoRenameTimers.delete(id);
+}
+
+/**
+ * 改名/移动之后，把这一份自动改名状态搬到新 id 上。
+ *
+ * 关键一条是**定时器按新路径重挂**：`remapIds()` 会改 `ui.tabs` / `ui.activeId`，
+ * 而旧定时器的回调闭包里是旧 id —— 不重挂的话，5 秒后它会去改一个已经不存在（或已被
+ * 别人占用）的路径。这里只搬键 + 重挂，不重新判定条件（到点时会拿最新状态再判一遍）。
+ */
+function moveAutoRenameState(oldId: Id, newId: Id, replace: (id: Id) => Id): void {
+  const timer = autoRenameTimers.get(oldId);
+  const wasInFlight = autoRenameInFlight.has(oldId);
+  if (timer) {
+    clearTimeout(timer);
+    autoRenameTimers.delete(oldId);
+  }
+  // 「占位名出身」的键跟着笔记走：**自动改名之后必须留在集里**，否则用户第二次改标题
+  // 时文件名不再跟随（那正是本次要修的缺陷）。用户显式重命名会在 `renameNote` 里先出集。
+  //
+  // 第二半（`|| isPlaceholderName(newId 的 stem)`）是安全网：只要**新名字本身就是占位名**，
+  // 无条件入集。它与 `autoRenameContext()` 的 `|| isPlaceholderName(...)` 同一条口径，
+  // 保证「名字是占位名 ⇒ 一定在候选集里」这条不变式不会因为某条搬键路径漏掉而破掉。
+  if (placeholderOrigin.has(oldId) || isPlaceholderName(stripExtension(baseName(newId)))) {
+    placeholderOrigin.delete(oldId);
+    placeholderOrigin.add(newId);
+  }
+  remapKeyed(explicitRenamedAt, replace);
+  remapKeyed(lastAutoRenameAt, replace);
+  remapKeyed(editorComposing, replace);
+  if (autoRenameInFlight.has(oldId)) {
+    autoRenameInFlight.delete(oldId);
+    autoRenameInFlight.add(newId);
+  }
+  // 只有「改名期间又被敲字」那一拍才有待执行的定时器需要重挂：那时 `remapIds` 会把
+  // 它从旧 id 搬到新 id，5 秒后按新路径再判一次（内容可能又变了）。
+  //
+  // 注意**不要**无条件重挂：定时器一旦已经开火，`autoRenameFromPlaceholder()` 里
+  // `cancelAutoRename(id)` 早就清过它了，这时再挂一个是多余的一拍 —— 它到点后会撞上
+  // 「距上次自动改名不足 30 秒」而空跑，却把那 30 秒静默期白白续上一轮。
+  if (timer || wasInFlight) {
+    armAutoRename(newId, autoRenameDelay);
+  }
+}
+
+/**
+ * 文件真的没了：把它那一份自动改名状态一起清账
+ * （删文件夹 / 彻底删除 / 清空回收站，与 `dropTitleOverrides` 同款谓词）。
+ */
+function dropAutoRenameState(within: (path: Id) => boolean): void {
+  for (const [id, timer] of [...autoRenameTimers]) {
+    if (!within(id)) continue;
+    clearTimeout(timer);
+    autoRenameTimers.delete(id);
+  }
+  for (const map of [explicitRenamedAt, lastAutoRenameAt, editorComposing]) {
+    for (const id of [...map.keys()]) if (within(id)) map.delete(id);
+  }
+  for (const id of [...autoRenameInFlight]) if (within(id)) autoRenameInFlight.delete(id);
+  for (const id of [...placeholderOrigin]) if (within(id)) placeholderOrigin.delete(id);
+}
+
+/**
+ * 改名动作的**独立路径**（§2.6）。与 `renameNote()` 的唯一差别在第 11 步：
+ * **不写 `titleOverride`、不写 `titlePinnedAt`、不 `flushMeta`**。
+ *
+ * 为什么这条差别是阻断级的：`refresh()` 是 `titleOverride ?? deriveTitle(...)`。
+ * 复用 `renameNote()` 的话，第一次自动改名就把该笔记的「正文标题 → 文件名」通道
+ * 永久锁死 —— 用户第二次改标题时文件名不再跟随，现象与修复前一模一样。
+ */
+export async function autoRenameFromPlaceholder(id: Id): Promise<AutoRenameOutcome> {
+  const target = backend;
+  const note = libraryStore.get().notes[id];
+  const now = Date.now();
+  const block = (reason: string): AutoRenameOutcome => {
+    const outcome: AutoRenameOutcome = { at: now, from: id, to: null, status: "skipped", reason };
+    autoRenameOutcomes.push(outcome);
+    return outcome;
+  };
+  if (!target || !note) return block("没有打开的笔记本 / 笔记不存在");
+  if (autoRenameInFlight.has(id)) return block("正在改名途中");
+
+  const reason = shouldAutoRename(autoRenameContext(id, now)!);
+  if (reason) return block(reason);
+
+  const title = derivePlaceholderTitle(note.content)!;
+  const clean = sanitizeName(title, "无标题");
+  const requested = joinPath(parentPath(id), `${clean}${extName(id) || ".md"}`);
+  if (requested === id) return block("与当前文件名相同（空操作）");
+
+  const caseOnly = requested.toLowerCase() === id.toLowerCase();
+  const taken = new Set(Object.keys(libraryStore.get().notes));
+  taken.delete(id);
+  autoRenameInFlight.add(id);
+  cancelAutoRename(id);
+  try {
+    // 复用 `renameNote()` 的顺序：先 flush（否则 450ms 那个指向旧路径的定时器会把新内容
+    // 写进一个已经不存在/已被别人占用的路径），再探测落点，再搬。
+    await flushNote(id);
+    const nextPath = caseOnly ? requested : await resolveAvailablePath(target, requested, taken, id);
+    if (caseOnly) await moveCaseOnly(target, id, nextPath);
+    else await target.move(id, nextPath);
+    // ★ 必须在 `remapIds` **之前**摘掉「在途」标记：`moveAutoRenameState` 靠它判断
+    //   「改名途中又被敲字、有一个待执行的定时器要按新路径重挂」。不摘的话，它会以为
+    //   旧 id 上还挂着一个定时器，于是在新 id 上重挂一个 —— 那一拍到点后撞上
+    //   「正在改名途中」，而且会把 30 秒节流重新计时（用户第二次改标题就再也不跟随了）。
+    autoRenameInFlight.delete(id);
+    // `remapIds` 会把改名期间敲进来的正文、dirty、writeTimers、ui.tabs/activeId 一起搬到新 id。
+    remapIds(id, nextPath);
+    await moveHistory(target, id, nextPath);
+    // ★ 与 `renameNote()` 的**唯一**差别：只把派生标题同步到内存，**不写** override。
+    //   `refresh()` 之后 `title` 仍由正文标题现算，所以下一次改标题文件名还会跟随。
+    patchNotes((notes) => {
+      const moved = notes[nextPath];
+      if (!moved) return notes;
+      return { ...notes, [nextPath]: { ...moved, title: deriveTitle(moved.content, stripExtension(baseName(nextPath))), titleOverride: null, updatedAt: Date.now() } };
+    });
+    // 防御性：正常路径下新 id 上不该有 pin（自动改名从不写它），有就清掉，免得它把
+    // 之后的自动改名按 30 秒静默期一直拦住。
+    //
+    // 为什么敢在这里直接改 `meta`：上面那次 `remapIds()` 已经 `scheduleMeta(400)`，
+    // 这份 meta 会被那次去抖写盘带上；这里不需要再排一个（多排一次只是多写一次文件）。
+    // 判据：「防御分支」那条用例（先手工往 `state.json` 里塞一个 pin，再触发自动改名，
+    // 断言改名后 `titlePinnedAt` 被清掉）。
+    if (meta.titlePinnedAt?.[nextPath] !== undefined) {
+      const next = { ...meta.titlePinnedAt };
+      delete next[nextPath];
+      meta = { ...meta, titlePinnedAt: Object.keys(next).length ? next : undefined };
+    }
+    lastAutoRenameAt.delete(id);
+    lastAutoRenameAt.set(nextPath, Date.now());
+    explicitRenamedAt.delete(id);
+    const outcome: AutoRenameOutcome = { at: now, from: id, to: nextPath, status: "renamed", reason: clean };
+    autoRenameOutcomes.push(outcome);
+    return outcome;
+  } catch (error) {
+    reportError(error, "自动改名失败");
+    const outcome: AutoRenameOutcome = {
+      at: now,
+      from: id,
+      to: null,
+      status: "skipped",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+    autoRenameOutcomes.push(outcome);
+    return outcome;
+  } finally {
+    // 正常路径上这一句是空操作（成功分支已经在 `remapIds` 之前摘过标记）；失败时它保证
+    // 「在途」标记不会把这篇笔记的自动改名永久卡住。
+    autoRenameInFlight.delete(id);
+  }
+}
+
+/* 测试缝：把停笔窗口改短（真实计时器下 5 秒太慢），用完由 `resetWorkspaceTransients()` 复位。 */
+export function setAutoRenameDelayForTests(ms: number): void {
+  autoRenameDelay = ms;
+}
+
+/**
+ * 测试缝：清掉 30 秒节流与「刚显式重命名过」的静默期读数。
+ *
+ * 为什么必须有这条缝：这两张表的**语义就是「等 30 秒」**，而 30 秒的真实时间不可能塞进
+ * 单测。要验证「第二次改标题文件名还会跟随」这条核心判据，就必须能把时间快进过去 ——
+ * 与其把窗口改成可注入的假时钟（库里的 450ms/700ms/200ms 定时器会跟它打结），
+ * 不如让测试显式声明「这 30 秒已经过去了」。
+ */
+export function resetAutoRenameHistoryForTests(id?: Id): void {
+  if (id === undefined) {
+    explicitRenamedAt.clear();
+    lastAutoRenameAt.clear();
+    return;
+  }
+  explicitRenamedAt.delete(id);
+  lastAutoRenameAt.delete(id);
+}
+
+/** 本会话自动改名的读数（只读副本，测试与排查用）。 */
+export function autoRenameOutcomeLog(): readonly AutoRenameOutcome[] {
+  return autoRenameOutcomes;
+}
+
+/** 有没有待执行的自动改名定时器（测试用来证明「5 秒内再敲字 = 重排，不是并发两个改名」）。 */
+export function hasPendingAutoRename(id: Id): boolean {
+  return autoRenameTimers.has(id);
+}
+
 export function updateNoteContent(id: Id, content: string, options: { immediate?: boolean } = {}): void {
   const state = libraryStore.get();
   // 回收站里的笔记就地编辑：内容写回**它自己的桶**（文件仍在 `.opennote/trash/…`），
@@ -1049,6 +1595,11 @@ export function updateNoteContent(id: Id, content: string, options: { immediate?
   invalidateSearchCache(id);
   if (options.immediate) void flushNote(id).catch(() => undefined);
   else persistNoteSoon(id);
+  // 占位名笔记的「停笔 5 秒落盘」：所有编辑入口都汇到这里（编辑器、快照恢复、剪藏追加前的
+  // flush、导入），挂在别处就要挂多次。定时器**按笔记 id 独立**，与 `writeTimers` /
+  // `scheduleMeta` 互不取消（一个是 450ms 的写盘、一个是 700ms 的元数据，语义完全不同）。
+  // 回收站里的笔记不参与（`shouldAutoRename` 的条件 1 会拦掉）。
+  scheduleAutoRename(id);
   maybeSnapshot(previous, next);
 }
 
@@ -1133,14 +1684,34 @@ function moveTitleOverride(from: Id, to: Id): void {
   scheduleMeta(400);
 }
 
-/** 文件真的没了：把它的显示名一起清账（删文件夹 / 彻底删除 / 清空回收站）。 */
+/**
+ * 「这个名字是用户手定的」的**唯一写入点**（`renameNote`）。
+ *
+ * 自动改名（`autoRenameFromPlaceholder`）**不写这张表** —— 这是「正文标题 → 文件名」
+ * 通道不被永久锁死的关键：pin 的存在意味着「用户手定过这个名字」，而自动改名写的是
+ * 正文派生的名字，写进去就等于把用户的名字锁住了。
+ */
+function pinTitle(id: Id, at: number): void {
+  meta = { ...meta, titlePinnedAt: { ...(meta.titlePinnedAt ?? {}), [id]: at } };
+  scheduleMeta(400);
+}
+
+/** 文件真的没了：把它的显示名与 pin 一起清账（删文件夹 / 彻底删除 / 清空回收站）。 */
 function dropTitleOverrides(within: (path: Id) => boolean): void {
-  if (!meta.titleOverrides) return;
-  const next: Record<Id, string> = {};
-  for (const [path, title] of Object.entries(meta.titleOverrides)) {
-    if (!within(path)) next[path] = title;
+  if (meta.titleOverrides) {
+    const next: Record<Id, string> = {};
+    for (const [path, title] of Object.entries(meta.titleOverrides)) {
+      if (!within(path)) next[path] = title;
+    }
+    meta = { ...meta, titleOverrides: Object.keys(next).length ? next : undefined };
   }
-  meta = { ...meta, titleOverrides: Object.keys(next).length ? next : undefined };
+  if (meta.titlePinnedAt) {
+    const next: Record<Id, number> = {};
+    for (const [path, at] of Object.entries(meta.titlePinnedAt)) {
+      if (!within(path)) next[path] = at;
+    }
+    meta = { ...meta, titlePinnedAt: Object.keys(next).length ? next : undefined };
+  }
   scheduleMeta(400);
 }
 
@@ -1151,6 +1722,13 @@ export async function renameNote(id: Id, title: string): Promise<void> {
   const clean = sanitizeName(title, "无标题");
   const requested = joinPath(parentPath(id), `${clean}${extName(id) || ".md"}`);
   if (requested === id) return;
+  // 用户显式改名 ⇒ 这篇笔记的自动改名必须立刻收手：取消待执行的定时器 + 打 30 秒静默期
+  // 时间戳（否则「用户点了重命名 → 旧标题 5 秒后把名字顶回去」），并且**退出占位名出身**
+  // （`titleOverride` 已经是永久停用，这里再退一层：用户手定的名字之后不再自动跟随）。
+  cancelAutoRename(id);
+  placeholderOrigin.delete(id);
+  const renamedAt = Date.now();
+  explicitRenamedAt.set(id, renamedAt);
   // Only the casing changes: a temp-name round trip is what every backend
   // accepts on a case-insensitive disk, while uniquePath() would hand back
   // "名字 2.md" because exists() still sees the file itself (D07).
@@ -1166,11 +1744,22 @@ export async function renameNote(id: Id, title: string): Promise<void> {
     await moveHistory(target, id, nextPath);
     // 新名字**同时**写进 `Note.titleOverride` 与笔记本状态：只写 `title` 会被下一次
     // `refresh()` / 重扫按正文 H1 算回去（用户实测：改完名再点别处又变回去）。
+    //
+    // ★ 写的是**落盘名**（`nextPath` 的 stem），不是请求名 `clean`（方案 §2.6 第 1 点、
+    //   §7.1 指定的断言）。撞名时两者会分叉：请求「系统设计」而磁盘上让位成
+    //   `系统设计 2.md`，若把请求名写进 override，侧栏显示名是「系统设计」、磁盘叫
+    //   `系统设计 2.md`，而 `refresh()` 是 `titleOverride ?? deriveTitle(...)` —— override
+    //   赢，于是这个分叉**永久**存在（重扫也按 override 挂回「系统设计」）。
+    const landed = stripExtension(baseName(nextPath));
     patchNotes((notes) => ({
       ...notes,
-      [nextPath]: { ...notes[nextPath], title: clean, titleOverride: clean, updatedAt: Date.now() },
+      [nextPath]: { ...notes[nextPath], title: landed, titleOverride: landed, updatedAt: Date.now() },
     }));
-    setTitleOverride(nextPath, clean);
+    setTitleOverride(nextPath, landed);
+    // 「这个名字是用户手定的」的来源标记：与 `titleOverrides` 一一对应，跟着键走。
+    pinTitle(nextPath, renamedAt);
+    explicitRenamedAt.delete(id);
+    explicitRenamedAt.set(nextPath, renamedAt);
     // 立刻落盘，别等 200ms 去抖：重命名一返回，**随后任何一次重扫**都必须读到这条记录
     // （桌面端文件监听是 500ms 去抖，但不能指望每个触发源都比去抖慢 —— Ctrl+S 就能随时重扫）。
     await flushMeta();
@@ -1226,6 +1815,7 @@ export async function moveNote(id: Id, folderId: Id | null): Promise<MoveNoteRes
   taken.delete(id);
   const requested = joinPath(folderId ?? "", baseName(id));
   try {
+    cancelAutoRename(id);
     await flushNote(id);
     const nextPath = await resolveAvailablePath(target, requested, taken, id);
     // Same file, only the folder name differs in casing: it is already there.
@@ -1305,10 +1895,18 @@ export async function trashNote(id: Id): Promise<void> {
   const requested = joinPath(TRASH_DIR, id);
   const taken = new Set(Object.keys(libraryStore.get().trash));
   try {
+    cancelAutoRename(id);
     await flushNote(id);
     const trashPath = await resolveAvailablePath(target, requested, taken, id);
     await target.move(id, trashPath);
     await moveHistory(target, id, trashPath);
+    // 「占位名出身」跟着进回收站。**必须搬**，不能留在旧的工作区路径上：一次重扫
+    // （桌面端文件监听 500ms 就会来）的 `originBefore` 只保住「还存在的 id」，留在旧路径
+    // 的那一条会被丢掉，还原之后这篇笔记再也不自动改名 —— 与本次要修的缺陷同一现象。
+    if (placeholderOrigin.has(id)) {
+      placeholderOrigin.delete(id);
+      placeholderOrigin.add(trashPath);
+    }
     // 回收站比工作区深两层 ⇒ 指向共享 `.assets/` 的引用要跟着加前缀，
     // 否则「删了再恢复」或「在回收站里看一眼」时图片全是裂图（而且不报错）。
     const assets = await rebaseNoteAssets(target, id, trashPath);
@@ -1346,6 +1944,7 @@ export async function restoreNote(id: Id): Promise<void> {
   const original = id.startsWith(`${TRASH_DIR}/`) ? id.slice(TRASH_DIR.length + 1) : baseName(id);
   const taken = new Set(Object.keys(libraryStore.get().notes));
   try {
+    cancelAutoRename(id);
     await flushAll();
     const nextPath = await resolveAvailablePath(target, original, taken, id);
     await target.move(id, nextPath);
@@ -1359,6 +1958,16 @@ export async function restoreNote(id: Id): Promise<void> {
     const assets = await rebaseNoteAssets(target, id, nextPath);
     // 恢复后的路径可能带序号（`第一章 2.md`）：显示名的键跟着落到最终路径上。
     moveTitleOverride(id, nextPath);
+    // 「占位名出身」从回收站路径（或它来时的路径）搬到最终路径上。两条判据都要：
+    //   ① `placeholderOrigin` 里有回收站路径或它原来的路径 —— 覆盖「已经被自动改名过、
+    //      名字不再是占位名」的笔记（这类笔记的名字必须继续跟随正文标题）；
+    //   ② 还原后的 stem 本身就是占位名 —— 覆盖「丢过一次标记」的现场。
+    // 不补这一步的话，用户把一篇占位名笔记丢进回收站再还原，它之后**再也不会**自动改名。
+    const carriedOrigin = placeholderOrigin.has(id) || placeholderOrigin.has(original);
+    if (carriedOrigin || isPlaceholderName(stripExtension(baseName(nextPath)))) {
+      placeholderOrigin.delete(id);
+      placeholderOrigin.add(nextPath);
+    }
     setState((prev) => {
       const trash = { ...prev.trash };
       delete trash[id];
@@ -1502,6 +2111,7 @@ export async function purgeNote(id: Id): Promise<void> {
     await target.remove(id, { recursive: true });
     await removeNoteArtifacts(target, id);
     dropTitleOverrides((path) => path === id);
+    dropAutoRenameState((path) => path === id);
     setState((prev) => {
       const trash = { ...prev.trash };
       delete trash[id];
@@ -1521,6 +2131,7 @@ export async function emptyTrash(): Promise<number> {
     for (const id of ids) await removeNoteArtifacts(target, id);
     if (await target.exists(TRASH_DIR)) await target.remove(TRASH_DIR, { recursive: true });
     dropTitleOverrides((path) => path === TRASH_DIR || path.startsWith(`${TRASH_DIR}/`));
+    dropAutoRenameState((path) => path === TRASH_DIR || path.startsWith(`${TRASH_DIR}/`));
     setState((prev) => ({ ...prev, trash: {} }));
     return count;
   } catch (error) {
@@ -1883,6 +2494,9 @@ function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): voi
   remapKeyed(plainCache, replace);
   remapKeyed(knownStats, replace);
   remapKeyed(lastSnapshotAt, replace);
+  // 自动改名的状态也跟着走：定时器**必须按新路径重挂**（旧 id 上那个定时器的回调闭包
+  // 指向的是一个已经不存在的路径），静默期/光标行/合成状态同理。
+  moveAutoRenameState(oldId, newId, replace);
   const ui = getUi();
   const patch: Record<string, unknown> = {};
   if (ui.activeId) patch.activeId = replace(ui.activeId);
@@ -1897,6 +2511,10 @@ function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): voi
     // 显示名的键也要跟着走，否则移动/重命名之后那条改名记录就指空、重扫时名字又变回正文 H1。
     titleOverrides: meta.titleOverrides
       ? Object.fromEntries(Object.entries(meta.titleOverrides).map(([path, title]) => [replace(path), title]))
+      : undefined,
+    // pin 与 `titleOverrides` 一一对应，必须在同一处做键替换，否则两张表会指不同的路径。
+    titlePinnedAt: meta.titlePinnedAt
+      ? Object.fromEntries(Object.entries(meta.titlePinnedAt).map(([path, at]) => [replace(path), at]))
       : undefined,
   };
   scheduleMeta(400);
@@ -2492,6 +3110,16 @@ export async function restoreSnapshot(snapshot: Snapshot): Promise<void> {
  * 到共享附件目录的层数现算（`relativeAssetRef`：`归档/foo 2.md` + `.assets/x.png`
  * → `../.assets/x.png`）。旧数据不迁移：老笔记的图仍在 `<笔记名>.assets/` 或公共
  * `<目录>/assets/` 里，正文照旧引用，照样能读。
+ *
+ * 去重语义与剪藏落点 `allocateAssetPath`（`src/lib/clip/landing.ts`）**逐条一致**：
+ * 1. `.assets/<内容 uuid>.<ext>` 不存在 → 写它；
+ * 2. 已存在 + **字节相同** → **复用**（不写、不改 mtime），返回同一个路径 ——
+ *    「同一张图连粘两次只留一个文件」；
+ * 3. 已存在 + 字节不同 → 按 `-2`、`-3`… 让位（**绝不静默覆盖**）。
+ *
+ * 为什么不能再用 `uniquePath`：它只认**文件名清单**、从不比对字节，于是第二次粘贴同一张图时
+ * `assetFinalName` 明明算出了同一个 uuid，却被推成 `X 2.png`（` 2` 带空格 ⇒ 引用还得退化成
+ * `<…>` 角括号形式）。序号形态统一成 `-2` 的理由见 `allocateAssetPath`（空格会截断链接目标）。
  */
 export async function saveImage(
   blob: Blob,
@@ -2512,23 +3140,46 @@ export async function saveImage(
   }
   const target = requireBackend();
   const dir = assetsDirFor();
-  const existing = await listOptionalDirectory(target, dir);
-  const taken = new Set(existing.map((entry) => entry.name));
   /*
    * 粘贴/拖进来的图与剪藏落盘的图**同一套命名规则**（`assetFinalName`，唯一产地）：
    * `<内容派生的 uuid>.<ext>`。0.4.0 用户原话「复制过来的默认路径不对，默认为 …uuid 命名即可」——
    * 名字里不再出现原始文件名（截图会叫 `图片-1738…png`、网页图会带一长串 URL 片段）。
-   * `uniquePath` 仍兜底：同内容重复粘贴时，先命中同名再退让成 ` 2`。
    */
   const bytes = new Uint8Array(await blob.arrayBuffer());
-  const name = uniquePath(await assetFinalName(bytes, suggestedName), taken);
-  const path = joinPath(dir, name);
-  await target.writeBytes(path, bytes);
+  const candidate = joinPath(dir, await assetFinalName(bytes, suggestedName));
+  const path = await reuseOrDedupe(target, candidate, bytes);
+  if (!(await target.exists(path))) await target.writeBytes(path, bytes);
   // 引用从**笔记所在目录**算到附件路径（`relativeAssetRef`，唯一产地），不在这里手拼一层前缀：
   // 笔记嵌在 `操作系统/产品/` 里就该是 `../../.assets/x.png`，少一层就是裂图。
   // 目标串再过一次 `markdownRef`：路径带空格时写成 `<…>`，否则会被**空格截断**、图片不渲染。
   return { path, markdown: markdownRef(relativeAssetRef(notePath, path)) };
 }
+
+/**
+ * `candidate` 能用就用它，否则让位成 `-2`、`-3`…（上限与剪藏路径的 `allocateAssetPath` 相同）。
+ *
+ * 判据是**字节**，不是「文件在不在」：
+ * - 不存在 → `candidate`（调用方随后写它）；
+ * - 存在且字节相同 → `candidate`（调用方**不**重写：复用不产生新文件、不动 mtime）；
+ * - 存在且字节不同 → 第一个可用的 `-N`（绝不覆盖别人的图）。
+ */
+async function reuseOrDedupe(target: FileSystemBackend, candidate: string, bytes: Uint8Array): Promise<string> {
+  const existing = await target.readBytes(candidate).catch(() => null);
+  if (existing === null || sameBytes(existing, bytes)) return candidate;
+  for (let index = 2; index <= 52; index += 1) {
+    const next = dedupePath(candidate, index);
+    if (await target.exists(next)) continue;
+    return next;
+  }
+  throw new Error(`附件目录里同名文件太多，放弃去重：${candidate}`);
+}
+
+/** `foo/a1b2-x.png` + 3 → `foo/a1b2-x-3.png`（扩展名之前插序号，与剪藏路径同一形态）。 */
+function dedupePath(candidate: string, index: number): string {
+  const ext = extName(candidate);
+  return ext ? `${candidate.slice(0, candidate.length - ext.length)}-${index}${ext}` : `${candidate}-${index}`;
+}
+
 
 /* ------------------------------------------------------------------ bootstrap */
 
