@@ -248,7 +248,8 @@ function createHarness(options = {}) {
     quitCalls: 0,
     openedExternal: [],
     shownInFolder: [],
-    titleBarOverlay: [],
+    /** 假窗口的最大化状态（`isMaximized()` 读它，自绘按钮的「最大化 ↔ 还原」靠它）。 */
+    maximized: false,
   }
 
   class FakeWebContents {
@@ -307,6 +308,8 @@ function createHarness(options = {}) {
     show() {
       this.showCalls += 1
     }
+    /** 关窗前先隐藏（main.cjs 用它避免销毁瞬间露出窗口底色）。 */
+    hide() {}
     isDestroyed() {
       return this.destroyed
     }
@@ -342,8 +345,14 @@ function createHarness(options = {}) {
     getContentBounds() {
       return { width: 1280, height: 800 }
     }
-    setTitleBarOverlay(colors) {
-      state.titleBarOverlay.push(colors)
+    /* 自绘窗口按钮的控制面（main.cjs 的 registerWindowHandlers / hideNativeWindowButtons）。 */
+    setWindowButtonVisibility() {}
+    setBackgroundColor() {}
+    minimize() {}
+    maximize() {}
+    unmaximize() {}
+    isMaximized() {
+      return state.maximized
     }
     static getFocusedWindow() {
       return null
@@ -384,6 +393,12 @@ function createHarness(options = {}) {
     getVersion: () => '0.2.0-test',
     getPath: () => state.userData,
     setAppUserModelId() {},
+    /**
+     * macOS Dock 图标（`main.cjs` 的 `applyDockIcon`）：darwin 上会走
+     * `nativeImage.createFromPath` + `dock.setIcon`，两个 API 都得在桩里存在，
+     * 否则护栏会在 require main.cjs 时抛异常、静默跳过整段 IPC 检查。
+     */
+    dock: { setIcon() {} },
     whenReady: () => Promise.resolve(),
     /**
      * 0.3.0 新增：`main.cjs` 用单实例锁把第二个实例挡掉，并注册 `opennote://` 协议
@@ -439,7 +454,17 @@ function createHarness(options = {}) {
     state,
     /** 模拟渲染层 → 主进程的 ipcMain.on 消息。 */
     emit: (channel, ...args) => ipcMain.emit(channel, ...args),
-    electronStub: { app, BrowserWindow: FakeBrowserWindow, Menu, dialog, ipcMain, session, shell },
+    electronStub: {
+      app,
+      BrowserWindow: FakeBrowserWindow,
+      Menu,
+      dialog,
+      ipcMain,
+      session,
+      shell,
+      /** 打桩返回「能解出图」：`applyDockIcon` 会真的走到 `app.dock.setIcon`。 */
+      nativeImage: { createFromPath: () => ({ isEmpty: () => false, getSize: () => ({ width: 1024, height: 1024 }) }) },
+    },
   }
 }
 
@@ -1153,6 +1178,8 @@ async function main() {
    */
   const DECLARED_PRELOAD_REMOVALS = {
     onMenu: 'C-12c 删死订阅：菜单栏被故意移除（00 §6.16 ㊿）；preload 顶部注释是恢复接入点',
+    "window.setTitleBarOverlay":
+      '原生窗口按钮在 macOS 与 Windows/Linux 上都已隐藏（改由渲染层自绘，见 main.cjs 顶部说明）：没有原生按钮就没有「同步底色」这件事；自绘按钮的颜色直接读 CSS 变量，主题切换不需要过 IPC',
   }
   await check('contextBridge 只暴露 window.opennote，不泄漏 require/process', async () => {
     assert.equal(preload.exposed.key, 'opennote')
@@ -1192,7 +1219,13 @@ async function main() {
       'shell.openExternal': 1,
       'app.getRecentWorkspaces': 0,
       'app.addRecentWorkspace': 1,
-      'window.setTitleBarOverlay': 1,
+      // 自绘窗口按钮（原生按钮已隐藏，`setTitleBarOverlay` 随之删除，见 DECLARED_PRELOAD_REMOVALS）。
+      'window.minimize': 0,
+      'window.toggleMaximize': 0,
+      'window.close': 0,
+      'window.getState': 0,
+      'window.setBackground': 1,
+      'window.onChanged': 1,
     }
     for (const name of EXISTING_FS_METHODS) {
       assert.equal(typeof bridge.fs[name], 'function', `fs.${name} 必须存在`)

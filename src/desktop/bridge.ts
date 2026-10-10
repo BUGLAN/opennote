@@ -357,9 +357,29 @@ export interface OpennoteBridge {
     /** Tell the main process the flush finished (idempotent). */
     flushDone(): void;
   };
+  /**
+   * 自绘窗口按钮的控制面（`src/components/WindowControls.tsx`）。
+   *
+   * 原生按钮在 macOS / Windows / Linux 上都不再出现（见 `main.cjs` 文件顶部的说明），
+   * 三个动作与最大化状态全部走这里。`setTitleBarOverlay` 已随原生按钮一起删除。
+   */
   window: {
-    /** Overlay colours for the frameless title bar (false on macOS). */
-    setTitleBarOverlay(colors: { color: string; symbolColor: string }): Promise<boolean>;
+    minimize(): Promise<void>;
+    /** 「最大化 ↔ 还原」两态切换（当前最大化时还原）。 */
+    toggleMaximize(): Promise<void>;
+    /** 与点系统关闭按钮同一条路径（含 D11 落盘握手）。 */
+    close(): Promise<void>;
+    getState(): Promise<{ maximized: boolean }>;
+    /**
+     * 把窗口的**原生底色**同步成当前主题的纸色。
+     *
+     * 窗口创建时只能写死一个底色（默认主题是浅色），深色主题下关窗/缩放时页面一被
+     * 销毁就会露出它 —— 表现为「闪一下白」。页面起来后与主题变化时各同步一次即可。
+     * 主进程只接受 CSS 颜色字面量，非法值忽略并返回 `false`。
+     */
+    setBackground(color: string): Promise<boolean>;
+    /** 订阅最大化状态变化；返回退订函数。 */
+    onChanged(callback: (state: { maximized: boolean }) => void): () => void;
   };
   /**
    * 本地桥的控制面（`opennote:bridge:*`）。设置面板**只经 IPC 读状态**——

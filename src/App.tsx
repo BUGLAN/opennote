@@ -104,6 +104,7 @@ import { Sidebar, currentFolderId, type Scope } from "./components/Sidebar";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { StatusBar } from "./components/StatusBar";
 import { TabBar } from "./components/TabBar";
+import { WindowControls } from "./components/WindowControls";
 import { setBridge } from "./editor/bridge";
 import { findImageSource, unwrapSource } from "./editor/livePreview";
 
@@ -470,14 +471,14 @@ export default function App(): ReactNode {
     document.title = activeNote ? `${activeNote.title} · Opennote` : "Opennote · 开源笔记";
   }, [activeNote]);
 
-  // 无边框标题栏：窗口按钮的底色跟随当前主题，避免亮色按钮压在暗色界面上。
+  // 无边框窗口的原生底色跟随主题：窗口创建时只能写死一个底色（默认主题是浅色），
+  // 深色主题下关窗/缩放时页面一被销毁就会露出那块浅色 —— 观感就是「闪一下白」。
+  // 这里读 body 的实际底色（`var(--paper)`，主题切换后立刻就是新值）同步给主进程。
   useEffect(() => {
     if (!bridge) return;
     const frame = requestAnimationFrame(() => {
-      const style = getComputedStyle(document.documentElement);
-      const color = style.getPropertyValue("--paper-2").trim() || "#fbf8f3";
-      const symbolColor = style.getPropertyValue("--ink-3").trim() || "#97897a";
-      void bridge.window.setTitleBarOverlay({ color, symbolColor }).catch(() => undefined);
+      const color = getComputedStyle(document.body).backgroundColor;
+      if (color) void bridge.window.setBackground(color).catch(() => undefined);
     });
     return () => cancelAnimationFrame(frame);
   }, [bridge, ui.appearance, ui.theme, ui.accent]);
@@ -1200,7 +1201,14 @@ export default function App(): ReactNode {
   const workspaceName = library.workspace?.name ?? "";
 
   return (
-    <div className={cn("app", bridge && "app--desktop", dropping && "is-dropping", ui.sidebarOpen && "is-sidebar-open")}>
+    <div
+      className={cn(
+        "app",
+        bridge && "app--desktop",
+        dropping && "is-dropping",
+        ui.sidebarOpen && "is-sidebar-open",
+      )}
+    >
       <Sidebar
         library={library}
         ui={ui}
@@ -1513,6 +1521,9 @@ export default function App(): ReactNode {
       <GithubDialogHost />
       <ConflictDialogHost />
       <Toasts />
+
+      {/* 自绘的三个窗口按钮：桌面端才有（浏览器/移动端没有窗口可管）。 */}
+      {bridge ? <WindowControls bridge={bridge} /> : null}
 
       <input
         ref={fileInputRef}

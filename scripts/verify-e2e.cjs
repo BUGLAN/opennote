@@ -187,7 +187,14 @@ function createNodeFsBridge() {
     dialog: { pickFolder: async () => null, pickSaveFile: async () => null, saveFile: async () => true },
     shell: { showItemInFolder: async () => {}, openExternal: async () => {} },
     app: { getRecentWorkspaces: async () => [], addRecentWorkspace: async () => {}, onFlushRequest: () => () => {}, flushDone: () => {} },
-    window: { setTitleBarOverlay: async () => false },
+    window: {
+      minimize: async () => {},
+      toggleMaximize: async () => {},
+      close: async () => {},
+      getState: async () => ({ maximized: false }),
+      setBackground: async () => true,
+      onChanged: () => () => {},
+    },
     onMenu: () => () => {},
     // 收件箱广播订阅：把回调存下来，S8.1 要用它驱动「450ms 去抖」这条路径。
     onInboxChanged: (fn) => {
@@ -1309,6 +1316,8 @@ function createElectronStub(userData) {
       for (const handler of [...(this.events.get(event) || [])]) handler(...args);
     }
     show() {}
+    /** 关窗前先隐藏（main.cjs 用它避免销毁瞬间露出窗口底色）。 */
+    hide() {}
     isDestroyed() {
       return this.destroyed;
     }
@@ -1332,7 +1341,15 @@ function createElectronStub(userData) {
     getContentBounds() {
       return { width: 1280, height: 800 };
     }
-    setTitleBarOverlay() {}
+    /* 自绘窗口按钮：main.cjs 会隐藏原生按钮并按需最小化/最大化/关闭，底色跟随主题。 */
+    setWindowButtonVisibility() {}
+    setBackgroundColor() {}
+    minimize() {}
+    maximize() {}
+    unmaximize() {}
+    isMaximized() {
+      return false;
+    }
     static getFocusedWindow() {
       return null;
     }
@@ -1370,6 +1387,8 @@ function createElectronStub(userData) {
     getPath: () => state.userData,
     getLocale: () => "zh-CN",
     setAppUserModelId() {},
+    /** macOS Dock 图标（`main.cjs` 的 `applyDockIcon`）：非 darwin 不碰它。 */
+    dock: { setIcon() {} },
     whenReady: () => Promise.resolve(),
     /**
      * 单实例锁（`02:1118`：拿不到锁的进程立即退出，命令行参数交给已运行实例）。
@@ -1413,6 +1432,8 @@ function createElectronStub(userData) {
       },
     },
     shell: { showItemInFolder() {}, openExternal: async () => {} },
+    /** 打桩返回「能解出图」：`applyDockIcon` 会真的走到 `app.dock.setIcon`。 */
+    nativeImage: { createFromPath: () => ({ isEmpty: () => false, getSize: () => ({ width: 1024, height: 1024 }) }) },
   };
 
   return {

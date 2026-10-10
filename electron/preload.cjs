@@ -94,6 +94,21 @@ const UPDATE_RESTART_CHANNEL = 'opennote:update:restart'
 /** 主进程 → 渲染层的状态/进度广播（进度已按 ≤5 次/秒节流）。 */
 const UPDATE_CHANGED_CHANNEL = 'opennote:update:changed'
 
+/**
+ * 自绘窗口按钮（`src/components/WindowControls.tsx`）。
+ *
+ * 原生按钮在 macOS（隐藏红绿灯）与 Windows/Linux（不启用 titleBarOverlay）上都不再出现，
+ * 所以最小化 / 最大化还原 / 关闭三件事必须经这里转发给主进程。
+ */
+const WINDOW_MINIMIZE_CHANNEL = 'opennote:window:minimize'
+const WINDOW_TOGGLE_MAXIMIZE_CHANNEL = 'opennote:window:toggleMaximize'
+const WINDOW_CLOSE_CHANNEL = 'opennote:window:close'
+const WINDOW_GET_STATE_CHANNEL = 'opennote:window:getState'
+/** 把窗口原生底色同步成当前主题纸色（否则深色主题关窗/缩放会闪一下浅色）。 */
+const WINDOW_SET_BACKGROUND_CHANNEL = 'opennote:window:setBackground'
+/** 主进程 → 渲染层：最大化状态变化（切换「最大化 ↔ 还原」图标）。 */
+const WINDOW_CHANGED_CHANNEL = 'opennote:window:changed'
+
 const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args)
 
 /** 订阅一个主进程频道，返回退订函数（与 `onDeepLink` / `onInboxChanged` 同一套写法）。 */
@@ -172,9 +187,24 @@ const bridge = {
     },
   },
 
+  /**
+   * 自绘窗口按钮（`src/components/WindowControls.tsx`）。
+   *
+   * `window.setTitleBarOverlay` **已删除**（不是漏发）：原生按钮在 macOS 与
+   * Windows/Linux 上都不再出现，也就没有「同步原生按钮底色」这件事了 —— 自绘按钮的
+   * 颜色直接由 CSS 变量决定，主题切换自动跟随，不需要过 IPC。
+   * 这条删除在 `ipc-safety-check.cjs` 与 `verify-contract.cjs` 的
+   * `DECLARED_PRELOAD_REMOVALS` 里都有申报；**恢复原生按钮时要一起恢复它**（连同 arity 断言）。
+   */
   window: {
-    /** 同步无边框标题栏上那三个原生按钮的底色与符号色（macOS 返回 false）。 */
-    setTitleBarOverlay: (colors) => invoke('opennote:window:titlebar', colors),
+    minimize: () => invoke(WINDOW_MINIMIZE_CHANNEL),
+    toggleMaximize: () => invoke(WINDOW_TOGGLE_MAXIMIZE_CHANNEL),
+    close: () => invoke(WINDOW_CLOSE_CHANNEL),
+    getState: () => invoke(WINDOW_GET_STATE_CHANNEL),
+    /** 同步窗口原生底色（当前主题的纸色）；非法颜色由主进程忽略并返回 false。 */
+    setBackground: (color) => invoke(WINDOW_SET_BACKGROUND_CHANNEL, color),
+    /** 最大化状态变化（主进程推）；返回退订函数。 */
+    onChanged: (callback) => subscribe(WINDOW_CHANGED_CHANNEL, callback),
   },
 
   /**

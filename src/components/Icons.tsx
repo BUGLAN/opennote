@@ -42,7 +42,10 @@ export type IconName =
   | "move"
   | "print"
   | "lock"
-  | "unlock";
+  | "unlock"
+  | "winMin"
+  | "winMax"
+  | "winRestore";
 
 const PATHS: Record<IconName, JSX.Element> = {
   file: (
@@ -226,6 +229,18 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M7 9V4.5h10V9" />
       <rect x="4" y="9" width="16" height="7.5" rx="2" />
       <path d="M7.5 14.5h9v5h-9z" />
+    </>
+  ),
+  /*
+   * 自绘窗口按钮的三个字形（与 Windows 的 ─ □ ❐ ✕ 同一套语义）：
+   * 最小化、最大化、还原。关闭复用上面的 `close`（同一个 ✕，不另画一份）。
+   */
+  winMin: <path d="M5.5 12h13" />,
+  winMax: <rect x="5.8" y="5.8" width="12.4" height="12.4" rx="1.8" />,
+  winRestore: (
+    <>
+      <path d="M9.2 9.2V7.9a1.7 1.7 0 0 1 1.7-1.7h5.3a1.7 1.7 0 0 1 1.7 1.7v5.3a1.7 1.7 0 0 1-1.7 1.7h-1.3" />
+      <rect x="6.1" y="9.2" width="8.7" height="8.7" rx="1.7" />
     </>
   ),
 };

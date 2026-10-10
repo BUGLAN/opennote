@@ -96,7 +96,14 @@ function createNodeFsBridge() {
     dialog: { pickFolder: async () => null, pickSaveFile: async () => null, saveFile: async () => true },
     shell: { showItemInFolder: async () => {}, openExternal: async () => {} },
     app: { getRecentWorkspaces: async () => [], addRecentWorkspace: async () => {}, onFlushRequest: () => () => {}, flushDone: () => {} },
-    window: { setTitleBarOverlay: async () => false },
+    window: {
+      minimize: async () => {},
+      toggleMaximize: async () => {},
+      close: async () => {},
+      getState: async () => ({ maximized: false }),
+      setBackground: async () => true,
+      onChanged: () => () => {},
+    },
     onMenu: () => () => {},
   };
 }

@@ -20,7 +20,7 @@
  *     回传的消息一律不含宿主机绝对路径/用户名（审计 D35）
  */
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron')
+const { app, BrowserWindow, Menu, dialog, ipcMain, nativeImage, session, shell } = require('electron')
 const { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } = require('node:fs/promises')
 const { existsSync, watch, readdirSync, readFileSync } = require('node:fs')
 const { spawn } = require('node:child_process')
@@ -88,18 +88,38 @@ function cspPolicy() {
     "worker-src 'self' blob:",
   ].join('; ')
 }
-/** 与界面左上角印章一致的图标；打包后 exe 内嵌同一份 build/icon.ico。 */
+/**
+ * 与界面左上角印章同源的图标（`pnpm icons` 生成，见 scripts/make_icons.py）：
+ *   · Windows/Linux：`build/icon.ico` —— 窗口 + 任务栏 + Alt-Tab，打包后 exe 内嵌同一份；
+ *   · macOS：**直接复用已经生成好的那张 512 位图**（`public/icon-512.png`，与 .ico 是
+ *     同一份 art），打包后 Vite 会把它拷进 `dist/`，所以两个位置都找一遍。
+ *
+ * 为什么不给 macOS 现画一张：绘制依赖系统 CJK 字体，而 macOS 的 Songti 路径随版本搬过家
+ * （`/System/Library/Fonts/` → `Supplemental/`），取不到时会静默落到 Pillow 自带、
+ * 不含中日韩字形的兜底字体，画出一个「缺字方框」—— 真踩过：Dock 图标成了白框叉。
+ * 生成物本来就是同一颗印章，直接拿来用最稳。
+ */
 const WINDOW_ICON = path.join(app.getAppPath(), 'build', 'icon.ico')
+const DOCK_ICON_CANDIDATES = [
+  path.join(app.getAppPath(), 'dist', 'icon-512.png'), // 打包后：Vite 把 public/ 拷进 dist/
+  path.join(app.getAppPath(), 'public', 'icon-512.png'), // 开发：源目录
+]
+/** 实际存在的那张 Dock 图标；都没有则返回 null（保持系统默认，绝不设成空白）。 */
+function dockIconPath() {
+  return DOCK_ICON_CANDIDATES.find((candidate) => existsSync(candidate)) || null
+}
 
 /**
- * 无边框标题栏：Windows 自带的那条标题栏（标题文字 + 最小化/最大化/关闭）
- * 和应用自己的头部（印章、标签页）功能重复，所以标题栏交给页面自己画。
- * Windows / Linux 用 titleBarOverlay 保留原生的三个窗口按钮，
- * macOS 用系统红绿灯（trafficLightPosition 让它落在印章右侧）。
+ * 无边框标题栏：系统那条标题栏（标题文字 + 最小化/最大化/关闭）和应用自己的头部
+ * （印章、标签页）功能重复，所以标题栏交给页面自己画。
+ *
+ * 三个窗口按钮**全部由渲染层自绘**（`src/components/WindowControls.tsx`），两个平台
+ * 的样式与位置因此逐像素一致：
+ *   · macOS：`setWindowButtonVisibility(false)` 隐藏系统红绿灯；
+ *   · Windows / Linux：不启用 titleBarOverlay，系统不画那三个原生按钮。
+ * 代价是失去原生绘制，所以三个按钮的行为必须自己接全 —— 见 registerWindowHandlers。
  */
 const IS_MAC = process.platform === 'darwin'
-const TITLEBAR_HEIGHT = 40
-const TITLEBAR_FALLBACK = { color: '#fbf8f3', symbolColor: '#97897a' }
 
 /** 开发模式：scripts/dev-electron.mjs 会注入该变量；打包运行时不设置。 */
 const DEV_URL = process.env.OPENNOTE_DEV_URL || ''
@@ -1057,6 +1077,84 @@ function registerAppHandlers() {
   )
 }
 
+/**
+ * 自绘窗口按钮的控制面（原生按钮两个平台都已隐藏，见文件顶部注释）。
+ *
+ * 频道沿用 `opennote:<group>:<op>` 命名；preload 侧有同名常量与之一一配对，
+ * `verify-contract.cjs` 的 C-12a 靠「常量可解析」把两侧咬住，所以这里写常量、不内联字符串。
+ */
+const WINDOW_MINIMIZE_CHANNEL = 'opennote:window:minimize'
+const WINDOW_TOGGLE_MAXIMIZE_CHANNEL = 'opennote:window:toggleMaximize'
+const WINDOW_CLOSE_CHANNEL = 'opennote:window:close'
+const WINDOW_GET_STATE_CHANNEL = 'opennote:window:getState'
+/**
+ * 渲染层 → 主进程：把窗口的**原生底色**同步成当前主题的纸色。
+ *
+ * 为什么需要它：窗口创建时只能给一个写死的 `backgroundColor`（默认主题是浅色），
+ * 但用户可能用夜读/墨色这类深色主题。关窗或缩放时页面一旦被销毁/重绘，露出的就是
+ * 窗口自己的底色 —— 深色界面上闪一下浅色，非常刺眼（真踩过）。
+ * 页面侧 `body`/boot 层本来就跟着 `var(--paper)` 走，这里补上窗口那一层。
+ */
+const WINDOW_SET_BACKGROUND_CHANNEL = 'opennote:window:setBackground'
+/** 只认 CSS 颜色字面量（渲染层传的是 `getComputedStyle(body).backgroundColor`）。 */
+const CSS_COLOR_PATTERN = /^(#[0-9a-f]{3,8}|rgba?\([\d\s.,%/]+\)|hsla?\([\d\s.,%/]+\))$/i
+/** 主进程 → 渲染层：最大化状态变化（`createWindow` 收到 maximize/unmaximize 时发）。 */
+const WINDOW_CHANGED_CHANNEL = 'opennote:window:changed'
+
+function registerWindowHandlers() {
+  handle(
+    WINDOW_MINIMIZE_CHANNEL,
+    () => {
+      focusedWindow()?.minimize()
+    },
+    '最小化窗口失败',
+  )
+
+  handle(
+    WINDOW_TOGGLE_MAXIMIZE_CHANNEL,
+    () => {
+      const window = focusedWindow()
+      if (!window) throw new Error('窗口不存在')
+      // 只做「最大化 ↔ 还原」两态：这是自绘按钮的语义，不碰系统红绿灯的第三态（全屏）。
+      if (window.isMaximized()) window.unmaximize()
+      else window.maximize()
+    },
+    '切换窗口最大化失败',
+  )
+
+  handle(
+    WINDOW_CLOSE_CHANNEL,
+    () => {
+      // 走 window.close()：与点系统关闭按钮同一条路径（D11 的落盘握手挂在 close 事件上）。
+      focusedWindow()?.close()
+    },
+    '关闭窗口失败',
+  )
+
+  handle(
+    WINDOW_GET_STATE_CHANNEL,
+    () => {
+      const window = focusedWindow()
+      return { maximized: window ? window.isMaximized() : false }
+    },
+    '读取窗口状态失败',
+  )
+
+  handle(
+    WINDOW_SET_BACKGROUND_CHANNEL,
+    (color) => {
+      const window = focusedWindow()
+      if (!window) return false
+      const value = typeof color === 'string' ? color.trim() : ''
+      // 非法值直接忽略：绝不把窗口底色设成空白（那会露出透明/黑，比闪一下更怪）。
+      if (!CSS_COLOR_PATTERN.test(value)) return false
+      window.setBackgroundColor(value)
+      return true
+    },
+    '设置窗口底色失败',
+  )
+}
+
 function registerIpcHandlers() {
   registerFsHandlers()
   registerFsWatchHandlers()
@@ -1066,18 +1164,7 @@ function registerIpcHandlers() {
   registerImportHandlers()
   registerNetHandlers()
   registerUpdateHandlers()
-
-  // 主题切换时同步标题栏按钮（叠加层）的底色与符号色。
-  ipcMain.handle('opennote:window:titlebar', (event, colors) => {
-    if (IS_MAC) return false
-    const window = BrowserWindow.fromWebContents(event.sender)
-    if (!window || window.isDestroyed()) return false
-    const color = colors && typeof colors.color === 'string' ? colors.color : TITLEBAR_FALLBACK.color
-    const symbolColor =
-      colors && typeof colors.symbolColor === 'string' ? colors.symbolColor : TITLEBAR_FALLBACK.symbolColor
-    window.setTitleBarOverlay({ color, symbolColor, height: TITLEBAR_HEIGHT })
-    return true
-  })
+  registerWindowHandlers()
 
   // preload 需要同步拿到 app.getVersion()（sandbox 下 preload 拿不到 app 模块）。
   ipcMain.on('opennote:app:version', (event) => {
@@ -2178,6 +2265,32 @@ function hardenWebContents(window) {
   })
 }
 
+/**
+ * macOS：把 Dock（和 ⌘Tab）图标换成我们自己的印章。
+ *
+ * 为什么必须显式设：macOS 的 Dock 图标来自 **app bundle**，而开发模式跑的是 Electron
+ * 自己的 bundle —— 不设就显示 Electron 默认图标，与 Windows 上的 build/icon.ico 差了
+ * 十万八千里。打包版由 electron-builder 用同一张图生成 .icns，这里再设一次是幂等的；
+ * 图缺失/解不出来时**保持原样**，绝不把图标设成空白。
+ */
+function applyDockIcon() {
+  if (!IS_MAC || !app.dock) return
+  const iconPath = dockIconPath()
+  if (!iconPath) return
+  const image = nativeImage.createFromPath(iconPath)
+  if (image.isEmpty()) return
+  app.dock.setIcon(image)
+}
+
+/**
+ * macOS：隐藏系统红绿灯 —— 三个窗口按钮改由渲染层自绘（见文件顶部注释）。
+ * 已知怪癖：进/出原生全屏时系统会把红绿灯重新显示出来，所以在这两个切换点各补一次。
+ */
+function hideNativeWindowButtons(window) {
+  if (!IS_MAC || window.isDestroyed()) return
+  window.setWindowButtonVisibility(false)
+}
+
 async function createWindow() {
   const window = new BrowserWindow({
     width: 1280,
@@ -2185,13 +2298,13 @@ async function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: APP_NAME,
+    // 窗口原生底色：这里是**首帧之前**的默认值（默认主题「素笺」的纸色）。页面起来后
+    // 由渲染层经 `opennote:window:setBackground` 同步成当前主题的纸色，否则深色主题下
+    // 关窗/缩放露出的这块浅色就是那一下刺眼的闪白（见该频道的注释）。
     backgroundColor: '#fbf8f3',
     // 无边框标题栏：标题文字不再占用一行，页面自己的头部就是标题栏。
-    // 原生窗口按钮由 titleBarOverlay（Windows/Linux）或系统红绿灯（macOS）提供。
+    // 三个窗口按钮由渲染层自绘：Windows/Linux 不启用 titleBarOverlay，macOS 下面显式隐藏红绿灯。
     titleBarStyle: 'hidden',
-    ...(IS_MAC
-      ? { trafficLightPosition: { x: 14, y: 13 } }
-      : { titleBarOverlay: { ...TITLEBAR_FALLBACK, height: TITLEBAR_HEIGHT } }),
     // 不显示窗口内的菜单栏：操作都在应用内设置里（见 installApplicationMenu）。
     autoHideMenuBar: true,
     icon: existsSync(WINDOW_ICON) ? WINDOW_ICON : undefined,
@@ -2206,9 +2319,19 @@ async function createWindow() {
   })
 
   mainWindow = window
+  // 原生按钮已经不存在，最大化状态变化必须主动告诉渲染层（切换「最大化 ↔ 还原」图标）。
+  const sendWindowState = () => {
+    if (window.isDestroyed()) return
+    window.webContents.send(WINDOW_CHANGED_CHANNEL, { maximized: window.isMaximized() })
+  }
+  window.on('maximize', sendWindowState)
+  window.on('unmaximize', sendWindowState)
   window.once('ready-to-show', () => {
     if (!window.isDestroyed()) window.show()
   })
+  hideNativeWindowButtons(window)
+  window.on('enter-full-screen', () => hideNativeWindowButtons(window))
+  window.on('leave-full-screen', () => hideNativeWindowButtons(window))
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null
     // 桥的生命周期跟随窗口：窗口没了就不该还有人在监听 127.0.0.1。
@@ -2229,6 +2352,12 @@ async function createWindow() {
       flushPending = false
       closeApproved = true
       if (window.isDestroyed()) return
+      /*
+       * 先隐藏、再关闭：关闭时渲染进程会先被销毁，之后窗口还要在屏幕上多留约 100ms，
+       * 那段时间它只剩窗口自己的底色 —— 实测把底色从浅色改成深色，用户看到的闪白就
+       * 变成了闪黑，说明闪的就是这一帧。隐藏之后这段等待不可见，窗口是「干净地消失」。
+       */
+      window.hide()
       window.close()
       // 兜底：渲染层的 beforeunload 若仍取消关闭，强制销毁（数据已在 flush 阶段落盘）。
       const force = setTimeout(() => {
@@ -2386,10 +2515,14 @@ app.whenReady().then(async () => {
   installContentSecurityPolicy()
 
   try {
+    // 图标先设：Dock 里一出现就是我们的印章，而不是 Electron 默认图标。
+    applyDockIcon()
     await createWindow()
     if (!readyLogged) {
       readyLogged = true
-      const iconNote = existsSync(WINDOW_ICON) ? WINDOW_ICON : 'exe 内嵌图标'
+      const iconNote = IS_MAC
+        ? (dockIconPath() ?? '未找到 icon-512.png（保持系统默认图标）')
+        : (existsSync(WINDOW_ICON) ? WINDOW_ICON : 'exe 内嵌图标')
       const frameNote = mainWindow && !mainWindow.isDestroyed()
         ? `窗口=${mainWindow.getBounds().height}px 内容=${mainWindow.getContentBounds().height}px`
         : '窗口未就绪'
@@ -2426,6 +2559,8 @@ app.whenReady().then(async () => {
   }
 
   app.on('activate', () => {
+    // 退出流程中绝不重建窗口，否则 app.quit() 会被顶回去（变成关不掉的窗口）。
+    if (quitRequested) return
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow().catch((error) => {
         console.error(`[opennote] 创建窗口失败：${error instanceof Error ? error.message : String(error)}`)
@@ -2441,5 +2576,11 @@ app.on('before-quit', () => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  /*
+   * 关掉最后一个窗口就退出应用 —— **macOS 也照做**，这是有意偏离 mac 惯例的一处：
+   * 本应用只有一个窗口，关掉后留在 Dock 里没有任何可做的事；而 macOS 的 `activate`
+   * （点 Dock 图标、或系统自己的一轮激活）会经上面的 handler 再建一个窗口，
+   * 用户看到的就是「点关闭，窗口闪一下又回来了」。两个平台行为保持一致。
+   */
+  app.quit()
 })

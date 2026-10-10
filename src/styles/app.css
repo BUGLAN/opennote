@@ -34,7 +34,14 @@
    Windows/Linux 的原生窗口按钮以叠加层形式压在右上角，需要留出宽度。 */
 
 .app--desktop {
-  --titlebar-inset: 148px;
+  /*
+   * 右上角三个自绘窗口按钮的占位宽度（3 × 46px，见下方的 `.win-controls`）。
+   * 标签栏与大纲头靠这个值留白，别让页签钻到按钮底下。
+   *
+   * 这里**没有平台分支**：两个平台用的是同一份自绘 DOM。以前 macOS 走系统红绿灯、
+   * Windows/Linux 走 titleBarOverlay 才需要按平台分开算，现在原生按钮已全部隐藏。
+   */
+  --titlebar-inset: 138px;
 }
 
 .app--desktop .sidebar__head,
@@ -65,6 +72,68 @@
 
 .app--desktop:has(.outline:not(.is-collapsed)) .outline__head {
   padding-right: var(--titlebar-inset);
+}
+
+/* ---------------------------- 自绘窗口按钮 ------------------------------ */
+
+/*
+ * 三个窗口按钮（`components/WindowControls.tsx`）：固定浮在窗口右上角，压在标签栏 /
+ * 大纲头之上。用 `position: fixed` 而不是塞进某一栏的 DOM —— 标签栏与大纲头是**互斥**
+ * 的两栏（大纲展开时右上角归大纲），放进其中一栏就得跟着搬家；浮层只有一份，两态都在。
+ *
+ * z-index 取 92：高于标签栏（6）与各类对话框（55–90），低于 toast（95）—— 与原生
+ * 窗口按钮「永远压在最上层」的分层一致。`-webkit-app-region: no-drag` 必须显式写：
+ * 右上角本身是窗口拖拽区，漏了就点不动按钮（只会拖动窗口）。
+ */
+.win-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 92;
+  display: flex;
+  height: var(--tabbar-h);
+  -webkit-app-region: no-drag;
+}
+
+/* 46px 宽 = `--titlebar-inset` 的 1/3，两处必须同时改。 */
+.win-controls__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  /* 窗口按钮不是应用内的操作按钮：指针保持普通箭头，跟系统一致。 */
+  cursor: default;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.win-controls__btn:hover {
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+  color: var(--ink);
+}
+
+.win-controls__btn:active {
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+.win-controls__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
+/*
+ * 关闭键：按下与悬停都是红底白字 —— 与两个平台的关闭键语义一致。
+ * 红是**写死的**、不跟随强调色：用户把强调色换成靛蓝/松绿时，「关闭」仍然必须是红的
+ * （否则按色找按钮的肌肉记忆就没了）。
+ */
+.win-controls__btn--close:hover,
+.win-controls__btn--close:active {
+  background: #c0392b;
+  color: #fff;
 }
 
 /* ============================== sidebar ================================= */

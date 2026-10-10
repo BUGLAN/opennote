@@ -1382,6 +1382,7 @@ group("§5 本地桥与安全");
 const DECLARED_PRELOAD_REMOVALS = [
   { name: "onMenu", why: "C-12c / 交接 §四-B1：菜单栏被故意移除（非 darwin 上 Menu.setApplicationMenu(null)）⇒ 删死订阅，不补发送方" },
   { name: "onImportNotice", why: "C-12c / 交接 §四-B2：主进程从未发过它，三件事各有产地（workspace-changed / inbox:changed / announce）⇒ 删订阅" },
+  { name: "window.setTitleBarOverlay", why: "原生窗口按钮在 macOS（隐藏红绿灯）与 Windows/Linux（不启用 titleBarOverlay）上都不再出现，三个按钮改由渲染层自绘 ⇒ 没有「同步原生按钮底色」要做的了；自绘按钮的颜色直接读 CSS 变量，主题切换不需要过 IPC" },
 ];
 
 /** 从 HEAD 版 preload 里找出某个方法**订阅的那个频道字面量**（用于自证匹配）。
