@@ -158,7 +158,7 @@ function readPackageVersion() {
 }
 
 /** 读不到 `package.json` 时的兜底；**必须**与 `package.json` 的 `version` 逐字一致。 */
-const APP_VERSION_FALLBACK = '0.3.2'
+const APP_VERSION_FALLBACK = '0.9.0'
 const APP_VERSION = readPackageVersion() || APP_VERSION_FALLBACK
 
 /** 请求体 16 MiB（解析前按 Content-Length 拒绝）。 */
