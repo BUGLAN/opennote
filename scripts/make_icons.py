@@ -42,25 +42,67 @@ SEAL_ICON_SIZE = 96
 # 以 CSS `.seal` 的 22px 为基准的几何：5px 圆角 / 13px 字
 SEAL_CSS_SIZE = 22.0
 
-# 与应用内印章一致的 CJK 字体，按可用性回退
+# 与应用内印章一致的 CJK 字体，按可用性回退。
+#
+# ⚠️ 路径会随系统版本搬家：macOS 把 Songti 从 `/System/Library/Fonts/` 挪进了
+# `Supplemental/`。老路径还在表里、只是存在性检查过不去，于是脚本**静默**回退到
+# Pillow 自带的位图字体 —— 那个字体没有中日韩字形，画出来是一个「缺字方框」，
+# 而 `pnpm icons` 会拿这个方框覆盖**全部**已提交图标（真踩过：Dock 图标变成白框叉）。
+# 所以这里三条一起立规矩：新旧路径都列、取到字体必须**验证真能画出「記」**、
+# 一个都不行就**报错退出**（宁可什么都不生成，也不静默写坏图）。
 FONT_CANDIDATES = [
     Path(r"C:\Windows\Fonts\simsun.ttc"),
     Path(r"C:\Windows\Fonts\simkai.ttf"),
     Path(r"C:\Windows\Fonts\msyh.ttc"),
-    Path("/System/Library/Fonts/Songti.ttc"),
+    Path("/System/Library/Fonts/Supplemental/Songti.ttc"),  # macOS 13+ 的实际位置
+    Path("/System/Library/Fonts/Songti.ttc"),  # 旧版 macOS
+    Path("/System/Library/Fonts/PingFang.ttc"),
     Path("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc"),
+    Path("/usr/share/fonts/truetype/noto/NotoSerifCJK-Regular.ttc"),
 ]
+
+GLYPH = "記"
+# 这个码位在 Unicode 里永久保留、不属于任何字符，因此没有任何字体会给它字形：
+# 渲染出来就是该字体的 `.notdef`（缺字方框）。拿它当「有没有字形」的对照。
+NOTDEF_PROBE = "\U0010FFFF"
+# 印章要的是宋体那种笔画，不是黑体/粗体：这些字重即使有字形也先让开。
+NON_REGULAR_STYLES = ("Black", "Heavy", "Bold", "Light", "Thin", "Ultralight")
+
+
+def renders_glyph(font: ImageFont.FreeTypeFont) -> bool:
+    """字体是否**真有**「記」的字形（而不是画出一个缺字方框）。"""
+
+    def render(text: str) -> bytes:
+        canvas = Image.new("L", (font.size * 2, font.size * 2), 0)
+        ImageDraw.Draw(canvas).text((font.size // 2, font.size // 2), text, font=font, fill=255)
+        return canvas.tobytes()
+
+    return render(GLYPH) != render(NOTDEF_PROBE)
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont:
+    non_regular = None
     for candidate in FONT_CANDIDATES:
-        if candidate.exists():
+        if not candidate.exists():
+            continue
+        # TTC 是字体集合，逐个 face 试：Songti.ttc 的 index 0 恰好是 Black（且无「記」字形）
+        for index in range(0, 16):
             try:
-                return ImageFont.truetype(str(candidate), size)
+                font = ImageFont.truetype(str(candidate), size, index=index)
             except OSError:
+                break
+            if not renders_glyph(font):
                 continue
-    # 最后回退到 Pillow 自带位图字体（会明显偏小，但不至于失败）
-    return ImageFont.load_default(size)
+            if any(word in " ".join(font.getname()) for word in NON_REGULAR_STYLES):
+                non_regular = non_regular or font
+                continue
+            return font
+    if non_regular is not None:
+        return non_regular
+    raise SystemExit(
+        "找不到能画出「記」的 CJK 字体，**没有生成任何图标**（绝不写出缺字方框）。"
+        "请把本机可用的字体路径补进 FONT_CANDIDATES。"
+    )
 
 
 def draw_seal(size: int) -> Image.Image:

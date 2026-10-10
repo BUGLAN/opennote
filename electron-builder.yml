@@ -83,6 +83,10 @@ win:
 # 下面两个目标目前是「声明了但未交付」：没有签名/公证配置，也没有进发布流水线。
 # 真要发布时先读 RELEASING.md 的「平台与签名」一节。
 mac:
+  # macOS 不吃 .ico：用已经生成好的那张 512 位图（与 build/icon.ico 同一份 art，
+  # 由 `pnpm icons` 产出），electron-builder 会据此生成 .icns。
+  # 开发模式下同一个文件由 main.cjs 的 applyDockIcon() 设给 Dock。
+  icon: public/icon-512.png
   target: dmg
   category: public.app-category.productivity
 
