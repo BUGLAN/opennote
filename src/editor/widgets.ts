@@ -2,6 +2,7 @@ import { EditorView, WidgetType } from "@codemirror/view";
 import { resolveImageSrc } from "../data/assets";
 import type { ThemeId } from "../data/types";
 import { parentPath } from "../fs";
+import { imageSizeFor, markImageLoaded, parkImageElement, pooledImageElement, rememberImageSize } from "./imagePool";
 import { bridge } from "./bridge";
 import { mathHtmlSync, renderMath } from "./math";
 import { mermaidHtmlSync, renderMermaid } from "./mermaid";
@@ -25,15 +26,16 @@ export class ImageWidget extends WidgetType {
     );
   }
 
+  /**
+   * 为什么先建空 `<img>`、等 URL 再赋 `src`：本地图片要从磁盘读字节（blob URL 由
+   * `imageUrlStore` 缓存）。代价是每个**新建的**元素都要重新解码 —— 换笔记时整篇文档
+   * 替换、所有 widget 重建，大图一收一放就是「切换文件整屏闪」。所以这里优先从
+   * `imagePool` 把上一轮**已解码**的那个元素搬回来（零加载零解码零塌陷）；全新元素则用
+   * 记过的自然尺寸先占住布局，解码期间文档不再跳。
+   */
   toDOM(view: EditorView): HTMLElement {
     const wrap = document.createElement(this.block ? "figure" : "span");
     wrap.className = `md-media prose${this.block ? " md-media--block" : ""}`;
-    const img = document.createElement("img");
-    img.alt = this.alt;
-    img.loading = "lazy";
-    img.decoding = "async";
-    img.draggable = false;
-    wrap.appendChild(img);
 
     // `resolveImageSrc()` 的基准仍是**目录**（`./foo.assets/x.png` 与 `./assets/x.png` 都要能读），
     // 而编辑器里唯一的事实是笔记路径 —— 目录由它换算，不另存一份。
@@ -44,11 +46,51 @@ export class ImageWidget extends WidgetType {
         view.requestMeasure();
         return;
       }
-      img.addEventListener("load", () => view.requestMeasure(), { once: true });
+
+      const pooled = pooledImageElement(url);
+      if (pooled) {
+        // 同一张图、不同的 alt（同一 URL 也可能被另一篇笔记引用）：说明文字要跟上这一次的用法。
+        pooled.alt = this.alt;
+        wrap.appendChild(pooled);
+        attachImageMenu(wrap, this);
+        view.requestMeasure();
+        return;
+      }
+
+      const img = document.createElement("img");
+      img.alt = this.alt;
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.draggable = false;
+      const size = imageSizeFor(url);
+      if (size) {
+        // CSS 是 `max-width: 100%; height: auto`：这对属性在解码期间就是占位盒（宽高比盒），
+        // 图片加载完成前后文档高度不变 —— 没有它，首次加载也会塌一下再弹回去。
+        img.width = size.width;
+        img.height = size.height;
+      }
+      img.addEventListener(
+        "load",
+        () => {
+          markImageLoaded(img);
+          rememberImageSize(url, img.naturalWidth, img.naturalHeight);
+          view.requestMeasure();
+        },
+        { once: true },
+      );
       img.src = url;
+      wrap.appendChild(img);
       attachImageMenu(wrap, this);
     });
     return wrap;
+  }
+
+  /** 元素还池（见 `imagePool`）：换笔记 / 光标进出图片行 / 整轮装饰重建都走这里。 */
+  destroy(dom: HTMLElement): void {
+    const img = dom.querySelector("img");
+    if (!(img instanceof HTMLImageElement)) return;
+    const url = img.getAttribute("src");
+    if (url) parkImageElement(url, img);
   }
 
   ignoreEvent(): boolean {

@@ -869,7 +869,8 @@ export default function App(): ReactNode {
     if (!hasWorkspace) return;
     const note = createNote({ folderId: folderId === undefined ? currentFolderId(scope) : folderId, content: "" });
     notify("已新建笔记", { action: { label: "移到回收站", run: () => trashNote(note.id) } });
-    requestAnimationFrame(() => viewRef.current?.focus());
+    // 焦点由 EditorPane 的「成为活跃标签」effect 接管：新标签的实例挂载后它自己会
+    // requestMeasure + focus —— 这里再抢一次 rAF 反而会扑在旧的（已隐藏的）实例上。
   };
 
   const newFolder = async (parentId?: Id | null) => {
@@ -1303,32 +1304,30 @@ export default function App(): ReactNode {
         )}
 
         <EditorPane
-          noteId={activeId}
-          content={activeNote?.content ?? ""}
-          hidden={!activeNote || activeLocked}
-          locked={activeLocked}
           /*
-           * 这里**不再**传 `baseDir`：`noteId` 本身就是笔记的工作区相对路径，而
-           * 附件目录、图片相对引用的基准都能从它派生（`EditorPane` 内部派生）。
-           * 再传一个同样由 `activeNote.id` 算出来的 `baseDir`，就是**同一个事实的第二个产地** ——
-           * 两边一旦漂移（例如附件目录改成 `<笔记名>.assets/`），就会出现「写图的目录」
-           * 与「读图的基准」不是一个东西，而类型都是 `string`，编译期一个字都不报。
+           * 每个 tab 一个常驻编辑器实例：切换标签 = 切换可见性，文档/undo/光标/滚动位置
+           * 都住在实例里，不重建 —— 整篇换文档会把所有 widget（含图片）拆了重建，白底大图
+           * 一收一放就是用户看到的「切换文件整屏闪」（2026-10-10 用户报告）。
+           * `viewRef` 语义不变：活跃实例的 view（大纲跳转、命令、新建笔记聚焦都用它）。
            */
+          tabs={ui.tabs}
+          activeId={activeId}
+          getNote={(id) => library.notes[id] ?? library.trash[id] ?? null}
+          lockedIds={ui.lockedNotes}
           settings={ui}
           getTitles={() => Object.values(library.notes).map((note) => note.title)}
           getTags={() => tags.map((entry) => entry.tag)}
-          onDocChange={(doc) => {
-            if (!activeId) return;
-            updateNoteContent(activeId, doc);
+          onDocChange={(id, doc) => {
+            updateNoteContent(id, doc);
           }}
-          onCursor={(value) => setCursor(value)}
-          onComposing={(composing) => setEditorComposing(activeId, composing)}
+          onCursor={(_id, value) => setCursor(value)}
+          onComposing={(id, composing) => setEditorComposing(id, composing)}
           onEditorBlur={() => {
             // onFocusChange 模式的落盘点：编辑器失焦（切标签/点外部）就写。
             if (getUi().autoSave === "onFocusChange") void flushAll().catch(() => undefined);
           }}
           onSave={() => flushAll()}
-          onReady={(view) => {
+          onActiveViewChange={(view) => {
             viewRef.current = view;
           }}
         />

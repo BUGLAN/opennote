@@ -17,22 +17,24 @@ export interface CursorInfo {
 
 interface EditorPaneProps {
   /**
-   * 正在编辑的笔记 id。**id 就是笔记路径**（`归档/foo 2.md`），所以附件落点
-   * （`<笔记名>.assets/`）与图片相对引用的基准目录都从它派生，不另设 `baseDir`：
-   * 同一个事实的第二个产地正是「粘贴的图写进 `未命名.assets/`」那类静默错误的来源。
-   * 没有打开的笔记时是 `null`。
+   * 打开的标签（`ui.tabs`，有序）。**每个标签一个常驻 CodeMirror 实例**：切换标签 =
+   * 切换可见性，文档、undo 历史、光标、滚动位置都住在实例里，不重建 —— 这是「切换
+   * 笔记整屏闪」的治本方案：整篇换文档会把所有 widget（含图片）拆了重建，白底大图
+   * 一收一放就是用户看到的频闪（2026-10-10 用户报告）。
    */
-  noteId: Id | null;
-  content: string;
-  hidden: boolean;
+  tabs: readonly Id[];
+  activeId: Id | null;
   /**
-   * 只读锁（0.4.0 标签栏的锁按钮 → `ui.lockedNotes`）。锁定时编辑器不收任何输入，
-   * 光标也不显示 —— 是「查看」而不是「待输入」。
+   * 取一篇笔记（`library.notes` 与 `library.trash` 都要认 —— 回收站里的笔记也能正常
+   * 打开）。返回 null 表示笔记没了（外部删除），不留实例。
    */
-  locked: boolean;
+  getNote(id: Id): { content: string } | null;
+  /** 只读锁命中的笔记（`ui.lockedNotes`，标签栏的锁按钮）。 */
+  lockedIds: readonly Id[];
+  /** 全局外观设置；每实例的 `notePath` 用自己的笔记 id，附件/图片基准由它派生。 */
   settings: UiSettings;
-  onDocChange(doc: string): void;
-  onCursor(info: CursorInfo): void;
+  onDocChange(id: Id, doc: string): void;
+  onCursor(id: Id, info: CursorInfo): void;
   /**
    * 输入法（IME）是否正在合成。
    *
@@ -43,14 +45,18 @@ interface EditorPaneProps {
    * `compositionend` 冒泡到编辑器宿主元素），数据层看不到；而数据层只认 `setEditorComposing()`
    * 下推的状态，两边各管一段、不重复判定。
    */
-  onComposing(composing: boolean): void;
+  onComposing(id: Id, composing: boolean): void;
   /**
-   * 编辑器失焦（focusout 离开编辑区）时触发：`onFocusChange` 自动保存模式的落盘点。
+   * 任一实例失焦（focusout 离开编辑区）时触发：`onFocusChange` 自动保存模式的落盘点。
    * 模式判断在 App 侧（读最新设置），这里只负责上报事件。
    */
   onEditorBlur?(): void;
   onSave(): void;
-  onReady(view: EditorView | null): void;
+  /**
+   * 活跃实例变化（切标签 / 关标签 / 标签清空）。App 的 `viewRef` 语义 =
+   * 「当前活跃实例的 view」，大纲跳转、命令面板、新建笔记的聚焦都靠它。
+   */
+  onActiveViewChange(view: EditorView | null): void;
   getTitles(): string[];
   getTags(): string[];
 }
@@ -92,18 +98,38 @@ export function attachCompositionReporter(host: CompositionEventHost, report: (c
   };
 }
 
+interface EditorHostProps {
+  /** 本实例的笔记 id。`key={id}` 保证它**永不改变**——id 变了就是卸载重建。 */
+  id: Id;
+  active: boolean;
+  content: string;
+  locked: boolean;
+  settings: UiSettings;
+  onDocChange(doc: string): void;
+  onCursor(info: CursorInfo): void;
+  onComposing(composing: boolean): void;
+  onEditorBlur?(): void;
+  onSave(): void;
+  /** 把创建好的视图登记进父级的实例表（父级按它解析「活跃实例」）。 */
+  onReady(view: EditorView): void;
+  /** 从实例表注销（标签关闭 / 笔记被删）。 */
+  onCleanup(): void;
+  getTitles(): string[];
+  getTags(): string[];
+}
+
 /**
- * One CodeMirror instance for the whole session; switching notes swaps the
- * document (with history annotations so undo never leaks across notes).
+ * 一个标签 = 一个 CodeMirror 实例。挂载时用当下内容建文档，之后**只做两类同步**：
+ * 外部内容变化（磁盘赢、快照恢复、导入）整篇替换；设置（主题/锁/拼写检查）经
+ * Compartment/Effect 下推。切换标签只是 `display` 的开与关。
  */
-export function EditorPane(props: EditorPaneProps): ReactNode {
+function EditorHost(props: EditorHostProps): ReactNode {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const propsRef = useRef(props);
   propsRef.current = props;
-  const loadedRef = useRef<Id | null>(null);
-  const expectedRef = useRef<string>("");
-  const cursorMemory = useRef(new Map<Id, number>());
+  /** 本实例自己刚写出的文档 —— 区分「外部内容变了」与「自己 onChange 的回声」。 */
+  const expectedRef = useRef<string>(props.content);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -111,7 +137,7 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
     const view = new EditorView({
       parent: host,
       state: EditorState.create({
-        doc: "",
+        doc: props.content,
         extensions: buildEditorExtensions({
           settings: { ...propsRef.current.settings },
           getTitles: () => propsRef.current.getTitles(),
@@ -128,26 +154,8 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
         }),
       }),
     });
+    expectedRef.current = props.content;
     viewRef.current = view;
-    if (import.meta.env.DEV) {
-      // handy for debugging the live-preview tree from the console
-      (window as unknown as Record<string, unknown>).__opennote = {
-        view,
-        settings: () => view.state.field(editorSettingsField, false),
-        apply: (patch: Partial<EditorSettings>) => view.dispatch({ effects: setEditorSettings.of(patch) }),
-        dump: () => {
-          const lines: string[] = [];
-          syntaxTree(view.state).iterate({
-            enter: (node) => {
-              lines.push(
-                `${node.name} ${node.from}-${node.to} ${JSON.stringify(view.state.sliceDoc(node.from, Math.min(node.to, node.from + 40)))}`,
-              );
-            },
-          });
-          return lines.join("\n");
-        },
-      };
-    }
     propsRef.current.onReady(view);
     // 输入法合成状态 → 宿主（数据层用它抑制「停笔 5 秒自动改名」）。
     const detachComposing = attachCompositionReporter(host, (composing) => propsRef.current.onComposing(composing));
@@ -163,56 +171,27 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
       host.removeEventListener("focusout", onFocusOut);
       view.destroy();
       viewRef.current = null;
-      propsRef.current.onReady(null);
+      propsRef.current.onCleanup();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 挂载一次；内容/设置走下面的同步 effect
   }, []);
 
-  /* swap the document when the active note changes */
+  /* 内容在外面变了（磁盘赢的采纳、快照恢复、导入、同步）：整篇替换，原光标夹进新文档。
+     隐藏的后台标签同样同步 —— 回到前台时看到的就是最新内容。 */
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    const previous = loadedRef.current;
-
-    if (props.noteId === null) {
-      loadedRef.current = null;
-      expectedRef.current = "";
-      if (view.state.doc.length) {
-        view.dispatch({
-          changes: { from: 0, to: view.state.doc.length, insert: "" },
-          annotations: Transaction.addToHistory.of(false),
-        });
-      }
-      return;
+    if (props.content !== expectedRef.current && props.content !== view.state.doc.toString()) {
+      expectedRef.current = props.content;
+      const selection = view.state.selection.main;
+      const length = props.content.length;
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: props.content },
+        selection: { anchor: Math.min(selection.anchor, length), head: Math.min(selection.head, length) },
+        annotations: Transaction.addToHistory.of(false),
+      });
     }
-
-    if (previous === props.noteId) {
-      // content changed outside the editor (snapshot restore, import, sync, 磁盘赢的采纳)
-      if (props.content !== expectedRef.current && props.content !== view.state.doc.toString()) {
-        expectedRef.current = props.content;
-        // 整篇替换时把原光标偏移夹进新文档：外部改动被采纳后光标尽量不跳。
-        const selection = view.state.selection.main;
-        const length = props.content.length;
-        view.dispatch({
-          changes: { from: 0, to: view.state.doc.length, insert: props.content },
-          selection: { anchor: Math.min(selection.anchor, length), head: Math.min(selection.head, length) },
-          annotations: Transaction.addToHistory.of(false),
-        });
-      }
-      return;
-    }
-
-    if (previous) cursorMemory.current.set(previous, view.state.selection.main.head);
-    loadedRef.current = props.noteId;
-    expectedRef.current = props.content;
-    const anchor = Math.min(cursorMemory.current.get(props.noteId) ?? 0, props.content.length);
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: props.content },
-      selection: { anchor, head: anchor },
-      effects: EditorView.scrollIntoView(0, { y: "start" }),
-      annotations: Transaction.addToHistory.of(false),
-    });
-    view.focus();
-  }, [props.noteId, props.content]);
+  }, [props.content]);
 
   /* push appearance / mode settings into the editor state */
   useEffect(() => {
@@ -226,8 +205,8 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
         typewriter: props.settings.typewriter,
         imageMode: props.settings.imageMode,
         // 空态传空串：粘贴时 `insertFileSnippets()` 如实提示「附件没有落点」，
-        // 而不是拿空路径去派生出一个 `未命名.assets/`。
-        notePath: props.noteId ?? "",
+        // 而不是拿空路径去派生出一个 `未命名.assets/`。实例的笔记路径永不改变（key={id}）。
+        notePath: props.id,
       }),
     });
   }, [
@@ -236,7 +215,7 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
     props.settings.focus,
     props.settings.typewriter,
     props.settings.imageMode,
-    props.noteId,
+    props.id,
   ]);
 
   useEffect(() => {
@@ -273,20 +252,30 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
     });
   }, []);
 
-  /* the editor stays mounted while no note is open (keeps undo history), so it
-     has to be re-measured when it becomes visible again */
+  /* 成为活跃标签：从 display:none 回到布局要重新量；焦点与状态栏光标跟上。
+     （旧「换文档后 view.focus()」的行为由这里承接——切换标签本来就是聚焦时刻。） */
   useEffect(() => {
-    if (props.hidden) return;
-    const view = viewRef.current;
-    if (!view) return;
-    requestAnimationFrame(() => view.requestMeasure());
-  }, [props.hidden]);
+    if (!props.active || props.locked) return;
+    requestAnimationFrame(() => {
+      const view = viewRef.current;
+      if (!view) return;
+      view.requestMeasure();
+      view.focus();
+      const range = view.state.selection.main;
+      const line = view.state.doc.lineAt(range.head);
+      propsRef.current.onCursor({
+        line: line.number,
+        column: range.head - line.from + 1,
+        selected: range.to - range.from,
+      });
+    });
+  }, [props.active, props.locked]);
 
   return (
     <div
       className={cn(
         "editor-host",
-        props.hidden && "editor-host--hidden",
+        (!props.active || props.locked) && "editor-host--hidden",
         props.settings.typewriter && "md-typewriter",
         props.settings.focus && "md-focus-mode",
         props.content === "" && "md-empty",
@@ -294,5 +283,73 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
       )}
       ref={hostRef}
     />
+  );
+}
+
+/**
+ * 标签 → 常驻编辑器实例的注册表。一个 EditorPane 渲染 `tabs` 里每个 id 各一个
+ * {@link EditorHost}，并向上汇报「活跃实例」（App 的 `viewRef`）。
+ */
+export function EditorPane(props: EditorPaneProps): ReactNode {
+  const viewsRef = useRef(new Map<Id, EditorView>());
+
+  /* 活跃实例上报。依赖 tabs：关闭活跃标签时（tabs 与 activeId 同一次提交里变化）
+     子组件的注销/登记 effect 先跑，这里读到的是刷新后的实例表。 */
+  useEffect(() => {
+    const view = props.activeId != null ? (viewsRef.current.get(props.activeId) ?? null) : null;
+    props.onActiveViewChange(view);
+    if (import.meta.env.DEV) {
+      // handy for debugging the live-preview tree from the console
+      (window as unknown as Record<string, unknown>).__opennote = view
+        ? {
+            view,
+            settings: () => view.state.field(editorSettingsField, false),
+            apply: (patch: Partial<EditorSettings>) => view.dispatch({ effects: setEditorSettings.of(patch) }),
+            dump: () => {
+              const lines: string[] = [];
+              syntaxTree(view.state).iterate({
+                enter: (node) => {
+                  lines.push(
+                    `${node.name} ${node.from}-${node.to} ${JSON.stringify(view.state.sliceDoc(node.from, Math.min(node.to, node.from + 40)))}`,
+                  );
+                },
+              });
+              return lines.join("\n");
+            },
+          }
+        : null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只跟「哪篇活跃/开了哪些标签」有关
+  }, [props.activeId, props.tabs]);
+
+  return (
+    <>
+      {props.tabs.map((id) => {
+        const note = props.getNote(id);
+        // 笔记没了（外部删除、清空回收站）：不留实例 —— React 卸载旧 host（销毁它的视图）。
+        if (!note) return null;
+        return (
+          <EditorHost
+            key={id}
+            id={id}
+            active={id === props.activeId}
+            content={note.content}
+            locked={props.lockedIds.includes(id)}
+            settings={props.settings}
+            onDocChange={(doc) => props.onDocChange(id, doc)}
+            onCursor={(info) => props.onCursor(id, info)}
+            onComposing={(composing) => props.onComposing(id, composing)}
+            onEditorBlur={props.onEditorBlur}
+            onSave={props.onSave}
+            onReady={(view) => viewsRef.current.set(id, view)}
+            onCleanup={() => {
+              viewsRef.current.delete(id);
+            }}
+            getTitles={props.getTitles}
+            getTags={props.getTags}
+          />
+        );
+      })}
+    </>
   );
 }
