@@ -794,30 +794,58 @@ function sameRoot(a: string | null, b: string | null): boolean {
  * Subscribe to external changes of `root` and ask the main process to watch the
  * folder. Older preloads and the browser fallback have no such API, so this is a
  * silent no-op there (D08 must not change the startup path).
+ *
+ * 非桌面后端（fsa/capacitor）没有监听源：窗口重新聚焦（浏览器切回标签页、手机从
+ * 后台回来）时重扫一次，作为这两个端唯一可用的「外部改动」信号。opfs 除外——
+ * 只有应用自己会写它（I1 已覆盖），聚焦刷新纯浪费。
  */
 function startWatching(root: string): void {
   stopWatching();
   const bridge = desktopBridge();
   const fs = bridge?.fs;
-  if (typeof fs?.watchWorkspace !== "function" || typeof fs.onWorkspaceChanged !== "function") return;
+  const unsubscribers: Array<() => void> = [];
+  const hasWatcherApi = typeof fs?.watchWorkspace === "function" && typeof fs.onWorkspaceChanged === "function";
   watchedRoot = root;
-  watchUnsubscribe = fs.onWorkspaceChanged((changed) => {
-    // The event is broadcast to every window: ignore other notebooks.
-    // v2 载荷带变化路径 → 按路径增量刷新（成本 ∝ 变化文件数）；拿不到路径
-    // （旧载荷/平台不给文件名）→ 整库重扫兜底。
-    const root = typeof changed === "string" ? changed : (changed?.root ?? "");
-    if (!sameRoot(root, watchedRoot)) return;
-    const target = backend;
-    const changes = typeof changed === "string" ? null : (changed?.changes ?? null);
-    if (!target || !changes || changes.length === 0) {
-      scheduleWatchRescan();
-      return;
-    }
-    queuePathRefresh(target, changes);
-  });
-  void fs.watchWorkspace(root).catch((error) => {
-    console.warn("[opennote] 无法监听工作区变化", error);
-  });
+  if (hasWatcherApi) {
+    unsubscribers.push(
+      fs.onWorkspaceChanged((changed) => {
+        // The event is broadcast to every window: ignore other notebooks.
+        // v2 载荷带变化路径 → 按路径增量刷新（成本 ∝ 变化文件数）；拿不到路径
+        // （旧载荷/平台不给文件名）→ 整库重扫兜底。
+        const root = typeof changed === "string" ? changed : (changed?.root ?? "");
+        if (!sameRoot(root, watchedRoot)) return;
+        const target = backend;
+        const changes = typeof changed === "string" ? null : (changed?.changes ?? null);
+        if (!target || !changes || changes.length === 0) {
+          scheduleWatchRescan();
+          return;
+        }
+        queuePathRefresh(target, changes);
+      }),
+    );
+    void fs.watchWorkspace(root).catch((error) => {
+      console.warn("[opennote] 无法监听工作区变化", error);
+    });
+  } else if (
+    backend?.kind !== "opfs" &&
+    typeof window !== "undefined" &&
+    typeof window.addEventListener === "function" &&
+    typeof document !== "undefined"
+  ) {
+    const onFocus = () => {
+      if (document.visibilityState === "visible") scheduleWatchRescan();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    unsubscribers.push(() => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    });
+  }
+  if (unsubscribers.length === 0) return;
+  watchUnsubscribe = () => {
+    for (const off of unsubscribers) off();
+  };
 }
 
 /** Drop the listener, the pending rescan and the main-process watcher. */
