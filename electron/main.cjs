@@ -47,6 +47,16 @@ const RECENT_LIMIT = 12
 const FLUSH_TIMEOUT_MS = 1500
 /** D08 工作区目录监听的去抖窗口。 */
 const WATCH_DEBOUNCE_MS = 450
+
+// P1c-2：工作区监听源优先 @parcel/watcher（VS Code 同源的原生监听：事件带类型、
+// 低 CPU、自带 ignore）。打包缺原生二进制或加载失败时，require 失败会自动退化回
+// node:fs 的递归 watch（见 startWorkspaceWatcher）——两条路的产出形状一致。
+let parcelWatcher = null
+try {
+  parcelWatcher = require('@parcel/watcher')
+} catch (error) {
+  console.warn('[opennote] @parcel/watcher 不可用，使用 node:fs 监听：', error && error.message)
+}
 /**
  * D38 只对 file:// 响应注入的 CSP。dev server（http://127.0.0.1:5173）绝不注入，
  * 否则 script-src 'self' 会挡掉 Vite 的 HMR 脚本。桌面构建的 dist/index.html 不含
@@ -734,6 +744,63 @@ function closeWorkspaceWatcher(identity) {
   return true
 }
 
+/**
+ * 启动工作区监听（P1c-2）。事件源优先 @parcel/watcher；require/订阅失败自动退化回
+ * node:fs 的递归 watch。两条路的产出都是「往 state.pending 塞工作区相对路径」，
+ * 自写过滤 / 聚合 / 广播完全共用 P1c-1 的管道。
+ */
+async function startWorkspaceWatcher(safeRoot, identity, state, onChange, schedule) {
+  if (parcelWatcher) {
+    try {
+      const subscription = await parcelWatcher.subscribe(
+        safeRoot,
+        (error, events) => {
+          if (error) {
+            console.warn('[opennote] 工作区监听出错，停止监听', error)
+            closeWorkspaceWatcher(identity)
+            return
+          }
+          for (const event of events) {
+            const rel = selfWriteKey(path.relative(safeRoot, event.path))
+            if (!rel) {
+              state.generic = true
+              continue
+            }
+            if (rel === '.opennote' || rel.startsWith('.opennote/')) continue
+            if (isSelfWrite(safeRoot, rel)) continue
+            state.pending.set(rel, event.type === 'create' ? 'add' : event.type === 'delete' ? 'delete' : 'update')
+          }
+          schedule()
+        },
+        {
+          // 元数据与依赖目录永不需要刷新；`.opennote/**` 在回调里再滤一层（双保险）。
+          ignore: ['.opennote/**', 'node_modules/**', '.git/**'],
+        },
+      )
+      // 包一层 close()，与 node:fs watcher 的关闭形状对齐。
+      state.watcher = {
+        close: () => {
+          void subscription.unsubscribe().catch(() => undefined)
+        },
+      }
+      return
+    } catch (error) {
+      console.warn('[opennote] @parcel/watcher 订阅失败，退回 node:fs 监听：', error && error.message)
+    }
+  }
+  try {
+    state.watcher = watch(safeRoot, { recursive: true, persistent: false }, onChange)
+  } catch {
+    try {
+      // 平台不支持递归监听时退化成只监听根目录。
+      state.watcher = watch(safeRoot, { persistent: false }, onChange)
+    } catch (error) {
+      throw fsError('监听工作区失败', '.', error)
+    }
+  }
+  state.watcher.on?.('error', () => closeWorkspaceWatcher(identity))
+}
+
 function registerFsWatchHandlers() {
   handle(
     'opennote:fs:watchWorkspace',
@@ -779,17 +846,11 @@ function registerFsWatchHandlers() {
       }
 
       try {
-        state.watcher = watch(safeRoot, { recursive: true, persistent: false }, onChange)
-      } catch {
-        try {
-          // 平台不支持递归监听时退化成只监听根目录。
-          state.watcher = watch(safeRoot, { persistent: false }, onChange)
-        } catch (error) {
-          workspaceWatchers.delete(identity)
-          throw fsError('监听工作区失败', '.', error)
-        }
+        await startWorkspaceWatcher(safeRoot, identity, state, onChange, schedule)
+      } catch (error) {
+        workspaceWatchers.delete(identity)
+        throw error
       }
-      state.watcher.on('error', () => closeWorkspaceWatcher(identity))
 
       // 收件箱变更检测是**独立**的一条链路：`.opennote/**` 被上面的 onChange
       // 显式跳过（避免自写自读），所以它不能复用这个 watcher，也走独立频道。

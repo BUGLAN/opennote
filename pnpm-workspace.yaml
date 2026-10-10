@@ -2,6 +2,7 @@
 # Electron and electron-builder ship install scripts that must be allowed to run,
 # otherwise `pnpm install` exits non-zero and blocks the build/package scripts.
 allowBuilds:
+  '@parcel/watcher': true
   electron: true
   electron-winstaller: true
 

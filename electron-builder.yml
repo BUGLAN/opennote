@@ -55,7 +55,18 @@ files:
   - electron/**/*
   - package.json
   # 见文件头「关于体积」：这些依赖只在构建期用，运行时不需要。
-  - '!node_modules/**/*'
+  # P1c-2 注：@parcel/watcher（工作区监听源）在 devDependencies——`pnpm dev` 直接用
+  # 它；打包版 main.cjs require 不到时自动退化回 node:fs 递归 watch（同一内核事件源，
+  # 行为一致）。将来若要打包也带上它，按下面的配方放开（spike 结论见
+  # docs/设计-同步层与索引重构-2026-10-10.md §P1c-2）：
+  #   1) 把 @parcel/watcher 与 @parcel/watcher-win32-x64 移回 dependencies
+  #      （electron-builder 的 pnpm 收集器只走 package.json 直接依赖，.pnpm 通配不生效）；
+  #   2) files 追加 'node_modules/@parcel/watcher/**/*' 与
+  #      'node_modules/@parcel/watcher-win32-x64/**/*'（闭包 picomatch/is-glob/detect-libc
+  #      也要同样处理）；
+  #   3) asarUnpack: ['**/node_modules/@parcel/watcher-win32-x64/**/*']（.node 不能从
+  #      asar 里 dlopen）；4) 发版前跑一次 --dir 构建，确认 app.asar.unpacked 里有
+  #      watcher.node。
 
 asar: true
 compression: normal
