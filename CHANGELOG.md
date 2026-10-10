@@ -23,6 +23,12 @@
 
 ### 修复
 
+- **`pnpm dev` 启动时 stderr 打一行「'watchman' 不是内部或外部命令」**（dev-only，功能无恙）。
+  `@parcel/watcher` 官方 win32 预编译二进制把 WATCHMAN 后端编译了进去，`getBackend("default")`
+  的 WATCHMAN 分支排在 WINDOWS 分支前面且同样匹配 "default"，首次订阅会 `popen` 探测
+  watchman CLI——没装的机器上 cmd 打印上述错误后正常落到 Windows 后端。现在 win32 显式
+  `backend: 'windows'` 跳过探测（macOS/Linux 路径不变：FSEvents 天然优先、unix 探测自带
+  `2>/dev/null`）。打包版不受影响（`@parcel/watcher` 仅 devDependencies，打包退化 `fs.watch`）。
 - **切换笔记时整屏闪一下（白底大图一收一放尤其明显）**，按用户点名的方案重构为**每个 tab
   一个常驻编辑器实例**。旧实现是单 CodeMirror 实例整篇换文档：切笔记一次 `changes:{0,全篇}`
   事务把所有 widget（含图片）销毁重建，每个新 `<img>` 都要重新「加载 → 解码 → 首绘」，期间

@@ -775,6 +775,12 @@ async function startWorkspaceWatcher(safeRoot, identity, state, onChange, schedu
         {
           // 元数据与依赖目录永不需要刷新；`.opennote/**` 在回调里再滤一层（双保险）。
           ignore: ['.opennote/**', 'node_modules/**', '.git/**'],
+          // win32 显式指回 windows 后端：官方 win32 预编译二进制的 `getBackend("default")`
+          // 会先命中编译进二进制的 WATCHMAN 分支（它排在 WINDOWS 分支前面、同样匹配
+          // "default"），`checkAvailable()` 于是 popen 探测 watchman CLI —— 没装 Watchman
+          // 的机器上 cmd 就往 stderr 打一行「'watchman' 不是内部或外部命令」。纯探测噪音
+          // （失败后本来就会落到 windows 后端），显式指定跳过这次探测。
+          ...(process.platform === 'win32' ? { backend: 'windows' } : {}),
         },
       )
       // 包一层 close()，与 node:fs watcher 的关闭形状对齐。
