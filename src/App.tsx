@@ -105,6 +105,7 @@ import { SidebarResizer } from "./components/SidebarResizer";
 import { StatusBar } from "./components/StatusBar";
 import { TabBar } from "./components/TabBar";
 import { setBridge } from "./editor/bridge";
+import { findImageSource, unwrapSource } from "./editor/livePreview";
 
 export default function App(): ReactNode {
   const library = useLibrary();
@@ -531,9 +532,26 @@ export default function App(): ReactNode {
       notify: (message) => notify(message),
       hasNote: (title) => Object.values(library.notes).some((note) => note.title === title),
       imageMode: () => ui.imageMode,
-      // 右键图片：编辑器把「哪张图、属于哪篇笔记」交出来，菜单与剪贴板都留在这一层。
-      // 只有一项，但它是唯一入口 —— 不给图片挂上原生菜单的桌面壳里，右键原本什么都不发生。
+      // 右键图片：编辑器把「哪张图、属于哪篇笔记、它的完整源码、被点的那一个在哪」交出来，
+      // 菜单与剪贴板都留在这一层。桌面壳里不给图片挂原生菜单，右键原本什么都不发生。
       openImageMenu: (x, y, target) => {
+        /*
+         * 拿活跃编辑器，**拿不到必须说话**。
+         *
+         * 原来是 `if (!view) return;` —— 静默失败，用户看到的是「点了没反应」，
+         * 无从判断哪里坏了。用户 2026-10-10 报的正是这个：打开笔记后点「删除图片」
+         * 没反应，切一次标签就好了（活跃实例比 `activeId` 晚报到，见 `EditorPane`
+         * 的 `registryVersion`）。现在那条路径已经修掉，这里留一句提示兜底。
+         */
+        const withActiveView = (action: (view: EditorView) => void) => () => {
+          const view = viewRef.current;
+          if (!view) {
+            notify("编辑器还没就绪，请先点一下正文再试", { kind: "danger" });
+            return;
+          }
+          action(view);
+        };
+
         openMenu(x, y, [
           {
             id: "copy-image",
@@ -545,6 +563,55 @@ export default function App(): ReactNode {
                 else notify(result.message, { kind: "danger" });
               });
             },
+          },
+          /*
+           * 「编辑图片」= 把这段源码展开，并把光标落在**引用串**上（`![说明](这里)` 的
+           * 「这里」）—— 改图片最常见的动作就是换路径，选中它可以直接粘贴新路径覆盖，
+           * 又不会把 `![]()` 这层壳一起替换掉。
+           */
+          {
+            id: "edit-image",
+            label: "编辑图片",
+            icon: "edit",
+            run: withActiveView((view) => {
+              const range = findImageSource(view.state, target.source, target.from);
+              if (!range) {
+                notify("没找到这张图片，文档可能已经改过了", { kind: "danger" });
+                return;
+              }
+              view.dispatch({
+                effects: unwrapSource.of({ from: range.from, to: range.to }),
+                selection: { anchor: range.urlFrom, head: range.urlTo },
+                scrollIntoView: true,
+              });
+              view.focus();
+            }),
+          },
+          /*
+           * 「删除图片」是「光标放到图片后面按 Backspace」那条路径的**快速版**：
+           * 那条要先拆开渲染再删，这条一步到位。
+           *
+           * 范围必须问语法树要（`findImageSource`），不能拿 `target.src` 去 `indexOf` ——
+           * 同一张图可能被引用两次，而 `![a](x.png)` 也可能只是代码块里的字面量。
+           * `target.from` 保证删的是**右键的那一个**，不是第一处。
+           */
+          {
+            id: "delete-image",
+            label: "删除图片",
+            icon: "trash",
+            danger: true,
+            run: withActiveView((view) => {
+              const range = findImageSource(view.state, target.source, target.from);
+              if (!range) {
+                notify("没找到这张图片，文档可能已经改过了", { kind: "danger" });
+                return;
+              }
+              view.dispatch({
+                changes: { from: range.from, to: range.to },
+                selection: { anchor: range.from },
+              });
+              view.focus();
+            }),
           },
         ]);
       },
