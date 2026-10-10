@@ -42,6 +42,7 @@ import {
   sharedAssetFilesIn,
 } from "../lib/clip/landing";
 import { desktopBridge } from "../desktop/bridge";
+import { fileStates } from "./fileStates";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
 import type { Folder, FolderChoice, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
 import { getUi, patchUi } from "./ui";
@@ -282,8 +283,7 @@ const autoRenameOutcomes: AutoRenameOutcome[] = [];
 
 /** Bumped by every open/close: a slow scan must never publish into a newer workspace (D02). */
 let generation = 0;
-/** Last stamp we know for a file on disk; a mismatch means somebody else edited it (D08). */
-const knownStats = new Map<Id, { size: number; mtimeMs: number }>();
+// 磁盘状态记账收口在 ./fileStates（P0 搬家；P1 升级为含内容溯源的 FileRecord）。
 /** In-flight create preflights. Writes wait for them, so a late clash cannot clobber a file (D03). */
 const createGuards = new Map<Id, Promise<void>>();
 /** Raised while reading a broken state file, surfaced once the workspace state has settled (D10). */
@@ -410,7 +410,7 @@ export interface ScanResult {
   meta: WorkspaceMeta;
   files: number;
   bytes: number;
-  /** On-disk stamps per note id, seeded into `knownStats` by open/rescan (D08). */
+  /** On-disk stamps per note id, seeded into `fileStates` by open/rescan (D08). */
   stamps: Record<Id, { size: number; mtimeMs: number }>;
 }
 
@@ -650,8 +650,7 @@ export async function initLibrary(): Promise<void> {
 
 /** Remember what the notes looked like on disk, so a later save can spot an external edit. */
 function applyStamps(stamps: ScanResult["stamps"]): void {
-  knownStats.clear();
-  for (const [id, stamp] of Object.entries(stamps)) knownStats.set(id, stamp);
+  fileStates.seedAll(stamps);
 }
 
 /** Surface a warning collected while scanning, once the new state is in place (D10). */
@@ -725,7 +724,7 @@ export async function openWorkspace(
         // UI: the next keystroke would land in a folder nobody can see (D26).
         backend = null;
         meta = { ...defaultMeta };
-        knownStats.clear();
+        fileStates.clear();
         resetWorkspaceTransients();
         invalidateSearchCache();
         setState(() => ({
@@ -882,7 +881,7 @@ export async function closeWorkspace(): Promise<void> {
   await flushMeta();
   backend = null;
   meta = { ...defaultMeta };
-  knownStats.clear();
+  fileStates.clear();
   // Snapshot throttling is per notebook, so closing releases the table (D22).
   resetWorkspaceTransients();
   invalidateSearchCache();
@@ -1034,7 +1033,7 @@ async function flushNote(id: Id): Promise<void> {
   }
   const prior = pendingWrites.get(id);
   const write = (prior?.catch(() => undefined) ?? Promise.resolve()).then(async () => {
-    const known = knownStats.get(id);
+    const known = fileStates.get(id);
     const current = await target.stat(id).catch(() => null);
     if (known && current && (current.mtimeMs !== known.mtimeMs || current.size !== known.size)) {
       const onDisk = await target.readText(id).catch(() => null);
@@ -1048,8 +1047,8 @@ async function flushNote(id: Id): Promise<void> {
     }
     await target.writeText(id, note.content);
     const after = await target.stat(id).catch(() => null);
-    if (after) knownStats.set(id, after);
-    else knownStats.delete(id);
+    if (after) fileStates.set(id, after);
+    else fileStates.delete(id);
   });
   pendingWrites.set(id, write);
   try {
@@ -2492,7 +2491,7 @@ function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): voi
     persistNoteSoon(to, 200);
   }
   remapKeyed(plainCache, replace);
-  remapKeyed(knownStats, replace);
+  fileStates.remap(replace);
   remapKeyed(lastSnapshotAt, replace);
   // 自动改名的状态也跟着走：定时器**必须按新路径重挂**（旧 id 上那个定时器的回调闭包
   // 指向的是一个已经不存在的路径），静默期/光标行/合成状态同理。
