@@ -1133,7 +1133,6 @@ export default function App(): ReactNode {
         onOpenNote={(id) => openNote(id)}
         onNewNote={(folderId) => newNote(folderId)}
         onNewFolder={(parentId) => void newFolder(parentId)}
-        onOpenSettings={() => setSettingsOpen(true)}
         onToggleSidebar={() => patchUi({ sidebarOpen: !ui.sidebarOpen })}
         onOpenWorkspace={(record) => void openRecord(record)}
         onAddLocalFolder={() => void openLocalFolder()}

@@ -296,6 +296,7 @@ const MEASURE = `
       scrollWidth: b.scrollWidth,
       clientWidth: b.clientWidth,
       height: Math.round(rect.height * 100) / 100,
+      bottomEdge: Math.round(rect.bottom * 10) / 10,
       contentLeft: Math.round(contentLeft * 10) / 10,
       contentRight: Math.round(contentRight * 10) / 10,
       width: Math.round((contentRight - contentLeft) * 10) / 10,
@@ -332,6 +333,19 @@ const MEASURE = `
       .map((el) => label(el.parentElement) + ' [' + Math.round(el.getBoundingClientRect().width) + 'px]'),
     dotVisible: !!dot && visible(dot),
     actionsInsideBar: actionsRect.right <= contentRight + 0.5 && actionsRect.left >= contentLeft - 0.5,
+    /* 侧栏脚注与底栏「同高同底」是写死的契约（--statusbar-h）：抽屉布局下侧栏
+       隐藏（mobile=false 的用例里我们关掉了抽屉），量不到就记 null、不作数。 */
+    foot: (() => {
+      const foot = document.querySelector('.sidebar__foot');
+      if (!foot || !visible(foot)) return null;
+      const r = foot.getBoundingClientRect();
+      const hasActions = Boolean(foot.querySelector('.sidebar__foot-actions'));
+      return {
+        height: Math.round(r.height * 100) / 100,
+        bottom: Math.round(r.bottom * 10) / 10,
+        noActionSlot: !hasActions,
+      };
+    })(),
   };
 `
 
@@ -350,6 +364,13 @@ function violations(result) {
   if (result.clipped.length) bad.push(`有信息项被压出半截字：${result.clipped.join(' / ')}`)
   if (result.pastInfoRight.length) bad.push(`有信息项越过信息段右边界（被裁）：${result.pastInfoRight.join(' / ')}`)
   if (actions.count < 7) bad.push(`按钮数量 ${actions.count} < 7`)
+  if (result.foot) {
+    if (Math.abs(result.foot.height - 30) > 0.6) bad.push(`侧栏脚注高度 ${result.foot.height} ≠ 30（--statusbar-h）`)
+    if (Math.abs(result.foot.bottom - result.bar.bottomEdge) > 1) {
+      bad.push(`侧栏脚注底边 ${result.foot.bottom} 与底栏底边 ${result.bar.bottomEdge} 不齐（两条底边线要连成一条）`)
+    }
+    if (!result.foot.noActionSlot) bad.push('侧栏脚注又出现了动作位 .sidebar__foot-actions（已按用户要求移除）')
+  }
   return bad
 }
 
@@ -438,6 +459,8 @@ async function run({ send, evaluate }) {
         cases.push({
           name,
           barWidth: result.bar.width,
+          barHeight: result.bar.height,
+          foot: result.foot,
           infoWidth: result.info.width,
           actionsWidth: result.actions.width,
           buttons: result.actions.count,

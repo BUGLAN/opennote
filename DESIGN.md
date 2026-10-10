@@ -273,10 +273,7 @@ components:
     borderColor: "{colors.rule}（上边框）"
     textColor: "{colors.ink-3}"
     typography: "{typography.fs-xs}"
-    note: "与 .statusbar **同高同底**：两条底边线连成一条（顶行 sidebar-head / tabbar 同为 tabbar-h 的上下镜像）。高度必须写死，靠内容撑会高 6.39px"
-  sidebar-foot-actions:
-    layout: "display: flex; align-items: center; margin-left: auto（设置按钮 22 × 22）"
-    note: "不用行内 span 包 inline-flex 按钮：那会撑出 23.39px 的行盒，把 30px 的底栏顶高"
+    note: "与 .statusbar **同高同底**：两条底边线连成一条（顶行 sidebar-head / tabbar 同为 tabbar-h 的上下镜像）。高度必须写死，靠内容撑会高 6.39px。**不放动作按钮**（2026-10-10 设置入口去重：状态栏最右那颗是同一个图标；当年「行内 span 包 inline-flex 按钮撑出 23.39px 行盒」的陷阱在 `app.css` 的 `.sidebar__foot` 注释里留了档）"
   tabbar:
     backgroundColor: "color-mix(in srgb, {colors.paper-2} 40%, {colors.paper})"
     borderColor: "{colors.rule}"

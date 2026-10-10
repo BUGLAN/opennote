@@ -28,6 +28,11 @@
   `src/components/statusbarLayout.test.ts`（源码契约：任何一档都不许隐藏按钮或保存圆点）+
   `scripts/statusbar-fit-probe.mjs`（真窗口 56 个用例 × 4 遍内容，含最窄的 356px 与 GitHub
   笔记本多出来的两颗按钮；全绿），证据 `docs/verify/A2-状态栏窄窗-作者证据.md`。
+- **侧栏脚注的「设置」按钮撤掉**（用户：「这里的设置图标就不用了，右边有相同的图标」）：
+  它和状态栏最右那颗是同一个图标、同一个动作，留一颗就够。设置仍从状态栏、命令面板
+  （`Ctrl/⌘ + K`）进入。随之退场的还有脚注动作位 `.sidebar__foot-actions` 与它那条
+  「行内 span 包 inline-flex 按钮会撑出 23.39px 行盒」的护栏单测（陷阱在 `app.css` 的
+  `.sidebar__foot` 注释里留了档）；`Sidebar` 的 `onOpenSettings` prop 一并删除。
 
 ## [0.10.0] - 2026-10-10
 

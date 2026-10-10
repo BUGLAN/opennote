@@ -42,14 +42,9 @@ describe("外壳的顶行 / 底行各自连成一条线", () => {
     // 这一条就是那次缺陷：没有 height 时，脚注被内容撑成 36.39px（状态栏 30px）。
     expect(block(app, ".sidebar__foot")).toMatch(/height:\s*var\(--statusbar-h\)/);
   });
-
-  it("脚注的动作位是 flex，不是「行内 span 包一颗 inline-flex 按钮」", () => {
-    // 行内包法会按基线对齐撑出 23.39px 的行盒（按钮自己只有 22px）——30px 的底栏里
-    // 就成了「内容比内容盒还高」，只能靠溢出到内边距里落位。
-    const actions = block(app, ".sidebar__foot-actions");
-    expect(actions).toMatch(/display:\s*flex/);
-    expect(actions).toMatch(/margin-left:\s*auto/);
-  });
+  // 脚注的动作位测试已随元素退场（2026-10-10：设置入口去重，脚注不再放按钮）。
+  // 当年的缺陷（行内 span 包 inline-flex 按钮撑出 23.39px 行盒、把 30px 底栏顶高）
+  // 在 `app.css` 的 `.sidebar__foot` 注释里留了档，将来加动作时别踩回去。
 
   it("两个高度令牌的值与 DESIGN.md 的尺寸常量一致（40px / 30px）", () => {
     expect(tokens).toMatch(/--tabbar-h:\s*40px/);

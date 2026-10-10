@@ -72,7 +72,6 @@ export interface SidebarProps {
   onOpenNote(id: Id): void;
   onNewNote(folderId?: Id | null): void;
   onNewFolder(parentId?: Id | null): void;
-  onOpenSettings(): void;
   /**
    * 头部那个「收起 / 展开」按钮。**必须是切换**：收起后头部仍然留在原地
    * （这正是它存在的意义），按钮得能把侧栏再叫回来。
@@ -405,17 +404,13 @@ export function Sidebar(props: SidebarProps): ReactNode {
         ) : null}
       </div>
 
+      {/* 脚注不再放「设置」按钮：状态栏最右那颗是同一个图标、同一个动作
+          （2026-10-10 用户反馈「这里的设置图标就不用了，右边有相同的图标」）。
+          随之退场的还有动作位 `.sidebar__foot-actions` 与它那条「22px 行盒」的护栏。 */}
       <footer className="sidebar__foot">
         <Icon name="shield" size={13} />
         <span title={props.workspace ? workspaceLocation(props.workspace) : undefined}>
           {counts.all} 篇笔记
-        </span>
-        {/* 动作位的高度是「盒模型里量得到的 22px」（`.sidebar__foot-actions`），
-            不再用行内 `<span>` 包按钮 —— 那会撑出 23.39px 的行盒，把 30px 的底栏顶高。 */}
-        <span className="sidebar__foot-actions">
-          <button className="icon-btn" title="设置" onClick={props.onOpenSettings} style={{ width: 22, height: 22 }}>
-            <Icon name="settings" size={14} />
-          </button>
         </span>
       </footer>
       </aside>

@@ -3,6 +3,12 @@
     {
       "name": "1264x829 dpr2 侧栏293 大纲closed · 真实内容",
       "barWidth": 947,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 592.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -22,6 +28,12 @@
     {
       "name": "1264x829 dpr2 侧栏293 大纲closed · 用户截图那组内容",
       "barWidth": 947,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 592.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -41,6 +53,12 @@
     {
       "name": "1264x829 dpr2 侧栏293 大纲closed · 最坏内容",
       "barWidth": 947,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 551,
       "actionsWidth": 384,
       "buttons": 7,
@@ -63,6 +81,12 @@
     {
       "name": "1264x829 dpr2 侧栏293 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 947,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 477,
       "actionsWidth": 458,
       "buttons": 9,
@@ -85,6 +109,12 @@
     {
       "name": "1264x829 dpr2 侧栏293 大纲open · 真实内容",
       "barWidth": 740,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 481,
       "actionsWidth": 247,
       "buttons": 7,
@@ -104,6 +134,12 @@
     {
       "name": "1264x829 dpr2 侧栏293 大纲open · 用户截图那组内容",
       "barWidth": 740,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 481,
       "actionsWidth": 247,
       "buttons": 7,
@@ -123,6 +159,12 @@
     {
       "name": "1264x829 dpr2 侧栏293 大纲open · 最坏内容",
       "barWidth": 740,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 481,
       "actionsWidth": 247,
       "buttons": 7,
@@ -144,6 +186,12 @@
     {
       "name": "1264x829 dpr2 侧栏293 大纲open · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 740,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 407,
       "actionsWidth": 321,
       "buttons": 9,
@@ -165,6 +213,12 @@
     {
       "name": "1264x829 dpr1 侧栏520 大纲closed · 真实内容",
       "barWidth": 972,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 617.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -184,6 +238,12 @@
     {
       "name": "1264x829 dpr1 侧栏520 大纲closed · 用户截图那组内容",
       "barWidth": 972,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 617.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -203,6 +263,12 @@
     {
       "name": "1264x829 dpr1 侧栏520 大纲closed · 最坏内容",
       "barWidth": 972,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 576,
       "actionsWidth": 384,
       "buttons": 7,
@@ -225,6 +291,12 @@
     {
       "name": "1264x829 dpr1 侧栏520 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 972,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 829,
+        "noActionSlot": true
+      },
       "infoWidth": 502,
       "actionsWidth": 458,
       "buttons": 9,
@@ -247,6 +319,12 @@
     {
       "name": "1024x800 dpr1 侧栏268 大纲closed · 真实内容",
       "barWidth": 732,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 800,
+        "noActionSlot": true
+      },
       "infoWidth": 473,
       "actionsWidth": 247,
       "buttons": 7,
@@ -266,6 +344,12 @@
     {
       "name": "1024x800 dpr1 侧栏268 大纲closed · 用户截图那组内容",
       "barWidth": 732,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 800,
+        "noActionSlot": true
+      },
       "infoWidth": 473,
       "actionsWidth": 247,
       "buttons": 7,
@@ -285,6 +369,12 @@
     {
       "name": "1024x800 dpr1 侧栏268 大纲closed · 最坏内容",
       "barWidth": 732,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 800,
+        "noActionSlot": true
+      },
       "infoWidth": 473,
       "actionsWidth": 247,
       "buttons": 7,
@@ -306,6 +396,12 @@
     {
       "name": "1024x800 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 732,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 800,
+        "noActionSlot": true
+      },
       "infoWidth": 399,
       "actionsWidth": 321,
       "buttons": 9,
@@ -327,6 +423,12 @@
     {
       "name": "1024x800 dpr1 侧栏520 大纲closed · 真实内容",
       "barWidth": 480,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 800,
+        "noActionSlot": true
+      },
       "infoWidth": 221,
       "actionsWidth": 247,
       "buttons": 7,
@@ -346,6 +448,12 @@
     {
       "name": "1024x800 dpr1 侧栏520 大纲closed · 用户截图那组内容",
       "barWidth": 480,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 800,
+        "noActionSlot": true
+      },
       "infoWidth": 221,
       "actionsWidth": 247,
       "buttons": 7,
@@ -367,6 +475,12 @@
     {
       "name": "1024x800 dpr1 侧栏520 大纲closed · 最坏内容",
       "barWidth": 480,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 800,
+        "noActionSlot": true
+      },
       "infoWidth": 221,
       "actionsWidth": 247,
       "buttons": 7,
@@ -388,6 +502,12 @@
     {
       "name": "1024x800 dpr1 侧栏520 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 480,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 800,
+        "noActionSlot": true
+      },
       "infoWidth": 147,
       "actionsWidth": 321,
       "buttons": 9,
@@ -409,6 +529,12 @@
     {
       "name": "900x700 dpr1 侧栏520 大纲closed · 真实内容",
       "barWidth": 356,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 121,
       "actionsWidth": 223,
       "buttons": 7,
@@ -428,6 +554,12 @@
     {
       "name": "900x700 dpr1 侧栏520 大纲closed · 用户截图那组内容",
       "barWidth": 356,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 121,
       "actionsWidth": 223,
       "buttons": 7,
@@ -447,6 +579,12 @@
     {
       "name": "900x700 dpr1 侧栏520 大纲closed · 最坏内容",
       "barWidth": 356,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 121,
       "actionsWidth": 223,
       "buttons": 7,
@@ -466,6 +604,12 @@
     {
       "name": "900x700 dpr1 侧栏520 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 356,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 55,
       "actionsWidth": 289,
       "buttons": 9,
@@ -485,6 +629,12 @@
     {
       "name": "900x700 dpr1 侧栏200 大纲closed · 真实内容",
       "barWidth": 676,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 417,
       "actionsWidth": 247,
       "buttons": 7,
@@ -504,6 +654,12 @@
     {
       "name": "900x700 dpr1 侧栏200 大纲closed · 用户截图那组内容",
       "barWidth": 676,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 417,
       "actionsWidth": 247,
       "buttons": 7,
@@ -523,6 +679,12 @@
     {
       "name": "900x700 dpr1 侧栏200 大纲closed · 最坏内容",
       "barWidth": 676,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 417,
       "actionsWidth": 247,
       "buttons": 7,
@@ -544,6 +706,12 @@
     {
       "name": "900x700 dpr1 侧栏200 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 676,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 343,
       "actionsWidth": 321,
       "buttons": 9,
@@ -565,6 +733,12 @@
     {
       "name": "1440x900 dpr1 侧栏268 大纲closed · 真实内容",
       "barWidth": 1148,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 900,
+        "noActionSlot": true
+      },
       "infoWidth": 793.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -584,6 +758,12 @@
     {
       "name": "1440x900 dpr1 侧栏268 大纲closed · 用户截图那组内容",
       "barWidth": 1148,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 900,
+        "noActionSlot": true
+      },
       "infoWidth": 793.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -603,6 +783,12 @@
     {
       "name": "1440x900 dpr1 侧栏268 大纲closed · 最坏内容",
       "barWidth": 1148,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 900,
+        "noActionSlot": true
+      },
       "infoWidth": 752,
       "actionsWidth": 384,
       "buttons": 7,
@@ -625,6 +811,12 @@
     {
       "name": "1440x900 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 1148,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 900,
+        "noActionSlot": true
+      },
       "infoWidth": 678,
       "actionsWidth": 458,
       "buttons": 9,
@@ -647,6 +839,12 @@
     {
       "name": "1440x900 dpr1 侧栏268 大纲open · 真实内容",
       "barWidth": 916,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 900,
+        "noActionSlot": true
+      },
       "infoWidth": 561.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -666,6 +864,12 @@
     {
       "name": "1440x900 dpr1 侧栏268 大纲open · 用户截图那组内容",
       "barWidth": 916,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 900,
+        "noActionSlot": true
+      },
       "infoWidth": 561.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -685,6 +889,12 @@
     {
       "name": "1440x900 dpr1 侧栏268 大纲open · 最坏内容",
       "barWidth": 916,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 900,
+        "noActionSlot": true
+      },
       "infoWidth": 520,
       "actionsWidth": 384,
       "buttons": 7,
@@ -707,6 +917,12 @@
     {
       "name": "1440x900 dpr1 侧栏268 大纲open · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 916,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 900,
+        "noActionSlot": true
+      },
       "infoWidth": 446,
       "actionsWidth": 458,
       "buttons": 9,
@@ -729,6 +945,12 @@
     {
       "name": "1920x1080 dpr1 侧栏268 大纲closed · 真实内容",
       "barWidth": 1628,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 1080,
+        "noActionSlot": true
+      },
       "infoWidth": 1273.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -747,6 +969,12 @@
     {
       "name": "1920x1080 dpr1 侧栏268 大纲closed · 用户截图那组内容",
       "barWidth": 1628,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 1080,
+        "noActionSlot": true
+      },
       "infoWidth": 1273.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -765,6 +993,12 @@
     {
       "name": "1920x1080 dpr1 侧栏268 大纲closed · 最坏内容",
       "barWidth": 1628,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 1080,
+        "noActionSlot": true
+      },
       "infoWidth": 1232,
       "actionsWidth": 384,
       "buttons": 7,
@@ -785,6 +1019,12 @@
     {
       "name": "1920x1080 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 1628,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 1080,
+        "noActionSlot": true
+      },
       "infoWidth": 1158,
       "actionsWidth": 458,
       "buttons": 9,
@@ -806,6 +1046,12 @@
     {
       "name": "1920x1080 dpr1 侧栏268 大纲open · 真实内容",
       "barWidth": 1396,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 1080,
+        "noActionSlot": true
+      },
       "infoWidth": 1041.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -824,6 +1070,12 @@
     {
       "name": "1920x1080 dpr1 侧栏268 大纲open · 用户截图那组内容",
       "barWidth": 1396,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 1080,
+        "noActionSlot": true
+      },
       "infoWidth": 1041.5,
       "actionsWidth": 342.5,
       "buttons": 7,
@@ -842,6 +1094,12 @@
     {
       "name": "1920x1080 dpr1 侧栏268 大纲open · 最坏内容",
       "barWidth": 1396,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 1080,
+        "noActionSlot": true
+      },
       "infoWidth": 1000,
       "actionsWidth": 384,
       "buttons": 7,
@@ -863,6 +1121,12 @@
     {
       "name": "1920x1080 dpr1 侧栏268 大纲open · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 1396,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 1080,
+        "noActionSlot": true
+      },
       "infoWidth": 926,
       "actionsWidth": 458,
       "buttons": 9,
@@ -884,6 +1148,12 @@
     {
       "name": "820x700 dpr1 侧栏268 大纲closed · 真实内容",
       "barWidth": 796,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 537,
       "actionsWidth": 247,
       "buttons": 7,
@@ -903,6 +1173,12 @@
     {
       "name": "820x700 dpr1 侧栏268 大纲closed · 用户截图那组内容",
       "barWidth": 796,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 537,
       "actionsWidth": 247,
       "buttons": 7,
@@ -922,6 +1198,12 @@
     {
       "name": "820x700 dpr1 侧栏268 大纲closed · 最坏内容",
       "barWidth": 796,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 537,
       "actionsWidth": 247,
       "buttons": 7,
@@ -943,6 +1225,12 @@
     {
       "name": "820x700 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 796,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 463,
       "actionsWidth": 321,
       "buttons": 9,
@@ -964,6 +1252,12 @@
     {
       "name": "600x700 dpr1 侧栏268 大纲closed · 真实内容",
       "barWidth": 576,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 317,
       "actionsWidth": 247,
       "buttons": 7,
@@ -983,6 +1277,12 @@
     {
       "name": "600x700 dpr1 侧栏268 大纲closed · 用户截图那组内容",
       "barWidth": 576,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 317,
       "actionsWidth": 247,
       "buttons": 7,
@@ -1002,6 +1302,12 @@
     {
       "name": "600x700 dpr1 侧栏268 大纲closed · 最坏内容",
       "barWidth": 576,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 317,
       "actionsWidth": 247,
       "buttons": 7,
@@ -1023,6 +1329,12 @@
     {
       "name": "600x700 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 576,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 243,
       "actionsWidth": 321,
       "buttons": 9,
@@ -1044,6 +1356,12 @@
     {
       "name": "380x700 dpr1 侧栏268 大纲closed · 真实内容",
       "barWidth": 356,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 121,
       "actionsWidth": 223,
       "buttons": 7,
@@ -1063,6 +1381,12 @@
     {
       "name": "380x700 dpr1 侧栏268 大纲closed · 用户截图那组内容",
       "barWidth": 356,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 121,
       "actionsWidth": 223,
       "buttons": 7,
@@ -1082,6 +1406,12 @@
     {
       "name": "380x700 dpr1 侧栏268 大纲closed · 最坏内容",
       "barWidth": 356,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 121,
       "actionsWidth": 223,
       "buttons": 7,
@@ -1101,6 +1431,12 @@
     {
       "name": "380x700 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
       "barWidth": 356,
+      "barHeight": 30,
+      "foot": {
+        "height": 30,
+        "bottom": 700,
+        "noActionSlot": true
+      },
       "infoWidth": 55,
       "actionsWidth": 289,
       "buttons": 9,
