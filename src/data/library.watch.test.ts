@@ -270,21 +270,93 @@ describe("D08 目录监听接线", () => {
     expect(scans(backend) - before).toBe(1);
   });
 
-  it("v2 载荷（带变化路径）触发重扫；其他笔记本的 v2 事件不触发", async () => {
+  it("v2 载荷（带变化路径）按路径增量刷新；其他笔记本的 v2 事件不触发", async () => {
     const bridge = installBridge();
     const backend = scenario("A", (b) => b.seed("a.md", "# a"));
     await openRecord("A");
     const before = scans(backend);
 
-    bridge.emit({ v: 2, root: rootOf("A"), changes: [{ path: "新.md", type: "add" }] });
+    // 变化的是一个不存在的路径：按路径刷新发现文件不在 ⇒ 无事发生，且不做全量重扫。
+    bridge.emit({ v: 2, root: rootOf("A"), changes: [{ path: "不存在.md", type: "add" }] });
     await vi.advanceTimersByTimeAsync(600);
     await settle();
-    expect(scans(backend) - before).toBe(1);
+    expect(scans(backend) - before).toBe(0);
 
     bridge.emit({ v: 2, root: "C:\\别的地方", changes: [{ path: "x.md", type: "update" }] });
     await vi.advanceTimersByTimeAsync(600);
     await settle();
+    expect(scans(backend) - before).toBe(0);
+  });
+
+  it("v2 按路径刷新：干净笔记被外部改动 → 采纳该文件，且不做全量重扫", async () => {
+    const bridge = installBridge();
+    const backend = scenario("A", (b) => {
+      b.seed("a.md", "# a");
+      b.seed("b.md", "# b");
+    });
+    await openRecord("A");
+    const before = scans(backend);
+
+    backend.seed("a.md", "# 外部新版本");
+    bridge.emit({ v: 2, root: rootOf("A"), changes: [{ path: "a.md", type: "update" }] });
+    await vi.advanceTimersByTimeAsync(600);
+    await settle();
+
+    expect(getLibrary().notes["a.md"]?.content).toBe("# 外部新版本");
+    expect(backend.text("a.md")).toBe("# 外部新版本");
+    expect(getLibrary().dirty["a.md"]).toBeUndefined();
+    expect(scans(backend) - before).toBe(0);
+  });
+
+  it("v2 按路径刷新：外部新增 .md 入树（父目录节点补齐）", async () => {
+    const bridge = installBridge();
+    const backend = scenario("A", (b) => b.seed("a.md", "# a"));
+    await openRecord("A");
+
+    backend.seed("新建目录/新笔记.md", "# 新笔记");
+    bridge.emit({ v: 2, root: rootOf("A"), changes: [{ path: "新建目录/新笔记.md", type: "add" }] });
+    await vi.advanceTimersByTimeAsync(600);
+    await settle();
+
+    expect(getLibrary().notes["新建目录/新笔记.md"]?.content).toBe("# 新笔记");
+    expect(getLibrary().folders["新建目录"]).toBeDefined();
+  });
+
+  it("v2 按路径刷新：外部删除 → 笔记出树", async () => {
+    const bridge = installBridge();
+    const backend = scenario("A", (b) => {
+      b.seed("a.md", "# a");
+      b.seed("b.md", "# b");
+    });
+    await openRecord("A");
+
+    backend.remove("b.md");
+    bridge.emit({ v: 2, root: rootOf("A"), changes: [{ path: "b.md", type: "delete" }] });
+    await vi.advanceTimersByTimeAsync(600);
+    await settle();
+
+    expect(getLibrary().notes["b.md"]).toBeUndefined();
+    expect(getLibrary().notes["a.md"]).toBeDefined();
+  });
+
+  it("事件批超限（git checkout 风暴）退回一次全量重扫", async () => {
+    const bridge = installBridge();
+    const backend = scenario("A", (b) => b.seed("a.md", "# a"));
+    await openRecord("A");
+    const before = scans(backend);
+
+    const changes: Array<{ path: string; type: string }> = [];
+    for (let index = 0; index < 51; index += 1) {
+      backend.seed(`风暴-${index}.md`, "# x");
+      changes.push({ path: `风暴-${index}.md`, type: "add" });
+    }
+    bridge.emit({ v: 2, root: rootOf("A"), changes });
+    await vi.advanceTimersByTimeAsync(600);
+    await settle();
+
     expect(scans(backend) - before).toBe(1);
+    expect(getLibrary().notes["风暴-0.md"]).toBeDefined();
+    expect(getLibrary().notes["风暴-50.md"]).toBeDefined();
   });
 
   it("重扫期间的更多通知只合并为一次尾随重扫", async () => {

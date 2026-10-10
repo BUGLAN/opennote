@@ -41,7 +41,7 @@ import {
   relativeAssetRef,
   sharedAssetFilesIn,
 } from "../lib/clip/landing";
-import { desktopBridge } from "../desktop/bridge";
+import { desktopBridge, type WorkspaceFileChange } from "../desktop/bridge";
 import { fileStates, type FileRecord, type FileStamp } from "./fileStates";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
 import type { Folder, FolderChoice, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
@@ -803,11 +803,17 @@ function startWatching(root: string): void {
   watchedRoot = root;
   watchUnsubscribe = fs.onWorkspaceChanged((changed) => {
     // The event is broadcast to every window: ignore other notebooks.
-    // v2 载荷带变化路径：P2 起按路径增量刷新；当前真外部事件仍走一次重扫——
-    // 应用自己的写入已在主进程源头过滤，打字不再触发重扫（卡顿的根）。
+    // v2 载荷带变化路径 → 按路径增量刷新（成本 ∝ 变化文件数）；拿不到路径
+    // （旧载荷/平台不给文件名）→ 整库重扫兜底。
     const root = typeof changed === "string" ? changed : (changed?.root ?? "");
     if (!sameRoot(root, watchedRoot)) return;
-    scheduleWatchRescan();
+    const target = backend;
+    const changes = typeof changed === "string" ? null : (changed?.changes ?? null);
+    if (!target || !changes || changes.length === 0) {
+      scheduleWatchRescan();
+      return;
+    }
+    queuePathRefresh(target, changes);
   });
   void fs.watchWorkspace(root).catch((error) => {
     console.warn("[opennote] 无法监听工作区变化", error);
@@ -871,6 +877,100 @@ async function runWatchRescan(): Promise<void> {
   } finally {
     watchRescanRunning = false;
   }
+}
+
+/**
+ * 按路径增量刷新（P2a）：v2 事件只重读变化的文件，不再整库重扫——
+ * 外部事件的处理成本 ∝ 变化的文件数，与库的总大小无关（D7）。
+ *
+ * 处置与 flushNote 的保存前检查同源（`reconcileExternalChange`，磁盘赢 D3）：
+ *   - 干净笔记被外部改了 → 直接采纳磁盘（编辑器重载保光标），不占前像；
+ *   - dirty 笔记被外部改了 → 未保存文本进隐藏前像，然后采纳磁盘；
+ *   - 磁盘上还是我们自己写的上一版（自写过滤漏网）→ 我的赢，照常走保存；
+ *   - 新 .md → 入树（父目录节点一并补）；已知笔记消失 → 出树并关标签。
+ *
+ * 兜底：一次事件批超过 PATH_REFRESH_LIMIT（git checkout 这类风暴）、拿不到路径、
+ * 或处理中出任何错 → 退回一次整库重扫（rescanWorkspace）。
+ */
+const PATH_REFRESH_LIMIT = 50;
+let pathRefreshTail: Promise<void> = Promise.resolve();
+
+function queuePathRefresh(target: FileSystemBackend, changes: WorkspaceFileChange[]): void {
+  pathRefreshTail = pathRefreshTail
+    .then(() => refreshPaths(target, changes))
+    .catch((error) => {
+      console.warn("[opennote] 按路径刷新失败，退回整库重扫", error);
+      void rescanWorkspace().catch(() => undefined);
+    });
+}
+
+async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileChange[]): Promise<void> {
+  const myGen = generation;
+  if (backend !== target) return;
+  const md = changes.filter((change) => isMarkdownPath(change.path));
+  const dirs = changes.filter((change) => !isMarkdownPath(change.path) && !isHiddenPath(change.path) && change.type !== "delete");
+  if (md.length > PATH_REFRESH_LIMIT) {
+    await rescanWorkspace();
+    return;
+  }
+  for (const change of md) {
+    if (myGen !== generation || backend !== target) return;
+    const id = change.path;
+    const known = libraryStore.get().notes[id] ?? libraryStore.get().trash[id];
+    const exists = await target.exists(id).catch(() => false);
+    if (!exists) {
+      if (known) {
+        // 外部删除：出树、关标签、清记录。历史快照留在磁盘上（purge 才真正删）。
+        setState((prev) => {
+          const notes = { ...prev.notes };
+          delete notes[id];
+          const trash = { ...prev.trash };
+          delete trash[id];
+          return { ...prev, notes, trash };
+        });
+        fileStates.delete(id);
+        invalidateSearchCache(id);
+        closeTab(id);
+        reconcileTabs();
+      }
+      continue;
+    }
+    const stat = await target.stat(id).catch(() => null);
+    const onDisk = stat === null ? null : await target.readText(id).catch(() => null);
+    if (stat === null || onDisk === null) continue;
+    if (known) {
+      const dirty = Boolean(libraryStore.get().dirty[id]);
+      if (!dirty) {
+        // 干净：磁盘为准，直接采纳（不占前像——旧版本本就在历史里）。
+        adoptExternal(id, onDisk, stat);
+        continue;
+      }
+      const latest = libraryStore.get().notes[id] ?? libraryStore.get().trash[id];
+      await reconcileExternalChange(id, { content: onDisk, stat }, fileStates.get(id), latest?.content ?? known.content);
+      continue;
+    }
+    // 新笔记：入树（父目录节点一并补，与 restoreNote 同款）。
+    const note = makeNote(id, onDisk, stat.mtimeMs);
+    patchNotes((notes) => ({ ...notes, [id]: note }));
+    for (const ancestor of ancestorPaths(id)) {
+      if (!libraryStore.get().folders[ancestor]) {
+        patchFolders((folders) => ({ ...folders, [ancestor]: makeFolder(ancestor, Date.now()) }));
+      }
+      expandFolder(ancestor);
+    }
+    fileStates.adoptFromDisk(id, onDisk, stat);
+    invalidateSearchCache(id);
+  }
+  // 非 md 的新增目录（外部建了个空文件夹）：补个节点，树里看得见。目录删除不处理
+  //（纯装饰性，下一次全量重扫自会清）。
+  for (const change of dirs) {
+    if (myGen !== generation || backend !== target) return;
+    if (change.type === "delete") continue;
+    if (libraryStore.get().folders[change.path]) continue;
+    if (!(await target.exists(change.path).catch(() => false))) continue;
+    patchFolders((folders) => ({ ...folders, [change.path]: makeFolder(change.path, Date.now()) }));
+  }
+  reconcileTabs();
 }
 
 export async function closeWorkspace(): Promise<void> {
