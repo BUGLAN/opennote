@@ -303,6 +303,11 @@ components:
     height: "{layout.statusbar-h}"
     textColor: "{colors.ink-3}"
     typography: "{typography.fs-xs}"
+    container: "statusbar / inline-size —— 降级的判定轴是底栏自己的宽度，不是视口"
+  statusbar-info:
+    layout: "flex: 1 1 auto + min-width: 0 + overflow: hidden —— 唯一会被压缩的一段"
+  statusbar-actions:
+    layout: "flex: none —— 永不收缩：按钮在任何宽度下都完整可见（硬约束）"
   statusbar-item:
     height: 20px
     padding: "0 6px"
@@ -312,6 +317,10 @@ components:
   statusbar-item-on:
     backgroundColor: "{colors.accent-soft}"
     textColor: "{colors.accent}"
+  statusbar-label:
+    layout: "按钮里的文字；≤860px 只丢这一段，图标 + title / aria-label 都还在"
+  statusbar-ellipsis:
+    layout: "长文本（存放位置 / 当前文件夹）唯一允许收缩的两段：overflow: hidden + text-overflow: ellipsis"
   statusbar-dot:
     size: 6px
     rounded: "{rounded.full}"
@@ -1058,7 +1067,7 @@ font-variation-settings: "SOFT" 40, "WONK" 1;
 | `--sidebar-w` | 268px | 展开态侧栏的**默认**宽度。用户在右边框拖拽后由 `applyUi()` 写成内联值（夹取 200–520px）。≤820px 变 `min(84vw, 320px)` 浮层 |
 | `--outline-w` | 232px | 大纲面板。≤1080px 整个隐藏 |
 | `--tabbar-h` | 40px | 标签栏高度。**侧栏头部也是它**（`height: var(--tabbar-h)`），两条底边线连成一条 |
-| `--statusbar-h` | 30px | **底行两条底栏共用的高度**：`.statusbar` 与侧栏脚注 `.sidebar__foot`。两条底边线靠它连成一条（顶行靠 `--tabbar-h`，同一个原则的上下镜像）。内容多时靠 `.statusbar__item--compact` 隐藏降级 |
+| `--statusbar-h` | 30px | **底行两条底栏共用的高度**：`.statusbar` 与侧栏脚注 `.sidebar__foot`。两条底边线靠它连成一条（顶行靠 `--tabbar-h`，同一个原则的上下镜像）。内容多时**按底栏自身宽度**分档隐藏信息项（`@container statusbar`，见 §Responsive · 状态栏降级），按钮一颗都不许被裁 |
 | `--titlebar-inset` | 148px | **仅桌面端**：为 Windows/Linux 压右上角的原生窗口按钮留的宽度。见下 |
 
 **桌面窗口的硬约束**（`electron/main.cjs`，改布局时必须知道）：
@@ -1584,11 +1593,15 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 
 ## Responsive Behavior · 响应式
 
-### 断点（全项目只有 5 个，不要新增）
+### 断点（视口断点只有 4 个，不要新增）
+
+> 状态栏**不占视口断点**：它的降级按**底栏自己的宽度**判（`@container statusbar`，见下一节
+> 「状态栏降级」）。曾经它挂在 `≤1180px` 这条视口断点上，可底栏住在 `.main` 里，
+> 宽度 = 视口 − 侧栏（200–520）− 大纲（232）—— 视口 1264px 时它只剩 971px，
+> 断点却不触发，右侧按钮被 `overflow: hidden` 整颗裁掉（2026-10-10 用户截图）。
 
 | 断点 | 出处 | 变化 |
 | --- | --- | --- |
-| `≤1180px` | `app.css` | `.statusbar__item--compact` 隐藏（状态栏减少次要项，避免挤成两行） |
 | `≤1080px` | `app.css` | `.outline` 整个隐藏（`display: none`） |
 | `≤900px` | `clip.css` | 剪藏页两栏改上下堆叠，分隔线从「预览栏的右边」挪成「它的下边」 |
 | `≤820px` | `app.css` | `.app` 变两列（`[头部][标签栏]` / `[编辑器+状态栏]` 两行）；`.sidebar` 变 `position: fixed` 抽屉，从**顶行下面**（`top: var(--tabbar-h)`）滑出（`min(84vw, 320px)` + `--shadow-3` + `translateX`，`z-index: 58`，`display: flex` 保留动画）；`.sidebar__head` 宽 `auto` 且 `max-width: 46vw`（窄屏不挤掉标签栏）；`.sidebar__resizer` `display: none`；`.scrim--drawer` 让开顶行；`.app.is-sidebar-open` 显示 `.scrim--menu` |
@@ -1607,7 +1620,28 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 - **对话框**：宽度一律 `min(Npx, calc(100vw - 32px))`，**永远不横向溢出**。
 - **命令面板**：`min(620px, calc(100vw - 32px))`，高 `min(66vh, 640px)`。位置**顶部锚定**在上边距 `max(24px, 17vh)`（17vh + 66vh = 83vh，底部永不越界），不随结果条数居中浮动 —— 居中会让输入框在打字时上下跑。
 - **正文**：`--measure` 由用户控制，窄屏时 `100%` 生效（`46rem` 在 360px 屏上是溢出宽度，但正文容器不会被撑破，因为 `.prose` 有 `overflow-wrap: break-word`）。
-- **状态栏**：不换行（`flex-wrap: nowrap` + `overflow: hidden`），靠逐个 `display: none` 降级。
+- **状态栏**：不换行（`flex-wrap: nowrap` + `overflow: hidden`），按**底栏自身宽度**分档降级（见下）。
+
+#### 状态栏降级（用户 2026-10-10：右侧按钮被裁、点不到）
+
+两条腿，缺一不可：
+
+1. **结构**：按钮组 `.statusbar__actions` 是 `flex: none`，信息组 `.statusbar__info` 是唯一会被压缩的一段（`flex: 1 1 auto` + `min-width: 0` + `overflow: hidden`）。信息组可以被压到 0，**所以按钮在任何宽度下都完整可见** —— 这一条与阈值标定准不准无关，是硬保证。
+2. **分档**：`@container statusbar (max-width: …)` 按底栏自己的宽度整项隐藏信息，避免出现被省略号啃过的半截字。判定轴是底栏宽度（容器查询），不是视口。
+
+| 档（底栏内容盒宽 ≤） | 隐藏 | 依据（用户截图那组内容，px） |
+| --- | --- | --- |
+| 1180 | 「510 个文件」+ 字数统计（`.statusbar__item--compact`） | 全量内容约 1213px，放不下这两个数字（与旧版 1180 断点同档，只是换了判定轴） |
+| 900 | 加上「当前文件夹」 | 再挤就要靠省略号啃路径了（+72px） |
+| 860 | 加上按钮文字（`.statusbar__label`；只剩图标 + `title` / `aria-label`） | 7 颗带字按钮 342px ↔ 纯图标 247px（GitHub 笔记本再多两颗 +74px） |
+| 720 | 加上光标行列、保存状态里的「· N 分钟前」 | +112px |
+| 420 | 加上存放位置 | |
+| 400 | 保存状态只留圆点（`title` 说全文），并把两组间距收到 `--s2` | 「窗口 900 + 侧栏 520」= 底栏 356px，9 颗图标（GitHub 笔记本）+ 圆点约 320px |
+
+- **任何一档都不许隐藏按钮或保存圆点**：这条是源码契约，由 `src/components/statusbarLayout.test.ts` 守着（逐个 `@container` 块断言没有 `--button` / `.statusbar__dot`）。
+- **允许省略号的两项**：存放位置、当前文件夹（`.statusbar__ellipsis`，`flex: 0 1 auto; min-width: 0`）。其余信息项 `flex: none`，所以「谁会被省略号啃」是确定的。
+- **降级后仍然可达**：每个按钮都有 `title` 与 `aria-label`；全部动作都在命令面板（`Ctrl/⌘ + K`）里有同名条目，键盘快捷键不变（大纲 `⇧⌘O`、打字机 `⇧⌘Y`、专注 `⇧⌘D`、夜读 `⌥⌘T`）。
+- **几何验收**：`node scripts/statusbar-fit-probe.mjs --launch`（56 个用例 × 4 遍内容，任一违规退出码 1），证据在 `docs/verify/A2-状态栏窄窗-作者证据.md`。
 
 ### 触摸与命中
 
@@ -1660,7 +1694,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 | 对象 | 约定 | 例子 |
 | --- | --- | --- |
 | 组件类名 | `block__element`（BEM：块与元素两段） | `.tree__row`、`.dialog__body`、`.settings__tab` |
-| 结构性变体 | 独立类 `block--modifier`：**只用于结构 / 尺寸变体，不用于状态** | `.dialog--wide`、`.btn--primary`、`.tree__row--stacked`、`.statusbar__item--compact` |
+| 结构性变体 | 独立类 `block--modifier`：**只用于结构 / 尺寸变体，不用于状态** | `.dialog--wide`、`.btn--primary`、`.tree__row--stacked`、`.statusbar__item--compact`、`.statusbar__item--folder` |
 | 状态 | 另一套独立类，前缀一律 `is-` | `.tree__row.is-active`、`.sidebar.is-collapsed`、`.inbox__item.is-error` |
 | 组合类名 | 用 `cn()`，不要字符串拼接 | `cn("tab", active && "is-active")` |
 | 私有类（不参与主题） | 只用一次的类可以只由既有令牌拼，不必进 §Components | `.dinkus`、`.swatch__dot` |

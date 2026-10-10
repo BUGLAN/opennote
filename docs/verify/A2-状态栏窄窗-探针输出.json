@@ -1,0 +1,1143 @@
+{
+  "cases": [
+    {
+      "name": "1264x829 dpr2 侧栏293 大纲closed · 真实内容",
+      "barWidth": 947,
+      "infoWidth": 592.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--folder | — [42px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [86px]",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1 [64px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr2 侧栏293 大纲closed · 用户截图那组内容",
+      "barWidth": 947,
+      "infoWidth": 592.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--folder | Agent 产出 [86px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [136px]",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1 [71px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr2 侧栏293 大纲closed · 最坏内容",
+      "barWidth": 947,
+      "infoWidth": 551,
+      "actionsWidth": 384,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [125px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [67px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [105px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [47px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr2 侧栏293 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 947,
+      "infoWidth": 477,
+      "actionsWidth": 458,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [75px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [43px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [57px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [24px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr2 侧栏293 大纲open · 真实内容",
+      "barWidth": 740,
+      "infoWidth": 481,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--folder | —",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [86px]",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1 [64px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr2 侧栏293 大纲open · 用户截图那组内容",
+      "barWidth": 740,
+      "infoWidth": 481,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--folder | Agent 产出",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [136px]",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1 [71px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr2 侧栏293 大纲open · 最坏内容",
+      "barWidth": 740,
+      "infoWidth": 481,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [134px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [114px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr2 侧栏293 大纲open · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 740,
+      "infoWidth": 407,
+      "actionsWidth": 321,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [60px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [42px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr1 侧栏520 大纲closed · 真实内容",
+      "barWidth": 972,
+      "infoWidth": 617.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--folder | — [42px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [86px]",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1 [64px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr1 侧栏520 大纲closed · 用户截图那组内容",
+      "barWidth": 972,
+      "infoWidth": 617.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--folder | Agent 产出 [86px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [136px]",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1 [71px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr1 侧栏520 大纲closed · 最坏内容",
+      "barWidth": 972,
+      "infoWidth": 576,
+      "actionsWidth": 384,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [142px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [76px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [121px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [55px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1264x829 dpr1 侧栏520 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 972,
+      "infoWidth": 502,
+      "actionsWidth": 458,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [92px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [51px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [73px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [32px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1024x800 dpr1 侧栏268 大纲closed · 真实内容",
+      "barWidth": 732,
+      "infoWidth": 473,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--folder | —",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [86px]",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1 [64px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1024x800 dpr1 侧栏268 大纲closed · 用户截图那组内容",
+      "barWidth": 732,
+      "infoWidth": 473,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--folder | Agent 产出",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [136px]",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1 [71px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1024x800 dpr1 侧栏268 大纲closed · 最坏内容",
+      "barWidth": 732,
+      "infoWidth": 473,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [126px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [106px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1024x800 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 732,
+      "infoWidth": 399,
+      "actionsWidth": 321,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [52px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [34px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1024x800 dpr1 侧栏520 大纲closed · 真实内容",
+      "barWidth": 480,
+      "infoWidth": 221,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--folder | —",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [81px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1024x800 dpr1 侧栏520 大纲closed · 用户截图那组内容",
+      "barWidth": 480,
+      "infoWidth": 221,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--folder | Agent 产出",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [117px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [81px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [91px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1024x800 dpr1 侧栏520 大纲closed · 最坏内容",
+      "barWidth": 480,
+      "infoWidth": 221,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中 "
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [117px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [81px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [97px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1024x800 dpr1 侧栏520 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 480,
+      "infoWidth": 147,
+      "actionsWidth": 321,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中 "
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [43px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [81px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [25px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "900x700 dpr1 侧栏520 大纲closed · 真实内容",
+      "barWidth": 356,
+      "infoWidth": 121,
+      "actionsWidth": 223,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本",
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--folder | —",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [18px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "900x700 dpr1 侧栏520 大纲closed · 用户截图那组内容",
+      "barWidth": 356,
+      "infoWidth": 121,
+      "actionsWidth": 223,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes",
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--folder | Agent 产出",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [18px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "900x700 dpr1 侧栏520 大纲closed · 最坏内容",
+      "barWidth": 356,
+      "infoWidth": 121,
+      "actionsWidth": 223,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes",
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中 "
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [18px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "900x700 dpr1 侧栏520 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 356,
+      "infoWidth": 55,
+      "actionsWidth": 289,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes",
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中 "
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [18px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "900x700 dpr1 侧栏200 大纲closed · 真实内容",
+      "barWidth": 676,
+      "infoWidth": 417,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--folder | —",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [81px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "900x700 dpr1 侧栏200 大纲closed · 用户截图那组内容",
+      "barWidth": 676,
+      "infoWidth": 417,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--folder | Agent 产出",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [81px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "900x700 dpr1 侧栏200 大纲closed · 最坏内容",
+      "barWidth": 676,
+      "infoWidth": 417,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中 "
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [300px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [81px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [275px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "900x700 dpr1 侧栏200 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 676,
+      "infoWidth": 343,
+      "actionsWidth": 321,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中 "
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [239px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [81px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [215px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1440x900 dpr1 侧栏268 大纲closed · 真实内容",
+      "barWidth": 1148,
+      "infoWidth": 793.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--folder | — [42px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [86px]",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1 [64px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1440x900 dpr1 侧栏268 大纲closed · 用户截图那组内容",
+      "barWidth": 1148,
+      "infoWidth": 793.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--folder | Agent 产出 [86px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [136px]",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1 [71px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1440x900 dpr1 侧栏268 大纲closed · 最坏内容",
+      "barWidth": 1148,
+      "infoWidth": 752,
+      "actionsWidth": 384,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [260px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [134px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [236px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [109px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1440x900 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 1148,
+      "infoWidth": 678,
+      "actionsWidth": 458,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [210px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [109px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [187px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [87px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1440x900 dpr1 侧栏268 大纲open · 真实内容",
+      "barWidth": 916,
+      "infoWidth": 561.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--folder | — [42px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [86px]",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1 [64px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1440x900 dpr1 侧栏268 大纲open · 用户截图那组内容",
+      "barWidth": 916,
+      "infoWidth": 561.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--folder | Agent 产出 [86px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [136px]",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1 [71px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1440x900 dpr1 侧栏268 大纲open · 最坏内容",
+      "barWidth": 916,
+      "infoWidth": 520,
+      "actionsWidth": 384,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [104px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [57px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [85px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [38px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1440x900 dpr1 侧栏268 大纲open · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 916,
+      "infoWidth": 446,
+      "actionsWidth": 458,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [54px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [33px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [36px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [15px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1920x1080 dpr1 侧栏268 大纲closed · 真实内容",
+      "barWidth": 1628,
+      "infoWidth": 1273.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--compact | 0 个文件 [57px]",
+        "statusbar__item.statusbar__item--folder | — [42px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [86px]",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟 [131px]",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1 [64px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1920x1080 dpr1 侧栏268 大纲closed · 用户截图那组内容",
+      "barWidth": 1628,
+      "infoWidth": 1273.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--compact | 510 个文件 [71px]",
+        "statusbar__item.statusbar__item--folder | Agent 产出 [86px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [136px]",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 · [179px]",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1 [71px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1920x1080 dpr1 侧栏268 大纲closed · 最坏内容",
+      "barWidth": 1628,
+      "infoWidth": 1232,
+      "actionsWidth": 384,
+      "buttons": 7,
+      "hiddenInfo": [],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [300px]",
+        "statusbar__item.statusbar__item--compact | 9,999 个文件 [81px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [213px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符 [208px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [275px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1920x1080 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 1628,
+      "infoWidth": 1158,
+      "actionsWidth": 458,
+      "buttons": 9,
+      "hiddenInfo": [],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [300px]",
+        "statusbar__item.statusbar__item--compact | 9,999 个文件 [81px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [187px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符 [208px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [275px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [159px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1920x1080 dpr1 侧栏268 大纲open · 真实内容",
+      "barWidth": 1396,
+      "infoWidth": 1041.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--compact | 0 个文件 [57px]",
+        "statusbar__item.statusbar__item--folder | — [42px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [86px]",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟 [131px]",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1 [64px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1920x1080 dpr1 侧栏268 大纲open · 用户截图那组内容",
+      "barWidth": 1396,
+      "infoWidth": 1041.5,
+      "actionsWidth": 342.5,
+      "buttons": 7,
+      "hiddenInfo": [],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--compact | 510 个文件 [71px]",
+        "statusbar__item.statusbar__item--folder | Agent 产出 [86px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [136px]",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 · [179px]",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1 [71px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "1920x1080 dpr1 侧栏268 大纲open · 最坏内容",
+      "barWidth": 1396,
+      "infoWidth": 1000,
+      "actionsWidth": 384,
+      "buttons": 7,
+      "hiddenInfo": [],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [216px]",
+        "statusbar__item.statusbar__item--compact | 9,999 个文件 [81px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [112px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符 [208px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [194px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [90px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "1920x1080 dpr1 侧栏268 大纲open · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 1396,
+      "infoWidth": 926,
+      "actionsWidth": 458,
+      "buttons": 9,
+      "hiddenInfo": [],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [167px]",
+        "statusbar__item.statusbar__item--compact | 9,999 个文件 [81px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [88px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符 [208px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [145px]",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置 [67px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "820x700 dpr1 侧栏268 大纲closed · 真实内容",
+      "barWidth": 796,
+      "infoWidth": 537,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--folder | —",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [86px]",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1 [64px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "820x700 dpr1 侧栏268 大纲closed · 用户截图那组内容",
+      "barWidth": 796,
+      "infoWidth": 537,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--folder | Agent 产出",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [136px]",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1 [71px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "820x700 dpr1 侧栏268 大纲closed · 最坏内容",
+      "barWidth": 796,
+      "infoWidth": 537,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [190px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [168px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "820x700 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 796,
+      "infoWidth": 463,
+      "actionsWidth": 321,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [116px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [143px]",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中  [168px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [96px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "600x700 dpr1 侧栏268 大纲closed · 真实内容",
+      "barWidth": 576,
+      "infoWidth": 317,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--folder | —",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本 [98px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [81px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "600x700 dpr1 侧栏268 大纲closed · 用户截图那组内容",
+      "barWidth": 576,
+      "infoWidth": 317,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--folder | Agent 产出",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [155px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [81px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "600x700 dpr1 侧栏268 大纲closed · 最坏内容",
+      "barWidth": 576,
+      "infoWidth": 317,
+      "actionsWidth": 247,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中 "
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [213px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [81px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [190px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "600x700 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 576,
+      "infoWidth": 243,
+      "actionsWidth": 321,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中 "
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [139px]",
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [81px]"
+      ],
+      "ellipsized": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes [118px]"
+      ],
+      "bad": []
+    },
+    {
+      "name": "380x700 dpr1 侧栏268 大纲closed · 真实内容",
+      "barWidth": 356,
+      "infoWidth": 121,
+      "actionsWidth": 223,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--path | 未打开笔记本",
+        "statusbar__item.statusbar__item--compact | 0 个文件",
+        "statusbar__item.statusbar__item--folder | —",
+        "statusbar__item.statusbar__item--compact | 0 字 · 0 字符 · 约 0 分钟",
+        "statusbar__item.statusbar__item--cursor | 行 1 · 列 1"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--save | 已写入磁盘 [18px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "380x700 dpr1 侧栏268 大纲closed · 用户截图那组内容",
+      "barWidth": 356,
+      "infoWidth": 121,
+      "actionsWidth": 223,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes",
+        "statusbar__item.statusbar__item--compact | 510 个文件",
+        "statusbar__item.statusbar__item--folder | Agent 产出",
+        "statusbar__item.statusbar__item--compact | 2,128 字 · 2,457 字符 ·",
+        "statusbar__item.statusbar__item--cursor | 行 25 · 列 1"
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 7 分钟前 [18px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "380x700 dpr1 侧栏268 大纲closed · 最坏内容",
+      "barWidth": 356,
+      "infoWidth": 121,
+      "actionsWidth": 223,
+      "buttons": 7,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes",
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中 "
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [18px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    },
+    {
+      "name": "380x700 dpr1 侧栏268 大纲closed · 最坏内容 + GitHub 两颗按钮",
+      "barWidth": 356,
+      "infoWidth": 55,
+      "actionsWidth": 289,
+      "buttons": 9,
+      "hiddenInfo": [
+        "statusbar__item.statusbar__item--path | 本机磁盘 · E:\\repo\\notes",
+        "statusbar__item.statusbar__item--compact | 9,999 个文件",
+        "statusbar__item.statusbar__item--folder | 一个很长很长的文件夹名字要占位置",
+        "statusbar__item.statusbar__item--compact | 12,345 字 · 98,765 字符",
+        "statusbar__item.statusbar__item--cursor | 行 1,234 · 列 99 · 选中 "
+      ],
+      "visibleInfo": [
+        "statusbar__item.statusbar__item--save | 已写入磁盘 · 59 分钟前 [18px]"
+      ],
+      "ellipsized": [],
+      "bad": []
+    }
+  ],
+  "failures": 0,
+  "shots": [
+    "docs\\verify\\A2-shots\\user-screenshot-sb293-real.png",
+    "docs\\verify\\A2-shots\\user-screenshot-sb293-user.png",
+    "docs\\verify\\A2-shots\\user-screenshot-sb293-worst.png",
+    "docs\\verify\\A2-shots\\user-screenshot-sb293-github.png",
+    "docs\\verify\\A2-shots\\user-screenshot-sb293-outline-real.png",
+    "docs\\verify\\A2-shots\\user-screenshot-sb293-outline-user.png",
+    "docs\\verify\\A2-shots\\user-screenshot-sb293-outline-worst.png",
+    "docs\\verify\\A2-shots\\user-screenshot-sb293-outline-github.png",
+    "docs\\verify\\A2-shots\\user-narrow-sidebar-max-sb520-user.png",
+    "docs\\verify\\A2-shots\\user-narrow-sidebar-max-sb520-worst.png",
+    "docs\\verify\\A2-shots\\w1024-sb268-user.png",
+    "docs\\verify\\A2-shots\\w1024-sb268-worst.png",
+    "docs\\verify\\A2-shots\\floor-900-sidebar-520-sb520-user.png",
+    "docs\\verify\\A2-shots\\floor-900-sidebar-520-sb520-worst.png",
+    "docs\\verify\\A2-shots\\floor-900-sidebar-520-sb520-github.png",
+    "docs\\verify\\A2-shots\\mobile-820-sb268-user.png",
+    "docs\\verify\\A2-shots\\mobile-820-sb268-worst.png",
+    "docs\\verify\\A2-shots\\mobile-380-sb268-user.png",
+    "docs\\verify\\A2-shots\\mobile-380-sb268-worst.png"
+  ]
+}

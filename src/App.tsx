@@ -1322,7 +1322,8 @@ export default function App(): ReactNode {
         <StatusBar
           counts={counts}
           dirty={activeId ? Boolean(library.dirty[activeId]) : false}
-          savedLabel={library.lastSavedAt ? `已写入磁盘 · ${formatRelativeTime(library.lastSavedAt)}` : "已写入磁盘"}
+          savedLabel="已写入磁盘"
+          savedAgo={library.lastSavedAt ? formatRelativeTime(library.lastSavedAt) : null}
           cursor={cursor}
           settings={ui}
           locationLabel={locationLabel}

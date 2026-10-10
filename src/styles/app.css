@@ -990,6 +990,19 @@ mark.hit {
 
 /* ------------------------------ status bar ------------------------------ */
 
+/**
+ * 底栏的窄窗降级按**它自己的宽度**判（`@container statusbar`），不按视口 ——
+ * 它住在 `.main` 里，宽度 = 视口 − 侧栏（200~520，可拖）− 大纲（232）：2026-10-10 用户截图
+ * 那组参数（视口 1264 @2x、侧栏 293）下它只有 971px，内容要 1170px，而当时的
+ * `@media (max-width: 1180px)` 判的是视口 1264 > 1180 → 不降级 → `overflow: hidden`
+ * 把最右边的「历史 / 夜读 / 设置」整颗裁掉、点不到。
+ *
+ * 两道保险，缺一不可：
+ * ① **结构**：按钮组 `flex: none`、信息组 `min-width: 0` + `overflow: hidden` ——
+ *    信息组可以被压到 0，所以**按钮在任何宽度下都不会被裁**，与断点标定准不准无关；
+ * ② **分档**：`@container` 按底栏宽度整项隐藏信息，避免出现「本机磁盘 · E:\rep…」这种
+ *    被省略号啃过的半截字（唯一允许截断的是那两段长文本：存放位置、当前文件夹）。
+ */
 .statusbar {
   display: flex;
   align-items: center;
@@ -1003,6 +1016,27 @@ mark.hit {
   user-select: none;
   flex-wrap: nowrap;
   overflow: hidden;
+  /* 降级基准 = 底栏自己的内容盒宽度（`:has()` 已在用，容器查询同支持档） */
+  container: statusbar / inline-size;
+}
+
+/* 信息段：唯一会被压缩的一段。`min-width: 0` 让它能缩到 0，`overflow: hidden` 让
+   溢出发生在**它内部**（被啃掉的只会是右侧那两颗度量），而不是把按钮顶出去。 */
+.statusbar__info {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 按钮段：永不收缩、永不换行 —— 「必要的东西必须显示出来」就落在这一条上 */
+.statusbar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex: none;
 }
 
 .statusbar__spacer {
@@ -1023,19 +1057,88 @@ mark.hit {
   white-space: nowrap;
 }
 
-/* 存储位置可能很长（本机路径 / OPFS 名称）：省略号而不是把底栏挤成两行 */
+/* 两段长文本（存放位置 / 当前文件夹）是**唯一允许收缩、允许省略号**的信息项：
+   它们可以被压缩甚至消失，来保住右边的数字与保存状态。其余信息项一律 `flex: none`，
+   所以「谁会被省略号啃」是确定的。 */
 .statusbar__item--path {
+  flex: 0 1 auto;
   min-width: 0;
   max-width: 300px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: block;
-  line-height: 20px;
 }
 
-@media (max-width: 1180px) {
+.statusbar__item--folder {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 220px;
+}
+
+/* 省略号必须落在**块级**盒子上：`.statusbar__item` 是 inline-flex，直接给它
+   `text-overflow` 不生效；而给「图标 + 文字」的项设 `display: block`，块级 svg 会把
+   文字挤进匿名块，省略号同样不生效。所以文字单独包一层。 */
+.statusbar__ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 按钮里的文字：窄窗只丢这一段，图标 + `title` + `aria-label` 都还在 */
+.statusbar__label {
+  white-space: nowrap;
+}
+
+/* ---- 分档降级（底栏自身宽度，内容盒）-------------------------------------
+ * 阈值的选法：拿用户截图那组真实内容（路径 ~194px、510 个文件 ~63、Agent 产出 ~72、
+ * 「已写入磁盘 · 7 分钟前」~121、字数 ~183、行列 ~76、7 颗带字按钮 ~342（GitHub 笔记本
+ * 再多两颗，+74px）逐档量，
+ * 让每一档在**放不下之前**就触发；两段长文本（存放位置、当前文件夹）允许先被省略号压缩，
+ * 所以阈值不必贴到极限。GitHub 笔记本会多两颗按钮（+74px），阈值按最宽的那种情况定。
+ * 实测量与复跑命令在 `docs/verify/A2-状态栏窄窗-作者证据.md`（`scripts/statusbar-fit-probe.mjs`）。
+ * 逐档只丢信息，绝不丢按钮：任何一条规则都不许碰 `.statusbar__item--button`。 */
+@container statusbar (max-width: 1180px) {
+  /* 两个数字最先让位（与旧版那条 `@media (max-width: 1180px)` 同一档，只是换了判定轴） */
   .statusbar__item--compact {
     display: none;
+  }
+}
+
+@container statusbar (max-width: 900px) {
+  .statusbar__item--folder {
+    display: none;
+  }
+}
+
+@container statusbar (max-width: 860px) {
+  /* 按钮只剩图标（`title` / `aria-label` 仍在） */
+  .statusbar__label {
+    display: none;
+  }
+}
+
+@container statusbar (max-width: 720px) {
+  .statusbar__item--cursor,
+  .statusbar__save-ago {
+    display: none;
+  }
+}
+
+@container statusbar (max-width: 420px) {
+  .statusbar__item--path {
+    display: none;
+  }
+}
+
+@container statusbar (max-width: 400px) {
+  /* 最窄一档：保存状态只留圆点（语义仍由 `title` 说出，圆点形状仍在 ——
+     见 DESIGN.md「降级后必须仍然可用」），连间距也收紧 —— 9 颗图标（GitHub 笔记本）
+     + 圆点约 320px，而「窗口 900 + 侧栏拖到上限 520」时底栏只有 356px，差的就是这几像素。
+     注意：**容器查不到自己**，所以这里只能改后代，改不了 `.statusbar` 自己的 gap / padding。 */
+  .statusbar__save-text {
+    display: none;
+  }
+  .statusbar__info,
+  .statusbar__actions {
+    gap: var(--s2);
   }
 }
 

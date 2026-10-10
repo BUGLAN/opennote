@@ -8,7 +8,26 @@
 
 ## [Unreleased]
 
-（下一批改动写这里。发布时把这一节落成 `## [x.y.z] - 日期`，并跑 `pnpm release:version x.y.z`。）
+### 修复
+
+- **底栏（状态栏）窄窗下右侧按钮被裁掉、点不到**（用户报「底下这些图标显示不全」）。用户截图
+  2528×1659 @2x（视口 1264×829、侧栏 293）逐像素量出：底栏可用 947px、内容需要约 1170px，
+  「收件箱」被切成半截，其后的「历史 / 夜读 / 设置」整颗消失。三条根因：① `.statusbar` 是
+  `flex-wrap: nowrap` + `overflow: hidden`，而 `.statusbar__item` 一律 `flex: none` —— 溢出
+  只能往右推，被裁的正好是最右边的按钮；② 唯一的降级规则 `@media (max-width: 1180px)` 判的是
+  **视口**，可底栏住在 `.main` 里（宽度 = 视口 − 侧栏 200–520 − 大纲 232），视口 1264 > 1180
+  所以**不降级**；③ `.statusbar__item--compact` 还挂在「收件箱」「GitHub」「清除令牌」三个
+  **按钮**上，一降级连能力入口一起消失。修法两条腿：**结构**上把底栏拆成信息组
+  `.statusbar__info`（`flex: 1 1 auto` + `min-width: 0` + `overflow: hidden`，唯一会被压缩、
+  可被压到 0）与按钮组 `.statusbar__actions`（`flex: none`），于是**按钮在任何宽度下都完整
+  可见，与阈值标定准不准无关**；**分档**改用 `@container statusbar` 按底栏自身宽度降级
+  （1180 / 900 / 860 / 720 / 420 / 400px：先丢文件数与字数统计，再丢当前文件夹，再丢按钮文字，
+  再丢行列与相对时间，最后只剩存放位置、保存圆点），`--compact` 从此只给信息项用，按钮文字
+  单独包一层 `.statusbar__label`，每个按钮补 `aria-label`（`Icon` 是 `aria-hidden`，文字一没
+  按钮就没有可访问名）。宽窗视觉无变化；`--statusbar-h` 与侧栏脚注的同底契约不动。验收：
+  `src/components/statusbarLayout.test.ts`（源码契约：任何一档都不许隐藏按钮或保存圆点）+
+  `scripts/statusbar-fit-probe.mjs`（真窗口 56 个用例 × 4 遍内容，含最窄的 356px 与 GitHub
+  笔记本多出来的两颗按钮；全绿），证据 `docs/verify/A2-状态栏窄窗-作者证据.md`。
 
 ## [0.10.0] - 2026-10-10
 
