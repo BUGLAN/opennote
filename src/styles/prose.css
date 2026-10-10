@@ -308,6 +308,24 @@
   overflow: hidden;
 }
 
+/*
+ * 编辑区里的表格是**块级装饰**，而 CodeMirror 官方明文要求
+ * 「block-level decorations should not have vertical margins」
+ * （本机 `@codemirror/view@6.43.13` 的 `index.d.ts:140-144`）。
+ *
+ * 原因：margin 落在盒子**外面**，既不计入 `getBoundingClientRect().height`
+ * （CM 就是用它逐行/逐块量高度的），也不参与 `estimatedHeight` 的估算 ——
+ * 于是「估算高度」与「实测高度」永远差着一个 margin，视口外的 widget 一滚进来
+ * 就要改行高表，滚动位置跟着变。
+ *
+ * 间距改由 padding 承担：它算在盒子高度里，估算与实测因此能对上。
+ * 下面这条只作用于**编辑器里的** widget；阅读视图 / 导出 HTML 走 `.prose table`，
+ * 那里的 margin 是对的，不动。
+ */
+.cm-content .table-widget {
+  margin-block: 0;
+}
+
 .prose th,
 .prose td,
 .table-widget th,

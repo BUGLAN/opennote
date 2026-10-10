@@ -355,6 +355,22 @@ export function SettingsDialog({
                     />
                     拼写检查
                   </label>
+                  {/*
+                    默认关闭：标记露出来是靠把 `#`、`**`、`> ` 塞回文本流实现的，那一行
+                    以及它后面的文字会横向窜动（实测 14–64px），而每次移动光标都会触发一次。
+                    改标记有快捷键（Mod-1…Mod-6 / Mod-b / Mod-Shift-q…），所以默认不露。
+                  */}
+                  <label
+                    className="switch"
+                    title="一直显示 #、**、> 等 Markdown 标记，像纯文本编辑器一样。默认关闭：平时只看到渲染结果，源码在你「正在拆某一块」时才出现（把光标放到图片/粗体后面按删除，或者把标题文字删空）。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={settings.showMarks}
+                      onChange={(event) => patchUi({ showMarks: event.target.checked })}
+                    />
+                    一直显示源码标记
+                  </label>
                   <label className="switch">
                     <input type="checkbox" checked={settings.snapshots} onChange={(event) => patchUi({ snapshots: event.target.checked })} />
                     自动历史快照

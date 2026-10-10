@@ -52,6 +52,44 @@ export function imageSizeFor(url: string): { width: number; height: number } | n
   return sizes.get(url) ?? null;
 }
 
+/* ------------------------------------------------- 尺寸的第二个产地：markdown 引用串 */
+
+/**
+ * URL → 自然尺寸是**加载之后**才知道的，所以它救不了「第一次插入」：粘贴一张新图，
+ * 从没加载过 ⇒ 没有尺寸 ⇒ `<img>` 先塌成 0、解码完再把下方内容推下去 ——
+ * 这正是用户报的那次跳动。
+ *
+ * 粘贴那一刻我们手里就有 `File`，尺寸是**当场可量**的（`media.ts` 的 `readImageSize`）。
+ * 这里按 **markdown 里的引用串**（`./note.assets/a.png`）再记一份，widget 建出来的
+ * 第一帧就能占好位，不必等任何异步。
+ */
+const sourceSizes = new Map<string, { width: number; height: number }>();
+
+/**
+ * 引用串的规范化钥匙：`markdownRef` 在路径含空白/括号时写成角括号形式
+ * （`<./备注 2.assets/a.png>`），而解析器给的 URL 节点未必带括号 ——
+ * 两边都过这一道，同一个文件就不会因为写法不同而查不到尺寸。
+ */
+export function normalizeImageKey(src: string): string {
+  const trimmed = src.trim();
+  return trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1) : trimmed;
+}
+
+export function rememberSourceSize(src: string, width: number, height: number): void {
+  if (!src || width <= 0 || height <= 0) return;
+  const key = normalizeImageKey(src);
+  if (sourceSizes.has(key)) return; // 第一次量到的为准：同一个文件的尺寸不会变
+  sourceSizes.set(key, { width, height });
+  if (sourceSizes.size > SIZES_CAP) {
+    const oldest = sourceSizes.keys().next();
+    if (!oldest.done) sourceSizes.delete(oldest.value);
+  }
+}
+
+export function sourceSizeFor(src: string): { width: number; height: number } | null {
+  return sourceSizes.get(normalizeImageKey(src)) ?? null;
+}
+
 /** 图片 `load` 之后调一次：把这个元素标记为「可入池」。 */
 export function markImageLoaded(img: HTMLImageElement): void {
   loaded.add(img);
@@ -106,14 +144,15 @@ function trimTotal(): void {
 }
 
 /** @internal 单测用：看池子现状（入池元素数、URL 桶数、记住的尺寸数）。 */
-export function poolStats(): { idle: number; urls: number; sizes: number } {
+export function poolStats(): { idle: number; urls: number; sizes: number; sourceSizes: number } {
   let idleCount = 0;
   for (const bucket of idle.values()) idleCount += bucket.length;
-  return { idle: idleCount, urls: idle.size, sizes: sizes.size };
+  return { idle: idleCount, urls: idle.size, sizes: sizes.size, sourceSizes: sourceSizes.size };
 }
 
 /** @internal 单测用：清空池子。池子是模块级单例，用例之间需要干净的起点。 */
 export function clearImagePool(): void {
   idle.clear();
   sizes.clear();
+  sourceSizes.clear();
 }

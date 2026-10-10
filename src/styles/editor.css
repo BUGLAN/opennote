@@ -381,7 +381,10 @@
 }
 
 .cm-content .md-table {
-  padding: 0.55em 0;
+  /* 表格 widget 的垂直 margin 已被去掉（CodeMirror 官方明文禁止块级装饰带垂直 margin，
+     见 `prose.css` 里 `.cm-content .table-widget` 那段）：原来 1.05em 的外边距改成内边距，
+     视觉间距不变，但**算进盒子高度**，估算与实测因此能对上。 */
+  padding: 1.05em 0;
   cursor: text;
 }
 

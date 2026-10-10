@@ -10,6 +10,12 @@ export interface EditorSettings {
   imageMode: "asset" | "inline";
   spellcheck: boolean;
   /**
+   * 光标所在行要不要露出 Markdown 标记。默认 `false`（不露）——
+   * 露出来会让那一行文字横向窜动 14–64px，而每次移动光标都会触发一次。
+   * 详见 `src/data/types.ts` 的 `UiSettings.showMarks`。
+   */
+  showMarks: boolean;
+  /**
    * 正在编辑的笔记**路径**（`归档/foo 2.md`）—— 路径本身就是「哪一篇笔记」这一个事实的产地，
    * 没有笔记打开时是空串。
    *
@@ -32,6 +38,7 @@ export const defaultEditorSettings: EditorSettings = {
   typewriter: false,
   imageMode: "asset",
   spellcheck: true,
+  showMarks: false,
   notePath: "",
 };
 

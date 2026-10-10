@@ -9,6 +9,7 @@ import { bracketMatching } from "@codemirror/language";
 import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
 import { EditorState, Compartment, type Extension } from "@codemirror/state";
 import { EditorView, keymap, drawSelection, dropCursor, ViewPlugin, type ViewUpdate } from "@codemirror/view";
+import { blockPad } from "./blockPad";
 import { markdownCommands, setHeading, toggleLinePrefix } from "./commands";
 import { slashCompletion, tagCompletion, wikiCompletion } from "./completion";
 import { livePreviewField } from "./livePreview";
@@ -16,6 +17,7 @@ import { markdownSupport } from "./markdown";
 import { linkClickHandler, mediaHandlers } from "./media";
 import { editorSettingsField, type EditorSettings } from "./settings";
 import { editorTheme } from "./theme";
+import { unwrapKeymap } from "./unwrap";
 
 export interface EditorHooks {
   settings: Partial<EditorSettings>;
@@ -45,7 +47,27 @@ function runSlashCommand(id: string, view: EditorView): void {
   if (command) command(view);
 }
 
-/** Keeps the caret vertically centred — the iA-Writer-style typewriter mode. */
+/**
+ * 视口上下各多少比例算「边缘」。光标落在中间这段安全带里就不去动滚动。
+ * 0.25 表示中间 50% 是安全带。
+ */
+const TYPEWRITER_EDGE_BAND = 0.25;
+
+/**
+ * Keeps the caret vertically centred — the iA-Writer-style typewriter mode.
+ *
+ * 只在光标**真的接近视口边缘**时才把它拉回中间。
+ *
+ * 原来每次选区/文档变化都无条件派发一个 `scrollIntoView`，有两个代价：
+ *   1. 它持续重置 CodeMirror 自己的滚动锚定 —— `measure()` 里一旦有待处理的
+ *      `scrollTarget` 就**放弃补偿**（见 `@codemirror/view` 的 measure 循环），
+ *      于是任何装饰引起的高度变化都不会被兜住；
+ *   2. 每敲一个字都多一次事务 + 一帧 rAF。
+ *
+ * 「光标居中」与「位置绝对稳定」本来就互相冲突：iA Writer 的官方支持页里，
+ * 这一节的标题就叫 **"Jumping Screen When Editing?"**，并建议编辑阶段关掉该模式。
+ * 这里取折中 —— 保住打字机的观感，同时不再每敲一个字就和滚动锚定打架。
+ */
 const typewriterScroll = ViewPlugin.fromClass(
   class {
     private frame: number | null = null;
@@ -54,12 +76,20 @@ const typewriterScroll = ViewPlugin.fromClass(
       if (!update.selectionSet && !update.docChanged) return;
       const settings = update.state.field(editorSettingsField, false);
       if (!settings?.typewriter) return;
+      const view = update.view;
       const head = update.state.selection.main.head;
       if (this.frame !== null) cancelAnimationFrame(this.frame);
       this.frame = requestAnimationFrame(() => {
         this.frame = null;
-        if (!update.view.dom.isConnected) return;
-        update.view.dispatch({ effects: EditorView.scrollIntoView(head, { y: "center" }) });
+        if (!view.dom.isConnected) return;
+        // 光标仍在中央安全带里 ⇒ 什么都不做。这一步就是「别去抢滚动锚定」。
+        const coords = view.coordsAtPos(head);
+        if (!coords) return;
+        const scroller = view.scrollDOM.getBoundingClientRect();
+        if (scroller.height <= 0) return;
+        const relative = (coords.top - scroller.top) / scroller.height;
+        if (relative >= TYPEWRITER_EDGE_BAND && relative <= 1 - TYPEWRITER_EDGE_BAND) return;
+        view.dispatch({ effects: EditorView.scrollIntoView(head, { y: "center" }) });
       });
     }
 
@@ -128,6 +158,8 @@ export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
   return [
     editorTheme(),
     livePreviewField,
+    // 块级内容换形态时把高度差补成留白（见 `blockPad.ts`）—— 必须在 livePreviewField 之后。
+    blockPad,
     markdownSupport,
     history(),
     drawSelection(),
@@ -156,6 +188,8 @@ export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
     mediaHandlers({ imageMode: hooks.imageMode, notify: hooks.notify }),
     linkClickHandler(),
     typewriterScroll,
+    // 「光标停在边界按删除 ⇒ 先拆开这一段」——必须排在 defaultKeymap 之前抢下 Backspace/Delete。
+    unwrapKeymap,
     keymap.of([
       ...customKeys,
       ...closeBracketsKeymap,

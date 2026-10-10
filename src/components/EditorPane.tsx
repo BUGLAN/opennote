@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { EditorState, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
@@ -204,6 +204,7 @@ function EditorHost(props: EditorHostProps): ReactNode {
         focus: props.settings.focus,
         typewriter: props.settings.typewriter,
         imageMode: props.settings.imageMode,
+        showMarks: props.settings.showMarks,
         // 空态传空串：粘贴时 `insertFileSnippets()` 如实提示「附件没有落点」，
         // 而不是拿空路径去派生出一个 `未命名.assets/`。实例的笔记路径永不改变（key={id}）。
         notePath: props.id,
@@ -215,6 +216,7 @@ function EditorHost(props: EditorHostProps): ReactNode {
     props.settings.focus,
     props.settings.typewriter,
     props.settings.imageMode,
+    props.settings.showMarks,
     props.id,
   ]);
 
@@ -293,6 +295,21 @@ function EditorHost(props: EditorHostProps): ReactNode {
 export function EditorPane(props: EditorPaneProps): ReactNode {
   const viewsRef = useRef(new Map<Id, EditorView>());
 
+  /**
+   * 实例表的**版本号**。存在的唯一理由是让下面的上报 effect 能感知「实例表变了」。
+   *
+   * 为什么非它不可：上报 effect 的依赖是 `[activeId, tabs]`，而**实例注册发生在子组件
+   * 的挂载 effect 里**。有一条真实路径会因此漏掉上报 ——
+   * 应用启动时 `library.notes` 还是空的（`src/data/library.ts` 初始就是 `notes: {}`），
+   * 恢复出来的标签找不到笔记 ⇒ 不渲染 `EditorHost` ⇒ 那一刻上报的是 `null`；
+   * 等异步扫描把笔记填进来，`EditorHost` 才挂载并注册实例，而 `activeId` / `tabs`
+   * **一个都没变** ⇒ 上报 effect 不会再跑 ⇒ `viewRef` 一直停在 `null`。
+   *
+   * 症状（用户 2026-10-10 稳定复现）：右键图片「删除图片」没反应，**切一次标签就好了**。
+   * 同样受影响的还有大纲跳转、命令面板、新建笔记聚焦 —— 它们都读 `viewRef`。
+   */
+  const [registryVersion, setRegistryVersion] = useState(0);
+
   /* 活跃实例上报。依赖 tabs：关闭活跃标签时（tabs 与 activeId 同一次提交里变化）
      子组件的注销/登记 effect 先跑，这里读到的是刷新后的实例表。 */
   useEffect(() => {
@@ -320,7 +337,7 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
         : null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只跟「哪篇活跃/开了哪些标签」有关
-  }, [props.activeId, props.tabs]);
+  }, [props.activeId, props.tabs, registryVersion]);
 
   return (
     <>
@@ -341,9 +358,15 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
             onComposing={(composing) => props.onComposing(id, composing)}
             onEditorBlur={props.onEditorBlur}
             onSave={props.onSave}
-            onReady={(view) => viewsRef.current.set(id, view)}
+            // 注册/注销都要**抬高版本号**：实例比 activeId 晚就绪是真实存在的路径
+            // （见 `registryVersion` 的注释），不抬的话 `viewRef` 会一直停在 null。
+            onReady={(view) => {
+              viewsRef.current.set(id, view);
+              setRegistryVersion((n) => n + 1);
+            }}
             onCleanup={() => {
               viewsRef.current.delete(id);
+              setRegistryVersion((n) => n + 1);
             }}
             getTitles={props.getTitles}
             getTags={props.getTags}

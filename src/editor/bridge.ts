@@ -17,8 +17,18 @@ export interface EditorBridge {
   /**
    * 右键一张**渲染出来的图片**（视口坐标）。菜单长什么样、能做什么由宿主决定 ——
    * 编辑器不认识「剪贴板」，只负责把「哪张图、属于哪篇笔记」如实交出去。
+   *
+   * - `source` 是**完整的 `![说明](引用)`**（不是只有引用串）；
+   * - `from` 是**被右键的那一个**在文档里的起点（取不到时为 `-1`）。
+   *
+   * 两个都要：宿主靠 `findImageSource(state, source, from)` 定位范围。只给 `source`
+   * 的话，同一张图被引用两次时会命中第一处 —— 删错地方。
    */
-  openImageMenu(x: number, y: number, target: { src: string; notePath: string }): void;
+  openImageMenu(
+    x: number,
+    y: number,
+    target: { src: string; notePath: string; source: string; from: number },
+  ): void;
 }
 
 export const bridge: EditorBridge = {

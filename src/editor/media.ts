@@ -5,6 +5,7 @@ import type { EditorState, Extension } from "@codemirror/state";
 import { imageNameForPaste } from "../data/assets";
 import { saveImage } from "../data/library";
 import { blobToDataUrl } from "../lib/utils";
+import { rememberSourceSize } from "./imagePool";
 import { editorSettingsField } from "./settings";
 
 /**
@@ -43,6 +44,7 @@ export async function insertFileSnippets(files: File[], options: AttachmentOptio
     try {
       if (options.imageMode === "inline") {
         const dataUrl = await blobToDataUrl(file);
+        if (isImage) await rememberSizeFor(dataUrl, file);
         snippets.push(isImage ? `![${file.name}](${dataUrl})` : `[${file.name}](${dataUrl})`);
         continue;
       }
@@ -55,6 +57,7 @@ export async function insertFileSnippets(files: File[], options: AttachmentOptio
         continue;
       }
       const saved = await saveImage(file, file.name || imageNameForPaste(file), options.notePath);
+      if (isImage) await rememberSizeFor(saved.markdown, file);
       snippets.push(isImage ? `![${file.name || "图片"}](${saved.markdown})` : `[${file.name}](${saved.markdown})`);
     } catch (error) {
       console.error("[opennote] 附件保存失败", error);
@@ -62,6 +65,54 @@ export async function insertFileSnippets(files: File[], options: AttachmentOptio
     }
   }
   return snippets;
+}
+
+/**
+ * 把一张待插入图片的**像素尺寸**按它在 markdown 里的引用串记下来。
+ *
+ * 为什么必须在这里做：`imagePool` 的尺寸表是**加载之后**才填的，救不了「第一次插入」——
+ * 粘贴一张新图，从没加载过 ⇒ 没有尺寸 ⇒ widget 先塌成 0、解码完再把下方内容推下去。
+ * 而粘贴这一刻 `File` 就在手里，尺寸当场可量；在 `view.dispatch()` **之前**记好，
+ * widget 建出来的第一帧就已经是最终高度的盒子。
+ *
+ * 量不出来（不是图片、浏览器不支持、文件损坏）就安静跳过：这只是提前占位，
+ * 失败就退回原来的「解码完成再撑开」路径，不该让粘贴本身失败。
+ */
+async function rememberSizeFor(src: string, file: File): Promise<void> {
+  const size = await readImageSize(file);
+  if (size) rememberSourceSize(src, size.width, size.height);
+}
+
+/** 读一张图片的像素尺寸。任何失败都返回 `null`，绝不抛 —— 调用方只拿它做提前占位。 */
+async function readImageSize(file: File): Promise<{ width: number; height: number } | null> {
+  if (typeof createImageBitmap === "function") {
+    try {
+      const bitmap = await createImageBitmap(file);
+      const size = { width: bitmap.width, height: bitmap.height };
+      bitmap.close();
+      if (size.width > 0 && size.height > 0) return size;
+    } catch {
+      // 落到下面的 <img> 兜底
+    }
+  }
+  // node（单测）里没有 `Image`：这一支直接返回 null，粘贴链路照旧只做落盘。
+  if (typeof Image !== "function" || typeof URL?.createObjectURL !== "function") return null;
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("image decode failed"));
+      el.src = objectUrl;
+    });
+    return img.naturalWidth > 0 && img.naturalHeight > 0
+      ? { width: img.naturalWidth, height: img.naturalHeight }
+      : null;
+  } catch {
+    return null;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 export function mediaHandlers(options: {
@@ -76,7 +127,10 @@ export function mediaHandlers(options: {
       notify: options.notify,
     });
     if (!snippets.length) return;
-    const text = snippets.join("\n");
+    // 光标落到附件**下面新起的一行**：附件所在行不「活跃」，粘贴完当场就是渲染态。
+    // 停在附件行上会让它先显示 `![…](…)` 源码，等回车或移开才换成渲染态 ——
+    // 那一下的高度突变正是用户 2026-10-10 报的跳动。
+    const text = `${snippets.join("\n")}\n`;
     const pos = Math.min(at, view.state.doc.length);
     view.dispatch({
       changes: { from: pos, insert: text },

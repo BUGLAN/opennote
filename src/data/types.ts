@@ -133,6 +133,18 @@ export interface UiSettings {
   typewriter: boolean;
   focus: boolean;
   spellcheck: boolean;
+  /**
+   * 光标所在行要不要露出 Markdown 标记（`# `、`**`、`> `、`` ` ``、链接的 `[..](..)`）。
+   *
+   * **默认 `false`（不露）**，与 Typora 的默认相反。理由：露出标记会让那一行的文字
+   * 横向窜动（实测 14–64px），而每次移动光标都会触发一次 —— 这是「位置一直在变」
+   * 里最频繁的一类。改标记本来就有快捷键（`Mod-1`…`Mod-6` / `Mod-b` / `Mod-Shift-q` …），
+   * 所以「看见标记」并不是编辑的前提。
+   *
+   * 打开它就回到「光标到哪露哪」的老行为（Typora 的默认，也是它 2018 年至今未修的
+   * issue #285 的来源）。
+   */
+  showMarks: boolean;
   showWordCount: boolean;
   snapshots: boolean;
   /** 自动保存模式（VSCode 式三档，无 off）。 */
@@ -238,6 +250,8 @@ export const DEFAULT_UI: UiSettings = {
   typewriter: false,
   focus: false,
   spellcheck: true,
+  // 默认不露标记：见 `UiSettings.showMarks` 的说明。
+  showMarks: false,
   showWordCount: true,
   snapshots: true,
   autoSave: "afterDelay",
