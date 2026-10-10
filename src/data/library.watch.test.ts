@@ -119,6 +119,7 @@ vi.mock("./workspaces", () => ({
 }));
 
 import { closeWorkspace, getLibrary, openWorkspace, updateNoteContent } from "./library";
+import { patchUi } from "./ui";
 
 interface WatchCalls {
   calls: string[];
@@ -209,6 +210,9 @@ beforeEach(async () => {
   backends.clear();
   records.clear();
   vi.useFakeTimers();
+  // 这些用例的时钟推进按旧默认延时 450ms 写死；自动保存默认值改为 1000ms 后，
+  // 统一在这里夹回 450，让「停笔 → 落盘」仍落在 600ms 的推进窗口里。
+  patchUi({ autoSave: "afterDelay", autoSaveDelay: 450 });
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   await closeWorkspace().catch(() => undefined);

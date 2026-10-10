@@ -42,7 +42,7 @@ import {
   sharedAssetFilesIn,
 } from "../lib/clip/landing";
 import { desktopBridge } from "../desktop/bridge";
-import { fileStates } from "./fileStates";
+import { fileStates, type FileRecord, type FileStamp } from "./fileStates";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
 import type { Folder, FolderChoice, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
 import { getUi, patchUi } from "./ui";
@@ -648,11 +648,6 @@ export async function initLibrary(): Promise<void> {
   }
 }
 
-/** Remember what the notes looked like on disk, so a later save can spot an external edit. */
-function applyStamps(stamps: ScanResult["stamps"]): void {
-  fileStates.seedAll(stamps);
-}
-
 /** Surface a warning collected while scanning, once the new state is in place (D10). */
 function flushMetaWarning(): void {
   if (!metaWarning) return;
@@ -687,7 +682,7 @@ export async function openWorkspace(
     // is a different note, so nothing may carry over (D22).
     resetWorkspaceTransients();
     meta = scanned.meta;
-    applyStamps(scanned.stamps);
+    fileStates.seedFromScan(scanned);
     invalidateSearchCache();
     setActiveWorkspace(record.id);
     setState((prev) => ({
@@ -724,7 +719,6 @@ export async function openWorkspace(
         // UI: the next keystroke would land in a folder nobody can see (D26).
         backend = null;
         meta = { ...defaultMeta };
-        fileStates.clear();
         resetWorkspaceTransients();
         invalidateSearchCache();
         setState(() => ({
@@ -742,6 +736,9 @@ export async function openWorkspace(
 
 /** Drop everything that only means something while one notebook is open (D22/D26). */
 function resetWorkspaceTransients(): void {
+  // 磁盘状态记账也在这里清：同一路径在另一个笔记本是**另一篇笔记**，A 库的记录
+  // 绝不能参与 B 库的「外部改动」判定（否则会把 A 的正文当 B 的前像，D22 实测）。
+  fileStates.clear();
   lastSnapshotAt.clear();
   snapshotNames.clear();
   snapshotFailures.clear();
@@ -881,8 +878,8 @@ export async function closeWorkspace(): Promise<void> {
   await flushMeta();
   backend = null;
   meta = { ...defaultMeta };
-  fileStates.clear();
   // Snapshot throttling is per notebook, so closing releases the table (D22).
+  // 磁盘状态记账也随 resetWorkspaceTransients() 一起清（同一条 D22 规则）。
   resetWorkspaceTransients();
   invalidateSearchCache();
   libraryStore.set({ ...emptyState, ready: true });
@@ -908,9 +905,39 @@ export async function rescanWorkspace(): Promise<void> {
   const scanned = await scanWorkspace(target);
   if (myGen !== generation || target !== backend) return;
   meta = { ...scanned.meta, expanded: getUi().expanded, lastOpened: getUi().activeId ?? scanned.meta.lastOpened };
-  applyStamps(scanned.stamps);
+  // 播种前先抓一份旧记录：下面 dirty 守卫的「真外部改动」判定要用它做内容溯源
+  //（播种自己按三态规则决定保留哪一份，见 fileStates.seedFromScan）。
+  const recordsBefore = new Map(fileStates.entries());
+  fileStates.seedFromScan(scanned);
   invalidateSearchCache();
   const keptDirty: Id[] = [];
+  // 【磁盘赢】dirty 笔记在磁盘上出现了我们不知道的版本（内容溯源 + 时间戳双重确认）
+  // 时：未保存的本地文本先进前像，然后采纳磁盘——不再走「保留本地」。
+  const superseded: { id: Id; buffer: string }[] = [];
+  const keepLocal = new Set<Id>();
+  for (const id of new Set([...Object.keys(libraryStore.get().dirty), ...dirtyBefore])) {
+    const disk = scanned.notes[id];
+    // The file is gone (deleted or moved outside): a dirty key could never be
+    // flushed again, so it is dropped like before.
+    if (!disk) continue;
+    const local = libraryStore.get().notes[id];
+    // Disk is at least as new as memory: nothing to protect.
+    if (!local || local.content === disk.content) continue;
+    const seen = recordsBefore.get(id);
+    const stamp = scanned.stamps[id];
+    const isForeign =
+      !seen || (disk.content !== seen.content && (!stamp || stamp.mtimeMs > seen.stat.mtimeMs));
+    if (isForeign) {
+      superseded.push({ id, buffer: local.content });
+      continue;
+    }
+    // The scan read bytes older than what the user has typed: keep the local
+    // text (and its title/tags) so a rescan never reverts an open editor, and
+    // keep the key dirty so the next flush writes it.
+    keepLocal.add(id);
+  }
+  for (const item of superseded) await stashPreImage(item.id, item.buffer);
+  if (myGen !== generation || target !== backend) return;
   setState((prev) => {
     const notes = { ...scanned.notes };
     const dirty: Record<Id, true> = {};
@@ -922,6 +949,7 @@ export async function rescanWorkspace(): Promise<void> {
       const local = prev.notes[id];
       // Disk is at least as new as memory: nothing to protect.
       if (!local || local.content === disk.content) continue;
+      if (!keepLocal.has(id)) continue; // 已被磁盘版本取代（前像已留档），不保本地
       // The scan read bytes older than what the user has typed: keep the local
       // text (and its title/tags) so a rescan never reverts an open editor, and
       // keep the key dirty so the next flush writes it.
@@ -999,19 +1027,58 @@ export async function resolveAvailablePath(
 }
 
 /**
- * Keep the disk version of a file that was changed behind our back; the caller
- * then writes the in-memory version, so both survive (D08).
+ * 【磁盘赢】把即将被丢弃的未保存 buffer 存进历史（隐藏前像）：
+ * 不在笔记本目录生成文件、不弹提示——但真丢了能从「历史版本」里捞回来。
+ * 空内容没有可保留的，直接跳过。
  */
-async function preserveConflictCopy(target: FileSystemBackend, id: Id): Promise<string> {
-  const content = await target.readText(id);
-  const dir = parentPath(id);
-  const ext = extName(id) || ".md";
-  const base = baseName(stripExtension(id));
-  const stamp = formatStamp(Date.now()).replace(/[: ]/g, "-");
-  const taken = new Set<string>();
-  const path = await resolveAvailablePath(target, joinPath(dir, `${base}.conflict-${stamp}${ext}`), taken);
-  await target.writeText(path, content);
-  return path;
+async function stashPreImage(id: Id, buffer: string): Promise<void> {
+  if (buffer.trim() === "") return;
+  await writeSnapshot(id, buffer, "before-disk", { quiet: true });
+}
+
+/**
+ * 采纳磁盘版本进内存：正文/标题/标签按磁盘内容重算并清 dirty。
+ * **不**调度自动改名——文件名跟随用户的编辑，不跟随外部改动。
+ */
+function adoptExternal(id: Id, content: string, stat: FileStamp): void {
+  const state = libraryStore.get();
+  const inTrash = Boolean(state.trash[id]);
+  const previous = state.notes[id] ?? state.trash[id];
+  if (previous) {
+    const next = refresh(previous, content);
+    next.updatedAt = stat.mtimeMs || Date.now();
+    if (inTrash) setState((prev) => ({ ...prev, trash: { ...prev.trash, [id]: next } }));
+    else patchNotes((notes) => ({ ...notes, [id]: next }));
+  }
+  fileStates.adoptFromDisk(id, content, stat);
+  markClean(id);
+  invalidateSearchCache(id);
+}
+
+/**
+ * I4：外部改动的唯一处置入口（磁盘赢，D3）。
+ * - 磁盘 = buffer → 磁盘已是内存那版：刷新记录、清 dirty（`unchanged`）；
+ * - 磁盘 = record.content（我们自己写的上一版）→ 我的赢，调用方照常覆盖（`mine-wins`）；
+ * - 其余 = 真外部改动 → buffer 进前像，采纳磁盘（`adopted`）。
+ */
+async function reconcileExternalChange(
+  id: Id,
+  disk: { content: string; stat: FileStamp },
+  record: FileRecord | undefined,
+  bufferContent: string,
+): Promise<"adopted" | "unchanged" | "mine-wins"> {
+  const diskNorm = normalizeEol(disk.content);
+  const bufferNorm = normalizeEol(bufferContent);
+  if (diskNorm === bufferNorm) {
+    fileStates.adoptFromDisk(id, disk.content, disk.stat);
+    markClean(id);
+    invalidateSearchCache(id);
+    return "unchanged";
+  }
+  if (record && diskNorm === normalizeEol(record.content)) return "mine-wins";
+  await stashPreImage(id, bufferContent);
+  adoptExternal(id, disk.content, disk.stat);
+  return "adopted";
 }
 
 async function flushNote(id: Id): Promise<void> {
@@ -1033,21 +1100,34 @@ async function flushNote(id: Id): Promise<void> {
   }
   const prior = pendingWrites.get(id);
   const write = (prior?.catch(() => undefined) ?? Promise.resolve()).then(async () => {
-    const known = fileStates.get(id);
+    const record = fileStates.get(id);
     const current = await target.stat(id).catch(() => null);
-    if (known && current && (current.mtimeMs !== known.mtimeMs || current.size !== known.size)) {
+    // 读盘的两个理由（I2：元数据只决定要不要读，判定看字节）：
+    //   1. 没有记录 —— 缺账 = 先读再定，绝不静默覆盖（旧 trash/restore 缺口的病根）；
+    //   2. stat 与记录不符 —— 磁盘可能被别人动过。
+    if (!record || (current && (current.mtimeMs !== record.stat.mtimeMs || current.size !== record.stat.size))) {
       const onDisk = await target.readText(id).catch(() => null);
-      if (onDisk === null || normalizeEol(onDisk) !== note.content) {
-        const copy = await preserveConflictCopy(target, id);
-        reportError(
-          new Error(`磁盘上的文件在应用外被修改，原内容已保留为 ${copy}`),
-          "检测到外部修改",
+      if (onDisk !== null) {
+        // buffer 取**最新**的内存正文：判定与留前像都不能用过期的快照。
+        const latest = libraryStore.get().notes[id] ?? libraryStore.get().trash[id];
+        const outcome = await reconcileExternalChange(
+          id,
+          { content: onDisk, stat: current ?? { size: onDisk.length, mtimeMs: Date.now() } },
+          record,
+          latest?.content ?? note.content,
         );
+        // adopted：磁盘赢，buffer 已进前像、内存已是磁盘版本；
+        // unchanged：磁盘本来就是内存那一版，无需写。两者都直接收工。
+        if (outcome !== "mine-wins") return;
       }
     }
+    // 链上可能有更新的写入，或 buffer 已被「磁盘赢」采纳替换：只写**当前**内存那版。
+    // 过期的捕获直接丢弃——否则旧快照会在采纳之后又把磁盘盖回去（D08 用例实测）。
+    const latestNow = libraryStore.get().notes[id] ?? libraryStore.get().trash[id];
+    if (!latestNow || latestNow.content !== note.content) return;
     await target.writeText(id, note.content);
     const after = await target.stat(id).catch(() => null);
-    if (after) fileStates.set(id, after);
+    if (after) fileStates.commitWrite(id, note.content, after);
     else fileStates.delete(id);
   });
   pendingWrites.set(id, write);
@@ -1062,7 +1142,15 @@ async function flushNote(id: Id): Promise<void> {
   }
 }
 
-function persistNoteSoon(id: Id, delay = 450): void {
+function autoSaveDelayMs(): number {
+  const raw = Math.round(getUi().autoSaveDelay);
+  return Number.isFinite(raw) ? Math.min(5000, Math.max(300, raw)) : 1000;
+}
+
+function persistNoteSoon(id: Id, delay = autoSaveDelayMs()): void {
+  // 只有 afterDelay 按停笔延时落盘；onFocusChange / onWindowChange 等各自的焦点
+  // 事件（内容保持 dirty，关窗握手 D11 仍会兜底），重扫/搬键的保底写也不排。
+  if (getUi().autoSave !== "afterDelay") return;
   const existing = writeTimers.get(id);
   if (existing) clearTimeout(existing);
   writeTimers.set(id, setTimeout(() => { void flushNote(id).catch(() => undefined); }, delay));
@@ -3074,7 +3162,9 @@ export async function listSnapshots(noteId: Id): Promise<Snapshot[]> {
       ? "manual"
       : entry.name.includes("-restore")
         ? "restore"
-        : "auto";
+        : entry.name.includes("-before-disk")
+          ? "before-disk"
+          : "auto";
     snapshots.push({ id: path, noteId, title: "", content, createdAt: entry.mtimeMs || Date.now(), reason });
   }
   return snapshots.sort((a, b) => b.createdAt - a.createdAt);

@@ -600,17 +600,22 @@ describe("D07 只改大小写的重命名", () => {
   });
 });
 
-describe("D08 外部改动不被静默覆盖", () => {
-  it("保存前发现磁盘被改过：保留冲突副本并提示", async () => {
+describe("D08 外部改动（磁盘赢，2026-10-10 语义）", () => {
+  it("保存前发现磁盘被改过：采纳磁盘版本，未保存改动进隐藏前像", async () => {
     const backend = await openSingle((b) => b.seed("a.md", "# 原始内容"));
     backend.externalWrite("a.md", "# 外部编辑器 / 同步盘改过的内容");
     updateNoteContent("a.md", "# 应用里又敲了一行", { immediate: true });
     await flushAll();
-    expect(backend.text("a.md")).toBe("# 应用里又敲了一行");
+    // 磁盘赢：笔记显示磁盘版本；应用的未保存改动进 `.opennote/history/` 的隐藏前像，
+    // **不再**在笔记本目录生成 `.conflict-*.md`，也不再弹「检测到外部修改」。
+    expect(backend.text("a.md")).toBe("# 外部编辑器 / 同步盘改过的内容");
+    expect(getLibrary().notes["a.md"]?.content).toBe("# 外部编辑器 / 同步盘改过的内容");
     const copies = backend.paths().filter((path) => path.includes(".conflict-"));
-    expect(copies).toHaveLength(1);
-    expect(backend.text(copies[0])).toBe("# 外部编辑器 / 同步盘改过的内容");
-    expect(getLibrary().error).toContain("外部修改");
+    expect(copies).toHaveLength(0);
+    const preimages = backend.paths().filter((path) => path.includes("-before-disk"));
+    expect(preimages).toHaveLength(1);
+    expect(backend.text(preimages[0])).toBe("# 应用里又敲了一行");
+    expect(getLibrary().error).toBeNull();
   });
 
   it("自己写入不会误判成冲突", async () => {

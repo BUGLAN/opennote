@@ -50,7 +50,10 @@ export interface Note {
   trashedAt: number | null;
 }
 
-export type SnapshotReason = "auto" | "manual" | "restore";
+export type SnapshotReason = "auto" | "manual" | "restore" | "before-disk";
+
+/** 自动保存模式（VSCode 式三档，无 off——本产品默认永远自动保存）。 */
+export type AutoSaveMode = "afterDelay" | "onFocusChange" | "onWindowChange";
 
 export interface Snapshot {
   id: Id;
@@ -132,6 +135,10 @@ export interface UiSettings {
   spellcheck: boolean;
   showWordCount: boolean;
   snapshots: boolean;
+  /** 自动保存模式（VSCode 式三档，无 off）。 */
+  autoSave: AutoSaveMode;
+  /** `afterDelay` 的停笔延时（ms），加载时夹到 300–5000。 */
+  autoSaveDelay: number;
   imageMode: "asset" | "inline";
   sidebarOpen: boolean;
   /**
@@ -233,6 +240,8 @@ export const DEFAULT_UI: UiSettings = {
   spellcheck: true,
   showWordCount: true,
   snapshots: true,
+  autoSave: "afterDelay",
+  autoSaveDelay: 1000,
   imageMode: "asset",
   sidebarOpen: true,
   sidebarWidth: SIDEBAR_WIDTH.default,

@@ -64,7 +64,7 @@ import {
 } from "./lib/clip";
 import { importFilesIntoOpfs, isCapacitorNative, pickFiles, supportsFileSystemAccess, supportsOpfs } from "./fs";
 import { desktopBridge, type ImportOutcome } from "./desktop/bridge";
-import { patchUi, setTheme as applyTheme, toggleAppearance, useUi } from "./data/ui";
+import { getUi, patchUi, setTheme as applyTheme, toggleAppearance, useUi } from "./data/ui";
 import type { Id, Snapshot, ThemeId, UiSettings } from "./data/types";
 import { buildAppCommands, isEditableTarget, matchesShortcut } from "./lib/appCommands";
 import { askConfirm, askText } from "./lib/dialogs";
@@ -446,8 +446,23 @@ export default function App(): ReactNode {
   }, [library.workspace]);
 
   useEffect(() => {
-    const timer = setInterval(() => { void flushAll().catch(() => undefined); }, 20_000);
+    // 20s 兜底 sweep 只属于 afterDelay 模式：onFocusChange / onWindowChange 的语义是
+    // 「焦点变了才写」，一个定时 sweep 会把模式悄悄变回延时保存。
+    const timer = setInterval(() => {
+      if (getUi().autoSave !== "afterDelay") return;
+      void flushAll().catch(() => undefined);
+    }, 20_000);
     return () => clearInterval(timer);
+  }, []);
+
+  // onWindowChange：整个窗口失焦（切到别的软件）→ 立即落盘。
+  useEffect(() => {
+    const onWindowBlur = () => {
+      if (getUi().autoSave !== "onWindowChange") return;
+      void flushAll().catch(() => undefined);
+    };
+    window.addEventListener("blur", onWindowBlur);
+    return () => window.removeEventListener("blur", onWindowBlur);
   }, []);
 
   useEffect(() => {
@@ -1308,6 +1323,10 @@ export default function App(): ReactNode {
           }}
           onCursor={(value) => setCursor(value)}
           onComposing={(composing) => setEditorComposing(activeId, composing)}
+          onEditorBlur={() => {
+            // onFocusChange 模式的落盘点：编辑器失焦（切标签/点外部）就写。
+            if (getUi().autoSave === "onFocusChange") void flushAll().catch(() => undefined);
+          }}
           onSave={() => flushAll()}
           onReady={(view) => {
             viewRef.current = view;

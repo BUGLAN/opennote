@@ -673,7 +673,13 @@ export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void
               >
                 {formatDateTime(snapshot.createdAt)}
                 <time>
-                  {snapshot.reason === "auto" ? "自动留档" : snapshot.reason === "manual" ? "手动记录" : "恢复前的备份"} ·{" "}
+                  {snapshot.reason === "auto"
+                    ? "自动留档"
+                    : snapshot.reason === "manual"
+                      ? "手动记录"
+                      : snapshot.reason === "before-disk"
+                        ? "被磁盘版本覆盖前的改动"
+                        : "恢复前的备份"} ·{" "}
                   {snapshot.content.length} 字符
                 </time>
               </button>

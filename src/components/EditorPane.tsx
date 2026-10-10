@@ -44,6 +44,11 @@ interface EditorPaneProps {
    * 下推的状态，两边各管一段、不重复判定。
    */
   onComposing(composing: boolean): void;
+  /**
+   * 编辑器失焦（focusout 离开编辑区）时触发：`onFocusChange` 自动保存模式的落盘点。
+   * 模式判断在 App 侧（读最新设置），这里只负责上报事件。
+   */
+  onEditorBlur?(): void;
   onSave(): void;
   onReady(view: EditorView | null): void;
   getTitles(): string[];
@@ -146,8 +151,16 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
     propsRef.current.onReady(view);
     // 输入法合成状态 → 宿主（数据层用它抑制「停笔 5 秒自动改名」）。
     const detachComposing = attachCompositionReporter(host, (composing) => propsRef.current.onComposing(composing));
+    // 编辑器失焦（onFocusChange 自动保存模式的落盘点）。焦点仍在编辑器内部
+    // （点 CodeMirror 自己的面板/悬浮框）不算离开。
+    const onFocusOut = (event: FocusEvent) => {
+      if (event.relatedTarget instanceof Node && host.contains(event.relatedTarget)) return;
+      propsRef.current.onEditorBlur?.();
+    };
+    host.addEventListener("focusout", onFocusOut);
     return () => {
       detachComposing();
+      host.removeEventListener("focusout", onFocusOut);
       view.destroy();
       viewRef.current = null;
       propsRef.current.onReady(null);
@@ -173,11 +186,15 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
     }
 
     if (previous === props.noteId) {
-      // content changed outside the editor (snapshot restore, import, sync)
+      // content changed outside the editor (snapshot restore, import, sync, 磁盘赢的采纳)
       if (props.content !== expectedRef.current && props.content !== view.state.doc.toString()) {
         expectedRef.current = props.content;
+        // 整篇替换时把原光标偏移夹进新文档：外部改动被采纳后光标尽量不跳。
+        const selection = view.state.selection.main;
+        const length = props.content.length;
         view.dispatch({
           changes: { from: 0, to: view.state.doc.length, insert: props.content },
+          selection: { anchor: Math.min(selection.anchor, length), head: Math.min(selection.head, length) },
           annotations: Transaction.addToHistory.of(false),
         });
       }

@@ -60,6 +60,12 @@ function load(): UiSettings {
     // 宽度是**用户拖出来的**：旧版本没有这个键、手改过 localStorage、拖到窗口外
     // 都会留下越界值，所以读取时统一夹一次，别让坏值把布局撑坏。
     ui.sidebarWidth = clampSidebarWidth(ui.sidebarWidth);
+    // 自动保存模式是白名单枚举；延时夹进 300–5000。坏值一律回默认，别让 localStorage
+    // 里的旧数据/手改值把保存节奏带坏。
+    if (ui.autoSave !== "afterDelay" && ui.autoSave !== "onFocusChange" && ui.autoSave !== "onWindowChange") {
+      ui.autoSave = DEFAULT_UI.autoSave;
+    }
+    ui.autoSaveDelay = Math.min(5000, Math.max(300, Math.round(Number(ui.autoSaveDelay)) || DEFAULT_UI.autoSaveDelay));
     return ui;
   } catch {
     return DEFAULT_UI;
