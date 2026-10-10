@@ -1397,9 +1397,29 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 
 **编辑区专属**（`editor.css`）：
 - 选择器是**两到三层深**（`.cm-editor .cm-content .cm-line.md-h1`），因为 CodeMirror 在运行时注入自己的基础主题，层级不够会输掉层叠。**这是刻意的，不要为了「简洁」把选择器缩短。**
-- **语法标记只在光标所在行露出**：`.md-src` / `.md-num` / `.md-table-delim` / 代码围栏 / `$$` 都是 `--ink-3`。非当前行的标记由 JS 加上隐藏类（`.md-hide-line`）。
+- **源码只在「拆它」或「它还没成立」时出现**（`UiSettings.showMarks` 默认 `false`）。这是编辑区最容易改错的一条，展开说：
+  - **渲染态是持久的**：光标停到某一行上**不会**把标记露出来。露标记靠 `Decoration.replace` 把 `#`、`**`、`> ` **塞回文本流**，那一行以及它后面的文字会横向窜动 —— 真实浏览器实测 `**` 14.18px、`# ` 24.11px、`[链接](url)` 64.47px，而每次移动光标都会触发一次。这是「位置一直在变」里最频繁的一类。
+  - **源码出现的两条路**：
+    1. **块还没成立**（`livePreview.ts` 的 `isEmptyBlock`）：空标题露 `## `、空引用露 `> `、空列表项露 `- `、空代码块露围栏。于是「敲下 `##` 看得见 → 敲进文字就消失 → 把文字删空又回来」由同一条规则给出，不需要任何按键行为。
+    2. **用户正在拆它**（`unwrap.ts` 的 `unwrapKeymap`）：光标停在某个**已渲染行内元素**（`**粗体**`、`` `代码` ``、链接、**图片**）的边界上按 Backspace/Delete，第一下先把源码露出来，再按一下才真的删内容。这是默认下唯一「主动看见标记」的入口，所以它必须零学习成本 —— 想删掉粗体，本能就是光标移到粗体后面按 Backspace。
+  - **图片因此是持久渲染的**：光标停在图片旁边**不会**把它换成 `![](...)`（否则第 2 条无从谈起）。要改路径/说明文字就按 Backspace 拆开，或者右键 →「删除图片」。
+  - **`showMarks: true` 是逃生舱**：所有标记一直显示，给「我就想看着源码写」的人。
+  - 改标记本来就有快捷键（`Mod-1`…`Mod-6` / `Mod-b` / `Mod-Shift-q` …），所以「看见标记」不是编辑的前提。
 - **专注模式**：非当前块的行 `color: color-mix(in srgb, var(--ink) 26%, transparent)`，其内部元素强制 `background-color: transparent` / `box-shadow: none`，图片与图表降到 `opacity: .35` + `saturate(.4)`。**不要**改成 `display: none`（那会让文档跳动）。
-- **打字机模式**：只在 `.cm-content` 上加 `padding-top: 28vh` / `padding-bottom: 62vh`，让光标能停在屏幕中间。空文档提示的 `top` 也跟着从 `56px` 改为 `28vh`。
+- **打字机模式**：`.cm-content` 上加 `padding-top: 28vh` / `padding-bottom: 62vh`，让光标能停在屏幕中间；空文档提示的 `top` 也跟着从 `56px` 改为 `28vh`。**但 JS 侧只在光标接近视口边缘（上下各 25%）时才把它拉回中间** —— 每次变化都派发 `scrollIntoView` 会持续重置 CodeMirror 自己的滚动锚定（`measure()` 里一旦有待处理的 `scrollTarget` 就放弃补偿）。iA Writer 官方支持页把这一节直接命名为 "Jumping Screen When Editing?"，说明「光标居中」与「位置稳定」本来就冲突，只能取折中。
+
+**编辑区的几何不变量（0.9.0 起，改这里之前必读）**：
+
+> **同一位置，任何时刻高度/宽度必须一样；同一时刻，文档前后两段的渲染状态必须同步。**
+
+live preview 会在「源码态 ↔ 渲染态」之间按块换形态，而两种形态高度不同 —— 于是块下方内容整块跳。三条已经落地的约束：
+
+1. **块级内容换形态时补白到同高**（`src/editor/blockPad.ts` + `src/editor/blockHeight.ts`）。widget 渲染时自己量一次高度记下来；光标进块、源码露出来时，把差额补成最后一行的 `padding-bottom`。实测表格差 130.66px、mermaid 差 172.34px。**补白必须落在参与布局的行上** —— 落在 `display:none` 的围栏行上会让高度永远补不上去，插件就会一轮轮加大补白（实测发散到 2298px）。
+2. **装饰器必须追上后台解析器**（`livePreview.ts` 的字段守卫）。后台解析推进语法树时发的是**只有 effect** 的事务，守卫只看 `docChanged`/`selection` 会把它们全漏掉 —— 文档尾部停在原始 markdown，直到用户点一下才一次性补上全部装饰（实测 6309 字文档一次补 880 条）。
+3. **块级 widget 要给 `estimatedHeight`**（`widgets.ts`）。默认 `-1` 等于告诉 CodeMirror「这块高度未知」，视口外只能按字符数比例猜行高，猜偏了就会在滚动时改写 `scrollTop`（归档实测 −708.63px）。
+
+判据是可复跑的：`pnpm verify:geometry`（真实 Chrome + 真实扩展，18 条断言，阈值 1px）。
+
 
 **CodeMirror 的结构层主题在这个文件里**（`src/editor/theme.ts`，用 `EditorView.theme()` / `HighlightStyle` 写在 JS 里）——它是**第 6 个样式面**，很容易被漏掉：
 
