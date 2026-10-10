@@ -803,7 +803,10 @@ function startWatching(root: string): void {
   watchedRoot = root;
   watchUnsubscribe = fs.onWorkspaceChanged((changed) => {
     // The event is broadcast to every window: ignore other notebooks.
-    if (!sameRoot(changed, watchedRoot)) return;
+    // v2 载荷带变化路径：P2 起按路径增量刷新；当前真外部事件仍走一次重扫——
+    // 应用自己的写入已在主进程源头过滤，打字不再触发重扫（卡顿的根）。
+    const root = typeof changed === "string" ? changed : (changed?.root ?? "");
+    if (!sameRoot(root, watchedRoot)) return;
     scheduleWatchRescan();
   });
   void fs.watchWorkspace(root).catch((error) => {

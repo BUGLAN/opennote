@@ -362,6 +362,45 @@ export function SettingsDialog({
                 </div>
               </SettingRow>
 
+              <SettingRow label="自动保存" hint="文件就是真源：停笔即存，切档不打断写作">
+                <div className="segmented">
+                  {(
+                    [
+                      ["afterDelay", "停笔延时"],
+                      ["onFocusChange", "失焦保存"],
+                      ["onWindowChange", "切窗保存"],
+                    ] as Array<[UiSettings["autoSave"], string]>
+                  ).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={cn(settings.autoSave === mode && "is-active")}
+                      onClick={() => patchUi({ autoSave: mode })}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {settings.autoSave === "afterDelay" ? (
+                  <div className="range" style={{ marginTop: 8 }}>
+                    <input
+                      type="range"
+                      min={300}
+                      max={5000}
+                      step={100}
+                      value={settings.autoSaveDelay}
+                      onChange={(event) => patchUi({ autoSaveDelay: Number(event.target.value) })}
+                    />
+                    <output>{(settings.autoSaveDelay / 1000).toFixed(1)} 秒</output>
+                  </div>
+                ) : (
+                  <p className="dialog__note">失焦 / 切窗时立即落盘，打字期间不写盘。</p>
+                )}
+                <p className="dialog__note">
+                  没有「关闭自动保存」档：外部改动以磁盘为准，被覆盖前的改动会留一份在「历史版本」里。
+                </p>
+              </SettingRow>
+
               <SettingRow label="粘贴的图片" hint="截图与拖入的文件怎么存">
                 <div className="segmented">
                   <button

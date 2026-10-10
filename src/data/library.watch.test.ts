@@ -126,12 +126,12 @@ interface WatchCalls {
   /** Roots the preload was asked to watch and has not been told to unwatch. */
   watched: Set<string>;
   listenerCount: number;
-  emit(root: string): void;
+  emit(event: string | { v: 2; root: string; changes: Array<{ path: string; type: string }> }): void;
 }
 
 /** A fake `window.opennote`; `watch: false` mimics a preload without the watch API. */
 function installBridge(options: { watch?: boolean; withWindow?: boolean } = {}): WatchCalls {
-  const listeners = new Set<(root: string) => void>();
+  const listeners = new Set<(event: string | { v: 2; root: string; changes: Array<{ path: string; type: string }> }) => void>();
   const watched = new Set<string>();
   const calls: string[] = [];
   const fs: Record<string, unknown> = options.watch === false
@@ -147,7 +147,7 @@ function installBridge(options: { watch?: boolean; withWindow?: boolean } = {}):
           watched.delete(root);
           return true;
         },
-        onWorkspaceChanged: (callback: (root: string) => void) => {
+        onWorkspaceChanged: (callback: (event: string | { v: 2; root: string; changes: Array<{ path: string; type: string }> }) => void) => {
           calls.push("subscribe");
           listeners.add(callback);
           return () => {
@@ -165,8 +165,8 @@ function installBridge(options: { watch?: boolean; withWindow?: boolean } = {}):
     get listenerCount() {
       return listeners.size;
     },
-    emit(root: string) {
-      for (const callback of [...listeners]) callback(root);
+    emit(event: string | { v: 2; root: string; changes: Array<{ path: string; type: string }> }) {
+      for (const callback of [...listeners]) callback(event);
     },
   };
 }
@@ -267,6 +267,23 @@ describe("D08 目录监听接线", () => {
     await vi.advanceTimersByTimeAsync(600);
     await settle();
 
+    expect(scans(backend) - before).toBe(1);
+  });
+
+  it("v2 载荷（带变化路径）触发重扫；其他笔记本的 v2 事件不触发", async () => {
+    const bridge = installBridge();
+    const backend = scenario("A", (b) => b.seed("a.md", "# a"));
+    await openRecord("A");
+    const before = scans(backend);
+
+    bridge.emit({ v: 2, root: rootOf("A"), changes: [{ path: "新.md", type: "add" }] });
+    await vi.advanceTimersByTimeAsync(600);
+    await settle();
+    expect(scans(backend) - before).toBe(1);
+
+    bridge.emit({ v: 2, root: "C:\\别的地方", changes: [{ path: "x.md", type: "update" }] });
+    await vi.advanceTimersByTimeAsync(600);
+    await settle();
     expect(scans(backend) - before).toBe(1);
   });
 

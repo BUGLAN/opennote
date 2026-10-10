@@ -398,6 +398,12 @@ async function writeFileAtomic(target, data) {
       .toString(36)
       .slice(2, 8)}.tmp`,
   )
+  // 登记自写路径（目标 + 临时文件）：watcher 命中即丢，应用自己的写盘不再触发整库刷新。
+  // currentWorkspaceRoot 由 watchWorkspace 设置；尚未打开工作区时无所谓（没有 watcher）。
+  if (currentWorkspaceRoot) {
+    markSelfWrite(currentWorkspaceRoot, path.relative(currentWorkspaceRoot, destination))
+    markSelfWrite(currentWorkspaceRoot, path.relative(currentWorkspaceRoot, temporary))
+  }
   try {
     await writeFile(temporary, data)
     await rename(temporary, destination)
@@ -547,7 +553,8 @@ function registerFsHandlers() {
   handle(
     'opennote:fs:mkdir',
     async (root, relPath) => {
-      const { target } = await safePath(root, relPath, 'parent')
+      const { root: safeRoot, target } = await safePath(root, relPath, 'parent')
+      markSelfWrite(safeRoot, relPath)
       try {
         await mkdir(target, { recursive: true })
       } catch (error) {
@@ -564,6 +571,7 @@ function registerFsHandlers() {
       // D29：不能只看 relPath 是不是空——'.'、'./'、'.\\'、'././' 都会被 path.resolve
       // 归一化成 root 本身，必须比较解析后的绝对路径（Windows 忽略大小写）。
       if (pathIdentity(target) === pathIdentity(safeRoot)) throw new Error('不能删除笔记本根目录')
+      markSelfWrite(safeRoot, relPath)
       const recursive = options && typeof options === 'object' ? options.recursive === true : false
       try {
         await rm(target, { recursive, force: true })
@@ -588,8 +596,10 @@ function registerFsHandlers() {
     'opennote:fs:move',
     async (root, from, to) => {
       if (!from || !to) throw new Error('不能移动笔记本根目录')
-      const source = (await safePath(root, from, 'parent')).target
+      const { root: safeRoot, target: source } = await safePath(root, from, 'parent')
       const target = (await safePath(root, to, 'parent')).target
+      markSelfWrite(safeRoot, from)
+      markSelfWrite(safeRoot, to)
       if (source === target) return
       if (target.startsWith(`${source}${path.sep}`)) throw new Error('不能将文件夹移动到自身内部')
       try {
@@ -649,22 +659,62 @@ function registerFsHandlers() {
 }
 
 // ---------------------------------------------------------------------------
-// D08：工作区变更通知（去抖，仅限已授权 root）
+// D08 + P1c：工作区变更通知（去抖、按路径载荷、自写过滤，仅限已授权 root）
 // ---------------------------------------------------------------------------
 //
-// 外部编辑器 / 同步盘改动工作区时，渲染层需要知道「该重扫了」。这里只做最小的
-// 主进程侧管道：watchWorkspace/unwatchWorkspace 受授权集合门控，事件去抖后广播给
-// 所有窗口（频道 opennote:fs:workspace-changed，payload 为工作区绝对路径）。
-// 注意：渲染层何时调用它们是 T6/数据层的事，这里不改变任何既有 API。
+// 管道：fs.watch(递归) → 收集变化路径 → 过滤应用自己刚写的路径 → 去抖 → 广播
+//   { v: 2, root, changes: [{ path, type }] }
+//
+// 为什么要过滤自写路径：0.9.x 里应用自己的每次自动保存都会触发一次「整库重扫」，
+// 打字越勤快重扫越频繁——既是卡顿的来源，也是「自己的保存被当成外部改动」的放大器。
+// 写入型 IPC（writeText/writeBytes/move/remove/mkdir）登记路径 + 短窗口，命中窗口的
+// 事件直接丢弃；万一漏掉一拍的真外部改动，仍有保存前的 stat/字节判定兜底，最坏只是
+// 界面晚一拍刷新，不会丢内容。
+//
+// 载荷带版本（v2 才有 changes）；changes 为空 ⇒ 「有变化但拿不到路径」，渲染层按全量处理。
+// 事件源将来要换 @parcel/watcher 时，保持「登记 → 过滤 → 聚合 → 广播」形状不变即可，
+// 见 docs/设计-同步层与索引重构-2026-10-10.md §3（打包约束见 electron-builder.yml 头注）。
 
-/** identity → { watcher, timer } */
+/** identity → { watcher, timer, pending: Map(相对路径→type), generic } */
 const workspaceWatchers = new Map()
 
-function notifyWorkspaceChanged(absolutePath) {
+/** 应用自己经 IPC 写过的路径，在这么长的窗口内不算「外部改动」。 */
+const SELF_WRITE_WINDOW_MS = 1500
+/** identity → Map(工作区相对路径（'/' 分隔）→ 过期时间) */
+const selfWrittenPaths = new Map()
+
+function selfWriteKey(relPath) {
+  return String(relPath || '').replace(/\\/g, '/').replace(/^\.\//, '')
+}
+
+function markSelfWrite(safeRoot, relPath) {
+  const identity = pathIdentity(safeRoot)
+  let bucket = selfWrittenPaths.get(identity)
+  if (!bucket) {
+    bucket = new Map()
+    selfWrittenPaths.set(identity, bucket)
+  }
+  bucket.set(selfWriteKey(relPath), Date.now() + SELF_WRITE_WINDOW_MS)
+}
+
+function isSelfWrite(safeRoot, relPath) {
+  const bucket = selfWrittenPaths.get(pathIdentity(safeRoot))
+  if (!bucket) return false
+  const key = selfWriteKey(relPath)
+  const expiresAt = bucket.get(key)
+  if (expiresAt === undefined) return false
+  if (Date.now() > expiresAt) {
+    bucket.delete(key)
+    return false
+  }
+  return true
+}
+
+function notifyWorkspaceChanged(absolutePath, changes) {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window || window.isDestroyed()) continue
     try {
-      window.webContents.send('opennote:fs:workspace-changed', absolutePath)
+      window.webContents.send('opennote:fs:workspace-changed', { v: 2, root: absolutePath, changes })
     } catch {
       /* 窗口正在销毁：忽略 */
     }
@@ -695,37 +745,51 @@ function registerFsWatchHandlers() {
       currentWorkspaceRoot = safeRoot
       if (workspaceWatchers.has(identity)) return true
 
+      // 状态先入表再开 watcher：否则首批事件可能撞上「表还没登记」而丢通知。
+      const state = { watcher: null, timer: null, pending: new Map(), generic: false }
+      workspaceWatchers.set(identity, state)
+
       const schedule = () => {
-        const state = workspaceWatchers.get(identity)
-        if (!state) return
         if (state.timer) clearTimeout(state.timer)
         state.timer = setTimeout(() => {
-          const current = workspaceWatchers.get(identity)
-          if (current) current.timer = null
-          notifyWorkspaceChanged(safeRoot)
+          state.timer = null
+          if (!state.generic && state.pending.size === 0) return
+          const changes = [...state.pending].map(([path, type]) => ({ path, type }))
+          state.pending.clear()
+          state.generic = false
+          notifyWorkspaceChanged(safeRoot, changes)
         }, WATCH_DEBOUNCE_MS)
         state.timer.unref?.()
       }
       const onChange = (_eventType, filename) => {
-        // 应用自己的元数据（.opennote/**）改动不对外通知，避免「自写 → 自读重扫」循环。
-        const name = typeof filename === 'string' ? filename.replace(/\\/g, '/') : ''
-        if (name === '.opennote' || name.startsWith('.opennote/')) return
+        // 三类不对外通知：`.opennote/**`（应用自己的元数据/历史，避免自写自读循环）、
+        // 自己刚经 IPC 写过的路径（避免每次自动保存招来一次整库重扫）、
+        // 以及拿不到文件名的事件（置 generic，仍整库刷新）。
+        const rel = selfWriteKey(filename)
+        if (!rel) {
+          state.generic = true
+          schedule()
+          return
+        }
+        if (rel === '.opennote' || rel.startsWith('.opennote/')) return
+        if (isSelfWrite(safeRoot, rel)) return
+        // fs.watch 不给事件类型：渲染层按路径重读即可，类型仅作日志/展示用途。
+        state.pending.set(rel, 'update')
         schedule()
       }
 
-      let watcher
       try {
-        watcher = watch(safeRoot, { recursive: true, persistent: false }, onChange)
+        state.watcher = watch(safeRoot, { recursive: true, persistent: false }, onChange)
       } catch {
         try {
           // 平台不支持递归监听时退化成只监听根目录。
-          watcher = watch(safeRoot, { persistent: false }, onChange)
+          state.watcher = watch(safeRoot, { persistent: false }, onChange)
         } catch (error) {
+          workspaceWatchers.delete(identity)
           throw fsError('监听工作区失败', '.', error)
         }
       }
-      watcher.on('error', () => closeWorkspaceWatcher(identity))
-      workspaceWatchers.set(identity, { watcher, timer: null })
+      state.watcher.on('error', () => closeWorkspaceWatcher(identity))
 
       // 收件箱变更检测是**独立**的一条链路：`.opennote/**` 被上面的 onChange
       // 显式跳过（避免自写自读），所以它不能复用这个 watcher，也走独立频道。

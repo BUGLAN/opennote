@@ -11,6 +11,22 @@ export interface DesktopEntry {
   mtimeMs: number;
 }
 
+/** 主进程广播的按路径变更（v2 载荷）。fs.watch 不区分增删改，`type` 仅作日志用途。 */
+export interface WorkspaceFileChange {
+  path: string;
+  type: "add" | "update" | "delete";
+}
+
+/**
+ * 工作区变更事件。`changes` 为空 ⇒ 主进程拿到了变化但拿不到路径（个别平台事件），
+ * 渲染层按全量处理。应用自己的写入已在主进程源头过滤，不会出现在这里。
+ */
+export interface WorkspaceChangedEvent {
+  v: 2;
+  root: string;
+  changes: WorkspaceFileChange[];
+}
+
 /* ===================================================================== *
  * 导入信封与落盘结果（`opennote.import/v1`）
  *
@@ -316,7 +332,7 @@ export interface OpennoteBridge {
     /** Stop watching a workspace. */
     unwatchWorkspace(root: string): Promise<boolean>;
     /** Subscribe to debounced workspace-change events; returns an unsubscribe function. */
-    onWorkspaceChanged(callback: (root: string) => void): () => void;
+    onWorkspaceChanged(callback: (event: WorkspaceChangedEvent | string) => void): () => void;
   };
   dialog: {
     pickFolder(): Promise<string | null>;
