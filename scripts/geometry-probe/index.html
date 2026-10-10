@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper" data-accent="seal" data-font="serif">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>opennote · geometry probe</title>
+    <!-- 真实样式表（不含 app.css：探针没有 React 外壳）。 -->
+    <link rel="stylesheet" href="/src/styles/tokens.css" />
+    <link rel="stylesheet" href="/src/styles/base.css" />
+    <link rel="stylesheet" href="/src/styles/prose.css" />
+    <link rel="stylesheet" href="/src/styles/editor.css" />
+    <style>
+      /* 只补 `src/styles/app.css:975-985` 里 `.editor-host` 那几条外壳规则。 */
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      #host.editor-host {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        position: relative;
+        background: var(--paper);
+        height: 100vh;
+      }
+      #host.editor-host .cm-editor {
+        height: 100%;
+      }
+      .probe-host {
+        position: relative;
+        overflow: hidden;
+        background: var(--paper);
+      }
+      .probe-host .cm-editor {
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="host" class="editor-host"></div>
+    <script type="module" src="./probe.ts"></script>
+  </body>
+</html>

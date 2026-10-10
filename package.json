@@ -49,6 +49,7 @@
     "checksums": "node scripts/make-checksums.mjs release",
     "update:e2e": "node scripts/update-e2e.cjs",
     "update:shots": "node scripts/update-shots.cjs",
+    "verify:geometry": "node scripts/verify-editor-geometry.cjs",
     "release:check": "node scripts/release-version.mjs check",
     "release:version": "node scripts/release-version.mjs set",
     "release:build": "node scripts/build-desktop.mjs && electron-builder --config electron-builder.yml && node extension/build.mjs && node scripts/pack-extension.mjs && node scripts/make-checksums.mjs release"
