@@ -1105,6 +1105,132 @@ group("§5 本地桥与安全");
   }
 }
 
+// B-3b 端口事实的**跨产物一致性**（冻结段 8787–8796 一共 5 个产地）
+/*
+ * 为什么必须有这条：这三个产物是**物理隔离的构建单元** —— 扩展自述「与主项目物理隔离
+ * 的独立构建单元」（`dependencies: {}`）、Skill 被要求零依赖（要能脱离仓库在
+ * `~/.agents/skills/` 下单独跑），所以它们**不能互相 import**，端口只能各写一份。
+ * 既然一个事实注定有多个产地，就至少要保证「漂移」当场红 —— 改一处忘另一处，
+ * 结果是「桥起来了但客户端找不到」，而不是任何编译错误。
+ *
+ * 与 `BR-3` 的分工：`BR-3` 只问「改动面里出现过 8787 与 8796 吗」（**存在性**）；
+ * 这条问的是 5 处清单是否**相等**（相等性）。
+ */
+{
+  const expand = (from, to) => {
+    const out = [];
+    for (let port = from; port <= to; port += 1) out.push(port);
+    return out;
+  };
+  const intOf = (text, re) => {
+    const matched = text.match(re);
+    return matched ? Number(matched[1]) : null;
+  };
+  const listOf = (text, re) => {
+    const matched = text.match(re);
+    if (!matched) return null;
+    const ports = [...matched[1].matchAll(/\d+/g)].map((item) => Number(item[0]));
+    return ports.length ? ports : null;
+  };
+
+  const preDrift = [];
+  const findings = [];
+
+  // ① electron/bridge.cjs —— DEFAULT_PORT / PORT_RANGE_START / PORT_RANGE_END
+  {
+    const src = stripComments(readIfExists("electron/bridge.cjs") || "");
+    const start = intOf(src, /const PORT_RANGE_START = (\d+)/);
+    const end = intOf(src, /const PORT_RANGE_END = (\d+)/);
+    const fallback = intOf(src, /const DEFAULT_PORT = (\d+)/);
+    if (start !== null && fallback !== null && start !== fallback) {
+      preDrift.push(`electron/bridge.cjs 内部：DEFAULT_PORT=${fallback} ≠ PORT_RANGE_START=${start}`);
+    }
+    findings.push({
+      name: "electron/bridge.cjs",
+      ports: start !== null && end !== null ? expand(start, end) : null,
+      note: `DEFAULT_PORT=${fallback} / RANGE=${start}–${end}`,
+    });
+  }
+
+  // ② src/lib/importBridge.ts —— BRIDGE_DEFAULT_PORT + BRIDGE_PORT_COUNT
+  {
+    const src = stripComments(readIfExists("src/lib/importBridge.ts") || "");
+    const start = intOf(src, /BRIDGE_DEFAULT_PORT\s*=\s*(\d+)/);
+    const count = intOf(src, /BRIDGE_PORT_COUNT\s*=\s*(\d+)/);
+    findings.push({
+      name: "src/lib/importBridge.ts",
+      ports: start !== null && count !== null ? expand(start, start + count - 1) : null,
+      note: `BRIDGE_DEFAULT_PORT=${start} / BRIDGE_PORT_COUNT=${count}`,
+    });
+  }
+
+  // ③ extension/src/lib/bridge.js —— BRIDGE_PORTS
+  {
+    const src = stripComments(readIfExists("extension/src/lib/bridge.js") || "");
+    findings.push({
+      name: "extension/src/lib/bridge.js",
+      ports: listOf(src, /BRIDGE_PORTS = Object\.freeze\(\[([\s\S]*?)\]/),
+      note: "BRIDGE_PORTS",
+    });
+  }
+
+  // ④ extension/src/manifest.json —— host_permissions（静态清单，Chrome 的硬约束，整合不掉）
+  {
+    let ports = null;
+    try {
+      const manifest = JSON.parse(readIfExists("extension/src/manifest.json") || "{}");
+      const hosts = Array.isArray(manifest.host_permissions) ? manifest.host_permissions : [];
+      const parsed = [];
+      for (const host of hosts) {
+        const matched = String(host).match(/^http:\/\/127\.0\.0\.1:(\d+)\/\*$/);
+        if (matched) parsed.push(Number(matched[1]));
+      }
+      ports = hosts.length > 0 && parsed.length === hosts.length ? parsed : null;
+    } catch {
+      ports = null;
+    }
+    findings.push({ name: "extension/src/manifest.json", ports, note: "host_permissions" });
+  }
+
+  // ⑤ .agents/skills/opennote-ingest/scripts/opennote-ingest.mjs —— PORTS
+  {
+    const src = stripComments(readIfExists(".agents/skills/opennote-ingest/scripts/opennote-ingest.mjs") || "");
+    findings.push({
+      name: ".agents/skills/opennote-ingest/scripts/opennote-ingest.mjs",
+      ports: listOf(src, /const PORTS = \[([\s\S]*?)\]/),
+      note: "PORTS",
+    });
+  }
+
+  const missing = findings.filter((item) => !Array.isArray(item.ports));
+  const canonical = findings.find((item) => Array.isArray(item.ports))?.ports || null;
+  const drifted = [...preDrift];
+  if (canonical) {
+    for (const item of findings) {
+      if (!Array.isArray(item.ports)) continue;
+      if (JSON.stringify(item.ports) !== JSON.stringify(canonical)) {
+        drifted.push(
+          `${item.name}: ${item.ports.length} 个（${item.ports[0]}–${item.ports[item.ports.length - 1]}）` +
+            ` ≠ ${canonical[0]}–${canonical[canonical.length - 1]}`,
+        );
+      }
+    }
+  }
+  const seen = canonical ? `${canonical[0]}–${canonical[canonical.length - 1]}（${canonical.length} 个）` : "?";
+  check(
+    "BR-3b",
+    "端口事实跨 5 处产物**相等**（冻结段 8787–8796；三者物理隔离不能互相 import，只能靠这条防漂移）",
+    canonical !== null && missing.length === 0 && drifted.length === 0,
+    `5 处一致：${seen}`,
+    [
+      missing.length ? `读不出端口清单：${missing.map((item) => `${item.name}（${item.note}）`).join("、")}` : "",
+      drifted.length ? `漂移：${drifted.join(" | ")}` : "",
+    ]
+      .filter(Boolean)
+      .join("；") || "与冻结段不一致",
+  );
+}
+
 // B-5 四道前置校验顺序 Host → Origin → Content-Type → token
 // 判据用**真实拒绝点**（`sendError(req, res, 'IMP-xxxx'`）的行号，而不是文档注释里的首次提及。
 {

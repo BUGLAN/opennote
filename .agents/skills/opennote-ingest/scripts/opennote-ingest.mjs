@@ -582,14 +582,40 @@ function readRecentWorkspaces() {
   }
 }
 
+/**
+ * 探测本地桥。候选顺序 = **显式 > 已公布端口 > 冻结段扫描**：
+ *
+ *   1. `--endpoint`：调用方点名，只试它。
+ *   2. `bridge.json` 的 `port`：桥自己公布的**实际绑定端口**。这一步是必需的 ——
+ *      端口完全可能落在冻结段之外（Windows 的保留端口段会把 `8787–8796` 整段吃掉，
+ *      见契约 §5.2.1），那种情况下**扫描永远找不到**，只有读这个文件才能跟上。
+ *      也就是「端口从各客户端各自硬编码的常量，变成服务端公布、客户端读取的一个事实」。
+ *   3. 冻结段 `8787–8796`：向后兼容的兜底。读不到文件（桥没跑过／文件被删），
+ *      或文件里的端口已失效（桥已停止、用户换回了默认段）时靠它。
+ */
 async function probeBridge(endpoint) {
-  const candidates = endpoint ? [endpoint] : PORTS.map((port) => `http://127.0.0.1:${port}`);
-  for (const base of candidates) {
+  const candidates = [];
+  if (endpoint) {
+    candidates.push({ base: endpoint, how: "--endpoint" });
+  } else {
+    const published = readBridgeFile();
+    const publishedPort = published && Number.isInteger(published.port) ? published.port : null;
+    if (publishedPort !== null && publishedPort >= 1024 && publishedPort <= 65535) {
+      candidates.push({ base: `http://127.0.0.1:${publishedPort}`, how: "bridge.json.port" });
+    }
+    for (const port of PORTS) {
+      const base = `http://127.0.0.1:${port}`;
+      if (!candidates.some((item) => item.base === base)) candidates.push({ base, how: "scan" });
+    }
+  }
+  for (const candidate of candidates) {
     try {
-      const response = await fetch(`${base}/v1/health`, { signal: AbortSignal.timeout(600) });
+      const response = await fetch(`${candidate.base}/v1/health`, { signal: AbortSignal.timeout(600) });
       if (!response.ok) continue;
       const payload = await response.json();
-      if (payload && payload.ok && payload.result) return { endpoint: base, ...payload.result };
+      if (payload && payload.ok && payload.result) {
+        return { endpoint: candidate.base, how: candidate.how, ...payload.result };
+      }
     } catch {
       /* 这个端口没有我们的桥，继续试下一个 */
     }
@@ -962,7 +988,19 @@ async function runCheck(opts) {
   const report = {
     ok: true,
     node: process.version,
-    bridge: bridge ? { endpoint: bridge.endpoint, app: bridge.app, spec: bridge.spec, inbox: bridge.inbox, inboxMode: bridge.inboxMode, workspace: bridge.workspace } : { found: false },
+    bridge: bridge
+      ? {
+          endpoint: bridge.endpoint,
+          // 端口是从哪儿来的：`--endpoint` / `bridge.json.port` / `scan`（冻结段扫描）。
+          // 排障时第一眼就看这个 —— 「找到了」和「怎么找到的」是两件事。
+          how: bridge.how,
+          app: bridge.app,
+          spec: bridge.spec,
+          inbox: bridge.inbox,
+          inboxMode: bridge.inboxMode,
+          workspace: bridge.workspace,
+        }
+      : { found: false },
     token: { present: Boolean(token.token), source: token.source, auth: bridge ? auth : "no-bridge" },
     workspace: null,
     inbox: null,

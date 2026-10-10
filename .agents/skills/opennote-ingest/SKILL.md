@@ -56,8 +56,11 @@ node $script --dir "docs\产出\2026-10" --recursive --folder "Agent 产出" --t
 node $script "docs\我的报告.md" --channel bridge --folder "Agent 产出" --json
 ```
 
-它把信封 `POST` 给本机桥（`http://127.0.0.1:8787`）。**`ok: true` 不等于写成了笔记** ——
-必须看 JSON 里的 `action`，它是从回执 `result.status` 归一的：
+它把信封 `POST` 给本机桥。**端口不是写死的 8787** —— 桥可能绑在别的端口上
+（用户显式指定，或 `8787–8796` 整段被 Windows 保留端口段占用时启用其持久化偏好）。
+脚本按 **`--endpoint` > `bridge.json` 的 `port` > 扫 `8787–8796`** 的顺序找桥，
+`--check --json` 的 `bridge.how` 会告诉你这次是**怎么找到的**。
+**`ok: true` 不等于写成了笔记** —— 必须看 JSON 里的 `action`，它是从回执 `result.status` 归一的：
 
 | 回执 `result.status` | 含义 | JSON `action` |
 | --- | --- | --- |

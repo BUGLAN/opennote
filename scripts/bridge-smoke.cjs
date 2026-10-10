@@ -306,6 +306,67 @@ function isRefused(port) {
   )
 }
 
+/**
+ * 注入缝隙：让指定端口的 `listen()` 以给定错误码失败，并记录**所有被尝试过的端口**。
+ *
+ * 为什么必须有这条缝：`EACCES` 是 **Windows 系统保留端口段**（Hyper-V / WSL / Docker 的
+ * `winnat`）的产物，测试里造不出来 —— `occupy()` 只能造 `EADDRINUSE`，而且占满 `8787–8796`
+ * 还要先停掉主桥、跑完再起回来。没有它，「起始端口一被系统保留就整段放弃」这个**真实故障
+ * 现场**（`8755–8854` 被保留 → 8787 起全段 `EACCES`）就没有任何回归护栏，改回去也不会有人发现。
+ *
+ * 为什么可行：`bridge.cjs` 顶层 `const http = require('node:http')` 拿到的是**同一个模块对象**，
+ * 而 `tryListen` 是在调用时才做 `http.createServer()` —— 替换属性对它可见。
+ *
+ * **只改测试，不改产品**：产品侧不留任何「测试模式」开关。
+ */
+async function withListenErrors(ports, code, fn) {
+  const originalCreateServer = http.createServer
+  const blocked = new Map(ports.map((port) => [port, code]))
+  const attempted = []
+  http.createServer = function patchedCreateServer(...args) {
+    const server = originalCreateServer.apply(this, args)
+    const originalListen = server.listen
+    server.listen = function patchedListen(...listenArgs) {
+      const target = listenArgs.find((item) => typeof item === 'number')
+      attempted.push(target)
+      if (blocked.has(target)) {
+        // 异步派发：`tryListen` 先注册 `once('error')` 再调 `listen()`，同步派发会丢事件。
+        setImmediate(() => {
+          server.emit(
+            'error',
+            Object.assign(new Error(`listen ${code}: injected by smoke 127.0.0.1:${target}`), {
+              code,
+              errno: code === 'EACCES' ? -4092 : -4091,
+              syscall: 'listen',
+              port: target,
+            }),
+          )
+        })
+        return server
+      }
+      return originalListen.apply(server, listenArgs)
+    }
+    return server
+  }
+  try {
+    return await fn({ attempted })
+  } finally {
+    http.createServer = originalCreateServer
+  }
+}
+
+/** `EACCES` = 端口被系统保留（Windows 保留段）。 */
+function withEaccesPorts(ports, fn) {
+  return withListenErrors(ports, 'EACCES', fn)
+}
+
+/** 冻结默认段 `8787–8796` 的全量列表（与 `bridge.cjs` 的 `FROZEN_PORTS` 同一个事实）。 */
+function frozenPorts() {
+  const out = []
+  for (let port = PORT_RANGE_START; port <= PORT_RANGE_END; port += 1) out.push(port)
+  return out
+}
+
 /** 造一个带最小渲染层替身的桥实例（默认端口见参数）。 */
 function makeBridge(options = {}) {
   const holder = { tokenHash: null, calls: [], inboxWrites: [], logs: [], logEvents: [] }
@@ -1998,6 +2059,163 @@ async function main() {
     } finally {
       for (const release of releases) await release()
       await custom.bridge.stop()
+    }
+  })
+
+  // ── 系统保留端口段（EACCES）与「默认段优先」 ───────────────────────────────
+  // 真实故障现场：Windows 的 `MaxUserPort` 把动态端口范围拉到 1024–15000，
+  // HNS/`winnat` 的保留段因此压到 8755–8854，于是 8787 起全段 `listen()` 返回 `EACCES`。
+  // 上面这些用例都造不出 `EACCES`（`occupy()` 只有 `EADDRINUSE`），所以走注入缝隙。
+  await check('系统保留段① EACCES 不再中断扫描：起始端口被保留时继续试下一个', async () => {
+    const custom = makeBridge({ noWindow: true })
+    custom.bridge.regenerateToken()
+    const reserved = privatePortCounter
+    privatePortCounter += 2
+    let result = null
+    try {
+      result = await withEaccesPorts([reserved], async () => custom.bridge.startWithPort(reserved))
+      assert.equal(
+        result.port,
+        reserved + 1,
+        `起始端口被系统保留时应继续扫到 ${reserved + 1}，实际 ${result.port}（${result.error || ''}）`,
+      )
+      return `${reserved} EACCES → ${result.port}（旧代码会停在 ${reserved} 直接失败）`
+    } finally {
+      await custom.bridge.stop().catch(() => {})
+    }
+  })
+
+  await check('系统保留段② 8787–8796 整段被保留 → failed + IMP-1002（**不是** port-busy）', async () => {
+    const reserved = makeBridge({ noWindow: true })
+    reserved.bridge.regenerateToken()
+    let result = null
+    try {
+      result = await withEaccesPorts(frozenPorts(), async () => reserved.bridge.start())
+      assert.equal(result.port, null, '整段被保留时不得监听成功')
+      assert.equal(result.code, 'IMP-1002', '被系统保留 ≠ 被程序占用，码号必须是 IMP-1002')
+      assert.equal(result.error, '本地接口启动失败（EACCES）。')
+      const status = reserved.bridge.status()
+      assert.equal(status.state, 'failed')
+      assert.equal(status.stateLabel, '启动失败')
+      assert.equal(status.running, false)
+      assert.equal(status.port, null)
+      return `failed / IMP-1002 /「${result.error}」`
+    } finally {
+      await reserved.bridge.stop().catch(() => {})
+    }
+  })
+
+  await check('默认段优先① 冻结段可用时就用冻结段（旧扩展 / 旧 Skill 只认这段）', async () => {
+    const dir = tempDir('opennote-bridge-frozen-first-')
+    const fallback = privatePortCounter
+    privatePortCounter += 10
+    const first = makeBridge({ dataDir: dir, workspace: true })
+    first.bridge.regenerateToken()
+    const up = await first.bridge.startWithPort(fallback)
+    assert.equal(up.port, fallback, `兜底端口本身要能起来：${up.error || ''}`)
+    await first.bridge.stop()
+
+    let freeFrozen = null
+    for (const candidate of frozenPorts()) {
+      if (await isFree(candidate)) {
+        freeFrozen = candidate
+        break
+      }
+    }
+    if (freeFrozen == null) {
+      fs.rmSync(dir, { recursive: true, force: true })
+      skip('冻结段全部被其它进程占用，无法断言「默认段优先」')
+    }
+
+    const second = makeBridge({ dataDir: dir, workspace: true })
+    try {
+      const result = await second.bridge.start()
+      assert.ok(
+        result.port >= PORT_RANGE_START && result.port <= PORT_RANGE_END,
+        `冻结段可用时应优先用它，实际 ${result.port}（持久化兜底是 ${fallback}）`,
+      )
+      assert.equal(await isFree(fallback), true, '兜底端口应仍空闲 —— 证明没有优先用它')
+      return `冻结段可用 → ${result.port}（而不是持久化的 ${fallback}）`
+    } finally {
+      await second.bridge.stop().catch(() => {})
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await check('默认段优先② 冻结段整段被保留时才启用用户持久化的兜底端口', async () => {
+    const dir = tempDir('opennote-bridge-fallback-')
+    const fallback = privatePortCounter
+    privatePortCounter += 10
+    const first = makeBridge({ dataDir: dir, workspace: true })
+    first.bridge.regenerateToken()
+    const up = await first.bridge.startWithPort(fallback)
+    assert.equal(up.port, fallback, `兜底端口本身要能起来：${up.error || ''}`)
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'bridge.json'), 'utf8'))
+    assert.equal(onDisk.startPort, fallback, 'bridge.json 必须记住用户点名的起始端口（跨重启）')
+    assert.equal(onDisk.port, fallback, 'bridge.json 必须公布实际绑定端口')
+    await first.bridge.stop()
+
+    const second = makeBridge({ dataDir: dir, workspace: true })
+    let attempted = []
+    try {
+      const result = await withEaccesPorts(frozenPorts(), async (probe) => {
+        const started = await second.bridge.start()
+        attempted = probe.attempted.slice()
+        return started
+      })
+      assert.equal(result.port, fallback, `应落到用户自己的兜底端口，实际 ${result.port}（${result.error || ''}）`)
+      assert.deepEqual(attempted.slice(0, 10), frozenPorts(), '冻结段必须整段排在兜底段之前')
+      assert.equal(attempted[10], fallback, `兜底段应紧接冻结段之后，实际 ${attempted[10]}`)
+      return `冻结段全 EACCES → ${attempted[0]}…${attempted[9]} → ${attempted[10]}`
+    } finally {
+      await second.bridge.stop().catch(() => {})
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await check('FR-41：冻结段只是「被别人占用」→ port-busy 明确提示，**不**偷偷用兜底端口', async () => {
+    const dir = tempDir('opennote-bridge-fr41-')
+    const fallback = privatePortCounter
+    privatePortCounter += 10
+    const first = makeBridge({ dataDir: dir, workspace: true })
+    first.bridge.regenerateToken()
+    const up = await first.bridge.startWithPort(fallback)
+    assert.equal(up.port, fallback, `兜底端口本身要能起来：${up.error || ''}`)
+    await first.bridge.stop()
+
+    const second = makeBridge({ dataDir: dir, workspace: true })
+    try {
+      const result = await withListenErrors(frozenPorts(), 'EADDRINUSE', async () => second.bridge.start())
+      assert.equal(result.port, null, '被占用时不得换到范围外（FR-41 要求明确提示而不是静默换端口）')
+      assert.equal(result.code, 'IMP-1003')
+      assert.equal(result.error, '8787 到 8796 端口都被占用了。请关闭占用端口的程序，或在设置里指定其它端口。')
+      assert.equal(second.bridge.status().state, 'port-busy')
+      assert.equal(await isFree(fallback), true, '兜底端口应仍空闲 —— 证明桥没有偷偷换过去')
+      return 'port-busy + IMP-1003，兜底端口未被偷用'
+    } finally {
+      await second.bridge.stop().catch(() => {})
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await check('bridge.json 公布实际绑定端口（未运行 / 运行中 / 停止后回落）', async () => {
+    const dir = tempDir('opennote-bridge-port-publish-')
+    const target = privatePortCounter
+    privatePortCounter += 10
+    const inst = makeBridge({ dataDir: dir, workspace: true })
+    inst.bridge.regenerateToken()
+    const readDisk = () => JSON.parse(fs.readFileSync(path.join(dir, 'bridge.json'), 'utf8'))
+    try {
+      assert.equal(readDisk().port, null, '未运行时 port 必须是 null（不猜）')
+      const started = await inst.bridge.startWithPort(target)
+      assert.equal(started.port, target, `应绑定 ${target}：${started.error || ''}`)
+      assert.equal(readDisk().port, target, '运行中 bridge.json.port 必须等于实际绑定端口')
+      await inst.bridge.stop()
+      assert.equal(readDisk().port, null, '停止后 port 必须回落 null（客户端据此回退扫描）')
+      return `null → ${target} → null`
+    } finally {
+      await inst.bridge.stop().catch(() => {})
+      fs.rmSync(dir, { recursive: true, force: true })
     }
   })
 

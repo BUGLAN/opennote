@@ -31,7 +31,7 @@ export const IMP_TABLE = {
   "IMP-1002": {
     http: null,
     retryable: false,
-    userMessage: "本地接口启动失败，端口可能被安全软件占用。可在设置里换一个端口，或查看日志。",
+    userMessage: "本地接口启动失败。常见原因：8787–8796 被 Windows 保留端口段占用（Hyper-V / WSL / Docker），或被安全软件拦截。可在设置里换一个端口，或查看日志。",
   },
   "IMP-1003": {
     http: null,

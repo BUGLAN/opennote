@@ -79,6 +79,27 @@ const PORT_COUNT = PORT_RANGE_END - PORT_RANGE_START + 1
 const CUSTOM_PORT_MIN = 1024
 const CUSTOM_PORT_MAX = 65535
 
+/**
+ * 从 `first` 起连续 `PORT_COUNT` 个端口（不越过 65535）—— 扫描相位共用同一份生成逻辑。
+ * 「一个事实一个产地」：冻结段、显式段、持久化兜底段都从这里出，不各写一份循环。
+ */
+function portBlockFrom(first) {
+  const last = Math.min(first + PORT_COUNT - 1, CUSTOM_PORT_MAX)
+  const block = []
+  for (let port = first; port <= last; port += 1) block.push(port)
+  return block
+}
+
+/**
+ * **冻结的默认段**：8787–8796。它永远是「没有显式端口时」的**首个**扫描相位。
+ *
+ * 为什么必须优先它：**旧版浏览器扩展与旧版 Skill 只认这一段**（扩展的 `host_permissions`
+ * 与 `BRIDGE_PORTS`、Skill 的 `PORTS` 都写死这 10 个），而它们的更新不由我们控制 ——
+ * 按 zip 手动「加载已解压的扩展程序」安装的副本**永不自动更新**（`scripts/pack-extension.mjs`）。
+ * 只要这一段还能用就优先用它，否则会把这些客户端无声地弄断。
+ */
+const FROZEN_PORTS = Object.freeze(portBlockFrom(PORT_RANGE_START))
+
 const TOKEN_PREFIX = 'opn_'
 /** randomBytes(32) → base64url = 43 字符；加前缀共 47。 */
 const TOKEN_SECRET_LENGTH = 43
@@ -197,7 +218,7 @@ const STATE_NAMES = {
 /** 错误码表：HTTP 状态 + 简报文案 + 是否可重试。文案取自契约 §6.2。 */
 const ERROR_TABLE = {
   'IMP-1001': { http: 503, retryable: true, message: '客户端连不上本地接口', userMessage: '本地接口未开启。请在 Opennote 的「设置 · 文件 · 导入与接口」里开启，然后重试。' },
-  'IMP-1002': { http: 500, retryable: false, message: '本地接口启动失败', userMessage: '本地接口启动失败，端口可能被安全软件占用。可在设置里换一个端口，或查看日志。' },
+  'IMP-1002': { http: 500, retryable: false, message: '本地接口启动失败', userMessage: '本地接口启动失败。常见原因：8787–8796 被 Windows 保留端口段占用（Hyper-V / WSL / Docker），或被安全软件拦截。可在设置里换一个端口，或查看日志。' },
   'IMP-1003': { http: 409, retryable: true, message: '端口全部被占用', userMessage: '8787 到 8796 端口都被占用了。请关闭占用端口的程序，或在设置里指定其它端口。' },
   'IMP-1004': { http: 504, retryable: true, message: '请求超时', userMessage: '本地接口没有及时响应。请确认 Opennote 正在运行。' },
   'IMP-1005': { http: 403, retryable: false, message: 'Host 头缺失或不在白名单', userMessage: '请求被本地接口拒绝。' },
@@ -475,6 +496,11 @@ function createBridge(options = {}) {
      */
     enabled: persisted.enabled === true,
     port: null,
+    /**
+     * 用户显式点名的起始端口（跨重启记住的偏好）。
+     * 它**只是兜底相位**，不挤占冻结默认段 —— 见 `start()` 的相位表。
+     */
+    startPortPreference: persisted.startPort,
     error: null,
     tokenHash: persisted.tokenHash,
     tokenLast4: persisted.tokenLast4,
@@ -487,8 +513,12 @@ function createBridge(options = {}) {
   const allowedOrigins = new Set(persisted.allowedOrigins)
 
   let server = null
-  const startPort = normalizePort(options.startPort) || readEnvPort() || DEFAULT_PORT
-  /** `start({ port })` 指定的端口：优先于 startPort，使用后保留到下次显式指定。 */
+  /**
+   * 显式起始端口：程序化 `options.startPort`（自测隔离实例用）或环境变量 `OPENNOTE_BRIDGE_PORT`。
+   * **有它时只扫它那一段**，与旧版逐字一致 —— 显式指令不该被「冻结段优先」改写。
+   */
+  const explicitStartPort = normalizePort(options.startPort) || readEnvPort()
+  /** `start({ port })` 指定的端口：优先于上面那个，使用后保留到下次显式指定。 */
   let startPortOverride = null
   let listeningPort = null
   const sockets = new Set()
@@ -539,7 +569,14 @@ function createBridge(options = {}) {
   // -------------------------------------------------------------------------
 
   function readPersisted() {
-    const empty = { tokenHash: null, tokenLast4: null, tokenPlaintext: null, allowedOrigins: [], enabled: false }
+    const empty = {
+      tokenHash: null,
+      tokenLast4: null,
+      tokenPlaintext: null,
+      allowedOrigins: [],
+      enabled: false,
+      startPort: null,
+    }
     if (!bridgeFile) return empty
     try {
       const parsed = JSON.parse(fs.readFileSync(bridgeFile, 'utf8'))
@@ -560,6 +597,11 @@ function createBridge(options = {}) {
         tokenPlaintext: plaintext,
         allowedOrigins: [...new Set(origins)],
         enabled: parsed.enabled === true,
+        /**
+         * 用户显式点名的起始端口（跨重启记住的偏好）。非法 / 缺失一律 null —— 不猜。
+         * 它在 `start()` 里只是**兜底相位**，不会挤占冻结默认段。
+         */
+        startPort: normalizePort(parsed.startPort),
       }
     } catch {
       /* 文件不存在或损坏：当作空状态，不阻塞启动 */
@@ -580,6 +622,20 @@ function createBridge(options = {}) {
         allowedOrigins: [...allowedOrigins],
         // 用户偏好，**不从 state.status 推导** —— 推导就会让「退出应用」把偏好清掉（task-27）。
         enabled: state.enabled === true,
+        /**
+         * **实际绑定的端口**（未运行时 `null`）—— 这是给客户端读的「已公布端口」。
+         *
+         * 存在的理由：旧版客户端只能盲扫 `8787–8796`；一旦桥因为系统保留段而绑到别处，
+         * 它们就再也找不到桥（`IMP-1001`）。把真实端口落盘后，有文件系统访问的客户端
+         * （CLI / Skill）可以先读它、读不到再退回扫描 —— 端口从「各客户端各自硬编码的常量」
+         * 变成「服务端公布、客户端读取的一个事实」。
+         *
+         * 浏览器扩展读不到这个文件（MV3 无文件系统访问），所以它**不**靠这条，
+         * 只能靠用户在扩展里显式填地址 —— 见 `docs/import/02` 的发现顺序。
+         */
+        port: typeof listeningPort === 'number' ? listeningPort : null,
+        /** 用户显式点名的起始端口（偏好）。它只是启动兜底，不改变「冻结段优先」。 */
+        startPort: normalizePort(state.startPortPreference),
         updatedAt: new Date().toISOString(),
       }
       const tmp = `${bridgeFile}.tmp`
@@ -709,7 +765,7 @@ function createBridge(options = {}) {
 
   /** 第 1 道：Host 白名单（防 DNS rebinding）。 */
   function checkHost(req, res) {
-    const port = listeningPort || startPort
+    const port = listeningPort || effectiveStartPort()
     const allowed = new Set([
       `127.0.0.1:${port}`,
       '127.0.0.1',
@@ -752,9 +808,16 @@ function createBridge(options = {}) {
     return true
   }
 
-  /** 当前生效的扫描起点：本次覆盖 > 配置的起始端口 > 默认 8787。 */
+  /**
+   * 生效的扫描起点（给 Host 校验与面板的「范围 X–Y」用）。
+   *
+   * 显式（本次覆盖 > 程序化/环境）优先；**没有显式时就是默认端口 8787**（= 冻结段起点，
+   * 两者相等由 `scripts/verify-contract.cjs` 的 `BR-3b` 咬住）。
+   * 持久化兜底段**不在这里体现** —— 它是「冻结段整段失败之后」的第二相位，不是当前范围；
+   * 把它算进来会让面板显示一个这次根本不会先扫的区间。
+   */
   function effectiveStartPort() {
-    return normalizePort(startPortOverride) || startPort
+    return normalizePort(startPortOverride) || explicitStartPort || DEFAULT_PORT
   }
 
   /** 令牌哈希来源：优先主进程持久状态，回调没给有效值时退回桥自己的内存状态。 */
@@ -2019,39 +2082,93 @@ function createBridge(options = {}) {
     state.status = 'starting'
     state.error = null
 
-    const requested = normalizePort(startPortOverride)
-    const first = effectiveStartPort()
-    // 「起始端口」= 扫描起点；从它开始顺序尝试 10 个连续端口（默认 8787–8796）。
-    const candidates = []
-    const last = Math.min(first + PORT_COUNT - 1, CUSTOM_PORT_MAX)
-    for (let port = first; port <= last; port += 1) candidates.push(port)
+    const explicit = normalizePort(startPortOverride) || explicitStartPort
+    const persistedPreference = normalizePort(state.startPortPreference)
+    /** 兜底段：只可能来自用户显式选择，且必须落在冻结段之外 —— 我们自己绝不挑段外端口。 */
+    const fallbackPorts =
+      persistedPreference != null && !FROZEN_PORTS.includes(persistedPreference)
+        ? portBlockFrom(persistedPreference)
+        : null
+
+    /*
+     * 扫描相位（顺序是刻意的，不要合并成一段连续扫描）：
+     *
+     *   ① 显式   —— `start({ port })` 面板本次点击 / 程序化 `options.startPort` / 环境变量：
+     *              **只扫它那一整段**。用户点名了端口就按点名的来，不被默认段改写。
+     *   ② 冻结段 —— 恰好 8787–8796。无显式时**永远先扫它**：旧版浏览器扩展与旧版 Skill
+     *              只认这段，而它们的更新不由我们控制（见 `FROZEN_PORTS`）。
+     *   ③ 兜底段 —— 仅当 ② 整段失败**且失败里出现过 EACCES**（被系统保留）时才追加。
+     *              纯 `EADDRINUSE`（被别人占用）**不追加**：那种情况契约要求**明确提示**，
+     *              而不是静默换到范围外（`FR-41`）。
+     */
+    const phases =
+      explicit != null
+        ? [{ name: 'explicit', ports: portBlockFrom(explicit) }]
+        : [{ name: 'frozen', ports: [...FROZEN_PORTS] }]
 
     let lastCode = null
-    for (const port of candidates) {
-      const result = await tryListen(port)
-      if (result.ok) {
-        server = result.server
-        listeningPort = port
-        state.port = port
-        state.status = 'running'
-        persist()
-        writeLog('bridge.start', { port })
-        return { port }
+    let sawInUse = false
+    let sawEacces = false
+    let attempted = []
+    let fatal = false
+
+    for (let index = 0; index < phases.length; index += 1) {
+      const phase = phases[index]
+      attempted = phase.ports
+      for (const port of phase.ports) {
+        const result = await tryListen(port)
+        if (result.ok) {
+          server = result.server
+          listeningPort = port
+          state.port = port
+          state.status = 'running'
+          persist()
+          writeLog('bridge.start', { port })
+          return { port }
+        }
+        lastCode = result.code
+        if (result.code === 'EADDRINUSE') {
+          sawInUse = true
+        } else if (result.code === 'EACCES') {
+          /*
+           * ⚠️ Windows 上 `EACCES` = 这个端口落在**系统保留段**里（Hyper-V / WSL / Docker 的
+           * `winnat`），**换一个端口完全可能就成功** —— 所以必须继续扫下一个候选。
+           *
+           * 旧版在这里写的是 `if (code !== 'EADDRINUSE') break`，于是起始端口一被系统保留就
+           * 放弃，10 个候选只试了第 1 个。真实故障现场：`8755–8854` 被保留 → 8787 起全段 EACCES
+           * → 桥永远不会起来，而日志只说「启动失败（EACCES）」。
+           */
+          sawEacces = true
+        } else {
+          // 换端口也不会变的错（如 EAFNOSUPPORT）：整体放弃，别把剩下的候选白扫一遍。
+          fatal = true
+          break
+        }
       }
-      lastCode = result.code
-      if (result.code !== 'EADDRINUSE') break
+      if (fatal) break
+      // 冻结段整段失败，且确实有端口被系统保留 → 才启用用户自己的兜底端口。
+      if (phase.name === 'frozen' && fallbackPorts && sawEacces) {
+        phases.push({ name: 'fallback', ports: fallbackPorts })
+      }
     }
 
-    state.status = lastCode === 'EADDRINUSE' ? 'port-busy' : 'failed'
-    state.error =
-      lastCode === 'EADDRINUSE'
-        ? `${candidates[0]} 到 ${candidates[candidates.length - 1]} 端口都被占用了。请关闭占用端口的程序，或在设置里指定其它端口。`
-        : `本地接口启动失败（${lastCode || '未知错误'}）。`
+    /*
+     * 失败终局：**`EACCES` 优先于 `EADDRINUSE`** 上报。
+     *
+     * 混合出现时，「被系统保留」才是用户能据此行动的那个诊断；这时报「都被占用了」是假话
+     * （没有任何进程占着它们），会把人引向「去关掉别的程序」这条错路 —— 这正是本次故障里
+     * 那句误导文案的同一个病根。
+     */
+    const portBusy = !sawEacces && sawInUse
+    state.status = portBusy ? 'port-busy' : 'failed'
+    state.error = portBusy
+      ? `${attempted[0]} 到 ${attempted[attempted.length - 1]} 端口都被占用了。请关闭占用端口的程序，或在设置里指定其它端口。`
+      : `本地接口启动失败（${lastCode || '未知错误'}）。`
     state.port = null
     listeningPort = null
     persist()
-    writeLog('bridge.listen-error', { code: lastCode === 'EADDRINUSE' ? 'IMP-1003' : 'IMP-1002', detail: lastCode || 'unknown' })
-    return { port: null, error: state.error, code: lastCode === 'EADDRINUSE' ? 'IMP-1003' : 'IMP-1002' }
+    writeLog('bridge.listen-error', { code: portBusy ? 'IMP-1003' : 'IMP-1002', detail: lastCode || 'unknown' })
+    return { port: null, error: state.error, code: portBusy ? 'IMP-1003' : 'IMP-1002' }
   }
 
   /**
@@ -2222,7 +2339,7 @@ function createBridge(options = {}) {
       lastRejectedOrigin,
       logPath: logFile,
       inboxWatch: typeof options.getInboxWatchMode === 'function' ? options.getInboxWatchMode() : false,
-      startPort,
+      startPort: effectiveStartPort(),
       /** 当前生效的起始端口段（元组 `[起, 止]`，与 `src/desktop/bridge.ts` 逐字一致）。 */
       portRange: [effectiveStartPort(), Math.min(effectiveStartPort() + PORT_COUNT - 1, CUSTOM_PORT_MAX)],
       error: state.error,
@@ -2250,6 +2367,14 @@ function createBridge(options = {}) {
         return Promise.resolve({ port: null, error: '端口要在 1024 到 65535 之间。', code: 'IMP-1002' })
       }
       startPortOverride = normalized
+      /*
+       * 用户显式点名的端口要**跨重启记住**（`bridge.json.startPort`）：当冻结默认段被系统
+       * 保留时，下次开应用不必再手敲一遍。它在 `start()` 里只是**兜底相位**（且只在冻结段
+       * 整段失败、确实出现 `EACCES` 时才启用），所以不会把默认段挤掉，也不会在默认段
+       * 只是「被别的程序占用」时悄悄换到范围外（`FR-41`）。
+       */
+      state.startPortPreference = normalized
+      persist()
       return start()
     },
     /** 生成新令牌（= regenerateToken，语义别名）。 */

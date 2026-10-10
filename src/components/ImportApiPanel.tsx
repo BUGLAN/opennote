@@ -22,6 +22,7 @@ import { askConfirm } from "../lib/dialogs";
 import {
   BRIDGE_ADDRESS_PLACEHOLDER,
   BRIDGE_DEFAULT_PORT,
+  BRIDGE_PORT_COUNT,
   BRIDGE_PORT_MAX,
   BRIDGE_PORT_MIN,
   bridgeAvailable,
@@ -73,6 +74,8 @@ export interface ImportApiPanelProps {
 const ROW: CSSProperties = { display: "flex", alignItems: "center", gap: "var(--s2)", flexWrap: "wrap" };
 const HINT: CSSProperties = { margin: "6px 0 0", fontSize: "var(--fs-xs)", color: "var(--ink-3)", lineHeight: 1.6 };
 const ERROR: CSSProperties = { margin: "6px 0 0", fontSize: "var(--fs-sm)", color: "var(--accent)" };
+/** 兼容性提示：不是错误（桥工作正常），但用户必须知道后果 —— 所以用强调色 + 小字号。 */
+const NOTICE: CSSProperties = { margin: "6px 0 0", fontSize: "var(--fs-xs)", color: "var(--accent)", lineHeight: 1.6 };
 const MONO: CSSProperties = { fontFamily: "var(--font-mono)" };
 const VALUE_BOX: CSSProperties = {
   flex: "1 1 200px",
@@ -310,6 +313,17 @@ export function ImportApiPanel({
     let alive = true;
     void (async () => {
       const next = await refresh();
+      /*
+       * **自动恢复失败时也要把桥给的原因说出来。**
+       *
+       * 用户什么都没点（应用启动时按偏好自动恢复监听），此时整屏只有一个「启动失败」芯片，
+       * `status.error` 里那句可执行的诊断被丢掉 —— 真实故障现场就是这么发生的：
+       * 桥因为系统保留端口段（`EACCES`）起不来，而面板一声不吭，用户只能去猜。
+       * 只在这两个失败态上补，且只在本来就没有更具体的话时才写。
+       */
+      if (next && (next.state === "failed" || next.state === "port-busy") && next.error) {
+        setErrorText((current) => current ?? next.error ?? null);
+      }
       // ㊴ 明文与哈希一起落在 userData/bridge.json 里，所以「复制」**任何时候**都该能取到明文；
       // 取不到只剩一种可能：bridge.json 是旧版本写的（只有哈希，没有明文）。
       // 桥说「明文在」时再试一次（IPC 刚就绪可能空响应一次），确实取不到就走旧令牌那句如实说明
@@ -368,6 +382,14 @@ export function ImportApiPanel({
   // `portRange` 是闭区间元组 `[起, 止]`（与 bridge.cjs 的运行时形状逐字一致）。
   const rangeStart = status?.portRange?.[0] ?? status?.startPort ?? BRIDGE_DEFAULT_PORT;
   const rangeEnd = status?.portRange?.[1] ?? rangeStart + 9;
+  /**
+   * 冻结默认段的闭区间上界（8787–8796）。
+   * 与 `rangeStart`/`rangeEnd` 是**两件事**：那两个跟随用户选的起始端口，这个是产品冻结的
+   * 「旧客户端只认这一段」的范围 —— 桥绑到它外面时必须如实告诉用户后果（见下面的提示行）。
+   */
+  const defaultRangeEnd = BRIDGE_DEFAULT_PORT + BRIDGE_PORT_COUNT - 1;
+  const outsideDefaultRange =
+    running && typeof status?.port === "number" && (status.port < BRIDGE_DEFAULT_PORT || status.port > defaultRangeEnd);
 
   const flashCopied = useCallback((which: "address" | "token") => {
     setCopied(which);
@@ -676,6 +698,13 @@ export function ImportApiPanel({
             范围 {rangeStart}–{rangeEnd}
           </span>
         </div>
+
+        {outsideDefaultRange ? (
+          <p style={NOTICE} role="note">
+            当前端口 {status?.port} 不在默认段 {BRIDGE_DEFAULT_PORT}–{defaultRangeEnd} 内：浏览器剪藏扩展
+            无法自动发现它（旧版客户端同理）。请把端口改回这一段，或更新扩展后在扩展里填写上面的地址。
+          </p>
+        ) : null}
 
         <p style={HINT}>{R3_HINT}</p>
         {errorText ? (

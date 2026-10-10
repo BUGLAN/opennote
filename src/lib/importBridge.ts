@@ -68,6 +68,14 @@ export const BRIDGE_STATE_LABELS: Record<BridgeState, string> = {
 
 /** 端口唯一事实：8787–8796（默认起始端口 + 10 个连续端口）。 */
 export const BRIDGE_DEFAULT_PORT = 8787;
+/**
+ * **冻结默认段**的端口个数（10）—— 与 `electron/bridge.cjs` 的 `PORT_COUNT` 同一个事实。
+ *
+ * 旧版浏览器扩展与旧版 Skill 只认这一段（扩展的 `host_permissions` / `BRIDGE_PORTS`、
+ * Skill 的 `PORTS` 都写死这 10 个），而它们的更新不由我们控制。所以「桥绑到了段外」
+ * 必须在面板上**说出来** —— 否则用户只会看到插件报「本地接口未开启」，然后以为插件坏了。
+ */
+export const BRIDGE_PORT_COUNT = 10;
 export const BRIDGE_PORT_MIN = 1024;
 export const BRIDGE_PORT_MAX = 65535;
 /** 地址行在未运行时的占位（UI-04/R3b 逐字「—」）。 */
