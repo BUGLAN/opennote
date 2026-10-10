@@ -6,14 +6,6 @@ import type { CursorInfo } from "./EditorPane";
 
 interface StatusBarProps {
   counts: { chars: number; words: number; minutes: number };
-  dirty: boolean;
-  savedLabel: string;
-  /**
-   * 「· 7 分钟前」那一段；没落过盘时为 `null`。单独给一段、不拼进 `savedLabel`：
-   * 底栏窄到一定程度时先丢时间、保留「已写入磁盘」这句（分档见 `app.css` 的
-   * `@container statusbar`），拼成一个字符串就没法只丢一半。
-   */
-  savedAgo: string | null;
   cursor: CursorInfo;
   settings: UiSettings;
   locationLabel: string;
@@ -50,10 +42,6 @@ interface StatusBarProps {
  */
 export function StatusBar(props: StatusBarProps): ReactNode {
   const { settings } = props;
-  const saveText = props.dirty ? "保存中…" : props.savedLabel;
-  const saveTitle = props.dirty
-    ? "保存状态：正在写入磁盘…"
-    : `保存状态：${saveText}${props.savedAgo ? ` · ${props.savedAgo}` : ""}`;
   const inboxText = props.inboxPending ? `收件箱 ${props.inboxPending}` : "收件箱";
   const historyText = props.snapshotCount ? `历史 ${props.snapshotCount}` : "历史";
   const appearanceText = settings.appearance === "dark" ? "夜读" : "素笺";
@@ -75,14 +63,8 @@ export function StatusBar(props: StatusBarProps): ReactNode {
           <span className="statusbar__ellipsis">{props.locationLabel}</span>
         </span>
 
-        <span className="statusbar__item statusbar__item--save" title={saveTitle}>
-          <span className={cn("statusbar__dot", props.dirty && "is-dirty")} />
-          <span className="statusbar__save-text">{saveText}</span>
-          {!props.dirty && props.savedAgo ? <span className="statusbar__save-ago"> · {props.savedAgo}</span> : null}
-        </span>
-
         {/* 两颗度量（字数 / 行列）挂在 spacer 右侧：底栏变窄时先丢掉它们，
-            左侧那四段（存放位置 / 文件数 / 文件夹 / 保存状态）留得更久。 */}
+            左侧那三段（存放位置 / 文件数 / 文件夹）留得更久。 */}
         <span className="statusbar__spacer" />
 
         {settings.showWordCount ? (

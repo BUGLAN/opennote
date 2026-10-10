@@ -698,10 +698,6 @@ function FolderBranch({ folder, depth, dropZoneProps, ...props }: BranchProps): 
           if (open) collapseFolder(folder.id);
           else expandFolder(folder.id);
         }}
-        onDoubleClick={async () => {
-          const name = await askText({ title: "重命名文件夹", value: folder.name, label: "文件夹名称" });
-          if (name) renameFolder(folder.id, name);
-        }}
         onContextMenu={(event) => {
           event.preventDefault();
           openMenu(event.clientX, event.clientY, folderMenu(folder, props));

@@ -87,9 +87,7 @@ const DROPPABLE = [
   ".statusbar__item--folder", // 当前文件夹
   ".statusbar__label", // 按钮文字（图标留着）
   ".statusbar__item--cursor", // 行列
-  ".statusbar__save-ago", // 保存状态里的「· N 分钟前」
   ".statusbar__item--path", // 存放位置
-  ".statusbar__save-text", // 保存状态最后只剩圆点
 ];
 
 describe("底栏：按钮永不裁切，信息按底栏自身宽度分档降级", () => {
@@ -127,17 +125,16 @@ describe("底栏：按钮永不裁切，信息按底栏自身宽度分档降级"
     expect(Math.max(...widths)).toBeGreaterThanOrEqual(1000);
   });
 
-  it("任何一档都不许隐藏按钮或保存圆点", () => {
+  it("任何一档都不许隐藏按钮", () => {
     for (const tier of tiers) {
       for (const selector of hiddenSelectors(tier.body)) {
         expect(selector).not.toMatch(/--button/);
-        expect(selector).not.toMatch(/statusbar__dot/);
         expect(DROPPABLE).toContain(selector);
       }
     }
   });
 
-  it("被隐藏的项恰好是那七样：宽窗下全部照常显示", () => {
+  it("被隐藏的项恰好是那五样：宽窗下全部照常显示", () => {
     const hidden = tiers.flatMap((tier) => hiddenSelectors(tier.body));
     expect([...new Set(hidden)].sort()).toEqual([...DROPPABLE].sort());
   });

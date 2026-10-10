@@ -1110,8 +1110,7 @@ mark.hit {
 }
 
 @container statusbar (max-width: 720px) {
-  .statusbar__item--cursor,
-  .statusbar__save-ago {
+  .statusbar__item--cursor {
     display: none;
   }
 }
@@ -1123,13 +1122,9 @@ mark.hit {
 }
 
 @container statusbar (max-width: 400px) {
-  /* 最窄一档：保存状态只留圆点（语义仍由 `title` 说出，圆点形状仍在 ——
-     见 DESIGN.md「降级后必须仍然可用」），连间距也收紧 —— 9 颗图标（GitHub 笔记本）
-     + 圆点约 320px，而「窗口 900 + 侧栏拖到上限 520」时底栏只有 356px，差的就是这几像素。
+  /* 最窄一档：连间距也收紧 —— 8 颗图标（GitHub 笔记本时）约 300px，
+     而「窗口 900 + 侧栏拖到上限 520」时底栏只有 356px，差的就是这几像素。
      注意：**容器查不到自己**，所以这里只能改后代，改不了 `.statusbar` 自己的 gap / padding。 */
-  .statusbar__save-text {
-    display: none;
-  }
   .statusbar__info,
   .statusbar__actions {
     gap: var(--s2);
@@ -1144,28 +1139,6 @@ mark.hit {
 .statusbar__item.is-on {
   color: var(--accent);
   background: var(--accent-soft);
-}
-
-.statusbar__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ink-3);
-}
-
-.statusbar__dot.is-dirty {
-  background: var(--accent);
-  animation: pulse 1.8s var(--ease) infinite;
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
 }
 
 /* ------------------------------- outline ------------------------------- */

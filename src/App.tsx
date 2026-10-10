@@ -75,7 +75,7 @@ import { extractHeadings, findCurrentHeading } from "./lib/outline";
 import { copyPathToClipboard, noteAbsolutePath } from "./lib/notePath";
 import { notify } from "./lib/toast";
 import { useUpdateController } from "./lib/update";
-import { cn, formatRelativeTime } from "./lib/utils";
+import { cn } from "./lib/utils";
 /* GitHub 仓库笔记本（网页版）：导入 → 本地编辑 → 双向同步。模块注释见各自文件头。 */
 import { createGithubApi, type GithubApi } from "./lib/github/api";
 import {
@@ -1339,9 +1339,6 @@ export default function App(): ReactNode {
 
         <StatusBar
           counts={counts}
-          dirty={activeId ? Boolean(library.dirty[activeId]) : false}
-          savedLabel="已写入磁盘"
-          savedAgo={library.lastSavedAt ? formatRelativeTime(library.lastSavedAt) : null}
           cursor={cursor}
           settings={ui}
           locationLabel={locationLabel}
