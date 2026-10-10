@@ -1,0 +1,124 @@
+=== A. 光标进出各块 → 块下方标记段落的纵向位移（px）===
+  block          块内位移    scrollHeight 变化   滚动位置变化
+  h1                   0                  0              0
+  setext           29.36                 29              0
+  fence               47                 47              0
+  table          -147.69               -148              0
+  mermaid        -117.17               -118              0
+  math            -13.66                -14              0
+  image            -6.39                 -7              0
+  quote                0                  0              0
+
+=== B. 行内标记显隐 → 水平位移（px）===
+  mark         元素 left 位移   文字起点 left 位移
+  strong           14.18              14.18
+  em               35.48              35.48
+  code             50.85              50.85
+  link             64.47              64.47
+  atx                  0              24.11
+  quote                0              12.16
+
+=== C. 异步渲染完成前后的位移（px）===
+  math     delta=    53.58 settled=true 首帧 loading=1 末帧 loading=0
+  mermaid  delta=   225.29 settled=true 首帧 loading=1 末帧 loading=0
+
+=== D. 视口滚动位置是否被保住 ===
+  D1 变化块在锚点上方（表格整体滚到视口上方，观察 MARK6A）
+     滚动前 scrollTop=    1007 标记在视口内 y=  638.47 锚点行=
+     滚动后 scrollTop=     892 标记在视口内 y=  605.78 锚点行=
+     ΔscrollTop=    -115  Δ标记视口位移=  -32.69  内容高度变化=    -148  钉住了=false
+  D2 变化块在锚点下方（表格贴视口顶部，观察 MARK4A——视口内可见）
+     滚动前 scrollTop=     694 标记在视口内 y=  410.94 锚点行=MARK3A
+     滚动后 scrollTop=     694 标记在视口内 y=  263.25 锚点行=MARK3A
+     ΔscrollTop=       0  Δ标记视口位移= -147.69  内容高度变化=    -148  钉住了=false
+  D3 同 D2，但 dispatch 带 scrollIntoView（真实输入/方向键路径）
+     滚动前 scrollTop=     694 标记在视口内 y=  410.94 锚点行=MARK3A
+     滚动后 scrollTop=     694 标记在视口内 y=  263.25 锚点行=MARK3A
+     ΔscrollTop=       0  Δ标记视口位移= -147.69  内容高度变化=    -148  钉住了=false
+  D4 变化块是公式块（MARK5A 贴视口顶部，观察 MARK6A）
+     滚动前 scrollTop=    1446 标记在视口内 y=  199.47 锚点行=$$
+     滚动后 scrollTop=    1446 标记在视口内 y=  185.81 锚点行=$$
+     ΔscrollTop=       0  Δ标记视口位移=  -13.66  内容高度变化=     -14  钉住了=false
+  D5 光标离开围栏代码块（围栏行重新 display:none，观察 MARK3A）
+     滚动前 scrollTop=     397 标记在视口内 y=  401.44 锚点行=
+     滚动后 scrollTop=     397 标记在视口内 y=  354.44 锚点行=
+     ΔscrollTop=       0  Δ标记视口位移=     -47  内容高度变化=     -47  钉住了=false
+  D6 表格跨视口上沿时点进表格（观察 MARK4A）
+     滚动前 scrollTop=    1054 标记在视口内 y=   50.94 锚点行=
+     滚动后 scrollTop=     939 标记在视口内 y=   18.25 锚点行=
+     ΔscrollTop=    -115  Δ标记视口位移=  -32.69  内容高度变化=    -148  钉住了=false
+
+=== E. display:none 隐藏行 ===
+  隐藏行数量 = 3
+    doc line 9 "==========" display=none offsetHeight=0 rect={"top":0,"left":0,"right":0,"bottom":0,"width":0,"height":0} lineBlockAt={"from":50,"to":60,"top":328.5,"height":0} coordsAtPos={"left":0,"right":0,"top":0,"bottom":0,"height":0}
+    doc line 13 "```js" display=none offsetHeight=0 rect={"top":0,"left":0,"right":0,"bottom":0,"width":0,"height":0} lineBlockAt={"from":70,"to":75,"top":416.58,"height":0} coordsAtPos=null
+    doc line 23 "```" display=none offsetHeight=0 rect={"top":0,"left":0,"right":0,"bottom":0,"width":0,"height":0} lineBlockAt={"from":174,"to":177,"top":666.08,"height":0} coordsAtPos=null
+  高度账：{"lineCount":46,"hiddenLineCount":3,"sumOfRenderedLineHeights":1347.73,"contentScrollHeight":3294,"scrollerScrollHeight":3294,"viewContentHeight":3260.97,"contentPaddingTop":"56px","contentPaddingBottom":"1260px","scrollerClientHeight":2600,"docLines":59}
+  方向键：
+    start (MARK2A)   → doc line 11 "MARK2A" marker3Top=751.44 scrollHeight=3294
+    ArrowDown #1     → doc line 12 "" marker3Top=751.44 scrollHeight=3294
+    ArrowDown #2     → doc line 14 "function alpha() {" marker3Top=798.44 scrollHeight=3341
+    ArrowDown #3     → doc line 15 "  return 1;" marker3Top=798.44 scrollHeight=3341
+    ArrowDown #4     → doc line 16 "}" marker3Top=798.44 scrollHeight=3341
+    start (MARK3A)   → doc line 25 "MARK3A" marker3Top=751.44
+    ArrowUp #1       → doc line 24 "" marker3Top=751.44
+    ArrowUp #2       → doc line 22 "}" marker3Top=798.44
+    ArrowUp #3       → doc line 21 "  return 3;" marker3Top=798.44
+    ArrowUp #4       → doc line 20 "function gamma() {" marker3Top=798.44
+  高度表估算 vs 实测：开围栏 [29.36,0] 闭围栏 [29.36,0] 对照行 [29.36,29.36]
+    内容高度变化 -37.73px，围栏之后的标记位移 -37.73px
+  高度表 vs DOM 偏差：checked=39 maxAbsDiff=0
+  程序化设置 scrollTop 后的漂移：
+    target=        0 → 实际=        0 delta=        0
+    target=      500 → 实际=      500 delta=        0
+    target=     1000 → 实际=     1000 delta=        0
+    target=     2000 → 实际=     2000 delta=        0
+    target=     3000 → 实际=     3000 delta=        0
+    target=     4000 → 实际=     4000 delta=        0
+    target=     5000 → 实际=     4998 delta=       -2
+    target=     6000 → 实际=     5937 delta=      -63
+    target=     6905 → 实际=     6818 delta=      -87
+    target=     7000 → 实际=     7000 delta=        0
+    target=     8000 → 实际=     8013 delta=       13
+    target=     9000 → 实际=     9000 delta=        0
+    target=    10000 → 实际=    10000 delta=        0
+    target=    10300 → 实际=    10296 delta=       -4
+
+=== 滚动漂移溯源 ===
+  一次大跳转 0 → 6000：实际停在 5291（差 -709px）
+     scrollTop 0 → 6000  由 at bigJump (<anonymous>:26:25) 写入
+     scrollTop 6000 → 5291.37  由 at EditorView.measure (/node_modules/.vite/deps/dist-Bv6NeQMa.js?v=be98713a:6993:31) 写入
+  同样的距离分 100px 步进：漂移 0px，单步最大偏差 0px
+  同样的距离分 500px 步进：漂移 0px，单步最大偏差 0px
+
+=== 漂移的算术 ===
+  #  0 scrollAnchorAt line=181 top=5993.32 off=6000 pos=-
+  #  1 lineBlockAt line=1 top=0 off=- pos=0
+  #  2 lineBlockAt line=164 top=4785.58 off=- pos=1615
+  #  3 lineBlockAt line=2 top=29.36 off=- pos=5
+  #  4 lineBlockAt line=331 top=9688.59 off=- pos=2871
+  #  5 lineBlockAt line=214 top=6253.55 off=- pos=2121
+  #  6 lineBlockAt line=1 top=0 off=- pos=0
+  #  7 lineBlockAt line=185 top=5402.13 off=- pos=1834
+  #  8 lineBlockAt line=2 top=29.36 off=- pos=5
+  #  9 lineBlockAt line=331 top=9688.59 off=- pos=2871
+  # 10 lineBlockAt line=234 top=6840.73 off=- pos=2331
+  # 11 lineBlockAt line=185 top=5402.13 off=- pos=1834
+  # 12 lineBlockAt line=2 top=29.36 off=- pos=5
+  # 13 lineBlockAt line=331 top=9688.59 off=- pos=2871
+  # 14 lineBlockAt line=234 top=6840.73 off=- pos=2331
+  # 15 lineBlockAt line=181 top=5284.69 off=- pos=1776
+  # 16 scrollAnchorAt line=186 top=5431.48 off=5291.37 pos=-
+  # 17 lineBlockAt line=1 top=0 off=- pos=0
+  # 18 lineBlockAt line=160 top=4668.14 off=- pos=1575
+  # 19 lineBlockAt line=2 top=29.36 off=- pos=5
+  # 20 lineBlockAt line=331 top=9688.59 off=- pos=2871
+  # 21 lineBlockAt line=221 top=6459.06 off=- pos=2185
+  # 22 lineBlockAt line=160 top=4668.14 off=- pos=1575
+  # 23 lineBlockAt line=2 top=29.36 off=- pos=5
+  # 24 lineBlockAt line=331 top=9688.59 off=- pos=2871
+  # 25 lineBlockAt line=221 top=6459.06 off=- pos=2185
+  # 26 scrollAnchorAt line=181 top=5284.69 off=5291 pos=-
+  # 27 lineBlockAt line=181 top=5284.69 off=- pos=1776
+  最终 scrollTop = 5291
+
