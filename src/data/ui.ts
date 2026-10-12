@@ -66,6 +66,8 @@ function load(): UiSettings {
       ui.autoSave = DEFAULT_UI.autoSave;
     }
     ui.autoSaveDelay = Math.min(5000, Math.max(300, Math.round(Number(ui.autoSaveDelay)) || DEFAULT_UI.autoSaveDelay));
+    // 紧凑断行是布尔开关：旧版本没有这个键，手改过 localStorage 也可能塞进字符串。
+    if (typeof ui.compactWrap !== "boolean") ui.compactWrap = DEFAULT_UI.compactWrap;
     return ui;
   } catch {
     return DEFAULT_UI;
@@ -120,6 +122,8 @@ export function applyUi(ui: UiSettings): void {
   root.dataset.font = ui.font;
   root.dataset.width = ui.width;
   root.dataset.appearance = ui.appearance;
+  // 紧凑断行（`compactWrap`）：只落一个属性，具体规则在 `editor.css` / `prose.css`。
+  root.dataset.wrap = ui.compactWrap ? "compact" : "normal";
   root.style.setProperty("--doc-fs", `${ui.fontSize}px`);
   root.style.setProperty("--doc-lh", String(ui.lineHeight));
   // 侧栏宽度是**用户拖出来的尺寸**，和 `--doc-fs` 一样只能走内联自定义属性：

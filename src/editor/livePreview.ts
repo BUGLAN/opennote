@@ -520,6 +520,29 @@ function decorate(
         }
 
         /* ------------------------------------------------------------- lists */
+        /*
+         * 悬挂缩进：折行片段对齐到首行**文字**，而不是退回项目符号的位置（症状与实测数据
+         * 见 `editor.css` 里 `.md-li` 那一段）。类名只挂在「项目符号就在行首」的**无序**项：
+         * 有序项的标记是字面文字（`1.`，宽度随位数变）、嵌套项前面是字面空格（负
+         * `text-indent` 会把它们的符号整体左移）—— 两者保持原样，好过给一个错的缩进。
+         *
+         * 这里**刻意不看** `showsSource`：光标进到行里时符号会换成源码，缩进若跟着消失，
+         * 整行就会横向跳一下（与 `showMarks` 那类「位置一直在变」的毛病同源）。
+         */
+        if (name === "ListItem") {
+          const first = doc.lineAt(from);
+          if (node.parent?.name === "BulletList" && from === first.from) {
+            const task = /^[-*+]\s+\[[ xX]\]/.test(state.sliceDoc(first.from, Math.min(first.to, first.from + 6)));
+            const attributes = task ? { "data-li": "task" } : undefined;
+            lineDeco(from, "md-li", attributes);
+            const last = doc.lineAt(to);
+            for (let n = first.number + 1; n <= last.number; n += 1) {
+              lineDeco(doc.line(n).from, "md-li-cont", attributes);
+            }
+          }
+          return;
+        }
+
         if (name === "ListMark") {
           const listType = node.parent?.parent?.name;
           if (listType === "BulletList" || listType === "OrderedList") {

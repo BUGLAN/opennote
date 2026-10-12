@@ -355,6 +355,17 @@ export function SettingsDialog({
                     />
                     拼写检查
                   </label>
+                  <label
+                    className="switch"
+                    title="允许在英文单词、链接、代码标识符的中间断行，把每一行填满。默认关闭：中文和英文混排时（例如「而如使用Flutter/dark,」），Flutter/dark, 这种不可断的长词放不进行尾就会整块折行，行尾空出两三个字宽；打开后行尾几乎填满，代价是英文词可能被劈成 Fl|utter。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={settings.compactWrap}
+                      onChange={(event) => patchUi({ compactWrap: event.target.checked })}
+                    />
+                    紧凑断行
+                  </label>
                   {/*
                     默认关闭：标记露出来是靠把 `#`、`**`、`> ` 塞回文本流实现的，那一行
                     以及它后面的文字会横向窜动（实测 14–64px），而每次移动光标都会触发一次。

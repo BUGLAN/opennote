@@ -13,6 +13,27 @@
   padding-right: 2px;
 }
 
+/* ---- 紧凑断行（设置 · 编辑 · compactWrap）--------------------------------
+   `word-break: break-all` 让每一行填满，消掉中文与拉丁词混排时的行尾留白：
+   `而如使用Flutter/dark,` 里 `Flutter/dark,` 是一整块**不可断**的拉丁词（实测：
+   `-` 之后才有断点，`/`、`,` 都没有 —— 连纯 URL 在 120px 容器里也是整块溢出），
+   行尾放不下就整块折行，空出 2–3 个字宽（690px 宽下实测 21px）；打开后只空 7px。
+   代价是英文词/代码标识符会被从中间劈开（`Fl|utter`），所以默认关闭、由用户取舍。
+
+   为什么不是 `overflow-wrap: anywhere`：那个**已经开着**（CodeMirror 的
+   `.cm-lineWrapping` 自带，防的是长串溢出容器），但它只在「一个词单独一行都放不下」
+   时才断，`Flutter/dark,` 在正文宽度里放得下，所以对留白毫无作用（实测分毫不变）。
+   特异性 0,3,0 压过 CM 运行时注入的 `.cm-content.cm-lineWrapping`（0,2,0），不需要
+   `!important` —— 与本文件顶部那条房规一致。 */
+:root[data-wrap="compact"] .cm-content {
+  word-break: break-all;
+}
+
+/* 公式与图表是「已经排好的图形」，不跟着在任意字符处断（它们各有 overflow-x 兜底）。 */
+:root[data-wrap="compact"] .cm-content :is(.md-math, .md-mermaid) {
+  word-break: normal;
+}
+
 /*
  * 选区底色：CodeMirror 的 baseTheme 用 `.ͼ2.cm-focused > .cm-scroller > .cm-selectionLayer
  * .cm-selectionBackground`（5 个类）画它自己的固定色（浅色 `#d7d4f0` / 深色 `#233`）。
@@ -162,6 +183,41 @@
   color: var(--accent);
   font-weight: 700;
   padding-right: 0.1em;
+}
+
+/*
+ * 列表项的**悬挂缩进**：文字折行后对齐到首行文字，而不是退回项目符号的位置。
+ *
+ * 症状（2026-10-12 用户报「看起来像另起了一段」）：首行文字被 `•` + 空格推开，折行
+ * 片段却从行首起排，比它往左突出约 0.75em，加上上一行行尾的换行留白，就成了一处「空洞」。
+ *
+ * 为什么只能这么做：折行是**同一个 `.cm-line` 的视觉折行**，不是源码行 —— 给「续行」
+ * 加装饰没有意义（装饰只认源码行）。CSS 里唯一作用在**首个行盒**上的手段是 `text-indent`：
+ * 配上等宽的正向内边距，首行原地不动、折行片段右移到首行文字的左边缘。
+ *
+ * `--li-gutter` 是「项目符号槽」（`•` + 紧跟的空格）的实测推进宽度：用构建产物的真字体
+ * （Newsreader Variable @ `--doc-fs` 16.5px）量得 0.747em，取 0.75em。任务项多一个复选框
+ * （1.02em 宽 + 0.35em 外边距）和一个空格，同法量得 2.344em，取 2.34em。
+ * `2px` 必须与上面 `.cm-editor .cm-line` 的 `padding-left` 保持一致。
+ *
+ * 只处理「项目符号就在行首」的**无序**项：有序项的标记是**字面文字**（`1.`），宽度随
+ * 位数变；嵌套项前面是字面空格，负 `text-indent` 会把它的符号整体左移 —— 两者保持原样，
+ * 好过给一个错的缩进。
+ */
+.cm-content .cm-line.md-li,
+.cm-content .cm-line.md-li-cont {
+  --li-gutter: 0.75em;
+  padding-left: calc(2px + var(--li-gutter));
+}
+
+.cm-content .cm-line.md-li[data-li="task"],
+.cm-content .cm-line.md-li-cont[data-li="task"] {
+  --li-gutter: 2.34em;
+}
+
+/* 首行左移一个槽宽：折行片段于是正好落在首行文字的左边缘上。 */
+.cm-content .cm-line.md-li {
+  text-indent: calc(-1 * var(--li-gutter));
 }
 
 .cm-content .md-task {

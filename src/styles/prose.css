@@ -16,6 +16,17 @@
   word-break: break-word;
 }
 
+/* 「紧凑断行」（设置 · 编辑 · compactWrap）在阅读视图、表格 widget、剪藏预览这些
+   prose 区域同样生效 —— 完整说明与实测数据见 `editor.css` 的同一段注释。 */
+:root[data-wrap="compact"] .prose {
+  word-break: break-all;
+}
+
+/* 公式与图表不跟着在任意字符处断。 */
+:root[data-wrap="compact"] .prose :is(.math-block, .mermaid-block, .katex) {
+  word-break: normal;
+}
+
 /* ---- headings ---------------------------------------------------------- */
 .prose h1,
 .prose h2,

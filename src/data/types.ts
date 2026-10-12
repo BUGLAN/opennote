@@ -145,6 +145,21 @@ export interface UiSettings {
    * issue #285 的来源）。
    */
   showMarks: boolean;
+  /**
+   * 紧凑断行：允许在**任意字符处**断行（CSS `word-break: break-all`），把每一行填满。
+   *
+   * **默认 `false`**。它解决的是中文与拉丁词混排时的行尾留白：`而如使用Flutter/dark,`
+   * 里 `Flutter/dark,` 是一整块**不可断**的拉丁词（实测 `-` 之后才有断点，`/`、`,`
+   * 都没有 —— 连纯 URL 在 120px 容器里也是整块溢出），行尾放不下就整块折行，于是空出
+   * 2–3 个字宽（690px 宽下实测 21px）。打开后同一行只空 7px，代价是英文词/代码标识符
+   * 可能被从中间劈开（`Fl|utter`）—— 是个观感取舍，交给用户。
+   *
+   * 为什么不是 `overflow-wrap: anywhere`：那个**已经开着**（CodeMirror 的
+   * `.cm-lineWrapping` 自带，防的是「长串溢出容器」），但它只在「一个词单独一行都放不下」
+   * 时才断 —— `Flutter/dark,` 在正文宽度里放得下，所以对留白分毫不动（实测同宽下
+   * 留白不变）。
+   */
+  compactWrap: boolean;
   showWordCount: boolean;
   snapshots: boolean;
   /** 自动保存模式（VSCode 式三档，无 off）。 */
@@ -252,6 +267,8 @@ export const DEFAULT_UI: UiSettings = {
   spellcheck: true,
   // 默认不露标记：见 `UiSettings.showMarks` 的说明。
   showMarks: false,
+  // 默认不紧凑断行：见 `UiSettings.compactWrap` 的说明（劈开英文词是有代价的观感取舍）。
+  compactWrap: false,
   showWordCount: true,
   snapshots: true,
   autoSave: "afterDelay",
