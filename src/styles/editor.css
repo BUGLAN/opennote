@@ -457,6 +457,147 @@
 
 /* ============================ modes ==================================== */
 
+/* ---- 查找 / 替换面板（`editor/findPanel.ts`）----------------------------
+   CodeMirror 的面板外壳（`.cm-panels` / `.cm-panel`）由 `theme.ts` 上底色与边框，
+   这里只管面板**内部**：中文按钮、输入框、命中计数。
+   一条房规：CodeMirror 的 base theme 在运行时注入，所以选择器至少两到三层类。 */
+.cm-panel .md-find {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+}
+
+.cm-panel .md-find__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+/* 查找框占满剩余宽度，命中计数贴在它右侧 —— 计数不能把输入框挤窄到看不清。 */
+.cm-panel .md-find__field {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+}
+
+.cm-panel .md-find__field:focus-within {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* 输入框本体不带自己的边框：边框画在 `.md-find__field` 上，聚焦时整块一起亮。 */
+.cm-panel .md-find__input,
+.cm-panel .md-find__field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.cm-panel .md-find__input:focus,
+.cm-panel .md-find__field input:focus {
+  outline: none;
+}
+
+.cm-panel .md-find__count {
+  flex: none;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cm-panel .md-find__count[data-state="invalid"] {
+  color: var(--accent);
+}
+
+.cm-panel .md-find__btn,
+.cm-panel .md-find__toggle,
+.cm-panel .md-find__close {
+  flex: none;
+  height: 26px;
+  padding: 0 var(--s2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  line-height: 1;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.cm-panel .md-find__btn:hover,
+.cm-panel .md-find__close:hover {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.cm-panel .md-find__toggle {
+  min-width: 26px;
+  padding: 0 5px;
+  border-color: var(--rule);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.cm-panel .md-find__toggle.is-on {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.cm-panel .md-find__sep {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  background: var(--rule);
+}
+
+.cm-panel .md-find__close {
+  width: 26px;
+  padding: 0;
+  font-size: 15px;
+}
+
+/* 替换行：默认 `hidden`（点「替换」才展开），展开时左侧对齐查找框。 */
+.cm-panel .md-find__row--replace[hidden] {
+  display: none;
+}
+
+.cm-panel .md-find__row--replace .md-find__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+}
+
+.cm-panel .md-find__row--replace .md-find__input:focus {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
 /* typewriter: room above and below so the caret can sit in the middle */
 .editor-host.md-typewriter .cm-content {
   padding-top: 28vh;

@@ -12,6 +12,7 @@ import { EditorView, keymap, drawSelection, dropCursor, ViewPlugin, type ViewUpd
 import { blockPad } from "./blockPad";
 import { markdownCommands, setHeading, toggleLinePrefix } from "./commands";
 import { slashCompletion, tagCompletion, wikiCompletion } from "./completion";
+import { createFindPanel } from "./findPanel";
 import { livePreviewField } from "./livePreview";
 import { markdownSupport } from "./markdown";
 import { linkClickHandler, mediaHandlers } from "./media";
@@ -166,7 +167,12 @@ export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
     dropCursor(),
     bracketMatching(),
     highlightSelectionMatches(),
-    search({ top: true }),
+    /*
+     * 查找 / 替换：搜索能力全用 CodeMirror 的（state、命中高亮、正则、整词、替换命令），
+     * 只把**面板这一层**换成自绘的中文查找条 —— 自带面板是英文的、替换常驻第二行，
+     * 与 App 的界面语言和设计令牌都对不上（2026-10-12 用户反馈）。见 `findPanel.ts`。
+     */
+    search({ top: true, createPanel: createFindPanel }),
     closeBrackets(),
     EditorState.allowMultipleSelections.of(true),
     EditorState.tabSize.of(2),

@@ -1433,6 +1433,7 @@ live preview 会在「源码态 ↔ 渲染态」之间按块换形态，而两�
 | 选区（聚焦） | **不在这个文件里**，落在 `editor.css` 的 `.cm-selectionLayer .cm-selectionBackground` | 见下「聚焦选区的两条硬约束」 |
 | 行号槽 | `.cm-gutters` → `color: var(--ink-3)` / `fontFamily: var(--font-mono)` / `fontSize: 11px`、无边框、透明底 | |
 | 查找面板 | `.cm-panels` → `var(--paper-2)` / `var(--ink)` / `borderColor: var(--rule)` / `fontSize: 13px` / `zIndex: 30`；输入与按钮 → `--paper-2` 底 + `--rule-strong` 边 + `4px` 圆角 | 顶部面板 `border-bottom: 1px solid var(--rule)` |
+| 查找条（自绘） | **面板内部**不在 `theme.ts`，落在 `editor.css` 的 `.cm-panel .md-find*`：中文按钮 / 输入框 / 命中计数（`--paper` 底、`--rule-strong` 边、`--radius-sm`；开关态 `--accent-soft` + `--accent`） | 用 `search({ createPanel })` 换掉 CodeMirror 自带的英文面板（`editor/findPanel.ts`）；搜索能力仍是 `@codemirror/search` 的 |
 | 补全 / 提示 | `.cm-tooltip` → `--paper-2` 底 + `--rule-strong` 边 + `var(--radius)` + `var(--shadow-2)`；选中项 → `--accent-soft` 底；匹配文字 → `--accent` + 600 | |
 | 搜索命中 | `.cm-searchMatch` → `background: var(--mark)` + `outline: 1px solid var(--accent-line)` + `2px` 圆角；当前命中 → `--accent-soft` | 与 `mark.hit` 不同：这里是方块底 + 描边 |
 | 语法高亮 | 全部走 `HighlightStyle` 的 **class 名**（`tok-keyword` 等），颜色定义在 `prose.css` | **不要在 `theme.ts` 里写颜色** —— 高亮颜色只有 `prose.css` 一处产地，编辑器与导出 HTML 因此永远一致 |
