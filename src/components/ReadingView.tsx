@@ -37,5 +37,15 @@ export function ReadingView({ note }: { note: Note }): ReactNode {
     };
   }, [html, note.folderId]);
 
-  return <article ref={ref} className="reading prose" dangerouslySetInnerHTML={{ __html: html }} />;
+  /*
+   * 滚动容器是**外层**，正文是内层 —— 与编辑器同一套结构（`.cm-scroller` 满宽负责滚动、
+   * `.cm-content` 居中限宽）。原来的写法把 `overflow-y: auto` 直接放在居中的 `.reading`
+   * 上，滚动条于是长在**正文栏**的右边缘：一按锁，它就从主栏右边缘横跳到正文栏右边缘，
+   * 悬在空白里（2026-10-12 用户反馈「锁定后滚动条从右边移动到左边」）。
+   */
+  return (
+    <div className="reading-scroll">
+      <article ref={ref} className="reading prose" dangerouslySetInnerHTML={{ __html: html }} />
+    </div>
+  );
 }

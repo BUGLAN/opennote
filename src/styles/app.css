@@ -1291,16 +1291,24 @@ mark.hit {
   cursor: default;
 }
 
-/* 只读锁的阅读视图：与编辑器**同一列**（同样的 --measure 与 56px 顶距），
-   锁上 / 解锁时文字不跳位；整篇按文章排版滚动阅读。 */
-.reading {
+/* 只读锁的阅读视图：**滚动容器与编辑器同一列**（占满主栏，滚动条因此留在主栏右边缘），
+    正文在它里面居中、与编辑器同宽同顶距（锁上 / 解锁时文字不跳位）。
+    与编辑器同一套结构：`.cm-scroller`（满宽、负责滚动）+ `.cm-content`（居中、`--measure`）。
+    以前 `overflow-y: auto` 直接写在居中的 `.reading` 上，滚动条会长在正文栏的右边缘 ——
+    一按锁就从主栏右边缘横跳到正文栏右边缘，悬在空白里（2026-10-12 用户反馈）。 */
+.reading-scroll {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  /* 与 `.cm-scroller` 的 `overscrollBehavior: contain` 对齐：滚到底不把外层一起带走。 */
+  overscroll-behavior: contain;
+}
+
+.reading {
   width: 100%;
   max-width: var(--measure);
   margin: 0 auto;
   padding: 56px 10px 30vh;
-  overflow-y: auto;
   outline: none;
 }
 
