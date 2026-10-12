@@ -16,7 +16,7 @@
  * `src/**` 一个字节都不改。
  */
 import { history } from "@codemirror/commands";
-import { EditorState } from "@codemirror/state";
+import { EditorState, Transaction } from "@codemirror/state";
 import { EditorView, drawSelection } from "@codemirror/view";
 /*
  * 与 `src/main.tsx` 拉进来的样式表/字体一一对应。少了它们，量到的是 fallback 字体的
@@ -30,6 +30,7 @@ import "@fontsource-variable/figtree/index.css";
 import "@fontsource-variable/jetbrains-mono/index.css";
 import "katex/dist/katex.min.css";
 import { blockPad } from "../../src/editor/blockPad";
+import { minimalReplace } from "../../src/editor/externalReplace";
 import { livePreviewField } from "../../src/editor/livePreview";
 import { markdownSupport } from "../../src/editor/markdown";
 import { editorSettingsField } from "../../src/editor/settings";
@@ -640,24 +641,208 @@ function dumpLines() {
 }
 
 /** CodeMirror 内部量（高度表 / 视口 / 滚动锚点）—— 只读，用于解释位移。 */
-function internals() {
-  const vs = (view as unknown as { viewState?: any }).viewState;
+function internalsOf(v: EditorView) {
+  const vs = (v as unknown as { viewState?: any }).viewState;
   return {
-    contentHeight: r2(view.contentHeight),
-    documentTop: r2(view.documentTop),
-    documentPadding: view.documentPadding,
+    contentHeight: r2(v.contentHeight),
+    documentTop: r2(v.documentTop),
+    documentPadding: v.documentPadding,
     heightMapHeight: vs?.heightMap ? r2(vs.heightMap.height) : null,
-    viewport: view.viewport,
-    scrollTop: r2(view.scrollDOM.scrollTop),
-    contentScrollHeight: view.contentDOM.scrollHeight,
-    scrollParentIsScrollDOM: vs?.scrollParent === view.scrollDOM,
+    viewport: v.viewport,
+    scrollTop: r2(v.scrollDOM.scrollTop),
+    contentScrollHeight: v.contentDOM.scrollHeight,
+    scrollParentIsScrollDOM: vs?.scrollParent === v.scrollDOM,
     scrollOffset: vs ? r2(vs.getScrollOffset()) : null,
     anchor: (() => {
       if (!vs) return null;
       const b = vs.scrollAnchorAt(vs.getScrollOffset());
-      return { from: b.from, top: r2(b.top), text: view.state.doc.lineAt(b.from).text.slice(0, 24) };
+      return { from: b.from, top: r2(b.top), text: v.state.doc.lineAt(b.from).text.slice(0, 24) };
     })(),
   };
+}
+
+function internals() {
+  return internalsOf(view);
+}
+
+/* =========================== 不变量 4：外部改动（磁盘赢）不许甩走视口 */
+
+/**
+ * 长文档夹具。
+ *
+ * 形状照抄「一篇几百行的中文长笔记」：标题 + 长段落 + 空行 + 零星围栏代码块，
+ * 而且**每行字符数刻意不均匀** —— 归档报告 §0.1 F 查明：未渲染区域在高度表里是一个
+ * `HeightMapGap`，`blockAt()` 按**字符比例**猜行号；字符分布均匀的文档猜得准，
+ * 也就复现不出「CM 自己改写 scrollTop」那 −708.63px。
+ */
+const LONG_PARA = [
+  "这一段是刻意写长的中文正文，用来把文档撑到几百行：住宅 IP、云主机、远程桌面、支付通道、",
+  "封号策略、风控与 BIN 检查、ASN 欺诈分、IP 一致性校验，这些词各自长度不同，",
+  "所以每一行的字符密度都不一样，高度表在没量过的区域只能按字符比例去猜。",
+].join("");
+
+function longDoc(opts: { above?: boolean; below?: boolean } = {}): string {
+  const lines: string[] = [];
+  if (opts.above) {
+    for (let i = 0; i < 12; i += 1) lines.push(`AGENT-ABOVE-${i} 外部在视口上方插入的段落。`);
+    lines.push("");
+  }
+  for (let i = 0; i < 140; i += 1) {
+    lines.push(`## 第 ${i} 节`);
+    lines.push("");
+    lines.push(LONG_PARA);
+    lines.push("");
+    if (i % 19 === 0) {
+      lines.push("```js");
+      lines.push(`function f${i}() { return ${i}; }`);
+      lines.push("```");
+      lines.push("");
+    }
+  }
+  if (opts.below) {
+    lines.push("AGENT-BELOW 外部在文档末尾追加的段落。");
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+/**
+ * 外部改动落进编辑器 —— 与 `src/components/EditorPane.tsx` 里 `EditorHost` 的内容同步
+ * effect **同一份代码**（`minimalReplace` 就是产品里那一个），只差 `updateListener`。
+ */
+function applyExternalReplace(v: EditorView, next: string): void {
+  const { changes, selection } = minimalReplace(v.state.doc.toString(), next, v.state.selection.main);
+  v.dispatch({ changes, selection, annotations: Transaction.addToHistory.of(false) });
+}
+
+/**
+ * 用**小步进**滚到目标位置。
+ *
+ * 一次 ≥1000px 的跳转本身就会中招（归档报告 §0.1 F），而这条不变量要量的是
+ * 「外部改动落下来的那一刻」，所以落位过程必须干净：300px 一步。
+ */
+async function scrollBySteps(v: EditorView, target: number, step = 300): Promise<void> {
+  let at = v.scrollDOM.scrollTop;
+  while (at < target) {
+    at = Math.min(target, at + step);
+    v.scrollDOM.scrollTop = at;
+    await settle();
+  }
+}
+
+/**
+ * 视口里第一条**非空**行 —— 它是这一条不变量的**内容锚点**。
+ *
+ * 光看 `rect.top` 会得到**假绿**：视口被整篇甩到开头时，新的顶行同样贴在滚动容器
+ * 上沿，`rect.top` 照样在 0 附近（修复前实测 Δ = −29.33px，而 `scrollTop` 掉了 3926px）。
+ * 所以锚点必须是「哪一行」：行文本 + 它在**文档里的位置**（`posAtDOM`）。
+ * 取非空行是因为夹具里段落之间有空行，空行的文本比不出任何东西。
+ */
+function topVisibleLine(v: EditorView) {
+  const top = v.scrollDOM.getBoundingClientRect().top;
+  const el =
+    linesOf(v).find((l) => l.getBoundingClientRect().bottom > top + 1 && (l.textContent ?? "").trim() !== "") ?? null;
+  return {
+    text: (el?.textContent ?? "").slice(0, 40),
+    pos: el ? v.posAtDOM(el) : null,
+    rect: rectOf(el),
+  };
+}
+
+function viewportSnapshot(v: EditorView) {
+  return { ...snapshot(v), topLine: topVisibleLine(v), internals: internalsOf(v) };
+}
+
+/** 800px ≈ 真实阅读高度：视口里只放得下十来行，大部分文档都在「没量过」的区域里。 */
+const READING_HOST_HEIGHT = 800;
+/** 落点：文档中段（夹具文档约 24 000px 高）。 */
+const READING_TOP = 4000;
+
+async function withReadingView(run: (v: EditorView) => Promise<void>): Promise<void> {
+  const host4 = document.createElement("div");
+  host4.className = "probe-host";
+  host4.style.height = `${READING_HOST_HEIGHT}px`;
+  document.body.appendChild(host4);
+  await showHost(host4);
+  const v = newView(host4, longDoc());
+  await settle();
+  await scrollBySteps(v, READING_TOP);
+  try {
+    await run(v);
+  } finally {
+    v.destroy();
+    host4.remove();
+  }
+}
+
+/**
+ * 三种「外部改动落下来」的时刻，都是产品里真实会发生的：
+ *
+ *   - `below`  改动在视口**下方**（Agent 在文末追加）—— 视口必须一动不动；
+ *   - `above`  改动在视口**上方**（Agent 在开头插了一段）—— 视口顶行必须是同一行，
+ *              `scrollTop` 由 CM 按新增高度自己补上；
+ *   - `during` 用户正拖着滚动条往上跳 1200px 的那一刻，改动落下来 ——
+ *              这是「滚动条往上滑被拽回去」那条反馈的复现路径。
+ */
+async function measureExternalReplace() {
+  const rows: unknown[] = [];
+
+  for (const kind of ["below", "above"] as const) {
+    await withReadingView(async (v) => {
+      const before = viewportSnapshot(v);
+      applyExternalReplace(v, longDoc({ [kind]: true }));
+      await settle();
+      const after = viewportSnapshot(v);
+
+      rows.push({
+        kind,
+        before,
+        after,
+        /** 外部改动前后，内容锚点的位移（px）—— 判定用。 */
+        deltaTopLineTop:
+          before.topLine.rect && after.topLine.rect ? r2(after.topLine.rect.top - before.topLine.rect.top) : null,
+        deltaScrollTop: r2(after.scrollTop - before.scrollTop),
+        /** 锚点还是不是**同一行**（文本 + 文档位置）—— 判定用。 */
+        sameTopLine: before.topLine.text === after.topLine.text,
+        sameTopLinePos: before.topLine.pos === after.topLine.pos,
+        topLineBefore: before.topLine.text,
+        topLineAfter: after.topLine.text,
+        topLinePosBefore: before.topLine.pos,
+        topLinePosAfter: after.topLine.pos,
+        /** 参照量：`above` 在开头插进去的那 12 行一共多少字符（锚点位置应当正好后移这么多）。 */
+        insertedAbove: kind === "above" ? longDoc({ above: true }).length - longDoc().length : 0,
+        /** 参照量：`above` 那 12 行一共多高（`scrollTop` 应当正好后移这么多）。 */
+        contentHeightDelta: r2(after.contentHeight - before.contentHeight),
+      });
+    });
+  }
+
+  await withReadingView(async (v) => {
+    const before = viewportSnapshot(v);
+    /* 拖滚动条往上跳 1200px，**不等**它落定，外部改动就在这一刻落下来。 */
+    const requested = Math.max(0, before.scrollTop - 1200);
+    v.scrollDOM.scrollTop = requested;
+    applyExternalReplace(v, longDoc({ below: true }));
+    await settle();
+    const after = viewportSnapshot(v);
+
+    rows.push({
+      kind: "during",
+      before,
+      after,
+      requested: r2(requested),
+      /** 那一跳被 CM 改写掉多少（px）—— 判定用。 */
+      drift: r2(after.scrollTop - requested),
+      deltaTopLineTop:
+        before.topLine.rect && after.topLine.rect ? r2(after.topLine.rect.top - before.topLine.rect.top) : null,
+      deltaScrollTop: r2(after.scrollTop - before.scrollTop),
+      sameTopLine: before.topLine.text === after.topLine.text,
+      topLineBefore: before.topLine.text,
+      topLineAfter: after.topLine.text,
+    });
+  });
+
+  return rows;
 }
 
 /* =========================================================== 对外 */
@@ -671,6 +856,7 @@ const GEOM = {
   measureVertical,
   measureHorizontal,
   measureAsync,
+  measureExternalReplace,
   dumpLines,
   internals,
 };

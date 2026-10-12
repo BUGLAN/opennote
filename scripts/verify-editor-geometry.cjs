@@ -591,6 +591,8 @@ async function main() {
   const horizontal = await evaluate(cdp, "return await GEOM.measureHorizontal()", 60_000);
   console.log("[measure] 不变量 2：异步渲染完成…");
   const asyncRows = await evaluate(cdp, "return await GEOM.measureAsync()", 180_000);
+  console.log("[measure] 不变量 4：外部改动（磁盘赢）…");
+  const externalRows = await evaluate(cdp, "return await GEOM.measureExternalReplace()", 180_000);
   console.log(`[measure] 采集完成（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
 
   /* ---------------------------------------------------------- 判定 */
@@ -657,6 +659,56 @@ async function main() {
     push("h", row.id, row.label, row.deltaCoordsLeft, reason, row);
   }
 
+  /*
+   * 不变量 4：外部改动（磁盘赢）落下来的那一刻，不许甩走视口。
+   *
+   * 判据是「视口里第一条非空行还是不是**同一行**、它在屏幕上的位置有没有变」——
+   * 只看像素会得到假绿：视口被整篇甩回文档开头时，新的顶行同样贴在滚动容器上沿，
+   * `rect.top` 照样在 0 附近（修复前实测 Δ = −29.33px，而 scrollTop 掉了 3926px）。
+   * 所以锚点同时比**行文本**与**文档位置**（probe 侧的 `posAtDOM`）。
+   *
+   * 「锚点换了一行」是**实测到的位移**（FAIL），不是「没测到」——两者必须分开报，
+   * 否则一次真实的回归会被当成测量失败混过去。
+   */
+  const pushExternal = (id, label, row, delta, measured, mismatch) => {
+    if (!measured) {
+      results.push({ invariant: "e", id, label, status: STATUS.UNMEASURED, reason: mismatch, delta, detail: row });
+    } else if (mismatch) {
+      results.push({ invariant: "e", id, label, status: STATUS.FAIL, reason: mismatch, delta, detail: row });
+    } else {
+      push("e", id, label, delta, null, row);
+    }
+  };
+  for (const row of externalRows) {
+    const measured = row.before?.topLine?.pos != null && row.after?.topLine?.pos != null;
+    const unmeasured = measured ? null : "视口里找不到非空行（内容锚点缺失），本次没测到";
+    if (row.kind === "during") {
+      pushExternal(
+        "during",
+        "拖滚动条上跳时落下的外部改动 · 跳转不被改写",
+        row,
+        row.drift,
+        measured && row.requested != null,
+        unmeasured ?? (row.requested == null ? "没记录到这次跳转的目标位置" : null),
+      );
+      continue;
+    }
+    const shifted = row.topLinePosAfter - row.topLinePosBefore;
+    const mismatch = !row.sameTopLine
+      ? `视口顶行换了一行：${JSON.stringify(row.topLineBefore)} → ${JSON.stringify(row.topLineAfter)}`
+      : row.kind === "below"
+        ? /* 改动在下方 ⇒ 锚点在文档里的位置一个字符都不该动 */
+          !row.sameTopLinePos
+          ? `锚点位置动了：${row.topLinePosBefore} → ${row.topLinePosAfter}（应当不动）`
+          : null
+        : /* 改动在上方 ⇒ 锚点应当正好后移「上方插入的那一段」的长度 */
+          shifted !== row.insertedAbove
+          ? `锚点应当后移 ${row.insertedAbove} 个字符（上方插入的那一段），实际后移 ${shifted}`
+          : null;
+    const label = row.kind === "below" ? "外部改动在视口下方 · 顶行不动" : "外部改动在视口上方 · 顶行不动";
+    pushExternal(`replace-${row.kind}`, label, row, row.deltaTopLineTop, measured, unmeasured ?? mismatch);
+  }
+
   /* ---------------------------------------------------------- 报告 */
 
   printInvariantHeader("不变量 1 · 切换不位移（纵向）", "光标在块外 → 移进块 → 块下方第一个标记段落的 rect.top 位移");
@@ -671,6 +723,14 @@ async function main() {
 
   printInvariantHeader("不变量 3 · 切换不位移（横向）", "光标在段落外 → 移进段落 → 标记元素文字起点 coordsAtPos().left 的位移");
   for (const r of results.filter((x) => x.invariant === "h")) {
+    printRow(r.status, r.label, r.delta, r.status === STATUS.PASS ? "" : r.reason || "");
+  }
+
+  printInvariantHeader(
+    "不变量 4 · 外部改动（磁盘赢）不甩走视口",
+    "一篇 24 000px 高的笔记滚到 scrollTop=4000 → 外部改动落下来 → 视口里第一条非空行的 rect.top 位移",
+  );
+  for (const r of results.filter((x) => x.invariant === "e")) {
     printRow(r.status, r.label, r.delta, r.status === STATUS.PASS ? "" : r.reason || "");
   }
 
@@ -727,6 +787,21 @@ async function main() {
           const tail = tl.length > 6 ? `  …  末帧 ${tl[tl.length - 1].at}ms:${tl[tl.length - 1].markerTop}` : "";
           console.log(`        时间线 top: ${head}${tail}`);
         }
+      } else if (r.invariant === "e") {
+        console.log(
+          `        scrollTop ${d.before?.scrollTop ?? "n/a"} → ${d.after?.scrollTop ?? "n/a"}` +
+            `   Δ ${px(d.deltaScrollTop)} px` +
+            (d.requested != null ? `   这次跳转的目标 ${d.requested}，实际落在 ${d.after?.scrollTop ?? "n/a"}` : ""),
+        );
+        console.log(
+          `        视口顶行 ${JSON.stringify(d.topLineBefore)} @${d.topLinePosBefore ?? "n/a"}` +
+            ` → ${JSON.stringify(d.topLineAfter)} @${d.topLinePosAfter ?? "n/a"}` +
+            (d.insertedAbove ? `   上方插入了 ${d.insertedAbove} 个字符` : ""),
+        );
+        console.log(
+          `        内容高度 ${d.before?.contentHeight ?? "n/a"} → ${d.after?.contentHeight ?? "n/a"}` +
+            `   高度表 ${d.before?.internals?.heightMapHeight ?? "n/a"} → ${d.after?.internals?.heightMapHeight ?? "n/a"}`,
+        );
       } else {
         console.log(`        文字起点 left ${d.outside.coordsAtText?.left ?? "n/a"} → ${d.inside.coordsAtText?.left ?? "n/a"}`);
         console.log(
@@ -748,7 +823,7 @@ async function main() {
     console.log("─".repeat(78));
     console.log("原始测量数据");
     console.log("─".repeat(78));
-    console.log(JSON.stringify({ env, vertical, horizontal, asyncRows }, null, 2));
+    console.log(JSON.stringify({ env, vertical, horizontal, asyncRows, externalRows }, null, 2));
   }
 
   /* ---------------------------------------------------------- 汇总 */
@@ -780,7 +855,7 @@ async function main() {
           chromeWindow: CHROME_WINDOW,
           tolerancePx: TOLERANCE_PX,
           results: results.map((r) => ({ invariant: r.invariant, id: r.id, label: r.label, status: r.status, delta: r.delta, reason: r.reason })),
-          raw: { vertical, horizontal, asyncRows },
+          raw: { vertical, horizontal, asyncRows, externalRows },
         },
         null,
         2,

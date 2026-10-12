@@ -4,6 +4,7 @@ import { EditorView } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import { imageUrlStore } from "../data/assets";
 import type { Id, UiSettings } from "../data/types";
+import { minimalReplace } from "../editor/externalReplace";
 import { editorSettingsField, refreshDecorations, setEditorSettings, type EditorSettings } from "../editor/settings";
 import { buildEditorExtensions, readOnlyCompartment, spellcheckCompartment } from "../editor/setup";
 import { notify } from "../lib/toast";
@@ -176,21 +177,24 @@ function EditorHost(props: EditorHostProps): ReactNode {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 挂载一次；内容/设置走下面的同步 effect
   }, []);
 
-  /* 内容在外面变了（磁盘赢的采纳、快照恢复、导入、同步）：整篇替换，原光标夹进新文档。
-     隐藏的后台标签同样同步 —— 回到前台时看到的就是最新内容。 */
+  /* 内容在外面变了（磁盘赢的采纳、快照恢复、导入、同步）：按**最小改动**替换，原光标夹进新文档。
+     隐藏的后台标签同样同步 —— 回到前台时看到的就是最新内容。
+
+     为什么不是「整篇替换」：整篇替换会把 CM 的滚动锚点塌到文档开头，`measure()` 的补偿
+     随即把视口拽回顶部（实测 4000 → 74，−3926px；Agent 一改文件，用户读的地方就没了）。
+     最小改动同时保住「视口位置」与「高度表里已量过的行高」，见 `editor/externalReplace.ts`。 */
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    if (props.content !== expectedRef.current && props.content !== view.state.doc.toString()) {
-      expectedRef.current = props.content;
-      const selection = view.state.selection.main;
-      const length = props.content.length;
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: props.content },
-        selection: { anchor: Math.min(selection.anchor, length), head: Math.min(selection.head, length) },
-        annotations: Transaction.addToHistory.of(false),
-      });
-    }
+    const current = view.state.doc.toString();
+    if (props.content === expectedRef.current || props.content === current) return;
+    expectedRef.current = props.content;
+    const { changes, selection } = minimalReplace(current, props.content, view.state.selection.main);
+    view.dispatch({
+      changes,
+      selection,
+      annotations: Transaction.addToHistory.of(false),
+    });
   }, [props.content]);
 
   /* push appearance / mode settings into the editor state */
