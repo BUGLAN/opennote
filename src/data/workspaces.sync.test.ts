@@ -118,6 +118,27 @@ describe("`accountRef` 是引用而不是密钥", () => {
    `load()` 真的会规范化持久化的记录（上面测的是纯函数，这里测接线）
    ============================================================================ */
 
+describe("新建的工作区**显式**带一份「关掉的同步」", () => {
+  it("★ 记录落盘就是完整形状（别的读它的地方不必各自处理「字段可能不存在」）", async () => {
+    vi.stubGlobal("localStorage", {
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    });
+    vi.resetModules();
+    try {
+      const mod = await import("./workspaces");
+      // `rememberWorkspace` 是**所有**创建路径（node / fsa / capacitor）最后都走的那一个。
+      const created = mod.rememberWorkspace({ name: "新笔记本", kind: "node", location: "/tmp/x" });
+      expect(created.sync).toEqual(DISABLED_SYNC);
+      expect(created.sync!.enabled).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+});
+
 describe("`load()` 的接线：坏记录在**读的时候**就被规范化", () => {
   it("★ 存了一份坏 `sync` 的记录 ⇒ 读出来是「关」，且不抛", async () => {
     /*

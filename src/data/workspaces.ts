@@ -192,6 +192,15 @@ export function rememberWorkspace(input: { name: string; kind: BackendKind; loca
     location: input.location,
     addedAt: now,
     lastOpenedAt: now,
+    /*
+     * 新建的工作区**显式**带上「关掉的同步」。
+     *
+     * 靠 `load()` 时的 `normalizeSyncConfig` 补上也能work（它对 `undefined` 就是返回「关」），
+     * 但显式写出来有两个好处：① 记录一旦落盘就是**完整**的形状，
+     * 别的读这份记录的地方（备份、导出、诊断）不必再各自处理「字段可能不存在」；
+     * ② 用户打开设置页时看到的是「同步：关」而不是一片空白 —— 空白会让人以为功能坏了。
+     */
+    sync: { ...DISABLED_SYNC },
   };
   workspaceStore.set({ workspaces: [...state.workspaces, record], activeId: record.id });
   persist();
