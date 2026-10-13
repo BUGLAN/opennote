@@ -1101,31 +1101,22 @@ export async function rescanWorkspace(): Promise<void> {
     // Disk is at least as new as memory: nothing to protect.
     if (!local || local.content === disk.content) continue;
     /*
-     * 【跨设备修复】判据从「磁盘 mtime 比我们记录的新」换成「写屏障之后我们没写过它」。
+     * ⚠️ **这个循环几乎从不真的进入**（`dirty` 与 `dirtyBefore` 在 `flushAll()` 之后就空了，
+     * 而 `flushAll()` 就在本次重扫的开头）。真正干活的是上面的 `fileStates.seedFromScan()`
+     * —— 那条路径决定「磁盘那一版算不算外部改动」，并据此更新**磁盘事实记录**。
      *
-     * 旧写法 `!seen || (disk.content !== seen.content && stamp.mtimeMs > seen.stat.mtimeMs)`
-     * 要求远端那一版**带更新的 mtime** 才认外部改动。跨设备时 mtime 不可比（另一台机器/
-     * 网盘/`git clone` 写来的内容可能更旧）→ 判成「本地 win」→ 保留旧 buffer →
-     * 下一次 `flushNote` 把远端新内容覆盖掉。
+     * 保留它是因为语义上仍然正确（重扫期间新变脏的笔记要保本地），
+     * 但**别把它当成主路径**：跨设备修复（丢内容那条 bug）的落点在 `seedFromScan`，
+     * 有用例是通过 `fileStates.get(id)?.content` 断言那一条的（`library.externalChange.test.ts`）。
      *
-     * 新规则：**没记录，或内容不同、且这一版不是我们屏障之后写下去的 → 就是外部改动。**
-     * 唯一要保住的原语义是「扫描读到旧字节」—— 那时**内存已经被我们敲过**，
-     * 也就是 `fileStates.bufferSeq(id) > seen.seq`。
+     * 【跨设备修复】判据是「**内存后来被我们敲过吗**」，不依赖任何时间戳：
+     *   `bufferSeq > seen.seq` → buffer 是我们自己后来敲的 → 内存赢，保留；
+     *   否则（没记录 / 内存自那次对齐后没动过）→ 磁盘赢，采纳扫描结果。
+     * 旧写法要求「磁盘 mtime 比我们记录的新」才认外部改动；跨设备 / 网盘 / `git clone`
+     * 下 mtime 不可比（另一端写来的内容可能更旧）→ 判成「本地 win」→ 保留旧 buffer →
+     * 下一次 `flushNote` 把远端新内容覆盖掉（文档 §5.4 第 5 条）。
      */
     const seen = fileStates.get(id);
-    /*
-     * 【跨设备修复】判据从「磁盘 mtime 比我们记录的新」换成「**内存后来被我们敲过吗**」。
-     *
-     * 旧写法 `!seen || (disk.content !== seen.content && stamp.mtimeMs > seen.stat.mtimeMs)`
-     * 要求远端那一版**带更新的 mtime** 才认外部改动。跨设备时 mtime 不可比（另一台机器、
-     * 网盘、`git clone` 写来的内容可能更旧）→ 判成「本地 win」→ 保留旧 buffer →
-     * 下一次 `flushNote` 把远端新内容覆盖掉（文档 §5.4 第 5 条）。
-     *
-     * 新规则（见 `fileStates` 模块头）：
-     *   `bufferSeq > seen.seq`  → buffer 是我们自己后来敲的 → 内存赢，保留；
-     *   否则（没记录 / 内存自那次对齐后没动过）→ 磁盘赢，采纳扫描结果。
-     * 于是「扫描的 list() 早于并发写入」与「真外部改动」被分开，且**不依赖时间戳**。
-     */
     const localEditedSince = fileStates.bufferSeq(id) > (seen?.seq ?? 0);
     const isForeign = !seen || !localEditedSince;
     if (isForeign) {

@@ -24,7 +24,7 @@ vi.mock("./workspaces", () => ({
   setActiveWorkspace: () => undefined,
 }));
 
-import { closeWorkspace, getLibrary, openWorkspace, updateNoteContent } from "./library";
+import { closeWorkspace, flushAll, getLibrary, openWorkspace, updateNoteContent } from "./library";
 import { clearConflicts, conflictCount, getConflict, listConflicts, recordConflict, resolveConflict } from "../sync/conflicts";
 import { resetSyncActiveForTests, setSyncActive } from "../sync/mode";
 import { patchUi } from "./ui";
@@ -135,19 +135,37 @@ describe("开着同步 ⇒ 只报不猜（红线 5）", () => {
   });
 
   it("行尾形态不同**但归一后不同** ⇒ 仍然是冲突（别把 false conflict 放宽成「差不多就算」）", async () => {
+    /*
+     * ⚠️ 这条用例**刻意不走 watcher**（`bridge.emit` + 重扫）。
+     *
+     * 它原来的写法是「先 emit 再等重扫」，但那条链路上有两个各自的去抖
+     * （自动保存 450ms、watcher 重扫 500ms），而**外部写入与本地编辑谁先被处理**
+     * 取决于推进节奏：一旦自动保存先落盘、笔记变干净，重扫读到的是**我们自己刚写的**
+     * 内容 —— 于是根本不产生冲突。那条用例因此 1/5 概率红（只在整套跑时现形）。
+     *
+     * 现在直接压**真正的判定入口**：`flushNote` 发现磁盘 stat 变了 → 读盘 →
+     * `reconcileExternalChange`。这条路径没有去抖、没有竞态，测的就是判定本身。
+     */
     setSyncActive(true);
-    const bridge = harness.installBridge();
     const backend = harness.scenario("A", (b) => b.seed("a.md", "# 起点"));
     await openWorkspace(records.get("A")!, { silent: true });
+    // 不排自动保存定时器（`onFocusChange` 档），落盘只由我们显式 flush 触发。
+    patchUi({ autoSave: "onFocusChange" });
 
     updateNoteContent("a.md", "# 撞车了");
+    // 外部写入**比本地那一版长 2 字节**（CRLF）：stat 一定变，`flushNote` 会去读盘。
     backend.seed("a.md", "# 撞车了\r\n");
-    bridge.emit(harness.rootOf("A"));
-    await settleUntil(() => conflictCount() > 0);
+
+    await flushAll();
 
     const conflicts = listConflicts();
     expect(conflicts).toHaveLength(1);
     expect(conflicts[0]!.path).toBe("a.md");
+    expect(conflicts[0]!.kind).toBe("both-modified");
+    // 两边标识都在，且**不相等** —— 这是「归一后确实不同」的直接证据。
+    expect(conflicts[0]!.localId).toBeTruthy();
+    expect(conflicts[0]!.remoteId).toBeTruthy();
+    expect(conflicts[0]!.localId).not.toBe(conflicts[0]!.remoteId);
   });
 
   it("关掉同步之后，同一场景不再进账本（开关是判定的一部分，不是全局副作用）", async () => {
