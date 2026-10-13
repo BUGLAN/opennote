@@ -93,6 +93,92 @@ export function fetchSend(): HttpSend {
   };
 }
 
+/* ============================================================================
+   桌面端的发送函数（转发到主进程，§5.5）
+   ============================================================================ */
+
+/** preload 暴露的那一小块代理接口。 */
+export interface DesktopSyncBridge {
+  /** 设置同步服务地址（换主机时主进程会弹**原生**确认框）。 */
+  configure(baseUrl: string): Promise<{ baseUrl: string; changed: boolean }>;
+  /** 把派生好的令牌交给主进程（之后逐请求由它贴）。 */
+  setAuthToken(token: string): Promise<boolean>;
+  /** 发一个**相对**请求。`body` 过 IPC 用普通数组（结构化克隆对 `Uint8Array` 的支持各宿主不一）。 */
+  request(input: {
+    method: string;
+    relPath: string;
+    headers: Record<string, string>;
+    body?: number[];
+  }): Promise<{ status: number; headers: Record<string, string>; body: number[] }>;
+}
+
+/** 取 `window.opennote.syncProxy`（非桌面端或旧版 preload 时为 null）。 */
+export function desktopSyncBridge(): DesktopSyncBridge | null {
+  const scope = globalThis as { window?: { opennote?: { isElectron?: boolean; syncProxy?: DesktopSyncBridge } } };
+  const bridge = scope.window?.opennote;
+  if (!bridge?.isElectron || !bridge.syncProxy) return null;
+  return bridge.syncProxy;
+}
+
+/**
+ * 用主进程代理实现的发送函数（桌面端）。
+ *
+ * ## ★ 这里要把「绝对 URL」翻成「相对路径」，而这一步是**安全相关**的
+ *
+ * 主进程的代理**只接受相对路径**（`electron/sync.cjs`：那是防止一次 XSS
+ * 借主进程把笔记外发的核心）。所以这里必须：
+ *
+ * 1. 断言请求 URL 的 **origin** 与配置的 base 相同；
+ * 2. 断言路径落在 base 的子路径之下；
+ * 3. 只把**路径 + 查询串**送过去。
+ *
+ * 第 1、2 条是**冗余**（主进程还会再判一次）—— 但冗余在这里是刻意的：
+ * 主进程那道是最后一道，而这里的错误信息能直接指出「provider 拼出了一个越界的 URL」，
+ * 比主进程抛的「跑出了 base」更接近根因。
+ */
+export function desktopSend(bridge: DesktopSyncBridge, baseUrl: string): HttpSend {
+  const base = new URL(baseUrl);
+  const basePath = base.pathname.replace(/\/+$/, "");
+
+  return async (request) => {
+    const url = new URL(request.url);
+    if (url.origin !== base.origin) {
+      throw new Error(`同步请求跑出了配置的服务地址（${url.origin} ≠ ${base.origin}）`);
+    }
+    if (basePath !== "" && !url.pathname.startsWith(`${basePath}/`) && url.pathname !== basePath) {
+      throw new Error(`同步请求跑出了配置的子路径（${url.pathname}）`);
+    }
+    const result = await bridge.request({
+      method: request.method,
+      relPath: url.pathname + url.search,
+      headers: request.headers,
+      ...(request.body === undefined ? {} : { body: toByteArray(request.body) }),
+    });
+    return { status: result.status, headers: result.headers, bytes: Uint8Array.from(result.body) };
+  };
+}
+
+/** 把 `Uint8Array | string` 统一成普通数组（过 IPC）。 */
+function toByteArray(body: Uint8Array | string): number[] {
+  const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
+  return Array.from(bytes);
+}
+
+/**
+ * 按宿主挑发送函数。
+ *
+ * - 桌面端（有 `window.opennote.syncProxy`）⇒ 走主进程代理，并**先把 base 与令牌登记过去**；
+ * - 其它宿主 ⇒ 直接 `fetch`（移动端 Capacitor WebView 不受桌面 CSP 约束）。
+ */
+export async function resolveSend(options: { baseUrl: string; authToken: string }): Promise<HttpSend> {
+  const bridge = desktopSyncBridge();
+  if (!bridge) return fetchSend();
+  // 换主机时主进程会弹原生确认框 —— 用户拒绝的话这里会抛，同步就不会开始（正确行为）。
+  await bridge.configure(options.baseUrl);
+  await bridge.setAuthToken(options.authToken);
+  return desktopSend(bridge, options.baseUrl);
+}
+
 const textDecoder = new TextDecoder();
 
 /**
