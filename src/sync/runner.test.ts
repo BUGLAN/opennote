@@ -8,7 +8,7 @@
  * 2. **「密钥已轮换」是独立状态**，不是「错误」的一种。归进错误会让用户去查网络。
  */
 import { describe, expect, it, vi } from "vitest";
-import { createSyncRunner, statusForError, type SyncStatus } from "./runner";
+import { createSyncRunner, describeSyncStatus, statusForError, type SyncStatus } from "./runner";
 import { SyncProviderError } from "./provider-types";
 import type { SyncOnceResult } from "./engine";
 
@@ -298,5 +298,70 @@ describe("§5.3 · 本地写之后去抖推一次", () => {
     runner.scheduleAfterLocalWrite();
     expect(timers.queued).toHaveLength(0);
     void vi;
+  });
+});
+
+/* ============================================================================
+   §5.3 · 状态 → 界面文案
+   ============================================================================ */
+
+describe("§5.3 · 状态栏文案：三种「说准」", () => {
+  it("★ `key-rotated` 用**文档指定的**文案，且标记为「需要用户动手」", () => {
+    /*
+     * §1.5 代价 2 与第 2030 行都要求 401 时给明确文案。写成「同步失败」会让用户
+     * 去查网络 —— 而这条**只有他自己能解决**（重新导入密钥）。
+     */
+    const text = describeSyncStatus({ phase: "key-rotated", lastSyncedAt: null });
+    expect(text.label).toContain("密钥已被轮换");
+    expect(text.detail).toContain("导入新的账号密钥");
+    // 状态栏据此决定要不要给一个可点的入口。
+    expect(text.actionable).toBe(true);
+    // 绝不能退化成一句笼统的「同步失败」。
+    expect(text.label).not.toBe("同步失败");
+  });
+
+  it("★ `offline` 与 `error` **不是一回事**（前者等等就好，后者要人管）", () => {
+    const offline = describeSyncStatus({ phase: "offline", error: "连不上", lastSyncedAt: null });
+    const error = describeSyncStatus({ phase: "error", error: "配额满了", code: "quota", lastSyncedAt: null });
+    expect(offline.label).toBe("离线");
+    expect(offline.tone).toBe("warn");
+    expect(error.label).toBe("同步失败");
+    expect(error.tone).toBe("error");
+    expect(offline.label).not.toBe(error.label);
+  });
+
+  it("★ 冲突数必须**露出来**（冲突是「只报不猜」的，不说就等于永远不解决）", () => {
+    const none = describeSyncStatus({ phase: "idle", lastSyncedAt: 1, conflicts: 0 });
+    const some = describeSyncStatus({ phase: "idle", lastSyncedAt: 1, conflicts: 3 });
+    expect(none.label).toBe("已同步");
+    expect(some.label).toContain("3");
+    expect(some.actionable).toBe(true);
+    expect(some.detail).toContain("自己决定");
+  });
+
+  it("从未同步过 ⇒ 说「尚未同步」（而不是「已同步」）", () => {
+    expect(describeSyncStatus({ phase: "idle", lastSyncedAt: null, conflicts: 0 }).label).toBe("尚未同步");
+  });
+
+  it("同步中 ⇒ busy（界面据此转圈，且不该再给一个「立即同步」按钮）", () => {
+    const text = describeSyncStatus({ phase: "syncing", startedAt: 1 });
+    expect(text.label).toBe("同步中…");
+    expect(text.tone).toBe("busy");
+    expect(text.actionable).toBe(false);
+  });
+
+  it("每个状态都有文案（`switch` 没有漏分支）", () => {
+    const all: SyncStatus[] = [
+      { phase: "idle", lastSyncedAt: null, conflicts: 0 },
+      { phase: "idle", lastSyncedAt: 1, conflicts: 1 },
+      { phase: "syncing", startedAt: 1 },
+      { phase: "offline", error: "x", lastSyncedAt: null },
+      { phase: "key-rotated", lastSyncedAt: null },
+      { phase: "error", error: "x", code: "server", lastSyncedAt: null },
+    ];
+    for (const status of all) {
+      const text = describeSyncStatus(status);
+      expect(text.label.length, status.phase).toBeGreaterThan(0);
+    }
   });
 });

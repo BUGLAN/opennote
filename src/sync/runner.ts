@@ -192,3 +192,74 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
     },
   };
 }
+
+/* ============================================================================
+   状态 → 界面文案（`StatusBar` 直接用它）
+   ============================================================================ */
+
+/** 状态栏要显示的东西（`tone` 决定颜色，`detail` 是次要的一行）。 */
+export interface SyncStatusText {
+  label: string;
+  detail: string | null;
+  tone: "idle" | "busy" | "warn" | "error";
+  /** 这个状态是否需要用户**动手**（状态栏据此决定要不要显示一个可点的入口）。 */
+  actionable: boolean;
+}
+
+/**
+ * 把 `SyncStatus` 翻成界面文案。
+ *
+ * ## 为什么单独抽成纯函数
+ *
+ * 三种情况都要求「**说准**」，而它们很容易被写成一句笼统的「同步失败」：
+ *
+ * 1. **`key-rotated` 有指定文案**（§1.5 代价 2、第 2030 行）：
+ *    「此设备的密钥已被轮换，请导入新密钥」。写成「同步失败」会让用户去查网络 ——
+ *    而这条**只有他自己能解决**（重新导入密钥），所以要 `actionable: true`。
+ * 2. **`offline` 与 `error` 不是一回事**：前者「等等就好」，后者要人管。
+ * 3. **冲突数必须露出来**（§5.3 的「N 冲突」）：冲突是**只报不猜**的
+ *    （引擎绝不动它们），所以用户不知道就等于永远不解决。
+ *
+ * 放在 `runner.ts` 旁边是为了让它和状态定义**一起改**：状态加了分支而文案没跟上，
+ * 是那种「编译通过、界面空白」的错。
+ */
+export function describeSyncStatus(status: SyncStatus): SyncStatusText {
+  switch (status.phase) {
+    case "syncing":
+      return { label: "同步中…", detail: null, tone: "busy", actionable: false };
+
+    case "key-rotated":
+      return {
+        // ★ 这句是文档指定的，不要改写成「同步失败」。
+        label: "此设备的密钥已被轮换",
+        detail: "请导入新的账号密钥。",
+        tone: "error",
+        // 只有用户自己能解决 —— 状态栏要给他一个入口。
+        actionable: true,
+      };
+
+    case "offline":
+      return { label: "离线", detail: "网络恢复后会自动重试。", tone: "warn", actionable: false };
+
+    case "error":
+      return { label: "同步失败", detail: status.error, tone: "error", actionable: false };
+
+    case "idle": {
+      if (status.conflicts > 0) {
+        return {
+          label: `已同步（${status.conflicts} 处冲突）`,
+          // 冲突是「只报不猜」的，引擎不会动它们 —— 所以要明确告诉用户去哪儿看。
+          detail: "有内容两边都改过，需要你自己决定保留哪一份。",
+          tone: "warn",
+          actionable: true,
+        };
+      }
+      return {
+        label: status.lastSyncedAt === null ? "尚未同步" : "已同步",
+        detail: null,
+        tone: "idle",
+        actionable: false,
+      };
+    }
+  }
+}
