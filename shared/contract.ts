@@ -227,6 +227,17 @@ export type InviteCreatedResponse = z.infer<typeof inviteCreatedResponseSchema>;
 export const treeEntrySchema = z
   .object({
     did: didSchema,
+    /**
+     * **明文模式**下这一条的工作区相对路径。
+     *
+     * 为什么要有它：**新设备**本地没有任何路径，而 `did → path` 反查只能靠
+     * 「把所有已知路径各算一次 did」。明文模式下 `did = "f:" + base64url(path)` 可逆，
+     * 所以服务端直接把 `path` 带回来最省事（§3.3 表「模式 A：服务端能看到路径」那一行）。
+     *
+     * ⚠️ **E2EE 下必须缺省** —— 服务端看不到明文路径，也**不许**试图解密（红线 3）。
+     * 那时新设备只能靠「全树解密」重建映射（§2.2）。
+     */
+    path: z.string().min(1).max(1024).optional(),
     hash: contentIdSchema.optional(),
     ehash: contentIdSchema.optional(),
     size: z.number().int().nonnegative().optional(),

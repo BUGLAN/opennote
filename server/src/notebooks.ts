@@ -320,6 +320,103 @@ export class NotebookStore {
       )
       .run(accountId, input.bytesUsed ?? 0, now, input.bytesUsed ?? 0, now);
   }
+
+  /* ---------------------------------------------------------------- 统计 */
+
+  /**
+   * 客户端上报的按天计数（§4.3 `client_stats`）。
+   *
+   * **`conflicts` / `errors` 是控制台判断「同步是否正常」最快的信号**：
+   * 持续增长 = 有一端基线坏了（§8.5）。所以这里用**累加**而不是覆盖 ——
+   * 同一天里客户端可能上报多次（每次同步一次），覆盖会把中间的过程丢掉。
+   *
+   * ⚠️ 只记**计数**：服务端看不到冲突内容（红线 2；E2EE 下它也只有密文）。
+   */
+  reportStats(input: {
+    accountId: string;
+    notebookId: string;
+    day: string;
+    conflicts: number;
+    errors: number;
+    pushes: number;
+    pulls: number;
+    deletes: number;
+  }): void {
+    const nonNegative = (value: number): number => Math.max(0, Math.floor(value));
+    this.db
+      .prepare(
+        `INSERT INTO client_stats (account_id, notebook_id, day, conflicts, errors, pushes, pulls, deletes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, notebook_id, day) DO UPDATE SET
+           conflicts = conflicts + excluded.conflicts,
+           errors    = errors    + excluded.errors,
+           pushes    = pushes    + excluded.pushes,
+           pulls     = pulls     + excluded.pulls,
+           deletes   = deletes   + excluded.deletes`,
+      )
+      .run(
+        input.accountId,
+        input.notebookId,
+        input.day,
+        nonNegative(input.conflicts),
+        nonNegative(input.errors),
+        nonNegative(input.pushes),
+        nonNegative(input.pulls),
+        nonNegative(input.deletes),
+      );
+  }
+
+  /** 读某个账号的按天统计（控制台「冲突与错误」页）。 */
+  statsFor(
+    accountId: string,
+    options: { notebookId?: string; limitDays?: number } = {},
+  ): { notebookId: string; day: string; conflicts: number; errors: number; pushes: number; pulls: number; deletes: number }[] {
+    const limit = options.limitDays ?? 30;
+    const rows = (
+      options.notebookId
+        ? this.db
+            .prepare("SELECT * FROM client_stats WHERE account_id = ? AND notebook_id = ? ORDER BY day DESC LIMIT ?")
+            .all(accountId, options.notebookId, limit)
+        : this.db.prepare("SELECT * FROM client_stats WHERE account_id = ? ORDER BY day DESC LIMIT ?").all(accountId, limit)
+    ) as unknown as {
+      notebook_id: string;
+      day: string;
+      conflicts: number;
+      errors: number;
+      pushes: number;
+      pulls: number;
+      deletes: number;
+    }[];
+    return rows.map((row) => ({
+      notebookId: row.notebook_id,
+      day: row.day,
+      conflicts: row.conflicts,
+      errors: row.errors,
+      pushes: row.pushes,
+      pulls: row.pulls,
+      deletes: row.deletes,
+    }));
+  }
+
+  /** 审计写入（**永不包含正文或密钥材料**，§4.3）。 */
+  audit(event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null; now?: number }): void {
+    this.db
+      .prepare("INSERT INTO audit (at, actor_id, action, target, ip, detail) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(event.now ?? Date.now(), event.actorId, event.action, event.target ?? null, event.ip ?? null, event.detail ?? null);
+  }
+
+  /** 审计尾部（控制台用；倒序）。 */
+  recentAudit(limit = 50): { at: number; actorId: string | null; action: string; target: string | null; ip: string | null; detail: string | null }[] {
+    const rows = this.db.prepare("SELECT * FROM audit ORDER BY at DESC LIMIT ?").all(limit) as unknown as {
+      at: number;
+      actor_id: string | null;
+      action: string;
+      target: string | null;
+      ip: string | null;
+      detail: string | null;
+    }[];
+    return rows.map((row) => ({ at: row.at, actorId: row.actor_id, action: row.action, target: row.target, ip: row.ip, detail: row.detail }));
+  }
 }
 
 /** 建的笔记本是否超出配额（**只拦写入，不拦读取**）。 */

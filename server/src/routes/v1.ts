@@ -1,0 +1,488 @@
+/**
+ * `/v1/*` 同步数据面（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §2.3、§4.7、§3.3、§3.5、§6.4）。
+ *
+ * ## 这一层是**适配层**，不是复制协议（§1.7 明确不引入自研复制协议）
+ *
+ * 它做的全部事情就是**翻译**：
+ *
+ * | 客户端 | Node | CouchDB |
+ * | --- | --- | --- |
+ * | `did` 查询参数 | 原样传下去 | `_id` |
+ * | `If-Match: <hash/ehash>` | `known.remoteHash` → `?rev=` | `_rev` CAS |
+ * | 原始字节 | base64 | `_attachments.blob`（落盘是二进制） |
+ * | `cursor` 不透明字符串 | 原样传下去 | `_changes.last_seq` |
+ *
+ * **没有一处是 Node 在决定**：不生成版本号、不裁决冲突、不造游标（红线 2）。
+ *
+ * ## 四个刻意的设计点（都来自 §4.7）
+ *
+ * 1. **`did` 走查询参数、不走 URL 路径段** —— `did` 可能带 `:`；放 query 最稳，
+ *    而且**客户端根本不传明文路径**（E2EE 下服务端看不到路径，§2.2）。
+ * 2. **越权返回 404 而不是 403** —— 由 `notebooks.resolveMembership()` 统一判定（§4.4 纪律 2）。
+ * 3. **`truncated` 必须如实上报** —— 它是「禁止推断删除」的开关（§6.4 规则 1）。
+ * 4. **`/v1/file` 传原始字节**（不是 JSON 包 base64）—— 客户端开销最小，
+ *    base64 膨胀只发生在 Node↔CouchDB 这一段（内网，且落盘不膨胀）。
+ *
+ * ## 检查点写进 `_local/device-<deviceId>`
+ *
+ * `_local` 文档**不参与复制、不出现在 `_changes` 里** —— 正好是检查点该有的性质（§3.7）。
+ * 注意它与本地基线**职责不同**：这里记的是「我拉到哪了」，本地账本记的是「我改没改」。
+ */
+
+import { Hono } from "hono";
+import {
+  changesResponseSchema,
+  clientStatsRequestSchema,
+  parseContract,
+  treeResponseSchema,
+  type CryptoMode,
+} from "../../../shared/contract";
+import type { AccountRow } from "../auth/accounts";
+import { AccountError, AccountStore } from "../auth/accounts";
+import { CouchError, type CouchClient, type CouchDocument } from "../couch/client";
+import { DESIGN_DOC_ID } from "../couch/design";
+import type { NotebookRow, NotebookStore } from "../notebooks";
+import type { ServerConfig } from "../config";
+import { bearerToken } from "./account";
+
+export interface V1RoutesDeps {
+  accounts: AccountStore;
+  notebooks: NotebookStore;
+  config: ServerConfig;
+  /** 运行时用的 CouchDB 客户端（`sync` 专用账号，**不是 admin**，§4.4 纪律 4）。 */
+  couch: CouchClient;
+  /** admin 客户端（只在**首次**建库/改 `_design` 时用，§4.5）。 */
+  couchAdmin: CouchClient;
+  audit?: (event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null }) => void;
+}
+
+/** 笔记本的加密模式（`syncinfo` 与 SQLite 都记着；以 SQLite 为准）。 */
+function cryptoModeOf(notebook: NotebookRow): CryptoMode {
+  return notebook.crypto_mode === "user-key" ? "user-key" : "none";
+}
+
+/** 从一条 CouchDB 文档投影出**紧凑**的树条目（**不含正文**，§3.6）。 */
+function treeEntryFromDoc(doc: CouchDocument, cryptoMode: CryptoMode): {
+  did: string;
+  path?: string;
+  hash?: string;
+  ehash?: string;
+  size?: number;
+  esize?: number;
+  rev: string;
+  deleted?: boolean;
+} {
+  const entry: ReturnType<typeof treeEntryFromDoc> = { did: doc._id, rev: String(doc._rev ?? "") };
+  if (typeof doc.hash === "string") entry.hash = doc.hash;
+  if (typeof doc.ehash === "string") entry.ehash = doc.ehash;
+  if (typeof doc.size === "number") entry.size = doc.size;
+  if (typeof doc.esize === "number") entry.esize = doc.esize;
+  if (doc.deleted === true) entry.deleted = true;
+  /*
+   * ★ `path` **只在明文模式下**带回去。
+   * 模式 B 的文档里根本没有 `path` 字段（只有 `epath` 密文），所以这一条也是
+   * 「E2EE 下服务端看不到路径」在代码里的样子 —— 不是靠自觉不读，是**没有可读的**。
+   */
+  if (cryptoMode === "none" && typeof doc.path === "string") entry.path = doc.path;
+  return entry;
+}
+
+/** 内容标识：明文模式取 `hash`，E2EE 取 `ehash`。 */
+function contentIdOf(doc: CouchDocument): string | null {
+  if (typeof doc.hash === "string") return doc.hash;
+  if (typeof doc.ehash === "string") return doc.ehash;
+  return null;
+}
+
+export function createV1Routes(deps: V1RoutesDeps): Hono {
+  const routes = new Hono();
+  const json = (body: unknown, status: number, headers: Record<string, string> = {}): Response =>
+    new Response(status === 204 ? null : JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json; charset=utf-8", ...headers },
+    });
+
+  /** 认证（与 account 路由同一条链路，只有这一条）。 */
+  const authenticate = (c: { req: { header: (name: string) => string | undefined } }): AccountRow | Response => {
+    const account = (() => {
+      const token = bearerToken(c.req.header("authorization"));
+      if (!token) return null;
+      try {
+        return deps.accounts.authenticate(token);
+      } catch (error) {
+        if (error instanceof AccountError) return error;
+        throw error;
+      }
+    })();
+    if (account === null) return json({ error: "缺少 Authorization: Bearer 令牌", code: "unauthorized" }, 401);
+    if (account instanceof AccountError) {
+      return json({ error: account.message, code: account.rejection === "disabled" ? "disabled" : "unauthorized" }, account.rejection === "disabled" ? 403 : 401);
+    }
+    deps.accounts.touch(account.id);
+    return account;
+  };
+
+  /**
+   * 解析 `nb=` 并把**授权判定**做完。
+   *
+   * 返回 `Response` 表示已经可以提前返回（401/404）；返回对象表示通过。
+   * **越权与不存在都返回 404**，且文案完全相同 —— 不泄露「这个笔记本存在」（§4.4 纪律 2）。
+   */
+  const resolveNotebook = (
+    c: { req: { header: (name: string) => string | undefined; query: (name: string) => string | undefined } },
+    requiredRole: "read" | "write" | "owner",
+  ): { account: AccountRow; notebook: NotebookRow } | Response => {
+    const auth = authenticate(c);
+    if (auth instanceof Response) return auth;
+
+    const notebookId = c.req.query("nb");
+    if (!notebookId) return json({ error: "缺少 nb 参数", code: "bad-request" }, 400);
+
+    const notebook = deps.notebooks.findById(notebookId);
+    const membership = notebook ? deps.notebooks.resolveMembership(notebook.id, auth.id) : null;
+    // ★ 「不存在」与「无权」走同一条返回（404 + 同一句文案）。
+    if (!notebook || !membership) return json({ error: "笔记本不存在", code: "not-found" }, 404);
+
+    if (requiredRole === "write" && membership.role === "viewer") {
+      // 他知道这个笔记本存在（他在成员表里）⇒ 403 是恰当的（§4.4 纪律 2 的例外）。
+      return json({ error: "只读成员不能写入", code: "bad-request" }, 403);
+    }
+    if (requiredRole === "owner" && membership.role !== "owner") {
+      return json({ error: "需要 owner 权限", code: "bad-request" }, 403);
+    }
+    return { account: auth, notebook };
+  };
+
+  /** CouchDB 错误 → HTTP。**冲突与不存在要分开**，否则客户端没法做三方 diff。 */
+  const couchError = (error: unknown): Response => {
+    if (error instanceof CouchError) {
+      const status = error.code === "not-found" ? 404 : error.code === "conflict" ? 409 : error.code === "too-large" ? 413 : error.code === "timeout" ? 504 : 502;
+      return json({ error: error.message, code: error.code }, status);
+    }
+    throw error;
+  };
+
+  /* -------------------------------------------------------------- health */
+
+  /**
+   * `GET /v1/health`（**公开，无需鉴权**）—— 协议闸门与网页端可核对性（§4.7、§5.6⑤）。
+   *
+   * `webBuildHash` 是构建时注入的 PWA 产物哈希：网页端信任的是「服务端当天发给它的那份 JS」，
+   * 这是浏览器端 E2EE 的固有边界。报出哈希让在意的人能核对「今天这份 JS 是不是我本地那份」。
+   */
+  routes.get("/health", async () => {
+    let couchVersion: string | null = null;
+    try {
+      couchVersion = (await deps.couch.version()).version;
+    } catch {
+      // CouchDB 不通也要能报健康（否则控制台连「哪里坏了」都看不到）。
+      couchVersion = null;
+    }
+    return json(
+      {
+        ok: true,
+        protocolVersion: deps.config.protocolVersionExpected,
+        minSupportedProtocolVersion: 1,
+        webBuildHash: process.env.OPENNOTE_WEB_BUILD_HASH ?? null,
+        couchVersion,
+      },
+      200,
+    );
+  });
+
+  /* ---------------------------------------------------------------- tree */
+
+  /**
+   * `GET /v1/tree` —— 列树（**紧凑投影，不含正文**）。
+   *
+   * 模式 A 走 view `by_path`（`~30 B/篇`），模式 B 走 `_all_docs?include_docs=true`
+   * （`~200 B/篇`）。两者的差别只是「多传半兆」，**增量同步完全不受影响**（§1.4 表）。
+   */
+  routes.get("/tree", async (c) => {
+    const resolved = resolveNotebook(c, "read");
+    if (resolved instanceof Response) return resolved;
+    const { notebook } = resolved;
+    const cryptoMode = cryptoModeOf(notebook);
+    const limit = clampLimit(c.req.query("limit"), deps.config.maxFileBytes > 0 ? 500 : 500);
+    const startKey = c.req.query("startkey") ?? undefined;
+
+    try {
+      if (cryptoMode === "none") {
+        /*
+         * 模式 A：view 查询。key 是**明文 path**，所以列树本来就能给可读路径
+         * （§3.3 表：base64url 的「人类可读性差」由 view 的 key 补回来）。
+         *
+         * 这里仍然只按 `_all_docs` 取（不依赖用户有没有建索引），因为 view 需要
+         * `_design` 就位；如果 `_design` 被手工删了，走 view 会直接 500，
+         * 而 `_all_docs` 仍能工作 —— 那样控制台能看到「置备不一致」而不是「同步全挂」。
+         */
+        const page = await deps.couch.allDocs(notebook.db_name, { limit, ...(startKey === undefined ? {} : { startKey }), includeDocs: true });
+        const files = page.rows
+          .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
+          .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
+          .filter((entry) => entry.deleted !== true);
+        return json(parseContract(treeResponseSchema, { cursor: null, truncated: page.rows.length >= limit, files }, "GET /v1/tree"), 200);
+      }
+
+      // 模式 B：`_all_docs?include_docs=true`（加密路径 ⇒ view 的 key 用不上，§3.3）。
+      const page = await deps.couch.allDocs(notebook.db_name, { limit, ...(startKey === undefined ? {} : { startKey }), includeDocs: true });
+      const files = page.rows
+        .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
+        .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
+        .filter((entry) => entry.deleted !== true);
+      return json(parseContract(treeResponseSchema, { cursor: null, truncated: page.rows.length >= limit, files }, "GET /v1/tree"), 200);
+    } catch (error) {
+      return couchError(error);
+    }
+  });
+
+  /* ------------------------------------------------------------- changes */
+
+  /**
+   * `GET /v1/changes` —— 增量变更。
+   *
+   * ⚠️ **`_changes` 是「部分有序」的**：官方明确顺序不保证一致，并要求客户端**幂等**
+   * （§4.7 设计点 5）。所以这里只把 `_id` 映射成 `did`、`op` 由 `deleted` 决定，
+   * **不排序、不去重、不解释** —— 排序是客户端不该依赖的东西。
+   *
+   * `resync: true` 由 `since` 无法回溯时给出（游标过期，§6.4 规则 2）。
+   */
+  routes.get("/changes", async (c) => {
+    const resolved = resolveNotebook(c, "read");
+    if (resolved instanceof Response) return resolved;
+    const { notebook } = resolved;
+    const since = c.req.query("since") ?? null;
+
+    try {
+      const page = await deps.couch.changes(notebook.db_name, { since, limit: 500 });
+      const changes = page.results
+        // `_design` / `_local` / `syncinfo` 不参与同步（它们不是笔记）。
+        .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
+        .map((row) => ({ did: row.id, op: row.deleted === true ? ("delete" as const) : ("update" as const) }));
+      return json(
+        parseContract(
+          changesResponseSchema,
+          { cursor: String(page.last_seq ?? ""), resync: false, changes },
+          "GET /v1/changes",
+        ),
+        200,
+      );
+    } catch (error) {
+      return couchError(error);
+    }
+  });
+
+  /* ---------------------------------------------------------------- file */
+
+  /**
+   * `GET /v1/file?nb=&did=` —— 取一条的**原始字节**。
+   *
+   * 走 `GET /{db}/{did}/blob`（附件），**永远不用 `_changes?attachments=true`**
+   * ——官方明确警告那个参数有 33% 传输开销（§3.5）。
+   */
+  routes.get("/file", async (c) => {
+    const resolved = resolveNotebook(c, "read");
+    if (resolved instanceof Response) return resolved;
+    const { notebook } = resolved;
+    const did = c.req.query("did");
+    if (!did) return json({ error: "缺少 did 参数", code: "bad-request" }, 400);
+
+    try {
+      const bytes = await deps.couch.getAttachment(notebook.db_name, did);
+      if (bytes === null) return json({ error: "这一条不存在", code: "not-found" }, 404);
+      const doc = await deps.couch.getDoc(notebook.db_name, did);
+      const headers: Record<string, string> = {
+        "content-type": "application/octet-stream",
+        // 内容标识放进头里，省掉客户端再拉一次元数据（`If-Match` 回传时要用）。
+        ...(doc && contentIdOf(doc) ? { "x-opennote-hash": contentIdOf(doc)! } : {}),
+        ...(doc?._rev ? { "x-opennote-rev": String(doc._rev) } : {}),
+      };
+      return new Response(bytes, { status: 200, headers });
+    } catch (error) {
+      return couchError(error);
+    }
+  });
+
+  /**
+   * `PUT /v1/file?nb=&did=` —— 写一条（CAS）。
+   *
+   * `If-Match` 语义（§4.7 设计点 3）：**缺省 = 允许新建；对不上 = 409 + 当前值**。
+   * 内部转成 CouchDB 的 `?rev=<baseRev>` —— 所以客户端仍然要持有并回传 `rev`
+   * （放在基线里），Node 只是把「内容标识」翻译成「rev」。
+   */
+  routes.put("/file", async (c) => {
+    const resolved = resolveNotebook(c, "write");
+    if (resolved instanceof Response) return resolved;
+    const { notebook } = resolved;
+    const did = c.req.query("did");
+    if (!did) return json({ error: "缺少 did 参数", code: "bad-request" }, 400);
+
+    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    if (bytes.byteLength > deps.config.maxFileBytes) {
+      return json({ error: `文件超过上限（${deps.config.maxFileBytes} 字节）`, code: "too-large" }, 413);
+    }
+    const ifMatch = c.req.header("if-match") ?? null;
+    const cryptoMode = cryptoModeOf(notebook);
+    // 模式 A 的明文路径由客户端给；模式 B **忽略**它（红线 3：服务端看不到明文路径）。
+    const pathFromQuery = cryptoMode === "none" ? (c.req.query("path") ?? null) : null;
+
+    try {
+      const existing = await deps.couch.getDoc(notebook.db_name, did);
+      const currentId = existing ? contentIdOf(existing) : null;
+
+      /*
+       * CAS：客户端给的 `If-Match` 是**内容标识**（明文 sha256 / E2EE 的 `ehash`），
+       * 而 CouchDB 要的是 `_rev`。翻译在这里发生，**判定不在我们这**：
+       * `If-Match` 与当前内容标识不一致 ⇒ 直接 409 + 当前值，连写都不试。
+       * 一致 ⇒ 用当前 `_rev` 去写（真正的 CAS 交给 CouchDB：万一在我们读完之后
+       * 又有人写，它会返回 409，我们再把它转成同一个形状）。
+       */
+      if (ifMatch !== null && currentId !== null && ifMatch !== currentId) {
+        return json({ error: "内容标识对不上（远端已变）", code: "conflict", current: { hash: currentId, rev: existing?._rev ?? null } }, 409);
+      }
+      if (ifMatch === null && existing) {
+        // 缺省 = 允许**新建**；但远端已有这一条 ⇒ 对不上。
+        return json({ error: "这一条已存在（缺省 If-Match 只允许新建）", code: "conflict", current: { hash: currentId, rev: existing._rev ?? null } }, 409);
+      }
+
+      const written = await deps.couch.putDoc(
+        notebook.db_name,
+        {
+          _id: did,
+          /*
+           * 模式 A：明文 `path` 由**客户端**通过查询参数给（§2.2「客户端不传明文路径」
+           * 说的是 E2EE；模式 A 本来就带 path，view 的 key 也要它）。
+           *
+           * ⚠️ **服务端不造路径**：客户端不给我们就不写 —— 我们没有任何办法
+           * 从 `did` 反推出一个可信的路径（那需要相信 base64 解码的结果，
+           * 而它来自网络）。模式 B 则**永远不写 `path`**（红线 3：服务端看不到明文路径）。
+           */
+          ...(cryptoMode === "none" && pathFromQuery ? { path: pathFromQuery } : {}),
+          // 内容标识：原文与密文两种模式都是客户端给的（我们只搬运）。
+          ...(cryptoMode === "none" ? { hash: ifMatch ?? undefined } : { ehash: ifMatch ?? undefined }),
+          size: bytes.byteLength,
+        },
+        { baseRev: existing?._rev ?? null },
+      );
+      if ("conflict" in written) {
+        return json({ error: "写入冲突（远端在我们读取之后又变了）", code: "conflict", current: written.current ? { hash: contentIdOf(written.current), rev: written.current._rev ?? null } : null }, 409);
+      }
+      // 正文以**附件**提交（base64 是 JSON 传输的固有开销；CouchDB 落盘存解码后的二进制）。
+      const attachment = await deps.couch.putAttachment(notebook.db_name, did, Buffer.from(bytes).toString("base64"), {
+        rev: written.rev,
+        contentType: "application/octet-stream",
+      });
+      if ("conflict" in attachment) {
+        return json({ error: "写附件冲突", code: "conflict", current: null }, 409);
+      }
+      return json({ rev: attachment.rev, hash: ifMatch ?? null }, existing ? 200 : 201);
+    } catch (error) {
+      return couchError(error);
+    }
+  });
+
+  /**
+   * `DELETE /v1/file?nb=&did=` —— **逻辑删除**（留墓碑）。
+   *
+   * 墓碑必须比 update 活得久：丢掉一个 delete 会让文件在另一端**复活**（§6.4 规则 3）。
+   */
+  routes.delete("/file", async (c) => {
+    const resolved = resolveNotebook(c, "write");
+    if (resolved instanceof Response) return resolved;
+    const { notebook } = resolved;
+    const did = c.req.query("did");
+    if (!did) return json({ error: "缺少 did 参数", code: "bad-request" }, 400);
+
+    try {
+      const existing = await deps.couch.getDoc(notebook.db_name, did);
+      if (!existing) return new Response(null, { status: 410 });
+      const ifMatch = c.req.header("if-match") ?? null;
+      const currentId = contentIdOf(existing);
+      if (ifMatch !== null && currentId !== null && ifMatch !== currentId) {
+        return json({ error: "内容标识对不上", code: "conflict", current: { hash: currentId, rev: existing._rev ?? null } }, 409);
+      }
+      const result = await deps.couch.putDoc(notebook.db_name, { _id: did, _deleted: true }, { baseRev: existing._rev ?? null });
+      if ("conflict" in result) return json({ error: "删除冲突", code: "conflict", current: null }, 409);
+      return new Response(null, { status: 204 });
+    } catch (error) {
+      return couchError(error);
+    }
+  });
+
+  /* ---------------------------------------------------------- checkpoint */
+
+  /**
+   * `PUT /v1/checkpoint` —— 把「我拉到哪了」写进 `_local/device-<deviceId>`。
+   *
+   * `_local` 文档**不参与复制、不出现在 `_changes` 里** —— 正好是检查点该有的性质（§3.7）。
+   * 它**不是**本地基线：本地账本记的是「我改没改」，两者职责不同。
+   */
+  routes.put("/checkpoint", async (c) => {
+    const resolved = resolveNotebook(c, "read");
+    if (resolved instanceof Response) return resolved;
+    const { notebook } = resolved;
+    const body = (await c.req.json().catch(() => null)) as { cursor?: unknown; deviceId?: unknown } | null;
+    const deviceId = typeof body?.deviceId === "string" ? body.deviceId : null;
+    const cursor = typeof body?.cursor === "string" ? body.cursor : null;
+    if (!deviceId || !/^[0-9a-f]{32}$/.test(deviceId)) return json({ error: "deviceId 形状不对", code: "bad-request" }, 400);
+
+    const id = `_local/device-${deviceId}`;
+    try {
+      const existing = await deps.couch.getDoc(notebook.db_name, id);
+      const written = await deps.couch.putDoc(notebook.db_name, { _id: id, cursor, deviceId, at: Date.now() }, { baseRev: existing?._rev ?? null });
+      if ("conflict" in written) {
+        // `_local` 上的冲突极罕见（同一个 deviceId 的两个客户端）；重读一次再写。
+        const again = await deps.couch.getDoc(notebook.db_name, id);
+        const retry = await deps.couch.putDoc(notebook.db_name, { _id: id, cursor, deviceId, at: Date.now() }, { baseRev: again?._rev ?? null });
+        if ("conflict" in retry) return json({ error: "检查点写入冲突", code: "conflict" }, 409);
+      }
+      return new Response(null, { status: 204 });
+    } catch (error) {
+      return couchError(error);
+    }
+  });
+
+  /* --------------------------------------------------------------- stats */
+
+  /**
+   * `POST /v1/stats` —— 客户端上报按天计数（§4.3 `client_stats`）。
+   *
+   * **服务端看不到冲突内容，只有计数** —— 与红线 2 一致：Node 不参与裁决，
+   * 而且 E2EE 下它也只有密文。
+   */
+  routes.post("/stats", async (c) => {
+    const resolved = resolveNotebook(c, "read");
+    if (resolved instanceof Response) return resolved;
+    const raw = await c.req.json().catch(() => null);
+    let input;
+    try {
+      input = parseContract(clientStatsRequestSchema, raw, "POST /v1/stats");
+    } catch {
+      return json({ error: "统计载荷形状不对", code: "bad-request" }, 400);
+    }
+    const { account } = resolved;
+    deps.notebooks.reportStats?.({
+      accountId: account.id,
+      notebookId: input.notebookId,
+      day: input.day,
+      conflicts: input.conflicts,
+      errors: input.errors,
+      pushes: input.pushes,
+      pulls: input.pulls,
+      deletes: input.deletes,
+    });
+    return new Response(null, { status: 204 });
+  });
+
+  return routes;
+}
+
+/** 把 `limit` 夹到合理区间（默认 500，最大 2000）。 */
+function clampLimit(raw: string | undefined, fallback: number): number {
+  const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, 2000);
+}
+
+/** 设计文档 id 重导出（诊断用；避免路由层直接 import `couch/design`）。 */
+export { DESIGN_DOC_ID };
