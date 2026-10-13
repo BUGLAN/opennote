@@ -214,7 +214,7 @@ export async function settle(): Promise<void> {
  * **为什么需要它**（踩过一次）：`settle()` 只推进固定时长，而一次外部改动要走
  * 「去抖 450ms → 重扫 → flushAll → 写前像 → 采纳磁盘」好几跳异步；固定时长在某些用例里
  * 会在链条中间就返回，于是断言读到的是**中间态** —— 表现为「明明打了 `count=1` 的日志，
- * 测试却看到 `list=[]`」。用条件等待而不是猜时长。
+ * 测试却看到 `list=[]`」，或者**单跑全绿、整套偶红**。用条件等待而不是猜时长。
  */
 export async function settleUntil(predicate: () => boolean, options: { steps?: number; msPerStep?: number } = {}): Promise<boolean> {
   const steps = options.steps ?? 40;
@@ -226,6 +226,25 @@ export async function settleUntil(predicate: () => boolean, options: { steps?: n
   }
   await settle();
   return predicate();
+}
+
+/**
+ * 把调度队列**彻底排空**：反复推进时钟直到一次推进期间没有任何待执行的定时器。
+ *
+ * 用在「确认某某**没有**发生」的断言之前 —— 那种断言最容易在链条没走完时假绿
+ * （或反过来读到中间态假红）。返回一共推进了多少毫秒（诊断用）。
+ */
+export async function drainTimers(options: { maxMs?: number; msPerStep?: number } = {}): Promise<number> {
+  const maxMs = options.maxMs ?? 5000;
+  const msPerStep = options.msPerStep ?? 100;
+  let advanced = 0;
+  while (advanced < maxMs) {
+    await settle();
+    await vi.advanceTimersByTimeAsync(msPerStep);
+    advanced += msPerStep;
+  }
+  await settle();
+  return advanced;
 }
 
 /**

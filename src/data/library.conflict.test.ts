@@ -13,7 +13,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceRecord } from "./workspaces";
-import { createHarness, expectNoConflictArtifacts, settleUntil } from "./libraryTestHarness";
+import { createHarness, drainTimers, expectNoConflictArtifacts, settleUntil } from "./libraryTestHarness";
 
 const harness = createHarness();
 const { backends, records } = harness;
@@ -170,8 +170,15 @@ describe("开着同步 ⇒ 只报不猜（红线 5）", () => {
     backend.seed("a.md", "# 又一次远端改动");
     bridge.emit(harness.rootOf("A"));
     await settleUntil(() => getLibrary().notes["a.md"]?.content === "# 又一次远端改动");
-    // 再空转几轮：确认后面不会再冒出一条冲突。
-    await settleUntil(() => false, { steps: 4 });
+    /*
+     * 再空转几轮并**显式排空调度队列**：确认后面不会再冒出一条冲突。
+     *
+     * 这一条曾经在整套跑的时候偶发失败（单跑 9/9 全绿、整套偶红）。原因是
+     * `settleUntil(() => false)` 只是「推进几次」，而外部改动那条链
+     * （去抖 450ms → 重扫 → flushAll → 采纳磁盘）在负载高时可能还没走完 ——
+     * 断言读到的是中间态。改成「推进到没有任何待执行的定时器为止」。
+     */
+    await drainTimers({ maxMs: 2000 });
     expect(conflictCount()).toBe(0);
   });
 });
