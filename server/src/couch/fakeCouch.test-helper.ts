@@ -19,6 +19,13 @@ export class FakeCouch {
   readonly databases = new Map<string, Map<string, FakeDoc>>();
   readonly calls: string[] = [];
   readonly security = new Map<string, unknown>();
+  /**
+   * 附件（`PUT /{db}/{id}/blob`）。键是 `db/id/name`，值是**解码后**的字节。
+   *
+   * 第一版没有它，于是任何「真的写一条笔记」的用例都会在 `putAttachment` 上 502 ——
+   * 而那个 502 看起来像产品坏了，其实是夹具缺了一块。**写路径的用例必须先有它**。
+   */
+  readonly attachments = new Map<string, Uint8Array>();
   readonly revsLimits = new Map<string, number>();
   /** 设成真时下一次请求抛网络错误（测回滚）。 */
   failNext: string | null = null;
@@ -35,6 +42,16 @@ export class FakeCouch {
     const method = init?.method ?? "GET";
     const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     const body = typeof init?.body === "string" ? init.body : undefined;
+    /*
+     * 二进制 body（附件正文）。`fetch` 的 body 可以是 `Uint8Array`，而附件就是这么发的
+     * —— 第一版只认字符串 body，于是「写一条真笔记」在假 CouchDB 上会静默存成空。
+     */
+    const bodyBytes =
+      init?.body instanceof Uint8Array
+        ? init.body
+        : init?.body instanceof ArrayBuffer
+          ? new Uint8Array(init.body)
+          : undefined;
     const marker = `${method} ${url.pathname}`;
     this.calls.push(marker);
 
@@ -111,6 +128,44 @@ export class FakeCouch {
         };
       });
       return json(200, { total_rows: docs.size, offset: 0, rows });
+    }
+
+    /*
+     * 附件：`/{db}/{id}/{name}`（三段以上）。CouchDB 用它存二进制正文（§3.5）。
+     *
+     * ⚠️ 必须在「文档」分支**之前**判断 —— 否则 `PUT /nb-x/f:abc/blob` 会被当成
+     * 一个 id 叫 `f:abc/blob` 的文档。真实 CouchDB 也是这个优先级（路径段最多的是附件）。
+     */
+    /*
+     * ⚠️ **`_design/` 与 `_local/` 的 doc id 里带斜杠**，所以路由不能只看段数。
+     *
+     * 真实 CouchDB 的规则是：这两个前缀下的 id 是 `_design/<name>` / `_local/<name>`，
+     * 之后的段才是附件名。第一版我只按「段数 ≥ 2 就是附件」判断，
+     * 于是 `PUT /nb-x/_local/device-abc` 被当成了「文档 `_local` 的附件 `device-abc`」
+     * —— 检查点写到 404 上去了（用例立刻红）。
+     */
+    const firstIsReserved = rest[0] === "_design" || rest[0] === "_local";
+    const attachmentAt = firstIsReserved ? 2 : 1;
+    if (rest.length > attachmentAt) {
+      const name = rest.slice(attachmentAt).join("/");
+      const docId = rest.slice(0, attachmentAt).join("/");
+      const key = `${dbName}/${docId}/${name}`;
+      if (method === "PUT") {
+        const doc = docs.get(docId);
+        if (!doc) return json(404, { error: "not_found", reason: "missing doc for attachment" });
+        const revParam = url.searchParams.get("rev");
+        if (revParam !== null && revParam !== doc._rev) return json(409, { error: "conflict" });
+        // ★ 正文是**原始字节**（不是 base64）—— 见 `CouchClient.putAttachment` 的说明。
+        this.attachments.set(key, bodyBytes ?? new Uint8Array());
+        const written = { ...doc, _rev: this.rev() };
+        docs.set(docId, written);
+        return json(201, { ok: true, rev: written._rev });
+      }
+      if (method === "GET") {
+        const bytes = this.attachments.get(key);
+        if (!bytes) return json(404, { error: "not_found" });
+        return new Response(bytes, { status: 200, headers: { "content-type": "application/octet-stream" } });
+      }
     }
 
     // 文档（`_design/opennote` 会被拆成两段，这里拼回去）。

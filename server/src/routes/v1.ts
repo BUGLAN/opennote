@@ -29,6 +29,7 @@
  * 注意它与本地基线**职责不同**：这里记的是「我拉到哪了」，本地账本记的是「我改没改」。
  */
 
+import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import {
   changesResponseSchema,
@@ -92,6 +93,22 @@ function contentIdOf(doc: CouchDocument): string | null {
   if (typeof doc.hash === "string") return doc.hash;
   if (typeof doc.ehash === "string") return doc.ehash;
   return null;
+}
+
+/**
+ * 把文档投影成树条目，**不合格的返回 `null`**（而不是让整个响应炸掉）。
+ *
+ * 为什么必须「跳过坏的」而不是「抛出去」：契约（`treeEntrySchema`）要求每条都有
+ * `hash` 或 `ehash`。如果文档里有一条没有（历史遗留、别的客户端写坏的、或者
+ * 我们自己某个 bug 留下的），整份响应就过不了 schema —— 结果是**整个笔记本列不了树**，
+ * 于是它彻底同步不了。**一个有问题的文档不该让整个笔记本瘫痪。**
+ *
+ * 这条是真机跑出来的：我在用例里塞了一条「既无 hash 也无 ehash」的文档，
+ * `/v1/tree` 直接 500。修法是把判定**前移**到这里逐条做，坏的丢掉并记日志。
+ */
+function validTreeEntry(entry: { did: string; hash?: string; ehash?: string }): boolean {
+  const id = entry.hash ?? entry.ehash;
+  return typeof id === "string" && /^[0-9a-f]{64}$/.test(id);
 }
 
 export function createV1Routes(deps: V1RoutesDeps): Hono {
@@ -220,7 +237,8 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         const files = page.rows
           .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
           .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
-          .filter((entry) => entry.deleted !== true);
+          .filter((entry) => entry.deleted !== true)
+          .filter((entry) => validTreeEntry(entry));
         return json(parseContract(treeResponseSchema, { cursor: null, truncated: page.rows.length >= limit, files }, "GET /v1/tree"), 200);
       }
 
@@ -229,7 +247,8 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       const files = page.rows
         .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
         .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
-        .filter((entry) => entry.deleted !== true);
+        .filter((entry) => entry.deleted !== true)
+        .filter((entry) => validTreeEntry(entry));
       return json(parseContract(treeResponseSchema, { cursor: null, truncated: page.rows.length >= limit, files }, "GET /v1/tree"), 200);
     } catch (error) {
       return couchError(error);
@@ -326,6 +345,29 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     // 模式 A 的明文路径由客户端给；模式 B **忽略**它（红线 3：服务端看不到明文路径）。
     const pathFromQuery = cryptoMode === "none" ? (c.req.query("path") ?? null) : null;
 
+    /*
+     * ★ **这一版的内容标识由客户端给**（`X-Opennote-Hash`）。
+     *
+     * `If-Match` 是 **CAS**（「我以为远端现在是哪一版」），不是「我这次写的是什么」——
+     * 两者是**不同的东西**，第一版把它们混成了一个，于是一个必然的后果：
+     * **新建时 `If-Match` 缺省，服务端就没有任何地方能拿到 hash**，写进去的文档
+     * 根本没有内容标识 ⇒ `/v1/tree` 里这一条过不了契约（`treeEntrySchema` 要求
+     * hash 或 ehash），而且下一次 CAS 永远对不上（症状是「同步总是冲突」）。
+     *
+     * 这个 bug 之所以没被早发现：前面所有用例都只写了「空笔记本列树」，
+     * **从来没有真的往库里写过一条笔记**。补上之后就有了。
+     *
+     * 模式 A 下允许省略：明文正文就在我们手里，`sha256(body)` 与客户端算的**必然相同**。
+     * 模式 B 下**必须**给 —— 服务端算不出 `ehash`（那是 `HMAC(nk.mac, …)`，红线 3）。
+     */
+    const declaredHash = c.req.header("x-opennote-hash") ?? null;
+    const newHash =
+      declaredHash ??
+      (cryptoMode === "none" ? await sha256Hex(bytes) : null);
+    if (newHash === null) {
+      return json({ error: "E2EE 模式必须带 X-Opennote-Hash 头（服务端算不出 ehash，红线 3）", code: "bad-request" }, 400);
+    }
+
     try {
       const existing = await deps.couch.getDoc(notebook.db_name, did);
       const currentId = existing ? contentIdOf(existing) : null;
@@ -358,8 +400,8 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
            * 而它来自网络）。模式 B 则**永远不写 `path`**（红线 3：服务端看不到明文路径）。
            */
           ...(cryptoMode === "none" && pathFromQuery ? { path: pathFromQuery } : {}),
-          // 内容标识：原文与密文两种模式都是客户端给的（我们只搬运）。
-          ...(cryptoMode === "none" ? { hash: ifMatch ?? undefined } : { ehash: ifMatch ?? undefined }),
+          // ★ **这一版**的内容标识（不是 `If-Match` 那个「我以为远端是哪一版」）。
+          ...(cryptoMode === "none" ? { hash: newHash } : { ehash: newHash }),
           size: bytes.byteLength,
         },
         { baseRev: existing?._rev ?? null },
@@ -367,15 +409,23 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       if ("conflict" in written) {
         return json({ error: "写入冲突（远端在我们读取之后又变了）", code: "conflict", current: written.current ? { hash: contentIdOf(written.current), rev: written.current._rev ?? null } : null }, 409);
       }
-      // 正文以**附件**提交（base64 是 JSON 传输的固有开销；CouchDB 落盘存解码后的二进制）。
-      const attachment = await deps.couch.putAttachment(notebook.db_name, did, Buffer.from(bytes).toString("base64"), {
+      /*
+       * 正文以**附件**提交，而且传的是**原始字节**（不是 base64）。
+       * 第一版传 base64，CouchDB 把它当字面内容存了下来 —— 读回来是乱码。
+       * 见 `CouchClient.putAttachment` 的说明。
+       */
+      const attachment = await deps.couch.putAttachment(notebook.db_name, did, bytes, {
         rev: written.rev,
         contentType: "application/octet-stream",
       });
       if ("conflict" in attachment) {
         return json({ error: "写附件冲突", code: "conflict", current: null }, 409);
       }
-      return json({ rev: attachment.rev, hash: ifMatch ?? null }, existing ? 200 : 201);
+      // 响应里回**这一版**的标识与 rev（客户端据此更新基线，§4.7: `-> 200/201 { hash?, ehash?, rev }`）。
+      return json(
+        { rev: attachment.rev, ...(cryptoMode === "none" ? { hash: newHash } : { ehash: newHash }) },
+        existing ? 200 : 201,
+      );
     } catch (error) {
       return couchError(error);
     }
@@ -475,6 +525,11 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
   });
 
   return routes;
+}
+
+/** `sha256` 小写十六进制（模式 A 的兜底：明文正文在我们手里，与客户端算的必然一致）。 */
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 /** 把 `limit` 夹到合理区间（默认 500，最大 2000）。 */

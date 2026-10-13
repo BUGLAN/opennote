@@ -13,8 +13,11 @@ import { CouchClient, CouchError } from "./client";
 interface Call {
   url: string;
   method: string;
-  body: string | undefined;
+  /** 请求体：JSON 是字符串，附件是原始字节。 */
+  body: string | Uint8Array | undefined;
   authorization: string | undefined;
+  /** 请求的 `Content-Type`（附件路径靠它区分「传字节」与「传 base64」）。 */
+  contentType: string | undefined;
 }
 
 /** 一个可编程的假 fetch：按队列返回响应，并记录每次调用。 */
@@ -30,8 +33,14 @@ function stubFetch(responses: { status?: number; body?: unknown; raw?: Uint8Arra
     calls.push({
       url,
       method: init?.method ?? "GET",
-      body: typeof init?.body === "string" ? init.body : undefined,
+      body:
+        typeof init?.body === "string"
+          ? init.body
+          : init?.body instanceof Uint8Array
+            ? init.body
+            : undefined,
       authorization: headers.get("authorization") ?? undefined,
+      contentType: headers.get("content-type") ?? undefined,
     });
     const next = responses[Math.min(index, responses.length - 1)] ?? { status: 200, body: {} };
     index += 1;
@@ -211,13 +220,30 @@ describe("附件：读回**原始字节**（§3.5：正文不走 JSON base64）"
     expect(await couch.getAttachment("nb-x", "f:abc")).toBeNull();
   });
 
-  it("写附件以 base64 提交并带 rev 与 content_type", async () => {
+  it("★ 写附件以**原始字节**提交（不是 base64）并带 rev", async () => {
+    /*
+     * 这条用例第一版断言的是「body 是 base64 字符串」。而那个调用方式在真 CouchDB 上
+     * 会把 base64 文本**当成内容存下来**（附件 length 是 base64 的长度、类型是
+     * `application/json`）—— 于是每一条笔记读回来都是乱码。
+     *
+     * 现在传原始字节：`fetch` 支持 `Uint8Array` body，Node↔CouchDB 这一段
+     * 连 33% 的 base64 膨胀都没有了，也顺带删掉了「编/解码 base64」这个 bug 面。
+     */
     const { couch, calls } = client([{ status: 201, body: { rev: "2-b" } }]);
-    const result = await couch.putAttachment("nb-x", "f:abc", "aGVsbG8=", { rev: "1-a", contentType: "text/markdown" });
+    const bytes = new TextEncoder().encode("# 你好");
+    const result = await couch.putAttachment("nb-x", "f:abc", bytes, { rev: "1-a" });
     expect(result).toEqual({ ok: true, rev: "2-b" });
-    expect(calls[0]!.body).toBe("aGVsbG8=");
+    expect(calls[0]!.body).toEqual(bytes);
     expect(calls[0]!.url).toContain("rev=1-a");
-    expect(calls[0]!.url).toContain("content_type=text%2Fmarkdown");
+    // 默认类型是二进制（不是 JSON —— 那正是第一版被误存的根因）。
+    expect(calls[0]!.contentType).toBe("application/octet-stream");
+  });
+
+  it("`content_type` 不再作为查询参数（那是 base64 上传路径的用法）", async () => {
+    const { couch, calls } = client([{ status: 201, body: { rev: "2-b" } }]);
+    await couch.putAttachment("nb-x", "f:abc", new Uint8Array([1, 2, 3]), { rev: "1-a", contentType: "text/markdown" });
+    expect(calls[0]!.url).not.toContain("content_type=");
+    expect(calls[0]!.contentType).toBe("text/markdown");
   });
 });
 

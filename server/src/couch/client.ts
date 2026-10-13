@@ -334,19 +334,45 @@ export class CouchClient {
    * 写附件（**以 base64 提交** —— 这是 JSON 传输的固有开销，无法避免，§3.5）。
    * CouchDB 会**落盘存解码后的二进制**，所以存储不膨胀。
    */
+  /**
+   * 写附件（正文以**原始二进制**提交）。
+   *
+   * ## ⚠️ 这里曾经有一个「存进去的是 base64 文本」的 bug
+   *
+   * 第一版的签名是 `putAttachment(db, id, base64: string, …)`，实现是
+   * `request("PUT", …, { body: base64, contentType: "application/json" })`。
+   * 看起来像是「CouchDB 的 base64 附件上传」——**但它不是**。
+   *
+   * CouchDB 的 base64 上传要求 body 是一个 **JSON 字符串**（带引号的 `"<base64>"`）。
+   * 传裸 base64 时，CouchDB 会把它当成**字面内容**存下来，并用请求的
+   * `Content-Type` 作为附件的类型。真机上的证据：
+   *
+   *     "_attachments": { "blob": { "content_type": "application/json",
+   *                                 "length": 28, "stub": true } }
+   *
+   * 明文是 20 字节，存进去 28 字节 —— 正是那串 base64 的长度。
+   * 后果是**每一条笔记读回来都是 base64 文本**（客户端会写出一堆乱码），
+   * 而单测发现不了：假 CouchDB 忠实复现了我的错误调用方式。
+   *
+   * ## 修法：直接传原始字节，连 base64 都不需要
+   *
+   * `fetch` 的 body 本来就支持 `Uint8Array`，所以 Node↔CouchDB 这一段
+   * **完全没有 33% 膨胀**（§3.5 说「base64 是 JSON 传输的固有开销」——
+   * 那是针对**客户端↔Node**那一跳的；内网这一跳可以传二进制）。
+   * 顺带把「编/解码 base64」这个 bug 面整个删掉了。
+   */
   async putAttachment(
     db: string,
     id: string,
-    base64: string,
+    bytes: Uint8Array,
     options: { rev: string; contentType?: string; name?: string },
   ): Promise<{ ok: true; rev: string } | { conflict: true }> {
     const query = new URLSearchParams({ rev: options.rev });
-    if (options.contentType) query.set("content_type", options.contentType);
     try {
       const body = await this.request<{ rev: string }>(
         "PUT",
         `/${encodeURIComponent(db)}/${encodeDocId(id)}/${encodeURIComponent(options.name ?? "blob")}?${query}`,
-        { body: base64, contentType: "application/json" },
+        { body: bytes, contentType: options.contentType ?? "application/octet-stream" },
       );
       return { ok: true, rev: body.rev };
     } catch (error) {
@@ -360,7 +386,7 @@ export class CouchClient {
   private async request<T>(
     method: string,
     path: string,
-    options: { body?: string; idempotent?: boolean; contentType?: string; timeoutMs?: number },
+    options: { body?: string | Uint8Array; idempotent?: boolean; contentType?: string; timeoutMs?: number },
   ): Promise<T> {
     const response = await this.rawRequest(method, path, options);
     if (!response.ok) throw await this.toError(response);
@@ -378,7 +404,7 @@ export class CouchClient {
   private async rawRequest(
     method: string,
     path: string,
-    options: { body?: string; idempotent?: boolean; contentType?: string; timeoutMs?: number },
+    options: { body?: string | Uint8Array; idempotent?: boolean; contentType?: string; timeoutMs?: number },
   ): Promise<Response> {
     const timeoutMs = options.timeoutMs ?? (options.body === undefined ? this.readTimeoutMs : this.writeTimeoutMs);
     // 只重试**幂等**请求（见模块头 ②）。写请求一次都不重试。

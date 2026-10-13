@@ -387,6 +387,184 @@ describe("§4.7 设计点 3 · `If-Match` 语义", () => {
   });
 });
 
+describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有一个真 bug）", () => {
+  /*
+   * 这一组是补上的。在它之前，**所有**用例都只做过「写元数据 / 列空树」，
+   * 从来没有真的往库里写过一条笔记 —— 于是这个 bug 一直没有被发现：
+   *
+   *   `PUT /v1/file` 把 `If-Match` 当成了「我这次写的是什么」，
+   *   而 `If-Match` 的语义是「我以为远端现在是哪一版」。新建时 `If-Match` 缺省，
+   *   于是**没有任何地方能拿到这一版的 hash**，写进去的文档根本没有内容标识。
+   *
+   * 必然的后果有两个，都很隐蔽：
+   *   1. `/v1/tree` 里那一条过不了契约（`treeEntrySchema` 要求 hash 或 ehash）
+   *      → 整个列树 500，而症状看起来像「服务端坏了」；
+   *   2. 下一次 CAS 永远对不上 → 症状是「同步永远在冲突」。
+   *
+   * 修法：新增 `X-Opennote-Hash` 头带**这一版**的标识；`If-Match` 回归纯 CAS 语义。
+   */
+  const HASH = "a".repeat(64);
+
+  it("★ 新建时必须带 `X-Opennote-Hash`，并且它真的落进了文档（列树能读到）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+
+    const created = await call(world, `/v1/file?nb=${notebook.id}&did=f:aaa&path=notes/a.md`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "x-opennote-hash": HASH },
+      body: "# 第一条笔记",
+    });
+    expect(created.status).toBe(201);
+    // 响应里回**这一版**的标识与 rev（客户端据此更新基线）。
+    const body = (await created.json()) as { hash?: string; rev?: string };
+    expect(body.hash).toBe(HASH);
+    expect(body.rev).toBeTruthy();
+
+    // ★ 关键：列树能读到它，且**过契约**（`treeResponseSchema` 在这里会校验）。
+    const tree = await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) });
+    expect(tree.status).toBe(200);
+    const listed = (await tree.json()) as { files: { did: string; hash?: string; path?: string }[] };
+    expect(listed.files).toHaveLength(1);
+    expect(listed.files[0]!.did).toBe("f:aaa");
+    expect(listed.files[0]!.hash).toBe(HASH);
+    expect(listed.files[0]!.path).toBe("notes/a.md");
+  });
+
+  it("模式 A 允许省略那个头（明文正文在我们手里 ⇒ 服务端算 `sha256` 兜底，值必然一致）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const created = await call(world, `/v1/file?nb=${notebook.id}&did=f:bbb&path=b.md`, {
+      method: "PUT",
+      headers: auth(alice.token),
+      body: "abc",
+    });
+    const body = (await created.json()) as { hash?: string };
+    // `sha256("abc")` 是固定值 —— 这就是「服务端算的与客户端算的一致」的具体形式。
+    expect(body.hash).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  });
+
+  it("★ 模式 B（E2EE）**必须**带那个头 —— 服务端算不出 `ehash`（红线 3）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id, "加密", "user-key");
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=h:${"a".repeat(32)}`, {
+      method: "PUT",
+      headers: auth(alice.token),
+      body: "ciphertext",
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("X-Opennote-Hash");
+    // 而且**没有**写进去（否则会留下一条没有标识的坏文档）。
+    expect(world.fake.databases.get(notebook.dbName)!.size).toBe(0);
+  });
+
+  it("改一条：`If-Match` = 我以为的当前值；对得上就 200，且新标识被写进去", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const HASH2 = "b".repeat(64);
+
+    await call(world, `/v1/file?nb=${notebook.id}&did=f:ccc&path=c.md`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "x-opennote-hash": HASH },
+      body: "v1",
+    });
+    const updated = await call(world, `/v1/file?nb=${notebook.id}&did=f:ccc&path=c.md`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "if-match": HASH, "x-opennote-hash": HASH2 },
+      body: "v2",
+    });
+    expect(updated.status).toBe(200);
+    expect(((await updated.json()) as { hash: string }).hash).toBe(HASH2);
+
+    // 列树读到的是**新**标识。
+    const listed = (await (await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) })).json()) as {
+      files: { hash?: string }[];
+    };
+    expect(listed.files[0]!.hash).toBe(HASH2);
+  });
+
+  it("改一条但 `If-Match` 对不上 → 409 + **当前值**（客户端要做三方 diff）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    await call(world, `/v1/file?nb=${notebook.id}&did=f:ddd&path=d.md`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "x-opennote-hash": HASH },
+      body: "v1",
+    });
+    const conflict = await call(world, `/v1/file?nb=${notebook.id}&did=f:ddd&path=d.md`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "if-match": "c".repeat(64), "x-opennote-hash": "d".repeat(64) },
+      body: "v2",
+    });
+    expect(conflict.status).toBe(409);
+    const body = (await conflict.json()) as { current: { hash: string } };
+    expect(body.current.hash).toBe(HASH);
+  });
+
+  it("★ 读回来：字节与写进去的**逐字节相同**，且响应头带 hash/rev", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const payload = new TextEncoder().encode("# 中文 📓 与 CRLF 行尾" + String.fromCharCode(13) + String.fromCharCode(10) + "第二行");
+    await call(world, `/v1/file?nb=${notebook.id}&did=f:eee&path=e.md`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "x-opennote-hash": HASH },
+      body: payload,
+    });
+
+    // 假 CouchDB 的附件读取：为它补一个最小实现（真实 CouchDB 走 `/{db}/{id}/blob`）。
+    const original = world.fake.fetchImpl;
+    world.fake.fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname.endsWith("/blob") && (init?.method ?? "GET") === "GET") {
+        return new Response(payload, { status: 200 });
+      }
+      return original(input, init);
+    }) as unknown as typeof fetch;
+
+    const client = couchClient(world.fake);
+    const app = new Hono();
+    app.route(
+      "/v1",
+      createV1Routes({
+        accounts: world.accounts,
+        notebooks: world.notebooks,
+        config: world.config,
+        couch: client,
+        couchAdmin: client,
+      }),
+    );
+    const response = await app.request(`http://localhost/v1/file?nb=${notebook.id}&did=f:eee`, { headers: auth(alice.token) });
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(payload);
+    expect(response.headers.get("x-opennote-hash")).toBe(HASH);
+    expect(response.headers.get("x-opennote-rev")).toBeTruthy();
+  });
+
+  it("列树里的每一条都能过契约（`treeEntrySchema` 要求 hash 或 ehash）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    // 塞几条形状不同的：明文、密文、以及一条坏的（既无 hash 也无 ehash）。
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    docs.set("f:ok1", { _id: "f:ok1", _rev: "1-a", path: "a.md", hash: HASH, size: 1 });
+    docs.set(`h:${"a".repeat(32)}`, { _id: `h:${"a".repeat(32)}`, _rev: "1-b", ehash: "e".repeat(64), esize: 2 });
+    docs.set("f:bad", { _id: "f:bad", _rev: "1-c", path: "bad.md" });
+    docs.set("syncinfo", { _id: "syncinfo", _rev: "1-d", protocolVersion: 1 });
+
+    const response = await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) });
+    // 一条坏的**不该让整个列树 500** —— 那样一个损坏的文档就会让这个笔记本再也同步不了。
+    expect(response.status).toBe(200);
+    const listed = (await response.json()) as { files: { did: string }[] };
+    expect(listed.files.map((entry) => entry.did).sort()).toEqual(["f:ok1", `h:${"a".repeat(32)}`].sort());
+  });
+});
+
 describe("§6.4 规则 3 · 删除是**逻辑删除**（留墓碑）", () => {
   it("DELETE 之后文档变成墓碑（`_deleted: true`），不是消失", async () => {
     const world = makeWorld();
