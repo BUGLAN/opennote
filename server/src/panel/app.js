@@ -30,15 +30,25 @@
 const API = "/panel/api";
 
 /* ============================================================================
-   §1.5 的密钥派生：与服务端、客户端用同一套 HKDF 参数
+   §1.5 / §3.9 的密钥派生：必须与 `src/sync/accountKey.ts` **逐参数一致**
 
-   ⚠️ 这段必须与 `shared/` 里的定义**逐字一致**。参数不一致的后果是
-   「令牌对不上 → 401」，而症状看起来像「密钥输错了」——
-   所以这里把 info 字符串写成常量并注明来源。
+   ⚠️ 这段是「四端同一条代码路径」的**例外**：控制台是「无构建步骤」的静态页，
+   没法 import `@noble/hashes`，只能用 WebCrypto。HKDF-SHA256 的实现在两者之间是等价的，
+   但 **salt / info / 长度差一个字就是完全不同的密钥** ——
+   而症状会是「密钥输错了」，一个会把人引到错方向（去怀疑用户）的报错。
+
+   所以 `src/sync/accountKey.test.ts` 里有一条用例**把两种实现算出来的字节直接比对**。
+   改动这里之前先去看那条用例。
    ============================================================================ */
 
-const HKDF_INFO_AUTH = "opennote-auth-v1";
+/** HKDF `info`（§3.9：`"opennote/v1/…"`）。 */
+const HKDF_INFO_AUTH = "opennote/v1/auth";
+/** 导出文本的前缀。 */
 const KEY_PREFIX = "opennote-key-v1.";
+/** 二进制 blob 的版本号。 */
+const BLOB_VERSION = 1;
+const ACCOUNT_ID_BYTES = 16;
+const ACCOUNT_KEY_BYTES = 32;
 
 const encoder = new TextEncoder();
 
@@ -51,36 +61,64 @@ function fromBase64Url(text) {
   return bytes;
 }
 
+/** 小写十六进制 → Uint8Array（`accountId` 的传输编码是十六进制）。 */
+function fromHex(text) {
+  const out = new Uint8Array(text.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(text.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
 /** Uint8Array → 小写十六进制（服务端的 `authToken` 就是 hex 形状）。 */
 function toHex(bytes) {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /**
- * 从账号密钥派生 `authToken` = `HKDF-SHA256(accountKey, info="opennote-auth-v1")`。
+ * 解析用户粘进来的密钥文本 → `{ accountId, accountKey }`。
  *
- * `salt` 留空（与服务端一致的默认：HKDF 的 salt 为空时用全零）。
+ * 格式（与 `accountKey.ts` 的 `decodeAccountKey` 一致）：
+ *   `opennote-key-v1.` + base64url( version(1B) || accountId(16B) || accountKey(32B) )
+ *
+ * ★ **`accountId` 必须在这里解出来**：它是 `authToken` 的派生 salt（§3.9）。
+ *   少了它就算拿到 `accountKey` 也派不出令牌 —— 而它本来是公开值，放进去不泄露任何东西。
  */
-async function deriveAuthToken(accountKey) {
+function parseAccountKey(text) {
+  const trimmed = (text || "").trim();
+  if (!trimmed) throw new Error("密钥是空的");
+  const body = trimmed.startsWith(KEY_PREFIX) ? trimmed.slice(KEY_PREFIX.length) : trimmed;
+  let blob;
+  try {
+    blob = fromBase64Url(body);
+  } catch {
+    throw new Error("密钥不是合法的 base64url");
+  }
+  const expected = 1 + ACCOUNT_ID_BYTES + ACCOUNT_KEY_BYTES;
+  if (blob.length !== expected) {
+    throw new Error(`密钥长度不对：期待 ${expected} 字节，实际 ${blob.length} 字节`);
+  }
+  if (blob[0] !== BLOB_VERSION) {
+    throw new Error(`不认识的密钥版本：${blob[0]}（本版只认 ${BLOB_VERSION}）`);
+  }
+  return {
+    accountId: toHex(blob.slice(1, 1 + ACCOUNT_ID_BYTES)),
+    accountKey: blob.slice(1 + ACCOUNT_ID_BYTES),
+  };
+}
+
+/**
+ * `authToken = HKDF-SHA256(accountKey, salt = accountId 的**16 个字节**, info = "opennote/v1/auth")`。
+ *
+ * ⚠️ salt 是 `accountId` **十六进制解码后的字节**，不是那串十六进制文本的 ASCII ——
+ * 后者会算出一个完全不同的令牌（`accountKey.test.ts` 里有一条反证用例专门画这个坑）。
+ */
+async function deriveAuthToken(accountKey, accountId) {
   const base = await crypto.subtle.importKey("raw", accountKey, "HKDF", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits(
-    { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: encoder.encode(HKDF_INFO_AUTH) },
+    { name: "HKDF", hash: "SHA-256", salt: fromHex(accountId), info: encoder.encode(HKDF_INFO_AUTH) },
     base,
     256,
   );
   return toHex(new Uint8Array(bits));
-}
-
-/** 解析用户粘进来的密钥文本 → 32 字节 `accountKey`。 */
-function parseAccountKey(text) {
-  const trimmed = text.trim();
-  if (!trimmed) throw new Error("密钥是空的");
-  const body = trimmed.startsWith(KEY_PREFIX) ? trimmed.slice(KEY_PREFIX.length) : trimmed;
-  const bytes = fromBase64Url(body);
-  if (bytes.length !== 32) {
-    throw new Error(`密钥长度不对：期待 32 字节，实际 ${bytes.length} 字节`);
-  }
-  return bytes;
 }
 
 /* ============================================================================ */
@@ -181,8 +219,8 @@ async function enter() {
   const errorBox = $("#unlock-error");
   show(errorBox, false);
   try {
-    const key = parseAccountKey($("#key").value);
-    const authToken = await deriveAuthToken(key);
+    const material = parseAccountKey($("#key").value);
+    const authToken = await deriveAuthToken(material.accountKey, material.accountId);
     const me = await request("/session", { method: "POST", body: { authToken } });
     /*
      * ★ 密钥**只在这里留一份**（用于「导出密钥」重新显示）。

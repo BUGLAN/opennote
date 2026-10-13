@@ -425,11 +425,29 @@ describe("静态资源是白名单（不是通用静态服务器）", () => {
     expect(js).not.toMatch(/body:\s*\{[^}]*accountKey/);
   });
 
-  it("派生令牌用的 HKDF info 与服务端/客户端一致（不一致的症状是 401，看起来像密钥错）", () => {
+  it("★ 派生令牌的 HKDF 参数与 `accountKey.ts` 一致（salt=accountId 字节、info=opennote/v1/auth）", () => {
+    /*
+     * 控制台是「四端同一条代码路径」的**例外**（无构建步骤 ⇒ 只能用 WebCrypto）。
+     * 而 HKDF 的 salt / info 差一个字就是完全不同的密钥 —— 症状会是「密钥输错了」。
+     * 所以这里逐参数钉住，并且在 `src/sync/accountKey.test.ts` 里有一条用例
+     * **把 noble 与 WebCrypto 算出来的字节直接比对**。
+     */
     const js = loadPanelAsset("app.js")!.body;
-    expect(js).toContain('"opennote-auth-v1"');
+    expect(js).toContain('"opennote/v1/auth"');
     expect(js).toContain("HKDF");
     expect(js).toContain("SHA-256");
+    // salt 必须是 accountId 的**字节**，不是那串十六进制文本的 ASCII。
+    expect(js).toContain("salt: fromHex(accountId)");
+    // 也不许再出现旧的那套参数。
+    expect(js).not.toContain("opennote-auth-v1");
+    expect(js).not.toContain("salt: new Uint8Array(0)");
+  });
+
+  it("控制台解得出密钥 blob 里的 `accountId`（少了它派不出令牌）", () => {
+    const js = loadPanelAsset("app.js")!.body;
+    // blob 形状：version(1) + accountId(16) + accountKey(32) = 49 字节。
+    expect(js).toContain("1 + ACCOUNT_ID_BYTES + ACCOUNT_KEY_BYTES");
+    expect(js).toContain("accountId: toHex(");
   });
 });
 
