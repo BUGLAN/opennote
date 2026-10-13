@@ -74,17 +74,38 @@ export type Platform = z.infer<typeof platformSchema>;
  *
  * 模式 A = `f:` + base64url；模式 B = `h:` + hex（由客户端的 `idKey` 算出，服务端**验不出**）。
  * 服务端只校验前缀与字符集，**绝不尝试解密**（§3.8 防线 1、红线 3）。
+ *
+ * ## `m:` —— 每个笔记本一条的**元记录**
+ *
+ * `did↔path` 映射表（见 `src/sync/crypto.ts` 的 `encodePathMap`）必须能上云，
+ * 否则**全新设备一个文件都拉不下来**：模式 B 的 did 不可逆，而映射表按设计
+ * 只存在本地（`.opennote/sync.json`，§3.11 要求它绝不能跨端）。
+ *
+ * 所以它需要一个**自己的标识**。用 `f:` / `h:` 都不行：
+ *
+ * - `f:` 是「明文路径的 base64url」，映射表不是一条文件；
+ * - `h:` 是「某个真实路径的 HMAC」，而映射表要**记录**那些 HMAC ——
+ *   拿其中一个当自己的 id 会让它看起来像一条普通文件（然后被当成文件去拉）。
+ *
+ * `m:` 明确表达「这是一条**元**记录，不是文件内容」。目前只有一条：
+ * `m:pathmap`（每个笔记本一份，覆盖式更新）。
+ *
+ * ⚠️ **服务端仍然只看前缀与字符集**：它不知道 `m:pathmap` 里是什么
+ * （那是用 `encRoot` 派生的密钥加密的，服务端没有 `encRoot`）。
  */
-export const DID_PREFIXES = ["f:", "h:"] as const;
+export const DID_PREFIXES = ["f:", "h:", "m:"] as const;
+
+/** 路径映射表的固定 `did`（每个笔记本一份，覆盖式更新）。 */
+export const PATH_MAP_DID = "m:pathmap";
 
 export const didSchema = z
   .string()
   .min(3)
   .max(512)
   .refine((value) => DID_PREFIXES.some((prefix) => value.startsWith(prefix)), {
-    message: "did 必须以 f: 或 h: 开头",
+    message: "did 必须以 f: / h: / m: 开头",
   })
-  .refine((value) => /^[fh]:[A-Za-z0-9_-]+$/.test(value), { message: "did 的字符集不合法" });
+  .refine((value) => /^[fhm]:[A-Za-z0-9_-]+$/.test(value), { message: "did 的字符集不合法" });
 
 /** `accountId`：客户端生成的 32 位十六进制（16B 随机，公开）。 */
 export const accountIdSchema = z.string().regex(/^[0-9a-f]{32}$/, "accountId 必须是 32 位小写十六进制");

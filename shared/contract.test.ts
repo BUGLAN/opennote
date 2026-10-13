@@ -10,6 +10,8 @@ import { describe, expect, it } from "vitest";
 import {
   ContractError,
   DEFAULT_CRYPTO_MODE,
+  DID_PREFIXES,
+  PATH_MAP_DID,
   MIN_SUPPORTED_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   accountCreateRequestSchema,
@@ -211,5 +213,38 @@ describe("★ `DEFAULT_CRYPTO_MODE`（已拍板：现在 `none`，P4 翻 `user-k
     expect(cryptoModeSchema.options).toContain(DEFAULT_CRYPTO_MODE);
     // 可共享的那个值是 `none` —— 与默认值**语义不同**，即使现在取值恰好相同。
     expect(cryptoModeSchema.options).toContain("none");
+  });
+});
+
+/* ============================================================================
+   ★ `m:` 前缀：每个笔记本一条的元记录（路径映射表）
+   ============================================================================ */
+
+describe("★ `m:` 前缀（路径映射表用的元记录）", () => {
+  it("`PATH_MAP_DID` 是 `m:` 开头，且能过 `didSchema`", () => {
+    expect(PATH_MAP_DID).toBe("m:pathmap");
+    expect(didSchema.safeParse(PATH_MAP_DID).success).toBe(true);
+  });
+
+  it("★ 用 `f:` / `h:` 都不行 —— 这个前缀是**必要的**，不是随手加的", () => {
+    /*
+     * - `f:` 是「明文路径的 base64url」，映射表不是一条文件；
+     * - `h:` 是「某个真实路径的 HMAC」，而映射表要**记录**那些 HMAC ——
+     *   拿其中一个当自己的 id 会让它**看起来像一条普通文件**，然后被当成文件去拉。
+     *
+     * 所以 `m:` 明确表达「这是一条元记录，不是文件内容」。
+     */
+    expect(PATH_MAP_DID.startsWith("f:")).toBe(false);
+    expect(PATH_MAP_DID.startsWith("h:")).toBe(false);
+    expect(DID_PREFIXES).toContain("m:");
+  });
+
+  it("旧的 `f:` / `h:` 形状**完全没变**（这次是纯增量）", () => {
+    expect(didSchema.safeParse("f:bm90ZXMvcmVhbC5tZA").success).toBe(true);
+    expect(didSchema.safeParse(`h:${"a".repeat(64)}`).success).toBe(true);
+    // 别的前缀仍然拒。
+    for (const bad of ["x:abc", ":abc", "m", "f:", "m:"]) {
+      expect(didSchema.safeParse(bad).success, bad).toBe(false);
+    }
   });
 });
