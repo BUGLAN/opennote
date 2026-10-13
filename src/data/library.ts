@@ -10,6 +10,7 @@ import {
   isHiddenPath,
   isMarkdownPath,
   joinPath,
+  normalizePath,
   parentPath,
   sameBytes,
   sanitizeName,
@@ -42,7 +43,7 @@ import {
   sharedAssetFilesIn,
 } from "../lib/clip/landing";
 import { desktopBridge, type WorkspaceFileChange } from "../desktop/bridge";
-import { fileStates, type FileRecord, type FileStamp } from "./fileStates";
+import { beginWrite, fileStates, type FileRecord, type FileStamp } from "./fileStates";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
 import type { Folder, FolderChoice, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
 import { getUi, patchUi } from "./ui";
@@ -388,6 +389,8 @@ function patchNotes(updater: (notes: Record<Id, Note>) => Record<Id, Note>): voi
 function patchNoteContent(id: Id, content: string): void {
   const note = libraryStore.get().notes[id];
   if (!note || note.content === content) return;
+  // 内存正文变了一版 —— 同步层的「本地改没改」判据就靠这个序号（见 fileStates 模块头）。
+  fileStates.noteEdited(id);
   patchNotes((notes) => ({ ...notes, [id]: { ...note, content } }));
 }
 
@@ -932,6 +935,38 @@ function queuePathRefresh(target: FileSystemBackend, changes: WorkspaceFileChang
     });
 }
 
+/**
+ * **远端落盘之后显式驱动 UI 刷新**（P0；`docs/执行-三端同步…` §5.4 第 1、2 条）。
+ *
+ * 两条硬要求：
+ * 1. **不能等 watcher** —— 桌面端的主进程 watcher 会把「应用自己经 IPC 写过的路径」
+ *    在 1.5 秒窗口内过滤掉（`electron/main.cjs` 的 `SELF_WRITE_WINDOW_MS`），而远端拉取
+ *    落盘走的正是同一条 IPC。等它等于等一个不会来的事件。
+ * 2. **不能整库重扫** —— `rescanWorkspace()` 的成本是 O(库)，而一次同步往往只动几篇；
+ *    这里按路径重读，成本 ∝ 变化的文件数（与 `D7` 同一条纪律）。
+ *
+ * 传进来的路径**必须是工作区相对路径**（与 `WorkspaceFileChange.path` 同一方言）。
+ * 不存在的路径按「外部删除」处理，但只有**已知笔记**才会出树（不会误建/误删节点）。
+ * 超过 `PATH_REFRESH_LIMIT` 条时自动退回整库重扫（内部兜底，调用方不用管）。
+ */
+export function applyExternalPaths(paths: readonly string[], options: { type?: WorkspaceFileChange["type"] } = {}): Promise<void> {
+  const target = backend;
+  if (!target) return Promise.resolve();
+  const seen = new Set<string>();
+  const changes: WorkspaceFileChange[] = [];
+  for (const raw of paths) {
+    const path = normalizePath(raw);
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    changes.push({ path, type: options.type ?? "update" });
+  }
+  if (changes.length === 0) return Promise.resolve();
+  queuePathRefresh(target, changes);
+  // 返回的是「这一批处理完」的句柄：调用方 await 它即可知道 UI 已经刷新过一轮。
+  const tail = pathRefreshTail;
+  return tail;
+}
+
 async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileChange[]): Promise<void> {
   const myGen = generation;
   if (backend !== target) return;
@@ -1036,9 +1071,6 @@ export async function rescanWorkspace(): Promise<void> {
   const scanned = await scanWorkspace(target);
   if (myGen !== generation || target !== backend) return;
   meta = { ...scanned.meta, expanded: getUi().expanded, lastOpened: getUi().activeId ?? scanned.meta.lastOpened };
-  // 播种前先抓一份旧记录：下面 dirty 守卫的「真外部改动」判定要用它做内容溯源
-  //（播种自己按三态规则决定保留哪一份，见 fileStates.seedFromScan）。
-  const recordsBefore = new Map(fileStates.entries());
   fileStates.seedFromScan(scanned);
   invalidateSearchCache();
   const keptDirty: Id[] = [];
@@ -1054,10 +1086,34 @@ export async function rescanWorkspace(): Promise<void> {
     const local = libraryStore.get().notes[id];
     // Disk is at least as new as memory: nothing to protect.
     if (!local || local.content === disk.content) continue;
-    const seen = recordsBefore.get(id);
-    const stamp = scanned.stamps[id];
-    const isForeign =
-      !seen || (disk.content !== seen.content && (!stamp || stamp.mtimeMs > seen.stat.mtimeMs));
+    /*
+     * 【跨设备修复】判据从「磁盘 mtime 比我们记录的新」换成「写屏障之后我们没写过它」。
+     *
+     * 旧写法 `!seen || (disk.content !== seen.content && stamp.mtimeMs > seen.stat.mtimeMs)`
+     * 要求远端那一版**带更新的 mtime** 才认外部改动。跨设备时 mtime 不可比（另一台机器/
+     * 网盘/`git clone` 写来的内容可能更旧）→ 判成「本地 win」→ 保留旧 buffer →
+     * 下一次 `flushNote` 把远端新内容覆盖掉。
+     *
+     * 新规则：**没记录，或内容不同、且这一版不是我们屏障之后写下去的 → 就是外部改动。**
+     * 唯一要保住的原语义是「扫描读到旧字节」—— 那时**内存已经被我们敲过**，
+     * 也就是 `fileStates.bufferSeq(id) > seen.seq`。
+     */
+    const seen = fileStates.get(id);
+    /*
+     * 【跨设备修复】判据从「磁盘 mtime 比我们记录的新」换成「**内存后来被我们敲过吗**」。
+     *
+     * 旧写法 `!seen || (disk.content !== seen.content && stamp.mtimeMs > seen.stat.mtimeMs)`
+     * 要求远端那一版**带更新的 mtime** 才认外部改动。跨设备时 mtime 不可比（另一台机器、
+     * 网盘、`git clone` 写来的内容可能更旧）→ 判成「本地 win」→ 保留旧 buffer →
+     * 下一次 `flushNote` 把远端新内容覆盖掉（文档 §5.4 第 5 条）。
+     *
+     * 新规则（见 `fileStates` 模块头）：
+     *   `bufferSeq > seen.seq`  → buffer 是我们自己后来敲的 → 内存赢，保留；
+     *   否则（没记录 / 内存自那次对齐后没动过）→ 磁盘赢，采纳扫描结果。
+     * 于是「扫描的 list() 早于并发写入」与「真外部改动」被分开，且**不依赖时间戳**。
+     */
+    const localEditedSince = fileStates.bufferSeq(id) > (seen?.seq ?? 0);
+    const isForeign = !seen || !localEditedSince;
     if (isForeign) {
       superseded.push({ id, buffer: local.content });
       continue;
@@ -1181,6 +1237,9 @@ function adoptExternal(id: Id, content: string, stat: FileStamp): void {
     if (inTrash) setState((prev) => ({ ...prev, trash: { ...prev.trash, [id]: next } }));
     else patchNotes((notes) => ({ ...notes, [id]: next }));
   }
+  // 采纳磁盘版 = 内存被换了一版：先记账 buffer 新序号，再让 adoptFromDisk 把它对齐成
+  // 「磁盘事实 == 此刻内存」。顺序反了会让这条记录永远被判成「本地后来敲过」。
+  fileStates.noteEdited(id);
   fileStates.adoptFromDisk(id, content, stat);
   markClean(id);
   invalidateSearchCache(id);
@@ -1201,6 +1260,9 @@ async function reconcileExternalChange(
   const diskNorm = normalizeEol(disk.content);
   const bufferNorm = normalizeEol(bufferContent);
   if (diskNorm === bufferNorm) {
+    // 两边内容已经一样了（可能是行尾形态不同）：不写盘，但要**重新对齐**记录，
+    // 否则这条记录会一直停在旧序号上，下次重扫又把内存判成「本地后来敲过」。
+    fileStates.noteEdited(id);
     fileStates.adoptFromDisk(id, disk.content, disk.stat);
     markClean(id);
     invalidateSearchCache(id);
@@ -1256,10 +1318,16 @@ async function flushNote(id: Id): Promise<void> {
     // 过期的捕获直接丢弃——否则旧快照会在采纳之后又把磁盘盖回去（D08 用例实测）。
     const latestNow = libraryStore.get().notes[id] ?? libraryStore.get().trash[id];
     if (!latestNow || latestNow.content !== note.content) return;
+    // 必须在 writeText **之前**捕获「这次写的是哪个 buffer 版本」：写盘可能横跨用户的
+    // 好几次击键，写完之后再取会把「写完那一版」错记成「用户后来敲的」。
+    beginWrite(id);
     await target.writeText(id, note.content);
     const after = await target.stat(id).catch(() => null);
     if (after) fileStates.commitWrite(id, note.content, after);
-    else fileStates.delete(id);
+    else {
+      fileStates.takeWriteSeq(id);
+      fileStates.delete(id);
+    }
   });
   pendingWrites.set(id, write);
   try {
@@ -1805,6 +1873,8 @@ export function updateNoteContent(id: Id, content: string, options: { immediate?
   const inTrash = Boolean(state.trash[id]);
   const previous = state.notes[id] ?? state.trash[id];
   if (!previous || previous.content === normalizeEol(content)) return;
+  // 记录「内存这一版是第几次编辑」：跨设备同步的本地改动判据（取代 mtime 比较）。
+  fileStates.noteEdited(id);
   const next = refresh(previous, content);
   next.updatedAt = Date.now();
   if (inTrash) setState((prev) => ({ ...prev, trash: { ...prev.trash, [id]: next } }));

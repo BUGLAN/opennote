@@ -57,6 +57,68 @@ try {
 } catch (error) {
   console.warn('[opennote] @parcel/watcher 不可用，使用 node:fs 监听：', error && error.message)
 }
+
+// P0（2026-10-13）：同步范围的判定**只有一份实现**，在 `src/sync/ignore.ts`。
+// 主进程是 CommonJS，require 不了 .ts，所以那份实现由 `pnpm build:ignore` 机械编译到
+// `electron/ignore-rules.cjs`（构建产物，见 scripts/build-ignore-rules.mjs）。
+// 于是「扫描侧」与「watcher 侧」判定同源，不再各写一张过滤表（原先这条 onChange 只过滤
+// `.opennote/` 与自写，`.git/`、`node_modules/` 会一路打上来）。
+// 加载失败时**不静默放行**，而是退回一份只含内置集的兜底表——宁可过滤得保守。
+let ignoreRulesModule = null
+try {
+  ignoreRulesModule = require('./ignore-rules.cjs')
+} catch (error) {
+  console.warn('[opennote] 忽略规则模块不可用，退回内置过滤：', error && error.message)
+}
+
+/** 只含内置忽略集的兜底判定（模块加载失败时用；不读 .gitignore）。 */
+function fallbackShouldIgnore(rel) {
+  const parts = selfWriteKey(rel).split('/').filter(Boolean)
+  for (let index = 0; index < parts.length; index += 1) {
+    const segment = parts[index]
+    const isLast = index === parts.length - 1
+    if (!isLast && ['.git', 'node_modules', 'dist', 'release', '.opennote'].includes(segment)) return true
+    if (isLast) {
+      if (['.git', 'node_modules', 'dist', 'release', '.opennote', '.DS_Store', 'Thumbs.db'].includes(segment)) return true
+      if (segment.endsWith('.swp') || segment.endsWith('~') || segment.endsWith('.tmp')) return true
+    }
+  }
+  return false
+}
+
+/**
+ * 读工作区根目录的 `.gitignore`（**v1 只支持根目录那一份**，见同步执行文档 §3.11）。
+ *
+ * 读不到 / 读不动一律当「没有 .gitignore」——同步范围绝不因为一份坏文件被**静默改大**。
+ */
+function readWorkspaceGitignore(safeRoot) {
+  try {
+    const target = path.join(safeRoot, '.gitignore')
+    if (!existsSync(target)) return ''
+    return readFileSync(target, 'utf8')
+  } catch (error) {
+    console.warn('[opennote] 读不到工作区的 .gitignore，按「没有」处理', error && error.message)
+    return ''
+  }
+}
+
+/**
+ * 造一份 watcher 用的忽略判定。**规则不含自写过滤**（那条是另一件事：`isSelfWrite`）。
+ *
+ * `.gitignore` 在**开始监听时读一次**：改 `.gitignore` 后重开笔记本生效。
+ * 这条限制写在这里，是因为「watcher 的规则集」必须在订阅期间保持稳定
+ * （@parcel/watcher 的 glob 是订阅期固定的，中途换规则要重新订阅）。
+ */
+function createIgnoreFilter(safeRoot) {
+  if (!ignoreRulesModule) return fallbackShouldIgnore
+  try {
+    const rules = ignoreRulesModule.createIgnoreRules(readWorkspaceGitignore(safeRoot))
+    return (rel) => rules.shouldIgnore(rel)
+  } catch (error) {
+    console.warn('[opennote] 构造忽略规则失败，退回内置过滤', error && error.message)
+    return fallbackShouldIgnore
+  }
+}
 /**
  * D38 只对 file:// 响应注入的 CSP。dev server（http://127.0.0.1:5173）绝不注入，
  * 否则 script-src 'self' 会挡掉 Vite 的 HMR 脚本。桌面构建的 dist/index.html 不含
@@ -770,6 +832,10 @@ function closeWorkspaceWatcher(identity) {
  * 自写过滤 / 聚合 / 广播完全共用 P1c-1 的管道。
  */
 async function startWorkspaceWatcher(safeRoot, identity, state, onChange, schedule) {
+  // 同一个判定函数两处使用（P0）：parcel 的 glob 只做**粗筛**（省掉整棵子树的原生事件），
+  // 真正的排除判据在 `state.shouldIgnore` 里，与渲染层扫描侧同源（§3.11）。
+  const shouldIgnore = createIgnoreFilter(safeRoot)
+  state.shouldIgnore = shouldIgnore
   if (parcelWatcher) {
     try {
       const subscription = await parcelWatcher.subscribe(
@@ -786,14 +852,16 @@ async function startWorkspaceWatcher(safeRoot, identity, state, onChange, schedu
               state.generic = true
               continue
             }
-            if (rel === '.opennote' || rel.startsWith('.opennote/')) continue
+            if (shouldIgnore(rel)) continue
             if (isSelfWrite(safeRoot, rel)) continue
             state.pending.set(rel, event.type === 'create' ? 'add' : event.type === 'delete' ? 'delete' : 'update')
           }
           schedule()
         },
         {
-          // 元数据与依赖目录永不需要刷新；`.opennote/**` 在回调里再滤一层（双保险）。
+          // 只做粗筛：`.opennote/`、`node_modules/`、`.git/` 整棵子树不需要任何原生事件。
+          // ⚠️ 这里是 glob 不是判定规则 —— `!` 取反内置集**在这里也不可能生效**，
+          // 与被忽略路径「双向不可见」的语义一致（§3.11）。
           ignore: ['.opennote/**', 'node_modules/**', '.git/**'],
           // win32 显式指回 windows 后端：官方 win32 预编译二进制的 `getBackend("default")`
           // 会先命中编译进二进制的 WATCHMAN 分支（它排在 WINDOWS 分支前面、同样匹配
@@ -839,7 +907,8 @@ function registerFsWatchHandlers() {
       if (workspaceWatchers.has(identity)) return true
 
       // 状态先入表再开 watcher：否则首批事件可能撞上「表还没登记」而丢通知。
-      const state = { watcher: null, timer: null, pending: new Map(), generic: false }
+      // `shouldIgnore` 由 startWorkspaceWatcher 填（两条事件源共用同一个判定函数）。
+      const state = { watcher: null, timer: null, pending: new Map(), generic: false, shouldIgnore: null }
       workspaceWatchers.set(identity, state)
 
       const schedule = () => {
@@ -855,16 +924,19 @@ function registerFsWatchHandlers() {
         state.timer.unref?.()
       }
       const onChange = (_eventType, filename) => {
-        // 三类不对外通知：`.opennote/**`（应用自己的元数据/历史，避免自写自读循环）、
-        // 自己刚经 IPC 写过的路径（避免每次自动保存招来一次整库重扫）、
-        // 以及拿不到文件名的事件（置 generic，仍整库刷新）。
+        // 三类不对外通知：
+        //   ① 同步范围之外的路径（内置忽略集 + 根目录 `.gitignore`，与渲染层扫描**同一个
+        //      判定函数**）—— 这条原先只滤 `.opennote/`，于是 `.git/`（一次提交就是几百个
+        //      事件）与 `node_modules/` 会一路打上来；
+        //   ② 自己刚经 IPC 写过的路径（避免每次自动保存招来一次整库重扫）；
+        //   ③ 拿不到文件名的事件（置 generic，仍整库刷新）。
         const rel = selfWriteKey(filename)
         if (!rel) {
           state.generic = true
           schedule()
           return
         }
-        if (rel === '.opennote' || rel.startsWith('.opennote/')) return
+        if ((state.shouldIgnore || fallbackShouldIgnore)(rel)) return
         if (isSelfWrite(safeRoot, rel)) return
         // fs.watch 不给事件类型：渲染层按路径重读即可，类型仅作日志/展示用途。
         state.pending.set(rel, 'update')

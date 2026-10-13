@@ -71,6 +71,9 @@ importers:
       idb:
         specifier: ^8.0.3
         version: 8.0.4
+      ignore:
+        specifier: 7.0.12
+        version: 7.0.12
       jszip:
         specifier: ^3.10.2
         version: 3.10.2
@@ -2513,6 +2516,10 @@ packages:
 
   idb@8.0.4:
     resolution: {integrity: sha512-jd0ITCrN+Zah4J7R/Z2jnR3W7A4BXDAjmo62MwWuSjxCiueUAf7X5rbodEdidWzeknwXHmLpdZkoiiCppNi30Q==}
+
+  ignore@7.0.12:
+    resolution: {integrity: sha512-/8UvqAPU9DGTI9k4mxtf49U37Isfwr8Uts96+SBHIkFxPJnHS0Ew4f00sM4Scd8V8EjM0jUNtVDdv1kPdt35lg==}
+    engines: {node: '>= 4'}
 
   immediate@3.0.6:
     resolution: {integrity: sha512-XXOFtyqDjNDAQxVfYxuF7g9Il/IbWmmlQg2MYKOH8ExIT1qg6xc4zyS3HaEEATgs1btfzxq15ciUiY7gjSXRGQ==}
@@ -6691,6 +6698,8 @@ snapshots:
   idb@7.1.1: {}
 
   idb@8.0.4: {}
+
+  ignore@7.0.12: {}
 
   immediate@3.0.6: {}
 

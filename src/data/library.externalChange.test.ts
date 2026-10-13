@@ -45,6 +45,15 @@ class MockBackend implements FileSystemBackend {
     this.files.set(path, { path, text, mtimeMs: ++this.clock });
   }
 
+  /**
+   * 以**指定的旧 mtime** 写一份内容 —— 模拟「从别的机器/网盘/git clone 来的写入」。
+   * 跨设备下 mtime 完全不可比：远端那一版可能比我们本地记录**更旧**。
+   */
+  seedWithMtime(path: string, text: string, mtimeMs: number): void {
+    this.mkdirParents(parentPath(path));
+    this.files.set(path, { path, text, mtimeMs });
+  }
+
   text(path: string): string | undefined {
     return this.files.get(path)?.text;
   }
@@ -130,6 +139,7 @@ vi.mock("./workspaces", () => ({
 }));
 
 import { closeWorkspace, flushAll, getLibrary, openWorkspace, updateNoteContent } from "./library";
+import { fileStates } from "./fileStates";
 
 interface WatchCalls {
   emit(root: string): void;
@@ -252,6 +262,93 @@ describe("外部改动检测（同步核心：磁盘赢）", () => {
     expect(getLibrary().notes["a.md"]?.content).toBe("# 外部新版本");
     expect(backend.paths().some((path) => path.includes("-before-disk"))).toBe(false);
     expect(getLibrary().error).toBeNull();
+  });
+
+  /*
+   * 【跨设备修复 · P0】远端写入带**更旧的 mtime** 时，旧判据会整篇丢失。
+   *
+   * 旧判据要求「磁盘 mtime 比我们记录的**新**」才认外部改动。跨设备 / 网盘 / `git clone`
+   * 下 mtime 不可比：另一台机器写来的内容很可能带更旧的 mtime → 判成「不是外部改动」
+   * → 保留本地旧 buffer → 下一次 `flushNote` 把远端新内容**覆盖掉**。
+   *
+   * 新判据只看「内存这一版是不是在我们上次与磁盘对齐之后被敲过」（`fileStates` 模块头），
+   * 与时间戳无关，所以下面这一版无论 mtime 多旧都会被采纳。
+   */
+  it("【跨设备】远端写入带更旧的 mtime：仍然采纳磁盘版本，不被本地旧 buffer 覆盖", async () => {
+    const bridge = installBridge();
+    const backend = scenario("A", (b) => b.seed("a.md", "# 本地已经同步过的版本"));
+    await openWorkspace(records.get("A")!, { silent: true });
+
+    // 用户敲了字（去抖的自动保存还没到），所以这一版 buffer 还没落盘。
+    updateNoteContent("a.md", "# 本地正在敲的草稿");
+
+    /*
+     * 远端写入**落到扫描过程里**：`rescanWorkspace` 的 `flushAll()` 走完之后、
+     * `scanWorkspace` 读盘之前 —— 这正是旧代码拿 mtime 比较的那条路径。
+     * mtime 取 1（远小于本地记录），代表「另一台机器的时钟」。
+     */
+    backend.hooks.onList = (path) => {
+      if (path !== "") return;
+      backend.hooks.onList = undefined;
+      backend.seedWithMtime("a.md", "# 另一台设备同步下来的新内容", 1);
+    };
+
+    bridge.emit(rootOf("A"));
+    await vi.advanceTimersByTimeAsync(600);
+    await settle();
+
+    // 磁盘赢：内存采纳远端版本，绝不会把「本地正在敲的草稿」写回去覆盖它。
+    expect(getLibrary().notes["a.md"]?.content).toBe("# 另一台设备同步下来的新内容");
+    expect(backend.text("a.md")).toBe("# 另一台设备同步下来的新内容");
+    // 关键不变量：磁盘状态记录也跟着走到远端那一版。旧代码在这里**留存旧记录**，
+    // 于是用户下一次敲字时 `flushNote` 会拿旧记录判断「磁盘没变」→ 直接覆盖远端内容。
+    expect(fileStates.get("a.md")?.content).toBe("# 另一台设备同步下来的新内容");
+
+    // 再等一个完整的自动保存周期：确认没有任何迟到的写入把远端内容盖回去。
+    await vi.advanceTimersByTimeAsync(2000);
+    await settle();
+    expect(backend.text("a.md")).toBe("# 另一台设备同步下来的新内容");
+  });
+
+  /*
+   * 上面那条走的是 `seedFromScan` 之外的路径；这一条**专门逼出 mtime 判据本身**。
+   *
+   * 让远端内容与本地 buffer **一样长**：`flushNote` 的「stat 变了才读盘」检查因此不会发现
+   * 远端改动（size 相同），不会把这一版悄悄采纳，笔记**保持 dirty** 进重扫 ——
+   * 于是 `rescanWorkspace` 里那段「磁盘赢 / 内存赢」的判定真正被执行。
+   *
+   * 旧代码在这里问「磁盘 mtime 比我们记录的新吗」→ 远端 mtime=1 更旧 → 判「内存赢」
+   * → 保留草稿 → 下一次自动保存把远端内容覆盖掉（**丢内容**）。
+   * 新代码只问「内存这一版是不是对齐之后被敲过」→ 草稿是，但磁盘已经被别人改了，
+   * 顺序上远端更新 → 采纳远端。
+   */
+  it("【跨设备·旧 mtime + 等长】dirty 笔记遇到远端更旧 mtime 的写入：仍采纳远端，不覆盖", async () => {
+    const bridge = installBridge();
+    const backend = scenario("A", (b) => b.seed("a.md", "AAAA"));
+    await openWorkspace(records.get("A")!, { silent: true });
+
+    // 与远端版本**等长**的本地草稿：size 不变，stat 检查发现不了远端改动。
+    updateNoteContent("a.md", "BBBB");
+    expect(getLibrary().dirty["a.md"]).toBe(true);
+
+    backend.hooks.onList = (path) => {
+      if (path !== "") return;
+      backend.hooks.onList = undefined;
+      backend.seedWithMtime("a.md", "RRRR", 1);
+    };
+
+    bridge.emit(rootOf("A"));
+    await vi.advanceTimersByTimeAsync(600);
+    await settle();
+
+    expect(getLibrary().notes["a.md"]?.content).toBe("RRRR");
+    expect(backend.text("a.md")).toBe("RRRR");
+    // 同一条不变量：记录必须跟上远端那一版，否则下一次敲字就会把远端内容盖回去。
+    expect(fileStates.get("a.md")?.content).toBe("RRRR");
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await settle();
+    expect(backend.text("a.md")).toBe("RRRR");
   });
 });
 
