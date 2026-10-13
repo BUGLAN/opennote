@@ -40,11 +40,20 @@ describe("首次打开", () => {
   it("重复打开是幂等的（迁移只跑一次）", () => {
     const applied: number[] = [];
     const db = openDatabase({ path: ":memory:", onMigration: (migration, didApply) => (didApply ? applied.push(migration.version) : undefined) });
-    expect(applied).toEqual([1]);
-    // 同一个连接上再调一次 openDatabase 不现实（内存库是每连接独立的），
-    // 所以这里用「迁移表连续性 + 版本一致」来断言「再打开不会重复跑」：
-    // 迁移函数是 `CREATE TABLE`（不带 IF NOT EXISTS），重复跑必然抛错 —— 见下一条用例。
-    expect(migrationList().map((item) => item.version)).toEqual([SCHEMA_VERSION]);
+
+    /*
+     * ⚠️ 期望值**从迁移表推**，不要写死 `[1]`。
+     *
+     * 第一版写死成 `[1]`，加迁移 2 时它就红了 —— 而那次失败**不是**幂等性出了问题，
+     * 只是测试需要跟着改。写死的期望值会在每次加迁移时制造一次假警报，
+     * 久了就会让人习惯性「改一下就过」，从而漏掉真正的回归。
+     */
+    const expected = migrationList().map((item) => item.version);
+    expect(expected[0]).toBe(1);
+    expect(applied).toEqual(expected);
+    // 版本号连续（1, 2, 3, …）：`openDatabase` 也会查这一点，这里再钉一次。
+    expect(expected).toEqual(expected.map((_, index) => index + 1));
+    expect(Math.max(...expected)).toBe(SCHEMA_VERSION);
     db.close();
   });
 

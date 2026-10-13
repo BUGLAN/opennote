@@ -238,7 +238,14 @@ export class AccountStore {
 
   /* ------------------------------------------------------------ 邀请码 */
 
-  createInvite(options: { createdBy: string; expiresInSeconds?: number; maxUses?: number; now?: number }): {
+  /**
+   * 生成注册邀请码（明文只返回这一次；库里只存哈希）。
+   *
+   * `createdBy` **可以是 `null`** —— 那是 CLI 发码的情况：CLI 是「根信任」的运维通道，
+   * 它的典型场景恰恰是**还没有任何可用账号**的时候（§4.12 `bootstrap-admin` 存在的理由
+   * 就是「管理员密钥丢了、控制台进不去」）。见 `db.ts` 迁移 2 的说明。
+   */
+  createInvite(options: { createdBy: string | null; expiresInSeconds?: number; maxUses?: number; now?: number }): {
     code: string;
     expiresAt: number | null;
     maxUses: number;

@@ -27,7 +27,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 interface Migration {
   version: number;
@@ -166,6 +166,49 @@ const MIGRATIONS: readonly Migration[] = [
           sync_info_ok  INTEGER NOT NULL DEFAULT 0,
           last_checked  INTEGER
         );
+      `);
+    },
+  },
+  {
+    version: 2,
+    description: "invites.created_by 允许为空（CLI 发码时还没有任何账号）",
+    up: (db) => {
+      /*
+       * ## 为什么必须允许为空
+       *
+       * 第一版写成 `created_by TEXT NOT NULL REFERENCES accounts(id)`，而 CLI 的
+       * `create-invite` 用 `createdBy: "cli"` —— 于是**第一次真跑就炸**
+       * `FOREIGN KEY constraint failed`。
+       *
+       * 根因不是「忘了填一个合法的 id」，而是**约束本身是错的**：CLI 是「根信任」的
+       * 运维通道（§4.12），它的典型场景恰恰是**还没有任何可用账号**的时候
+       * （`bootstrap-admin` 存在的理由就是「管理员密钥丢了、控制台进不去」）。
+       * 所以「谁发的这个码」在这个场景下**没有答案**，约束不该要求它有。
+       *
+       * 顺带把 `ON DELETE SET NULL` 写上：删账号时不再需要手工清 `invites`
+       * （`NotebookStore.deleteRowsOwnedBy` 里那一步仍然保留 —— 显式优于隐式，
+       * 但外键也不该留下会炸的悬空引用）。
+       *
+       * SQLite 改不了列的约束，只能重建表。
+       */
+      db.exec(`
+        ALTER TABLE invites RENAME TO invites_v1;
+
+        CREATE TABLE invites (
+          code_hash  TEXT PRIMARY KEY,
+          -- NULL = 由 CLI 发出（那时还没有账号）。见本迁移的说明。
+          created_by TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER,
+          max_uses   INTEGER NOT NULL DEFAULT 1,
+          uses       INTEGER NOT NULL DEFAULT 0,
+          revoked_at INTEGER
+        );
+
+        INSERT INTO invites (code_hash, created_by, created_at, expires_at, max_uses, uses, revoked_at)
+          SELECT code_hash, created_by, created_at, expires_at, max_uses, uses, revoked_at FROM invites_v1;
+
+        DROP TABLE invites_v1;
       `);
     },
   },
