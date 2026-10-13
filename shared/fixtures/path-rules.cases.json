@@ -1,0 +1,146 @@
+[
+  {
+    "id": "accept-plain-ascii",
+    "path": "a.md",
+    "expect": "accept",
+    "why": "最普通的一篇笔记"
+  },
+  {
+    "id": "accept-nested",
+    "path": "notes/a.md",
+    "expect": "accept",
+    "why": "子目录里的普通笔记"
+  },
+  {
+    "id": "accept-cjk",
+    "path": "日记/2026-10-13.md",
+    "expect": "accept",
+    "why": "中文路径（NFC 归一是另一件事，这里只判安全）"
+  },
+  {
+    "id": "accept-double-dot-filename",
+    "path": "a..b.md",
+    "expect": "accept",
+    "why": "§3.11：**不能**用 indexOf('..') 这种粗暴判断，`a..b.md` 是合法文件名"
+  },
+  {
+    "id": "accept-double-dot-nested",
+    "path": "notes/a..b.md",
+    "expect": "accept",
+    "why": "同上，嵌套时也一样"
+  },
+  {
+    "id": "accept-leading-double-dot",
+    "path": "..md",
+    "expect": "accept",
+    "why": "整个段是 `..md` —— 不是 `..` 段，合法"
+  },
+  {
+    "id": "accept-hidden-like-filename",
+    "path": ".opennote.md",
+    "expect": "accept",
+    "why": "§3.11 边界表：`.opennote` 是**目录名**，不是文件名前缀"
+  },
+  {
+    "id": "accept-hidden-like-nested",
+    "path": "notes/.opennote.md",
+    "expect": "accept",
+    "why": "同上：`.opennote` 是目录名，不是文件名前缀"
+  },
+  {
+    "id": "accept-deep",
+    "path": "a/b/c/d/e.md",
+    "expect": "accept",
+    "why": "很深的嵌套目录"
+  },
+  {
+    "id": "accept-with-space",
+    "path": "my notes/a b.md",
+    "expect": "accept",
+    "why": "段内部空格合法（只有段首尾空白会被归一掉）"
+  },
+  {
+    "id": "accept-image",
+    "path": "assets/图 片.png",
+    "expect": "accept",
+    "why": "附件（含空格与中文）"
+  },
+  {
+    "id": "reject-absolute-unix",
+    "path": "/etc/passwd",
+    "expect": "reject",
+    "why": "绝对路径"
+  },
+  {
+    "id": "reject-absolute-windows",
+    "path": "C:/Windows/system32",
+    "expect": "reject",
+    "why": "Windows 盘符（C:/…）"
+  },
+  {
+    "id": "reject-backslash-absolute",
+    "path": "\\windows\\x.md",
+    "expect": "reject",
+    "why": "反斜杠开头"
+  },
+  {
+    "id": "reject-parent",
+    "path": "../x.md",
+    "expect": "reject",
+    "why": "`..` 越界"
+  },
+  {
+    "id": "reject-parent-nested",
+    "path": "a/../../x.md",
+    "expect": "reject",
+    "why": "越界（用 `..` 段抵消）"
+  },
+  {
+    "id": "reject-parent-tail",
+    "path": "a/..",
+    "expect": "reject",
+    "why": "以 `..` 段结尾"
+  },
+  {
+    "id": "reject-ads",
+    "path": "a.md:secret",
+    "expect": "reject",
+    "why": "D36：NTFS 备用数据流（段内冒号）"
+  },
+  {
+    "id": "reject-ads-nested",
+    "path": "notes/a:b/c.md",
+    "expect": "reject",
+    "why": "段内冒号，嵌套时同样拒绝"
+  },
+  {
+    "id": "reject-reserved-opennote",
+    "path": ".opennote/sync.json",
+    "expect": "reject",
+    "why": "§3.11：保留目录，绝不跨端"
+  },
+  {
+    "id": "reject-reserved-git",
+    "path": ".git/config",
+    "expect": "reject",
+    "why": "§3.11：同步 .git/ 会把仓库搞坏"
+  },
+  {
+    "id": "reject-reserved-nested",
+    "path": "a/.git/x",
+    "expect": "reject",
+    "why": "保留目录在任意深度都拒绝"
+  },
+  {
+    "id": "reject-nul",
+    "path": "a\u0000b.md",
+    "expect": "reject",
+    "why": "空字节（NUL）；断言 `path.charCodeAt(1) === 0` 而不是字符串包含"
+  },
+  {
+    "id": "reject-empty",
+    "path": "",
+    "expect": "reject",
+    "why": "空字符串"
+  }
+]
