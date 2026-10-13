@@ -235,3 +235,99 @@ describe("§3.9 · 远端来的内容：明文直通，E2EE 要解开", () => {
     ).toThrow(/对不上/);
   });
 });
+
+/* ============================================================================
+   ★★ E2EE 的正文必须真的加密（这一层忘了加解密是**没有任何报错**的）
+   ============================================================================ */
+
+describe("★★ E2EE：`readLocal` 必须给出**密文**、`writeLocal` 必须写**明文**", () => {
+  /*
+   * ## 为什么这一组要单独存在（它咬出过一个真 bug）
+   *
+   * `did` 与 `ehash` 都是密文模式的（看起来完全正确），而正文走的是
+   * `readLocal`/`writeLocal` 这两个回调 —— 引擎**不知道也不该知道**加解密。
+   *
+   * 所以如果这一层直通：**没有异常、没有日志、契约校验也全过**，
+   * 而正文以**明文**发到了远端。后果是**安全承诺被静默违背**。
+   *
+   * 端到端那条用例（`session.test.ts`）确实咬住了它，但那条跑得慢、
+   * 而且要拉起整个会话。这里补一组**快而局部**的守卫：
+   * 将来谁重构了这两个回调，先红的是这一组。
+   */
+  const PLAINTEXT = "# 机密正文";
+
+  function e2eeDeps() {
+    const backend = memoryBackend({ "notes/a.md": PLAINTEXT });
+    const deps = createWorkspaceEngineDeps({
+      backend,
+      rules: createIgnoreRules(""),
+      cryptoMode: "user-key",
+      notebookId: NOTEBOOK,
+      notebookKey: NOTEBOOK_KEY,
+      knownPaths: async () => ["notes/a.md"],
+    });
+    return { backend, deps };
+  }
+
+  it("★ `readLocal` 给出的是密文：既不含明文，长度也是 明文+40", async () => {
+    const { deps } = e2eeDeps();
+    const bytes = await deps.readLocal("notes/a.md");
+    const asText = new TextDecoder().decode(bytes);
+    expect(asText).not.toContain("机密");
+    expect(asText).not.toContain("# ");
+    // nonce(24) + tag(16) = 40 字节开销。
+    expect(bytes.length).toBe(new TextEncoder().encode(PLAINTEXT).length + 40);
+  });
+
+  it("★ 明文模式下 `readLocal` 就是原字节（两种模式的差别**只在这一层**）", async () => {
+    const backend = memoryBackend({ "notes/a.md": PLAINTEXT });
+    const deps = createWorkspaceEngineDeps({ backend, rules: createIgnoreRules(""), cryptoMode: "none", notebookId: NOTEBOOK, knownPaths: async () => [] });
+    expect(new TextDecoder().decode(await deps.readLocal("notes/a.md"))).toBe(PLAINTEXT);
+  });
+
+  it("★ `writeLocal` 把密文解回**明文**再落盘（同一条路径）", async () => {
+    const { backend, deps } = e2eeDeps();
+    const sealed = await deps.readLocal("notes/a.md");
+    // 模拟「从远端拉下来这一条，写回它对应的路径」。
+    await deps.writeLocal("notes/a.md", sealed);
+    expect(new TextDecoder().decode(await backend.read("notes/a.md"))).toBe(PLAINTEXT);
+  });
+
+  it("★ 把 A 的密文写到 B 的路径上 ⇒ **解不开**（AAD 绑住了 did，§3.9 第 1 条）", async () => {
+    /*
+     * 这就是「密文重排攻击」的防线在本层的体现：不绑 did 的话，
+     * B 会被静默写成 A 的内容 —— 不报错，只是内容悄悄换了一份。
+     *
+     * ⚠️ 我第一版这条用例写反了（期望它能写成功），红了之后才发现
+     * **是断言错、实现对**。这次不用查文档也看得出来：报错文案自己说了
+     * 「或者它是在别的笔记本 / 别的路径下加密的」。
+     */
+    const { backend, deps } = e2eeDeps();
+    const sealed = await deps.readLocal("notes/a.md");
+    await expect(deps.writeLocal("notes/b.md", sealed)).rejects.toThrow(/别的路径/);
+    await expect(backend.read("notes/b.md")).rejects.toThrow();
+  });
+
+  it("★★ `writeLocal` 拿到**解不开的**密文 ⇒ **抛**，绝不把乱码写到盘上", async () => {
+    /*
+     * 静默写乱码比报错糟得多：用户的笔记**看起来还在**（文件在、大小也对），
+     * 打开却是乱码，而且原来的内容已经被覆盖了。
+     */
+    const { backend, deps } = e2eeDeps();
+    await expect(deps.writeLocal("notes/c.md", new Uint8Array(80).fill(9))).rejects.toThrow(/解不开/);
+    // 而且没有留下半个文件。
+    await expect(backend.read("notes/c.md")).rejects.toThrow();
+  });
+
+  it("★ E2EE 缺 `notebookId` ⇒ 早失败（它是内容 AAD 的一半，少了它加密做不了）", () => {
+    expect(() =>
+      createWorkspaceEngineDeps({
+        backend: memoryBackend({}),
+        rules: createIgnoreRules(""),
+        cryptoMode: "user-key",
+        notebookKey: NOTEBOOK_KEY,
+        knownPaths: async () => [],
+      } as never),
+    ).toThrow(/notebookId/);
+  });
+});
