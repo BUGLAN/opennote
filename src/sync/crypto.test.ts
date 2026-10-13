@@ -23,8 +23,11 @@ import {
   openContent,
   sealContent,
   sha256HexForTests,
+  derivePathMapKey,
+  encodePathMap,
+  decodePathMap,
 } from "./crypto";
-import { deriveNotebookKey, toHex } from "./accountKey";
+import { deriveNotebookKey, toHex, xchachaForTests } from "./accountKey";
 import { idForPath } from "../../shared/paths";
 
 const enc = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -229,5 +232,85 @@ describe("组合：`sealContent` / `openContent`", () => {
     expect(first.did).toBe(second.did);
     expect(first.ehash).toBe(second.ehash);
     expect(toHex(first.bytes)).not.toBe(toHex(second.bytes));
+  });
+});
+
+/* ============================================================================
+   ★★ 路径映射表：全新设备的 did↔path 重建（P4-b 的缺口）
+   ============================================================================ */
+
+describe("★★ 路径映射表：加密后上云，**服务端学不到任何路径**", () => {
+  const PATHMAP_KEY = derivePathMapKey(ENC_ROOT);
+  const ENTRIES = [
+    { did: didForPath(keys, "很机密的目录/客户名单.md"), path: "很机密的目录/客户名单.md" },
+    { did: didForPath(keys, "notes/a.md"), path: "notes/a.md" },
+  ];
+
+  it("往返一致", () => {
+    const blob = encodePathMap(PATHMAP_KEY, NOTEBOOK, ENTRIES);
+    expect(decodePathMap(PATHMAP_KEY, NOTEBOOK, blob)).toEqual(ENTRIES);
+  });
+
+  it("★★ 密文里**找不到任何路径痕迹**（否则模式 B 白做）", () => {
+    /*
+     * 这张表要**上云**。它不能明文（那就把路径泄露了），
+     * 所以必须用 `encRoot` 派生的密钥加密 —— 服务端只看到一条密文记录。
+     */
+    const blob = encodePathMap(PATHMAP_KEY, NOTEBOOK, ENTRIES);
+    const asText = new TextDecoder().decode(blob);
+    expect(asText).not.toContain("客户名单");
+    expect(asText).not.toContain("机密");
+    expect(asText).not.toContain("notes");
+    expect(asText).not.toContain("did");
+  });
+
+  it("★★ 只要有 `encRoot`，新设备就能重建整张表（**密钥即身份**）", () => {
+    /*
+     * 这是这个设计存在的理由：新设备导入账号密钥 → 解锁 `encRoot`
+     * → 解密这张表 → 有了路径，于是能拉文件了。
+     * 不需要第二样东西，也不需要用户手工输入文件名。
+     */
+    const uploaded = encodePathMap(PATHMAP_KEY, NOTEBOOK, ENTRIES);
+    // ── 新设备：只有 encRoot（从账号密钥解出来）──
+    const freshKey = derivePathMapKey(ENC_ROOT);
+    const rebuilt = decodePathMap(freshKey, NOTEBOOK, uploaded);
+    expect(rebuilt).toEqual(ENTRIES);
+    // 有了路径，就能算出 did 并对上远端那一条。
+    expect(rebuilt.map((entry) => entry.did)).toEqual(ENTRIES.map((entry) => entry.did));
+  });
+
+  it("★ 换 `encRoot`（别人的密钥）⇒ 解不开", () => {
+    const blob = encodePathMap(PATHMAP_KEY, NOTEBOOK, ENTRIES);
+    const otherKey = derivePathMapKey(Uint8Array.from({ length: 32 }, (_, index) => 255 - index));
+    expect(() => decodePathMap(otherKey, NOTEBOOK, blob)).toThrow(/密钥不对/);
+  });
+
+  it("★ 换 `notebookId`（AAD）⇒ 解不开（防止把 A 的表塞给 B，把文件写到错误位置）", () => {
+    const blob = encodePathMap(PATHMAP_KEY, NOTEBOOK, ENTRIES);
+    expect(() => decodePathMap(PATHMAP_KEY, OTHER_NOTEBOOK, blob)).toThrow(/别的笔记本/);
+  });
+
+  it("每次编码的密文不同（nonce 随机），但都能解开", () => {
+    const first = encodePathMap(PATHMAP_KEY, NOTEBOOK, ENTRIES);
+    const second = encodePathMap(PATHMAP_KEY, NOTEBOOK, ENTRIES);
+    expect(toHex(first)).not.toBe(toHex(second));
+    expect(decodePathMap(PATHMAP_KEY, NOTEBOOK, second)).toEqual(ENTRIES);
+  });
+
+  it("★ 形状不对的条目**丢掉**，不让整张表作废（一条坏记录不该让新设备一个文件都拉不下来）", () => {
+    const json = new TextEncoder().encode(JSON.stringify([{ did: "h:x", path: "a.md" }, { did: "" }, { path: "b.md" }, 42, null]));
+    // 手工造一条「内容合法但条目坏」的密文（走同一条加密路径）。
+    const nonce = new Uint8Array(24).fill(1);
+    const aad = new TextEncoder().encode(`opennote/v1/pathmap
+${NOTEBOOK}`);
+    const sealed = xchachaForTests(PATHMAP_KEY, nonce, aad).encrypt(json);
+    const blob = new Uint8Array(nonce.length + sealed.length);
+    blob.set(nonce, 0);
+    blob.set(sealed, nonce.length);
+    expect(decodePathMap(PATHMAP_KEY, NOTEBOOK, blob)).toEqual([{ did: "h:x", path: "a.md" }]);
+  });
+
+  it("太短的 blob / 不是 JSON / 不是数组 ⇒ 可读的错误", () => {
+    expect(() => decodePathMap(PATHMAP_KEY, NOTEBOOK, new Uint8Array(10))).toThrow(/太短/);
   });
 });

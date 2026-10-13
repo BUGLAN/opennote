@@ -33,6 +33,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
 import { idForPath, normalizeNfc, normalizePath } from "../../shared/paths";
 import { deriveNotebookSubkey, toHex } from "./accountKey";
+import { hkdf } from "@noble/hashes/hkdf.js";
 
 /** XChaCha20-Poly1305 的 nonce（192 位）。 */
 export const NONCE_BYTES = 24;
@@ -219,4 +220,101 @@ export function openContent(keys: NotebookKeys, notebookId: string, did: string,
     throw new Error("did 与本地路径对不上（本地的 did↔path 映射可能已经过期）");
   }
   return decryptContent(keys, did, notebookId, bytes);
+}
+
+/* ============================================================================
+   路径映射表（★ 全新设备的 did↔path 重建，P4-b 的缺口）
+   ============================================================================ */
+
+/**
+ * 派生「路径映射表」的密钥。
+ *
+ * ## 这张表为什么必须存在
+ *
+ * 模式 B 的 `did = HMAC(idKey, path)` **不可逆**，而 `did↔path` 映射按设计
+ * 只存在**本地**（`.opennote/sync.json`，§3.11 要求它**绝不能跨端**）。
+ *
+ * 于是有一台设备上的死路：**全新设备**（本地空、账本空）看到远端树时
+ * 没有任何办法把 did 翻回文件名 —— 它拿不到「这个密文该写到哪个文件名」，
+ * 一个文件都拉不下来。（`engine` 的处理是对的：如实报进 `unknownDids`，
+ * 绝不猜路径、绝不写盘。但那条路走不通。）
+ *
+ * ## 解法：把这张表**加密后**当成一条普通记录同步
+ *
+ * 它不能明文上云（那就等于把路径泄露了，模式 B 白做），
+ * 但可以用 `encRoot` 派生的密钥加密 —— 于是：
+ *
+ * - **新设备**：导入账号密钥 → 解锁 `encRoot` → 解密这张表 → 有了路径，能拉文件了；
+ * - **服务端**：没有 `encRoot`，看到的只是一条密文记录，**学不到任何路径**。
+ *
+ * 这正是「密钥即身份」的应有之义：**只要有密钥，换台设备就能重建一切**。
+ *
+ * ⚠️ 与 `notebookKey` 的区别：这张表是**账号级**的（`encRoot` 派生），
+ * 但它记的内容是**每个笔记本各自**的映射 —— 所以 `notebookId` 进 AAD，
+ * 防止把 A 笔记本的表塞给 B（那样会把文件写到错误的位置）。
+ */
+export const PATHMAP_INFO = "opennote/v1/pathmap";
+
+export function derivePathMapKey(encRoot: Uint8Array): Uint8Array {
+  // 与 `deriveNotebookKey` 同款：§3.9 的层级表里这条派生**没有 salt**。
+  return hkdf(sha256, encRoot, undefined, encoder.encode(PATHMAP_INFO), 32);
+}
+
+/** 一条映射：`did ↔ 工作区相对路径`。 */
+export interface PathMapEntry {
+  did: string;
+  path: string;
+}
+
+/**
+ * 把映射表编码成可上传的密文（`nonce || ct || tag`）。
+ *
+ * 明文用 JSON：这张表**不受二维码尺寸约束**（不像账号密钥），
+ * 而可读的格式在排查「某个文件为什么没同步」时价值很大。
+ */
+export function encodePathMap(pathMapKey: Uint8Array, notebookId: string, entries: PathMapEntry[]): Uint8Array {
+  const nonce = randomBytes(NONCE_BYTES);
+  const plaintext = encoder.encode(JSON.stringify(entries));
+  // AAD 绑 `notebookId`：防止把 A 笔记本的表塞给 B（会把文件写到错误的位置）。
+  const sealed = xchacha20poly1305(pathMapKey, nonce, encoder.encode(`opennote/v1/pathmap
+${notebookId}`)).encrypt(plaintext);
+  const out = new Uint8Array(NONCE_BYTES + sealed.length);
+  out.set(nonce, 0);
+  out.set(sealed, NONCE_BYTES);
+  return out;
+}
+
+/**
+ * 解开映射表。
+ *
+ * 形状不对的条目**丢掉**而不是整张表作废：一条坏记录不该让整台新设备
+ * 一个文件都拉不下来（与 `/v1/tree` 逐条判定、坏的丢掉同一个道理）。
+ */
+export function decodePathMap(pathMapKey: Uint8Array, notebookId: string, blob: Uint8Array): PathMapEntry[] {
+  if (blob.length < NONCE_BYTES + TAG_BYTES) throw new Error("路径映射表太短，不可能是有效内容");
+  const nonce = blob.slice(0, NONCE_BYTES);
+  const sealed = blob.slice(NONCE_BYTES);
+  let plaintext: Uint8Array;
+  try {
+    plaintext = xchacha20poly1305(pathMapKey, nonce, encoder.encode(`opennote/v1/pathmap
+${notebookId}`)).decrypt(sealed);
+  } catch {
+    throw new Error("解不开路径映射表：密钥不对，或者它属于别的笔记本");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    throw new Error("路径映射表的内容不是合法 JSON");
+  }
+  if (!Array.isArray(parsed)) throw new Error("路径映射表的内容不是数组");
+  const out: PathMapEntry[] = [];
+  for (const item of parsed) {
+    const entry = item as { did?: unknown; path?: unknown };
+    // 形状不对的条目丢掉（见函数说明）。
+    if (typeof entry?.did === "string" && typeof entry?.path === "string" && entry.did !== "" && entry.path !== "") {
+      out.push({ did: entry.did, path: entry.path });
+    }
+  }
+  return out;
 }
