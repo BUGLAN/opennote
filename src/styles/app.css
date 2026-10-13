@@ -521,15 +521,36 @@
   translate: 0 -100%;
 }
 
-.save-to__list {
-  max-height: 240px;
-  overflow-y: auto;
-  padding: 4px;
+/*
+ * 边框盒：搜索框（`flex: none`，钉住）+ 列表（自己滚）。
+ *
+ * 2026-10-13 用户：「需增加类似图1的搜索文件夹」。搜索框加进来之后，这一层必须存在 ——
+ * 让 `.save-to__list` 一边当滚动容器一边当边框，搜索框就只能塞进滚动区里跟着滚上去
+ * （或者反过来把边框画到外面，滚动条跑到边框之外）。分开之后与「移动到…」选择器同一个摆法。
+ * 边框 / 圆角 / 阴影 / 弹出动画都从 `.save-to__list` 搬到这一层，视觉上没有任何变化。
+ */
+.save-to__panel {
+  display: flex;
+  flex-direction: column;
   background: var(--paper-2);
   border: 1px solid var(--rule-strong);
   border-radius: var(--radius);
   box-shadow: var(--shadow-2);
+  overflow: hidden;
   animation: pop var(--dur-fast) var(--ease-out) both;
+}
+
+/* 钉住的搜索框：同一个 `.field--search`（同样的放大镜与高度），只在盒子里留出边距。 */
+.save-to__search {
+  flex: none;
+  width: auto;
+  margin: 6px 6px 0;
+}
+
+.save-to__list {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
 }
 
 .save-to__item {
@@ -730,6 +751,17 @@
   align-items: center;
   gap: 6px;
   width: 100%;
+  /*
+   * **行永远不许被 flex 压缩**（2026-10-13「文件树需进行样式优化」的根因）。
+   *
+   * `.tree` 既是 `flex-direction: column`，又常常同时是**滚动容器**
+   * （`.folder-picker` 就是 `<div class="folder-picker tree">`）。这种「定高的 flex 列 +
+   * 溢出内容」的组合下，`flex-shrink: 1`（默认）会把子项**压扁**去「塞进」容器高度，
+   * 而不是让它溢出滚动 —— 实测：14 条两行的搜索结果，行高被压到 **27px**（`min-height`
+   * 的地板），而它肚子里的内容有 **33.74px**，第二行（完整路径）于是被裁掉一截、和下一行
+   * 的图标挤在一起。装不下是**容器**的事：让容器滚，不是让行变形。
+   */
+  flex: none;
   min-height: 27px;
   padding: 3px 8px 3px 6px;
   border-radius: var(--radius-sm);
@@ -902,8 +934,36 @@
   white-space: nowrap;
 }
 
+/*
+ * 「堆叠」行：第一行是名字（或标题），第二行是小字说明（目录的完整路径 / 笔记摘要）。
+ * 三处用它：目录选择器的搜索结果（`Overlays.tsx`）、左栏「搜索」页的命中笔记、
+ * 左栏文件树搜索结果里的笔记行（`Sidebar.tsx` 的 `tree__row--stacked`）。
+ *
+ * 2026-10-13 用户：「文件树需进行样式优化」。实测那版的问题都在**对齐**上：
+ * ① `align-items: flex-start` 之后，14px 的 caret / 图标贴到行的上沿，看着像飘在两道
+ *    文字之间（第一行有 19px 高）；② 名字是**裸文本节点**，旁边跟着块级的
+ *    `.tree__note-snippet` —— 裸文本被折成匿名块，`.tree__label` 上的
+ *    `text-overflow: ellipsis` 对它**不生效**，长名字直接溢出被裁掉，没有省略号。
+ * 所以：图标顶到第一行的中线上，名字那一段包一层 `.tree__label-main` 自己截断。
+ */
 .tree__row--stacked {
   align-items: flex-start;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.tree__row--stacked > .tree__caret,
+.tree__row--stacked > .tree__icon {
+  margin-top: 3px;
+}
+
+/* 第一行（名字 / 标题）：单行截断。块级子元素各自管好自己的省略号，
+   `.tree__label` 那一层就不再是唯一负责截断的人。 */
+.tree__label-main {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 mark.hit {
@@ -1734,16 +1794,37 @@ mark.hit {
  *
  * 0.3.4 用户：「样式我期望能和首页文件夹样式相同」⇒ 行、caret、图标、高亮**直接复用
  * 左栏的 `.tree__*`**（同一套令牌、同一套交互：点行选中并翻转折叠、点 caret 只折叠），
- * 可折叠这件事也因此与左栏同一个说法。这里只剩**容器**这一层 —— 弹窗里的树要有
- * 滚动上限，文件夹多了对话框也不会长过屏幕。新增令牌 0。
+ * 可折叠这件事也因此与左栏同一个说法。这里只剩**容器**这一层。
+ * 新增令牌 0。
+ *
+ * 2026-10-13 用户：「搜索文件夹，页面高度会变，希望固定头部，类似于设置一样」——
+ * 对话框改成 `.dialog--tall`（与设置 / 收件箱同一个高度常量），正文区是列向 flex：
+ * 说明句与搜索框 `flex: none` 钉在上方，**只有列表滚动**（`flex: 1` + `min-height: 0`）。
+ * 搜索框自己不再是「列表上面的一段内容」，所以上一版写在行内的 `margin: 10px 0`
+ * 搬到这里来（组件里不再有行内样式）。
  */
 .folder-picker {
-  max-height: min(46vh, 340px);
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding: 4px;
   border: 1px solid var(--rule-strong);
   border-radius: var(--radius);
   background: var(--paper);
+}
+
+/* 钉住的头部：矮窗口 + 长列表下也不许被挤扁（命令面板那个「48px 被压到 20px」的坑）。 */
+.folder-picker__search {
+  flex: none;
+  margin: 10px 0;
+}
+
+/* 一个候选都没有时，这块空白由列表那一格接管并居中（定高之后不能只剩上半个面板有内容）。 */
+.folder-picker__empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* 置灰的「当前」目录：为什么点不动写在行内（`tree__meta` 的「当前」两个字），

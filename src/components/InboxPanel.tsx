@@ -72,6 +72,7 @@ import {
 } from "../data/inbox";
 import { askConfirm } from "../lib/dialogs";
 import { requestedNotePath } from "../lib/clip/landing";
+import { highlightRanges, substringRanges } from "../lib/fuzzy";
 import { notify } from "../lib/toast";
 import { cn, formatBytes, formatDateTime, formatRelativeTime } from "../lib/utils";
 
@@ -245,6 +246,28 @@ export function saveToOptionsFor(
   return list;
 }
 
+/**
+ * 「保存到」候选项的**过滤**（2026-10-13 用户：「需增加类似图1的搜索文件夹」）。
+ *
+ * 与「移动到…」选择器同一套口径：**包含**才算命中（`substringRanges()` 那一段注释解释了
+ * 为什么不走模糊匹配），名字与**真路径**都比一遍 —— 标签是 `folderPathLabel` 的写法
+ * （`剪藏 / 技术 / 排版`，斜杠两侧有空格），用户照着磁盘上的路径敲 `剪藏/技术` 时，
+ * 只比标签是搜不到的。
+ *
+ * 抽成纯函数（和 `saveToOptionsFor()` 同一个理由）：候选项只在**展开时**才渲染，
+ * 而测试用的是 `renderToStaticMarkup`（首屏、effect 不跑），断言只能打在纯函数上。
+ */
+export function filterSaveToOptions(
+  options: { value: string; label: string }[],
+  query: string,
+): { value: string; label: string }[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return options;
+  return options.filter(
+    (option) => option.label.toLowerCase().includes(q) || option.value.toLowerCase().includes(q),
+  );
+}
+
 /** 一条外部剪藏笔记的前像：正文 front-matter 里的 `source` / `captured_at`。 */interface PreviousCapture {
   path: string;
   title: string;
@@ -287,11 +310,13 @@ function findPreviousCapture(
  *
  * 交互（与 `FolderDialog` 同一套键盘语言）：
  * - 点触发器展开；`Esc` / 点外部 / 选中一项后收起；
- * - `↑`/`↓` 移动高亮、`Enter` 结算、`Home`/`End` 到首尾；
+ * - **展开即可打字过滤**（2026-10-13 用户：「需增加类似图1的搜索文件夹」）：浮层顶部一个
+ *   `.field--search`，焦点默认落进去；过滤走 `filterSaveToOptions()`，命中处上 `<mark class="hit">`；
+ * - `↑`/`↓` 移动高亮（只在**筛选后**的可见行里走）、`Enter` 结算、`Home`/`End` 到首尾；
  * - 悬浮任意一项 → 该项右侧/下方浮出完整路径（`--font-mono`，与「目录」一栏同款）。
  *
- * 无障碍：触发器是 `role="combobox"` + `aria-expanded` + `aria-activedescendant`，
- * 列表是 `role="listbox"`，每一项 `role="option"` + `aria-selected`。
+ * 无障碍：触发器是 `role="combobox"` + `aria-expanded`，列表是 `role="listbox"`，
+ * 每一项 `role="option"` + `aria-selected`。
  */
 function SaveToPicker({
   value,
@@ -306,6 +331,11 @@ function SaveToPicker({
 }): ReactNode {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(value);
+  /**
+   * 搜索关键字。只在浮层展开期间有意义，**每次展开清空**：残留的关键字会让下一次
+   * 打开「只剩几条」，而用户完全不记得自己上次打过什么。
+   */
+  const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popupRef = useRef<HTMLDivElement | null>(null);
@@ -328,14 +358,16 @@ function SaveToPicker({
   } | null>(null);
 
   const current = options.find((option) => option.value === value) ?? options[0];
+  /** 眼下画得出来的候选项：没有关键字时就是全部（过滤口径见 `filterSaveToOptions`）。 */
+  const matches = useMemo(() => filterSaveToOptions(options, query), [options, query]);
 
   const place = useCallback(() => {
     const node = triggerRef.current;
     if (!node) return;
     const box = node.getBoundingClientRect();
-    // 触发器下方剩的空间不够列表 + 预览（约 300px）时改成向上展开。
+    // 触发器下方剩的空间不够「搜索框 + 列表 + 预览」（约 340px）时改成向上展开。
     const below = window.innerHeight - box.bottom;
-    const flip = below < 300 && box.top > below;
+    const flip = below < 340 && box.top > below;
     // 右侧可用宽度：从触发器左边缘到窗口右边缘（留 12px 呼吸位）。
     const maxWidth = Math.max(240, window.innerWidth - box.left - 12);
     setRect({ left: box.left, top: flip ? box.top - 4 : box.bottom + 4, width: box.width, maxWidth, flip });
@@ -356,10 +388,20 @@ function SaveToPicker({
     };
   }, [open, place]);
 
-  // 收起时把高亮同步回当前值：下次展开光标落在**已选项**上，而不是上次划过的那一项。
+  /**
+   * 高亮项同步。
+   *
+   * 收起时回到**当前值**：下次展开光标落在已选项上，而不是上次划过的那一项。
+   * 展开时高亮项必须**在筛选后的列表里** —— 否则回车会「选中一个列表上根本看不见的目录」
+   * （用户看到的是「回车之后落点变成了别的目录」）。命中集一变就把高亮挪到第一条。
+   */
   useEffect(() => {
-    if (!open) setActive(value);
-  }, [open, value]);
+    if (!open) {
+      setActive(value);
+      return;
+    }
+    if (!matches.some((option) => option.value === active)) setActive(matches[0]?.value ?? value);
+  }, [open, value, matches, active]);
 
   // 点外部收起。用 `mousedown`（不是 `click`）：`click` 要等鼠标抬起，
   // 那时下拉已经因为选项的 `onClick` 结算过一次了，会先选中再被外部关闭的时序打架。
@@ -378,6 +420,26 @@ function SaveToPicker({
     return () => window.removeEventListener("mousedown", onDown);
   }, [open]);
 
+  /**
+   * 搜索框一挂上就聚焦 —— 用**回调 ref**，不是 `useEffect(…, [open])`。
+   *
+   * 浮层是等 `rect` 算出来才挂载的（`open && rect`），而 `open` 变 true 的那一刻浮层
+   * 还没进 DOM：effect 跑的时候拿不到节点，之后 `rect` 到位触发重渲染也不会再跑
+   * （依赖里没有它）—— 结果是「打开了下拉，搜索框在那儿，焦点却留在条目列表上」
+   * （实测 `document.activeElement` 是 `.inbox__item`）。回调 ref 在节点真正挂上时执行，
+   * 与渲染顺序无关。`useCallback` 保证身份稳定，免得每次重渲染都 detach/attach 抢一次焦点。
+   */
+  const attachSearch = useCallback((node: HTMLInputElement | null) => {
+    node?.focus();
+  }, []);
+
+  /** 展开：清掉上一次的关键字，高亮回到当前值；焦点由 `attachSearch` 那个回调 ref 交给搜索框。 */
+  const openList = () => {
+    setQuery("");
+    setActive(value);
+    setOpen(true);
+  };
+
   const settle = (next: string) => {
     setOpen(false);
     if (next !== value) onChange(next);
@@ -388,29 +450,34 @@ function SaveToPicker({
       event.preventDefault();
       event.stopPropagation();
       setOpen(false);
+      // 收起后焦点回到触发器：`Esc` 之后焦点掉进 body，键盘用户会「找不到自己在哪」。
+      triggerRef.current?.focus();
       return;
     }
     if (!open) {
       if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
         event.preventDefault();
-        setOpen(true);
+        openList();
       }
       return;
     }
-    const index = options.findIndex((option) => option.value === active);
+    // 展开后 `↑/↓` / `Home` / `End` 只在**筛选后**的可见行里走（滤掉的行不该能被选中）。
+    if (!matches.length) return;
+    const index = matches.findIndex((option) => option.value === active);
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      const step = event.key === "ArrowDown" ? 1 : options.length - 1;
-      setActive(options[(Math.max(index, 0) + step) % options.length].value);
+      const step = event.key === "ArrowDown" ? 1 : matches.length - 1;
+      setActive(matches[(Math.max(index, 0) + step) % matches.length].value);
     } else if (event.key === "Home") {
       event.preventDefault();
-      setActive(options[0].value);
+      setActive(matches[0].value);
     } else if (event.key === "End") {
       event.preventDefault();
-      setActive(options[options.length - 1].value);
+      setActive(matches[matches.length - 1].value);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      settle(active);
+      // 高亮项不在可见行里就不结算（`active` 可能还停在过滤前的那一项上）。
+      if (index >= 0) settle(active);
     }
   };
 
@@ -421,8 +488,23 @@ function SaveToPicker({
    *
    * 根目录项的 `value` 是空串（它没有路径），所以回落到它的标签。
    */
-  const activeOption = options.find((option) => option.value === active);
+  const activeOption = matches.find((option) => option.value === active);
   const previewPath = active === INBOX_ROOT_VALUE ? INBOX_ROOT_LABEL : (activeOption?.value ?? "");
+
+  /**
+   * 命中处上色：与过滤**同一口径**，比的是标签（`filterSaveToOptions` 还比真路径；
+   * 只在真路径上命中的那种，完整路径就在下面的预览里，不会被藏起来）。
+   */
+  const paint = (text: string) =>
+    highlightRanges(text, substringRanges(text, query)).map((part, index) =>
+      part.hit ? (
+        <mark className="hit" key={index}>
+          {part.text}
+        </mark>
+      ) : (
+        part.text
+      ),
+    );
 
   return (
     <div className="save-to" ref={rootRef} onKeyDown={onKeyDown}>
@@ -435,7 +517,7 @@ function SaveToPicker({
         aria-expanded={open}
         aria-haspopup="listbox"
         disabled={disabled}
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={() => (open ? setOpen(false) : openList())}
       >
         <span className="truncate">{current?.label ?? INBOX_ROOT_LABEL}</span>
         <Icon name="chevronDown" size={13} className="save-to__caret" />
@@ -462,26 +544,44 @@ function SaveToPicker({
               // 列表与触发器**同宽对齐**（下拉的常规约定）；预览允许比它宽，见下。
               style={{ left: rect.left, top: rect.top, width: rect.width }}
             >
-              <div className="save-to__list" role="listbox" aria-label="保存到">
-                {options.map((option) => {
-                  const selected = option.value === value;
-                  const activeItem = option.value === active;
-                  return (
-                    <button
-                      key={option.value || "\u0000root"}
-                      type="button"
-                      role="option"
-                      aria-selected={selected}
-                      className={cn("save-to__item", activeItem && "is-active")}
-                      onClick={() => settle(option.value)}
-                      // 悬浮 = 高亮：`↑/↓` 与鼠标走同一套「当前项」，预览跟着它走。
-                      onMouseEnter={() => setActive(option.value)}
-                    >
-                      <span className="truncate">{option.label}</span>
-                      {selected ? <Icon name="check" size={13} /> : null}
-                    </button>
-                  );
-                })}
+              {/* 搜索框与列表同一个边框盒（`.save-to__panel`）：搜索框钉在上方、列表自己滚 ——
+                  与「移动到…」选择器同一个摆法，打字时浮层不会一截一截地伸缩。 */}
+              <div className="save-to__panel">
+                <input
+                  ref={attachSearch}
+                  className="field field--search save-to__search"
+                  type="text"
+                  aria-label="搜索文件夹"
+                  placeholder="搜索文件夹…"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+                {matches.length ? (
+                  <div className="save-to__list" role="listbox" aria-label="保存到">
+                    {matches.map((option) => {
+                      const selected = option.value === value;
+                      const activeItem = option.value === active;
+                      return (
+                        <button
+                          key={option.value || "\u0000root"}
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          className={cn("save-to__item", activeItem && "is-active")}
+                          onClick={() => settle(option.value)}
+                          // 悬浮 = 高亮：`↑/↓` 与鼠标走同一套「当前项」，预览跟着它走。
+                          onMouseEnter={() => setActive(option.value)}
+                        >
+                          <span className="truncate">{paint(option.label)}</span>
+                          {selected ? <Icon name="check" size={13} /> : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  // 与「移动到…」同一个说法：搜索没命中就直说，不留一个空框。
+                  <p className="tree__empty">没有找到「{query.trim()}」。</p>
+                )}
               </div>
               {/* 预览：完整路径，贴在列表**下方**（不是盖在列表项上 —— 浮层挡住鼠标底下
                   那一行，等于用户刚看到的内容被自己触发的预览吃掉）。

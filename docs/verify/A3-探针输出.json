@@ -1,0 +1,150 @@
+{
+  "probe": "A3 目录选择器三项（真机 Chrome + OPFS 假笔记本）",
+  "viewport": "1238x730 CSS px (window 1264x830, DPR 2)",
+  "dialog": {
+    "before": {
+      "dialogClass": "dialog dialog--tall",
+      "dialog": {
+        "top": 65.7,
+        "bottom": 664.3,
+        "height": 598.59,
+        "left": 339
+      },
+      "search": {
+        "top": 172.52,
+        "bottom": 200.52,
+        "height": 28,
+        "left": 356
+      },
+      "rowCount": 14,
+      "rowPads": [
+        "6px"
+      ],
+      "rowHeights": [
+        27
+      ],
+      "hits": 0
+    },
+    "after": {
+      "dialogClass": "dialog dialog--tall",
+      "dialog": {
+        "top": 65.7,
+        "bottom": 664.3,
+        "height": 598.59,
+        "left": 339
+      },
+      "search": {
+        "top": 172.52,
+        "bottom": 200.52,
+        "height": 28,
+        "left": 356
+      },
+      "rowCount": 14,
+      "rowPads": [
+        "6px"
+      ],
+      "rowHeights": [
+        43.74
+      ],
+      "hits": 16
+    },
+    "delta": {
+      "dialogHeight": 0,
+      "dialogTop": 0,
+      "searchTop": 0
+    }
+  },
+  "saveTo": {
+    "focused": true,
+    "all": {
+      "items": 30,
+      "hits": 0,
+      "active": "Agent 产出",
+      "preview": "Agent 产出",
+      "panel": {
+        "top": 315.3,
+        "height": 276
+      },
+      "search": {
+        "top": 322.3,
+        "height": 28
+      },
+      "empty": null
+    },
+    "flask": {
+      "items": 11,
+      "hits": 11,
+      "active": "看过的书 / PYTHON WEB DEVELOPMENT WITH FLASK",
+      "preview": "看过的书/PYTHON WEB DEVELOPMENT WITH FLASK",
+      "panel": {
+        "top": 315.3,
+        "height": 276
+      },
+      "search": {
+        "top": 322.3,
+        "height": 28
+      },
+      "empty": null
+    },
+    "看过的书/gopl": {
+      "items": 3,
+      "hits": 0,
+      "active": "看过的书 / gopl-zh",
+      "preview": "看过的书/gopl-zh",
+      "panel": {
+        "top": 315.3,
+        "height": 140
+      },
+      "search": {
+        "top": 322.3,
+        "height": 28
+      },
+      "empty": null
+    },
+    "排版": {
+      "items": 1,
+      "hits": 1,
+      "active": "读书笔记 / 技术 / 排版",
+      "preview": "读书笔记/技术/排版",
+      "panel": {
+        "top": 315.3,
+        "height": 76
+      },
+      "search": {
+        "top": 322.3,
+        "height": 28
+      },
+      "empty": null
+    },
+    "不存在的目录": {
+      "items": 0,
+      "hits": 0,
+      "active": null,
+      "preview": "",
+      "panel": {
+        "top": 315.3,
+        "height": 89.25
+      },
+      "search": {
+        "top": 322.3,
+        "height": 28
+      },
+      "empty": "没有找到「不存在的目录」。"
+    },
+    "final": {
+      "items": 15,
+      "hits": 15,
+      "active": "看过的书",
+      "preview": "看过的书",
+      "panel": {
+        "top": 315.3,
+        "height": 276
+      },
+      "search": {
+        "top": 322.3,
+        "height": 28
+      },
+      "empty": null
+    }
+  }
+}

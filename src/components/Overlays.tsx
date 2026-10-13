@@ -13,6 +13,7 @@ import {
 import { createStore, useStore } from "../lib/store";
 import { closeDialog, dialogStore, useDialogRequest, type FolderChoice } from "../lib/dialogs";
 import { folderChoiceTrail, folderChoiceTree, type FolderChoiceNode } from "../data/library";
+import { highlightRanges, substringRanges } from "../lib/fuzzy";
 import { getUi } from "../data/ui";
 import type { Id } from "../data/types";
 import { dismissToast, useToasts } from "../lib/toast";
@@ -282,6 +283,15 @@ export function DialogHost(): ReactNode {
  *    拍平成一行两段（名字 + 完整路径）—— 不同父目录下的同名目录，只有完整路径能区分。
  * 5. **置灰当前目录**（选中它是空操作），理由写在行内（「当前」两个字），
  *    不让用户白点一次再由数据层静默 return；`↑/↓` 只在**可见**行里走。
+ * 6. **定高 + 头部钉住**（2026-10-13 用户：「搜索文件夹，页面高度会变，希望固定头部，
+ *    类似于设置一样」）：对话框走 `.dialog--tall`（与设置、收件箱同一个高度，只写在一处），
+ *    正文区是列向 flex —— 说明句、搜索框、脚注都是 `flex: none`，**只有列表滚**。
+ *    在此之前对话框是内容高的：一打字结果变少，整块面板就跟着缩短，搜索框自己在屏幕上
+ *    上下跳（正是设置面板 0.3.3 被报过的同一个毛病，改法也照搬那一套）。
+ * 7. **命中项的排版**（2026-10-13 用户：「文件树需进行样式优化」）：搜索结果**没有层级可画**，
+ *    所以不再照 `depth` 缩进（那会让一串互不相干的目录看起来像层层嵌套），统一顶格；
+ *    第二行给完整路径，两者都按**与过滤同口径**的子串命中上 `<mark class="hit">` ——
+ *    用户打了「op」，得一眼看出每行是**哪儿**命中的。
  */
 function FolderDialog({
   title,
@@ -388,9 +398,27 @@ function FolderDialog({
   };
 
   /**
+   * 按**与过滤同一口径**的子串命中给一段文字上色（`substringRanges` 的区间，
+   * `highlightRanges` 切成片段）。搜索框里打的字在行内一定有对应的高亮 ——
+   * 否则「为什么这一行会出现」就只能靠用户自己猜。
+   */
+  const paint = (text: string) =>
+    highlightRanges(text, substringRanges(text, query)).map((part, index) =>
+      part.hit ? (
+        <mark className="hit" key={index}>
+          {part.text}
+        </mark>
+      ) : (
+        part.text
+      ),
+    );
+
+  /**
    * 画一行。树模式与搜索模式共用这一份：
    * - 树模式带 caret（有孩子才画）与开/合文件夹图标，缩进与左栏**同一个公式**（`6 + depth*13`）；
-   * - 搜索模式没有层级可画，第二段给完整路径（不同父目录下的同名目录，只有它能区分）。
+   * - 搜索模式没有层级可画，**一律顶格**（树模式的 `depth = 0` 那一档），第二段给完整路径
+   *   （不同父目录下的同名目录，只有它能区分），两段都按命中上色。
+   *   caret 位留着（空 span）：搜索与树两种摆法下，图标和文字落在同一列，来回切换不跳。
    */
   const renderRow = (row: { choice: FolderChoice; hasChildren: boolean; open: boolean }, stacked: boolean) => {
     const { choice, hasChildren, open } = row;
@@ -406,7 +434,7 @@ function FolderDialog({
         aria-disabled={choice.disabled ? true : undefined}
         aria-expanded={!stacked && hasChildren ? open : undefined}
         className={cn("tree__row", active && "is-active", choice.disabled && "is-dim", stacked && "tree__row--stacked")}
-        style={{ paddingLeft: 6 + choice.depth * 13 }}
+        style={{ paddingLeft: stacked ? 6 : 6 + choice.depth * 13 }}
         // 完整路径挂在 `title` 上：单段名在深层目录里会重名，缩进看不出谁是谁。
         title={choice.path || "笔记本根目录"}
         onClick={() => {
@@ -432,8 +460,17 @@ function FolderDialog({
           <Icon name={choice.id === null ? "layers" : open && hasChildren ? "folderOpen" : "folder"} size={14} />
         </span>
         <span className="tree__label">
-          {choice.label}
-          {stacked ? <span className="tree__note-snippet">{choice.path || "笔记本根目录"}</span> : null}
+          {/* 树模式：单行，名字就是全部；搜索模式：名字一段 + 完整路径一段（两段各自截断）。
+              名字那一层包 `.tree__label-main`，`.tree__label` 的 nowrap/ellipsis 才能逐行生效 ——
+              裸文本节点在块级子元素旁边会变成匿名块，省略号是不生效的。 */}
+          {stacked ? (
+            <>
+              <span className="tree__label-main">{paint(choice.label)}</span>
+              <span className="tree__note-snippet">{paint(choice.path || "笔记本根目录")}</span>
+            </>
+          ) : (
+            choice.label
+          )}
         </span>
         {choice.disabled ? <span className="tree__meta">当前</span> : null}
       </div>
@@ -443,6 +480,9 @@ function FolderDialog({
   return (
     <Modal
       title={title}
+      // 定高（`.dialog--tall`）：打字过滤时面板一个像素都不动，搜索框钉在原处。
+      // 与设置 / 收件箱共用同一个高度常量（`app.css` 只写在一处）。
+      tall
       onClose={onClose}
       footer={
         <>
@@ -458,15 +498,15 @@ function FolderDialog({
     >
       {message ? <p className="dialog__message">{message}</p> : null}
       {/* 搜索框与左栏的是同一个类（`.field--search`）：同样的放大镜、同样的高度。
-          焦点默认落在这里 —— 打开就能直接打字过滤，`↑/↓` 从这里接管高亮。 */}
+          焦点默认落在这里 —— 打开就能直接打字过滤，`↑/↓` 从这里接管高亮。
+          `flex: none`：它是钉住的头部，不许被列表挤扁（命令面板那个 48px→20px 的坑）。 */}
       <input
         ref={searchRef}
-        className="field field--search"
+        className="field field--search folder-picker__search"
         type="text"
         aria-label="搜索文件夹"
         placeholder="搜索文件夹…"
         value={query}
-        style={{ margin: "10px 0" }}
         onChange={(event) => setQuery(event.target.value)}
         onKeyDown={navigate}
       />
@@ -484,7 +524,9 @@ function FolderDialog({
       ) : (
         // 一个可选目标都没有：与其给一个点了什么都不发生的「移动」，不如直说为什么。
         // 「搜索没命中」与「根本没有别的文件夹」是两件事，各说各的。
-        <p className="tree__empty">
+        // `.folder-picker__empty` 占住列表那一格（`flex: 1`）并居中 —— 定高之后，
+        // 空结果不能让下半块面板变成一块没有内容的空白。
+        <p className="tree__empty folder-picker__empty">
           {searching ? `没有找到「${query.trim()}」。` : "还没有别的文件夹可以放。先在左侧新建一个文件夹，再回来移动。"}
         </p>
       )}

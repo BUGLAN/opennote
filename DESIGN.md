@@ -1317,7 +1317,8 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 
 | 变体 | 类名 | 差异 |
 | --- | --- | --- |
-| 树行 | `.tree__row` | 左侧 `.tree__caret`（14px，`.is-open` 转 90°）+ `.tree__icon` + `.tree__label`（省略号）+ `.tree__meta`（`--fs-xs` + tabular-nums）+ `.tree__extra`（**默认 `opacity: 0`，hover / 激活时才显形**） |
+| 树行 | `.tree__row` | 左侧 `.tree__caret`（14px，`.is-open` 转 90°）+ `.tree__icon` + `.tree__label`（省略号）+ `.tree__meta`（`--fs-xs` + tabular-nums）+ `.tree__extra`（**默认 `opacity: 0`，hover / 激活时才显形**）；**`flex: none`**——`.tree` 常常同时是滚动容器（`.folder-picker` 就是 `.folder-picker.tree`），定高 flex 列里默认的 `flex-shrink: 1` 会把行压扁去「塞进」高度（实测两行结果行被压到 27px、内容 33.74px，第二行被裁）。装不下是容器的事：让容器滚，不让行变形 |
+| 堆叠树行 | `.tree__row--stacked` | 双行：第一行 `.tree__label-main`（**必须包一层块级**，裸文本节点在块级兄弟旁边会被折成匿名块，`.tree__label` 的省略号对它不生效）+ 第二行 `.tree__note-snippet`（`--fs-xs` + `--ink-3`）；`align-items: flex-start` 且 `> .tree__caret` / `> .tree__icon` 各 `margin-top: 3px`（顶到**第一行**的中线，不是飘在两行之间） |
 | 折叠组头 | `.tree__group` | `--fs-xs` + `--tracking-wide` + uppercase + `--ink-3`，`::after` 一条 `flex: 1` 的 1px `--rule` 横线填满右侧 |
 | 大纲行 | `.outline__item` | `--fs-sm`、`padding: 3px 8px`、左 2px 透明边；`.is-current` 时字 `--accent` + 左边 `--accent` + 底 `--accent-soft` |
 | 历史条目 | `.history__item` | `--fs-sm`、`padding: 7px 9px`，内部 `<time>` 用 `--fs-xs` + `--ink-3` 单独一行 |
@@ -1338,7 +1339,7 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 | 对话框 | `.dialog` | `--paper-2` 底 + `--rule-strong` 边 + `--radius` + `--shadow-3`；宽 `min(560px, 100vw - 32px)`、高 `min(82vh, 760px)`；`pop 220ms` |
 | 宽对话框 | `.dialog--wide` | 760px（收件箱、历史） |
 | 设置对话框 | `.dialog--settings` | 900px |
-| 定高对话框 | `.dialog--tall` | `height: min(600px, calc(100vh - 96px))`，**设置与收件箱共用**，只写在这一处 |
+| 定高对话框 | `.dialog--tall` | `height: min(600px, calc(100vh - 96px))`，**设置 / 收件箱 /「移动到…」共用**，只写在这一处；配 `.dialog--tall .dialog__body { display: flex; flex-direction: column }`，定高的头部（搜索框 / 说明句 / 脚注）写 `flex: none`、滚动区写 `flex: 1 1 auto; min-height: 0` —— 打字过滤时面板一个像素都不动 |
 | 命令面板 | `.palette` | `min(620px, 100vw - 32px)`、高 `min(66vh, 640px)`、`--radius`；**顶部锚定**（`.overlay-root--palette`，`place-items: start center` + `padding-top: max(24px, 17vh)`）：高度随结果条数变，打字时输入框不动，变短只朝下收缩；输入框 h56 / 15px 且 **`flex: none`**（见下）；脚注一行 `kbd` + `--fs-xs` |
 | 右键菜单 | `.menu` | `min-width: 190px`、`padding: 5px`、`--radius`、`--shadow-2`、`pop 120ms`，`z-index: 80` |
 | 工作区下拉 | `.workspace__menu` | 贴 `.sidebar__workspace` 绝对定位，`top: 40px`（8px 容器上 padding + 30px 按钮 + 2px 缝），左右各留 `--s3`，`max-height: 62vh`，`--shadow-3` |
@@ -1348,7 +1349,8 @@ hover：--paper-3 底 + --ink 字 + 图标转 --accent
 **滚动归谁**（这是本项目踩过坑的地方）：
 - **不要让 `.dialog__body` 整块滚**：定高面板里，左侧分类栏 / 条目列表会跟着滚上去。做法是让内层容器撑满定高、**各自滚动**（`.settings__pane`、`.inbox__list`、`.inbox__detail`）。
 - 两栏面板的 grid 行高必须是 `grid-template-rows: minmax(0, 1fr)`，否则行高由最长的那一栏决定，切筛选 / 切条目时面板尺寸会跳（表现为「闪」）。
-- **列向 flex 里，有固定高度的子项必须写 `flex: none`**。`.palette` 是 `flex-direction: column` + `max-height`，`.palette__list` 是 `flex: 1`；结果一多（60 项）容器顶到 `max-height` 时，**唯一还有基础高度的输入框**会被压到自己的自动最小高度（实测 48px → 20px，文字贴着上下边框）。这条不只影响命令面板：任何「定高容器 + 一个 `flex: 1` 的滚动区 + 一个定高头部」的组合都要显式 `flex: none`。
+- **列向 flex 里，有固定高度的子项必须写 `flex: none`**。`.palette` 是 `flex-direction: column` + `max-height`，`.palette__list` 是 `flex: 1`；结果一多（60 项）容器顶到 `max-height` 时，**唯一还有基础高度的输入框**会被压到自己的自动最小高度（实测 48px → 20px，文字贴着上下边框）。这条不只影响命令面板：任何「定高容器 + 一个 `flex: 1` 的滚动区 + 一个定高头部」的组合都要显式 `flex: none`。同一条也管**内容**：`.folder-picker` 既是 `.tree`（列向 flex）又是滚动容器，行不许被压扁 —— `.tree__row` 写死 `flex: none`（见 §列表与行）。
+- **「定高的搜索框 + 只滚的列表」是本项目选择器的统一摆法**（`FolderDialog` 的 `.folder-picker__search`、`SaveToPicker` 的 `.save-to__search`）：搜索框 `flex: none` 钉住，列表 `flex: 1 / max-height` 自己滚，空结果用 `flex: 1` + 居中的一句实话占住那一格。理由：过滤会让结果条数实时变，头部跟着动的话输入框会在屏幕上跳（设置面板 0.3.3、目录选择器 2026-10-13 各报过一次）。
 
 ### 反馈
 

@@ -989,7 +989,9 @@ function NoteRow({
         <Icon name="note" size={14} />
       </span>
       <span className="tree__label">
-        {note.title}
+        {/* 标题包一层 `.tree__label-main`：`tree__row--stacked` 里它是**第一行**，
+            裸文本节点在块级摘要旁边会被折成匿名块，省略号对它不生效（见 app.css）。 */}
+        <span className="tree__label-main">{note.title}</span>
         {variant === "list" ? <span className="tree__note-snippet">{excerpt(note.content, 80)}</span> : null}
       </span>
       <span className="tree__extra">
@@ -1302,7 +1304,7 @@ function SearchBody({
                 <Icon name="note" size={14} />
               </span>
               <span className="tree__label">
-                {hit.note.title}
+                <span className="tree__label-main">{hit.note.title}</span>
                 <span className="tree__note-snippet">{hit.snippet}</span>
               </span>
             </button>

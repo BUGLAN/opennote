@@ -91,6 +91,28 @@ export function fuzzyRank<T>(
   return out.slice(0, limit);
 }
 
+/**
+ * 「按子串过滤」的命中区间（大小写不敏感，**全部**命中都算）。
+ *
+ * 与 `fuzzyMatch()` 的分工：那个是**子序列**匹配（`glz` 能命中 `gopl-zh`），给命令面板的
+ * 模糊排序用；目录选择器（`Overlays.tsx` 的 `FolderDialog`）与「保存到」下拉
+ * （`InboxPanel.tsx` 的 `SaveToPicker`）沿用「包含才算命中」的老口径 —— 目录名是路径的
+ * 一段，模糊命中会把 `看过的书/PYTHON WEB…` 这类长路径打成一片噪音。
+ *
+ * 高亮必须与过滤**同一口径**：过滤按包含、高亮按子序列的话，会出现「这一行明明命中了，
+ * 却没有一处被标出来」的自相矛盾（反过来更糟：标出来的字符根本不连续）。
+ */
+export function substringRanges(text: string, query: string): [number, number][] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const haystack = text.toLowerCase();
+  const out: [number, number][] = [];
+  for (let at = haystack.indexOf(q); at >= 0; at = haystack.indexOf(q, at + q.length)) {
+    out.push([at, at + q.length]);
+  }
+  return out;
+}
+
 /** Highlight helper: merge ranges into `[start, end]` pairs safe for slicing. */
 export function highlightRanges(text: string, ranges: [number, number][]): { text: string; hit: boolean }[] {
   if (!ranges.length) return [{ text, hit: false }];
