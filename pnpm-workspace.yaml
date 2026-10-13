@@ -5,6 +5,9 @@ allowBuilds:
   '@parcel/watcher': true
   electron: true
   electron-winstaller: true
+  # tsx（服务端开发用的 TS 运行器）依赖 esbuild 的原生二进制；不允许它的安装脚本，
+  # `pnpm dev:server` 会直接起不来。它只在开发期用，不进任何产物。
+  esbuild: true
 
 # 上游 bug 的定点修正（2026-10-01 定位，改动前 `pnpm package:desktop` 必失败）：
 #   app-builder-lib@26.15.3 声明依赖 `@electron/get@^3.0.0`，但代码里调用的是只有

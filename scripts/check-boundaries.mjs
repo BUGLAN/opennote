@@ -40,27 +40,39 @@ async function walk(dir) {
   return out;
 }
 
-/** 一条规则：哪些文件里不许出现什么。 */
+/**
+ * 一条规则：哪些文件里不许出现什么。
+ *
+ * ⚠️ 这里**必须匹配「代码」而不是「文本」**。第一版把 B3 写成裸的 `/@noble\//`，
+ * 结果它拦住了服务端里**解释这条规则本身的注释**（"服务端里也不允许出现 @noble/*"）——
+ * 那会逼人**不再写这条注释**，正好把护栏的说明书拆掉。
+ * 现在 B1–B3 都要求出现 `from` / `import` / `require` 这类**加载语法**。
+ */
 const RULES = [
   {
     id: "B1",
     files: () => walk(join(root, "src")),
-    // `../server/` 与 `../../server/` 都要抓（深浅不同）。
-    pattern: /from\s+["'][^"']*\/server\//,
+    // `from "../server/…"` 与 `from "../../server/…"` 都要抓（深浅不同）。
+    pattern: /(?:from|import|require)\s*\(?\s*["'][^"']*\/server\//,
     message: "src/ 里不许 import server/（服务端代码会被打进前端产物）",
   },
   {
     id: "B2",
     files: () => walk(join(root, "server")),
-    pattern: /from\s+["'][^"']*\/src\//,
+    pattern: /(?:from|import|require)\s*\(?\s*["'][^"']*\/src\//,
     message: "server/ 里不许 import src/（客户端代码会进 Node 进程）",
   },
   {
     id: "B3",
     files: () => walk(join(root, "server")),
-    // 红线 3：服务端不做加解密。`@noble/*` 只进客户端构建。
-    pattern: /@noble\//,
-    message: "server/ 里不许出现 @noble/*（红线 3：服务端不得有加解密能力）",
+    /*
+     * 红线 3：服务端不做加解密。`@noble/*` 只进客户端构建。
+     *
+     * **只拦真正的加载**（`from "@noble/…"` / `require("@noble/…")`）—— 见上面的说明：
+     * 把「提到这个名字」也拦掉，会让人不敢在注释里写这条规则。
+     */
+    pattern: /(?:from|import|require)\s*\(?\s*["']@noble\//,
+    message: "server/ 里不许 import @noble/*（红线 3：服务端不得有加解密能力）",
   },
   {
     id: "B4",
