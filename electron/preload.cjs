@@ -194,6 +194,22 @@ const bridge = {
     persisted: () => invoke('opennote:sync:keyPersisted'),
   },
 
+  /**
+   * 远端同步请求的代理（§5.5）。
+   *
+   * ★ 这里**没有** `fetch(url)` 这样的方法，只有 `request({method, relPath, …})` ——
+   * 「通用出网」在接口形状上就写不出来。base URL 由 `configure()` 定死，
+   * 而 `configure()` 会弹**原生确认框**（网页里的按钮 XSS 点得到，原生对话框不行）。
+   */
+  syncProxy: {
+    /** 设置同步服务地址（换主机时会弹原生确认）。 */
+    configure: (baseUrl) => invoke('opennote:sync:configureProxy', baseUrl),
+    /** 把派生好的令牌交给主进程（之后逐请求由主进程贴，渲染层不再传）。 */
+    setAuthToken: (token) => invoke('opennote:sync:setAuthToken', token),
+    /** 发一个**相对**请求。 */
+    request: (input) => invoke('opennote:sync:proxyRequest', input),
+  },
+
   app: {
     getRecentWorkspaces: () => invoke('opennote:app:getRecentWorkspaces'),
     addRecentWorkspace: (absolutePath) => invoke('opennote:app:addRecentWorkspace', absolutePath),
