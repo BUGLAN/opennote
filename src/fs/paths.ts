@@ -26,6 +26,9 @@ export {
   foldCaseKey,
   idForPath,
   isHiddenPath,
+  isImagePath,
+  isMarkdownPath,
+  isMaterializable,
   isValidPathDocId,
   joinPath,
   normalizeNfc,
@@ -48,14 +51,6 @@ export const STATE_FILE = ".opennote/state.json";
 export const HISTORY_DIR = ".opennote/history";
 export const TRASH_DIR = ".opennote/trash";
 export const INBOX_DIR = ".opennote/inbox";
-
-export function isMarkdownPath(path: string): boolean {
-  return /\.(md|markdown|mdown|mkd|txt)$/i.test(path);
-}
-
-export function isImagePath(path: string): boolean {
-  return /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(path);
-}
 
 /** 人类可读的时间戳（列表里展示「最后修改」用）。 */
 export function formatStamp(ms: number): string {

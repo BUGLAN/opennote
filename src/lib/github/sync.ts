@@ -4,13 +4,14 @@
  * **判据只有一个来源**：基线（`.opennote/github.json`）里每个文件的
  * `localHash`（本地改没改）与 `remoteSha`（远端改没改）。
  *
- * ```
- *            本地改了   远端改了     推送时           拉取时
- *   否          否       不动             不动
- *   是          否       提交并推送       不动
- *   否          是       不动             覆盖本地
- *   是          是       ——（先拉取）     冲突，跳过并列出
- * ```
+ * ▍纯 diff 实现已搬到 `src/sync/diff.ts`（2026-10-13 单仓改造，§1.6、附录 A.3）
+ *
+ * `planPush` / `planPull` / `pushIsEmpty` / `LocalFile` 的**实现**现在只有一份，
+ * 在 `src/sync/diff.ts` —— 新的 `opennote` provider 与这里的 GitHub 通道共用同一套收敛判据。
+ * 本文件保留同名导出（薄封装：把 `GithubTree` 的 `{path, sha}` 映射成中性的
+ * `{path, hash}`），于是既有调用方（`src/App.tsx` 与 `sync.test.ts`）一行不用改。
+ *
+ * **「语义没变」由现有 GitHub 测试套件全绿来证明**，不由这里的声明证明。
  *
  * 三条硬纪律：
  * 1. **只动我们物化过的文件**（`imported:true`）与**本地新建**的文件；
@@ -27,20 +28,18 @@ import type { FileSystemBackend } from "../../fs/types";
 import { sha256Hex } from "../clip/hash";
 import { GithubError, type GithubApi, type GithubTree } from "./api";
 import type { GithubBaseline } from "./baseline";
-import { isMaterializable } from "./importRepo";
 
-/** 推送的候选：一个本地文件的当前状态。 */
-export interface LocalFile {
-  path: string;
-  hash: string;
-  bytes: number;
-}
+import {
+  planPull as planPullNeutral,
+  planPush as planPushNeutral,
+  pushIsEmpty,
+  type LocalFile,
+  type PullPlan,
+  type PushPlan,
+} from "../../sync/diff";
 
-export interface PushPlan {
-  added: LocalFile[];
-  modified: LocalFile[];
-  deleted: string[];
-}
+export { pushIsEmpty };
+export type { LocalFile, PullPlan, PushPlan };
 
 /**
  * 纯函数：基线 + 本地现状 → 推送计划。
@@ -50,92 +49,25 @@ export interface PushPlan {
  * 都可能改 mtime 而不改内容，用 mtime 会让整棵仓库每次都被判成「改过」。
  */
 export function planPush(baseline: GithubBaseline, local: LocalFile[]): PushPlan {
-  const localByPath = new Map(local.map((file) => [file.path, file]));
-  const added: LocalFile[] = [];
-  const modified: LocalFile[] = [];
-  const deleted: string[] = [];
-
-  for (const file of local) {
-    const known = baseline.files[file.path];
-    if (!known) {
-      added.push(file);
-      continue;
-    }
-    if (known.localHash !== file.hash) modified.push(file);
-  }
-  for (const [path, known] of Object.entries(baseline.files)) {
-    if (!known.imported) continue; // 没物化过的东西绝不当作「用户删了」
-    if (localByPath.has(path)) continue;
-    deleted.push(path);
-  }
-  return { added, modified, deleted };
-}
-
-export function pushIsEmpty(plan: PushPlan): boolean {
-  return plan.added.length === 0 && plan.modified.length === 0 && plan.deleted.length === 0;
-}
-
-export interface PullPlan {
-  /** 远端新增或远端已改、且本地没动 —— 可以直接覆盖本地。 */
-  download: { path: string; sha: string }[];
-  /** 远端删了、本地没动 —— 可以删本地。 */
-  removeLocal: string[];
-  /** 两边都改了（含「本地删了 / 远端改了」）：**不动**，列出来给人看。 */
-  conflicts: { path: string; reason: "both-modified" | "deleted-locally-modified-remotely" | "deleted-remotely-modified-locally" }[];
+  return planPushNeutral(baseline, local);
 }
 
 /**
  * 纯函数：基线 + 远端树 + 本地现状 → 拉取计划。
+ *
+ * ⚠️ 只是把 GitHub 的 `{path, sha}` 映射成中性的 `{path, hash}`，**判定逻辑一个字没改**
+ * （在 `src/sync/diff.ts`）。`truncated` 由调用方处理（§6.4 规则 1）。
  *
  * **只有「该物化的路径」才可能进 `download`**（判据是 `isMaterializable()`，与导入同一份）：
  * 基线里那些故意只记账的源码/配置（`imported:false`）**永远不落地** —— 否则一次拉取就会把
  * 仓库源码写进笔记本，而下一次推送又把它当成新笔记推回去。
  */
 export function planPull(baseline: GithubBaseline, remote: GithubTree, local: LocalFile[]): PullPlan {
-  const localByPath = new Map(local.map((file) => [file.path, file]));
-  const remoteByPath = new Map(remote.entries.map((entry) => [joinPath(entry.path), entry]));
-  const download: PullPlan["download"] = [];
-  const removeLocal: string[] = [];
-  const conflicts: PullPlan["conflicts"] = [];
-
-  for (const [path, entry] of remoteByPath) {
-    const known = baseline.files[path];
-    const localFile = localByPath.get(path);
-    const remoteChanged = !known || known.remoteSha !== entry.sha;
-    if (!remoteChanged) continue;
-
-    if (!isMaterializable(path)) continue; // 源码 / 配置：只更新下面那一轮账本，绝不落地
-    if (!known || !known.imported) {
-      /*
-       * 两种情况都直接拉：
-       * - 远端新增的笔记或图片：没有本地改动可言；
-       * - **上次没物化成功的**（超上限 / 取字节失败）：`localHash` 是 null、本地也确实没有这个文件，
-       *   那不是「用户删了它」—— 这里给它一次重试机会（拉下来之后 `localHash` 才成为真值）。
-       */
-      download.push({ path, sha: entry.sha });
-      continue;
-    }
-    if (!localFile) {
-      // 物化过的文件被本地删了，远端又改了它：两边都动了，只能问人
-      conflicts.push({ path, reason: "deleted-locally-modified-remotely" });
-      continue;
-    }
-    const localChanged = localFile.hash !== known.localHash;
-    if (localChanged) conflicts.push({ path, reason: "both-modified" });
-    else download.push({ path, sha: entry.sha });
-  }
-
-  for (const [path, known] of Object.entries(baseline.files)) {
-    if (!known.imported) continue;
-    if (remoteByPath.has(path)) continue;
-    const localFile = localByPath.get(path);
-    if (!localFile) continue; // 两边都没了
-    const localChanged = localFile.hash !== known.localHash;
-    if (localChanged) conflicts.push({ path, reason: "deleted-remotely-modified-locally" });
-    else removeLocal.push(path);
-  }
-
-  return { download, removeLocal, conflicts };
+  return planPullNeutral(
+    baseline,
+    { truncated: remote.truncated, entries: remote.entries.map((entry) => ({ path: joinPath(entry.path), hash: entry.sha })) },
+    local,
+  );
 }
 
 /* ------------------------------------------------------------ 本地现状扫描 */

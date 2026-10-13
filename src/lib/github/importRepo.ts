@@ -10,7 +10,7 @@
  * 同步时一律跳过）。这条规则同时解释了「为什么导入一个代码仓库不会把整个仓库抄下来」。
  */
 
-import { isImagePath, isMarkdownPath, joinPath } from "../../fs/paths";
+import { isImagePath, isMaterializable, joinPath } from "../../fs/paths";
 import type { FileSystemBackend } from "../../fs/types";
 import { sha256Hex } from "../clip/hash";
 import type { GithubTree } from "./api";
@@ -28,15 +28,13 @@ export const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const IMPORT_CONCURRENCY = 12;
 
 /**
- * 「这个路径该不该被物化」——**唯一产地**。
+ * 「这个路径该不该被物化」——实现已搬到 `shared/paths.ts`（`isMaterializable`），
+ * 这里只 re-export，保持既有 import 路径不变。
  *
- * 导入与拉取必须用同一条判据：只认笔记（`.md`/`.txt` 一族）与图片，其余（源码、配置、CI…）
- * 只进基线账本、永不落地。这条判据曾经在 `planPull()` 里漏成「只要远端 sha 变了就下载」，
+ * ⚠️ **导入与拉取必须共用同一条**：这条判据曾经在 `planPull()` 里漏成「只要远端 sha 变了就下载」，
  * 后果不是多下几个文件，而是**把仓库源码写进笔记本、下一次推送又把它当成笔记推回去**。
  */
-export function isMaterializable(path: string): boolean {
-  return isMarkdownPath(path) || isImagePath(path);
-}
+export { isMaterializable };
 
 export interface ImportPlan {
   /** 要拉下来并落地的文件（按路径排序，进度可复现）。 */

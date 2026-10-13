@@ -278,6 +278,29 @@ export function foldCaseKey(path: string): string {
   return normalizePath(path).toLowerCase();
 }
 
+/** 笔记类文件（`.md` 一族与 `.txt`）。 */
+export function isMarkdownPath(path: string): boolean {
+  return /\.(md|markdown|mdown|mkd|txt)$/i.test(path);
+}
+
+/** 图片（附件里最常见的一类，要用 `writeBytes` 而不是 `writeText`）。 */
+export function isImagePath(path: string): boolean {
+  return /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(path);
+}
+
+/**
+ * 「这个路径该不该被物化到本地」——**唯一产地**。
+ *
+ * 只认笔记与图片；其余（源码、配置、CI…）只进基线账本、**永不落地**。
+ * 这条判据曾经在 `planPull()` 里漏成「只要远端 sha 变了就下载」，后果不是多下几个文件，
+ * 而是**把仓库源码写进笔记本、下一次推送又把它当成新笔记推回去**。
+ *
+ * 放在 `shared/` 是因为**导入与拉取必须共用同一条**，而它们在单仓下本来就该是同一份。
+ */
+export function isMaterializable(path: string): boolean {
+  return isMarkdownPath(path) || isImagePath(path);
+}
+
 export interface CaseFoldCollision {
   /** 折叠后相同的两个路径（按原样返回，不修改）。 */
   a: string;
