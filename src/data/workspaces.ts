@@ -21,8 +21,84 @@ import {
   type FileSystemBackend,
 } from "../fs";
 import { uid } from "../lib/utils";
+import type { CryptoMode } from "../../shared/contract";
 
 const STORAGE_KEY = "opennote.workspaces.v1";
+
+/**
+ * 工作区的同步配置（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §5.3「后端/同步选择的唯一接缝」）。
+ *
+ * ## 三条纪律
+ *
+ * 1. **默认关**（§5.3 原文：「**默认关**」）。同步是**旁路**（§5.1）——
+ *    不开就不碰网络、不发任何请求。所以「读到一个坏值」时的正确退化是
+ *    **关掉**，而不是猜一个配置去连。
+ * 2. **`accountRef` 是引用，不是密钥。** 账号密钥由 `src/sync/keys.ts` 保管
+ *    （桌面端在主进程里），这里只放一个指向它的标识 —— 工作区记录会进 `localStorage`，
+ *    把密钥放进来等于把它放进一个可被 XSS 读的地方。
+ * 3. **`enabled: true` 但没有可用的 `baseUrl`/`notebookId` ⇒ 视为关。**
+ *    半配好的同步**绝不能**跑起来：那会往一个没验证过的地址发数据。
+ */
+export interface WorkspaceSyncConfig {
+  enabled: boolean;
+  /** 同步服务的公开地址（`https://notes.example.com`）。 */
+  baseUrl: string;
+  notebookId: string;
+  cryptoMode: CryptoMode;
+  /** 账号的**引用**（不是密钥本身）。 */
+  accountRef: string;
+}
+
+/** 关掉的同步（也是所有坏值的退化目标）。 */
+export const DISABLED_SYNC: WorkspaceSyncConfig = {
+  enabled: false,
+  baseUrl: "",
+  notebookId: "",
+  cryptoMode: "none",
+  accountRef: "",
+};
+
+/**
+ * 把一个**来路不明**的值规范化成一份可用的同步配置。
+ *
+ * 为什么必须有它：`load()` 是把 `localStorage` 里的 JSON **直接断言**成
+ * `WorkspaceRecord[]` 的（没有逐字段校验）。加了一个嵌套对象之后，
+ * `record.sync.enabled` 在一个坏记录上会是 `undefined` ——
+ * 而 `undefined` 在真值判断里是假，看着「恰好安全」，
+ * 但 `record.sync` 本身可能是 `"yes"` 这种字符串，于是 `record.sync.enabled` 直接抛。
+ *
+ * 所以这里逐字段校验，并且**任何一处不成立就退回「关」**。
+ */
+export function normalizeSyncConfig(raw: unknown): WorkspaceSyncConfig {
+  if (raw === null || typeof raw !== "object") return { ...DISABLED_SYNC };
+  const value = raw as Record<string, unknown>;
+
+  // 只有**恰好** `true` 才算开 —— 坏值不许把同步意外打开。
+  const wantsEnabled = value.enabled === true;
+  const baseUrl = typeof value.baseUrl === "string" ? value.baseUrl.trim() : "";
+  const notebookId = typeof value.notebookId === "string" ? value.notebookId.trim() : "";
+  const accountRef = typeof value.accountRef === "string" ? value.accountRef : "";
+  const cryptoMode: CryptoMode = value.cryptoMode === "user-key" ? "user-key" : "none";
+
+  // 地址必须是 http/https（`javascript:` / `file:` 之类的值不许被当成服务地址）。
+  const usableUrl = (() => {
+    if (!baseUrl) return false;
+    try {
+      const parsed = new URL(baseUrl);
+      return parsed.protocol === "https:" || parsed.protocol === "http:";
+    } catch {
+      return false;
+    }
+  })();
+
+  /*
+   * ★ 半配好的同步视为**关**。
+   * 缺 notebookId 就没法知道同步哪个笔记本；地址不可用就没法知道发给谁 ——
+   * 这两种情况下「跑起来」都意味着往一个没验证过的目的地发数据。
+   */
+  const enabled = wantsEnabled && usableUrl && notebookId !== "";
+  return { enabled, baseUrl, notebookId, cryptoMode, accountRef };
+}
 
 export interface WorkspaceRecord {
   id: string;
@@ -38,6 +114,10 @@ export interface WorkspaceRecord {
   location: string;
   addedAt: number;
   lastOpenedAt: number;
+  /**
+   * 这个工作区的同步配置（§5.3）。**可选**：老记录里没有它，`normalizeSyncConfig` 会补上「关」。
+   */
+  sync?: WorkspaceSyncConfig;
 }
 
 interface RegistryState {
@@ -54,7 +134,13 @@ function load(): RegistryState {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { workspaces: [], activeId: null };
     const parsed = JSON.parse(raw) as Partial<RegistryState>;
-    const workspaces = Array.isArray(parsed.workspaces) ? (parsed.workspaces as WorkspaceRecord[]) : [];
+    const workspaces = Array.isArray(parsed.workspaces)
+      ? (parsed.workspaces as WorkspaceRecord[]).map((record) => ({
+          ...record,
+          // 坏值一律退化成「关」（见 `normalizeSyncConfig` 的说明）。
+          sync: normalizeSyncConfig((record as { sync?: unknown } | null)?.sync),
+        }))
+      : [];
     return { workspaces, activeId: parsed.activeId ?? null };
   } catch {
     return { workspaces: [], activeId: null };
