@@ -994,25 +994,77 @@ group("§4 前像 / 导入日志 / 幂等索引");
 
 group("§5 本地桥与安全");
 
-// B-1 零新依赖
+/*
+ * B-1 零新依赖 —— **收窄到「本地桥自己用了什么」**
+ *
+ * ## 为什么改（这是一次明确的决定，不是为了让某次改动通过而放宽）
+ *
+ * 原来的实现拿**整个 `package.json`** 与固定快照 `BASELINE` 比。
+ * 而同步方案 §4.9 **明确决定**引入 `@noble/ciphers` + `@noble/hashes`，
+ * 服务端也需要 `@hono/node-server` —— 于是这道门禁从那一刻起就必然红，
+ * 而且**它红的原因与它想守的东西无关**。
+ *
+ * 一条「因为无关原因长期变红」的门禁比没有门禁更坏：它会训练人习惯性忽略它。
+ *
+ * ## 收窄后守的是什么（**比原来更强，也更稳**）
+ *
+ * 原来的意图是「本地桥不要长出新依赖」。而桥**现在一个第三方包都不用**
+ * （只 `require` `node:http` / `node:crypto` / `node:fs` / `node:path` 与本地 `./clip-stage.cjs`）。
+ * 所以直接把那个性质写出来：**桥及其本地依赖闭包里，不许出现任何非 Node 内建的裸模块名。**
+ *
+ * 好处有两条：① 它不随 `package.json` 变化而漂移，只在**桥真的引入了第三方包**时红；
+ * ② 它比「与基线快照比」更强 —— 基线里本来就有 `zod`，旧写法允许桥去 require 它，
+ * 新写法不允许（桥是个安全敏感面，不该因为「这个包反正已经装了」就放行）。
+ */
 {
-  const head = git(["show", `${BASELINE}:package.json`]);
-  const now = readIfExists("package.json");
-  let same = false;
-  let detail = "package.json 不可读";
-  if (head && now) {
-    try {
-      const a = JSON.stringify(JSON.parse(head).dependencies || {});
-      const b = JSON.stringify(JSON.parse(now).dependencies || {});
-      const devA = JSON.stringify(JSON.parse(head).devDependencies || {});
-      const devB = JSON.stringify(JSON.parse(now).devDependencies || {});
-      same = a === b && devA === devB;
-      detail = same ? `dependencies 与 devDependencies 与 ${BASELINE} 完全一致` : `dependencies 变化: ${a !== b}; devDependencies 变化: ${devA !== devB}`;
-    } catch (error) {
-      detail = `解析失败: ${error.message}`;
+  /** Node 内建：`node:` 前缀，以及几个老式裸名。 */
+  const BUILTINS = new Set([
+    "assert", "buffer", "child_process", "cluster", "console", "constants", "crypto", "dgram",
+    "diagnostics_channel", "dns", "domain", "events", "fs", "http", "http2", "https", "module",
+    "net", "os", "path", "perf_hooks", "process", "punycode", "querystring", "readline",
+    "repl", "stream", "string_decoder", "timers", "tls", "trace_events", "tty", "url", "util",
+    "v8", "vm", "wasi", "worker_threads", "zlib",
+  ]);
+
+  /** 从一份源码里取出所有裸模块名（`require("x")` / `import … from "x"` / `import("x")`）。 */
+  const bareSpecifiers = (source) => {
+    const out = [];
+    for (const m of String(source).matchAll(/(?:require\s*\(\s*|from\s+|import\s*\(\s*)["']([^"']+)["']/g)) {
+      const spec = m[1];
+      if (spec.startsWith(".") || spec.startsWith("/")) continue; // 本地文件，不是依赖
+      if (spec.startsWith("node:") || BUILTINS.has(spec.split("/")[0])) continue;
+      out.push(spec);
     }
-  }
-  check("BR-1", "桥零新依赖（dependencies / devDependencies 未变）", same, detail, detail);
+    return out;
+  };
+
+  /** 从入口出发，沿**相对** require 走一遍，拿到桥的本地模块闭包。 */
+  const collectBridgeClosure = (entry) => {
+    const seen = new Set();
+    const queue = [entry];
+    const offenders = [];
+    while (queue.length > 0) {
+      const rel = queue.shift();
+      if (seen.has(rel)) continue;
+      seen.add(rel);
+      const source = readIfExists(rel);
+      if (source === null) continue;
+      for (const spec of bareSpecifiers(source)) offenders.push({ file: rel, spec });
+      for (const m of source.matchAll(/require\s*\(\s*["'](\.[^"']+)["']\s*\)/g)) {
+        queue.push(path.posix.normalize(path.posix.join(path.posix.dirname(rel), m[1])));
+      }
+    }
+    return { files: [...seen], offenders };
+  };
+
+  const { files, offenders } = collectBridgeClosure("electron/bridge.cjs");
+  const same = offenders.length === 0 && files.length >= 2;
+  const detail = same
+    ? `桥的本地闭包（${files.length} 个文件：${files.join("、")}）只 require Node 内建与本地文件，零第三方依赖`
+    : files.length < 2
+      ? `没能读到桥的源码（读到 ${files.length} 个文件）—— 检查器自身失效，按失败处理`
+      : `桥引入了第三方依赖：${offenders.map((o) => `${o.spec}（${o.file}）`).join("、")}`;
+  check("BR-1", "桥零第三方依赖（桥及其本地依赖闭包只 require Node 内建与本地文件）", same, detail, detail);
 }
 
 // B-2/B-3 监听地址与端口（先剥掉注释，避免文档注释里的反例被当成实现）
