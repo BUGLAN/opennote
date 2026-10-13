@@ -487,35 +487,54 @@ describe("D25 规模：分组索引与并发扫描", () => {
     const folderIds = Object.keys(state.folders);
     const rounds = 5;
 
-    const indexedStart = performance.now();
-    for (let round = 0; round < rounds; round += 1) {
-      for (const id of folderIds) {
-        childFolders(state, id);
-        notesInFolder(state, id, { sort: "updated" });
-        folderStats(state, id);
+    /*
+     * ⚠️ 这是一条**性能对比**断言，而单次 `performance.now()` 的读数对
+     * 「一次 GC 停顿」或「调度器把这一轮切走」毫无抵抗力 —— 实测它在整套跑时会偶发失败
+     * （`expected 75.9 to be less than 65.4`：两个数**都**远大于真实值，
+     * 说明是环境噪声、不是算法退化）。
+     *
+     * 改成**多批取最优**：真实倍率是几十倍，任何一批只要没被噪声打中就能体现出来。
+     * 取最优而不是平均，是因为噪声只会让某一批**变慢**、不会让它变快。
+     */
+    const measure = (work: () => void): number => {
+      let best = Number.POSITIVE_INFINITY;
+      for (let batch = 0; batch < 7; batch += 1) {
+        const start = performance.now();
+        work();
+        best = Math.min(best, performance.now() - start);
       }
-    }
-    const indexedMs = performance.now() - indexedStart;
+      return best;
+    };
+
+    const indexedMs = measure(() => {
+      for (let round = 0; round < rounds; round += 1) {
+        for (const id of folderIds) {
+          childFolders(state, id);
+          notesInFolder(state, id, { sort: "updated" });
+          folderStats(state, id);
+        }
+      }
+    });
 
     // The pre-fix shape of the same work: rebuild the descendant set from all
     // folders and walk all notes once per folder, per round.
     const notes = Object.values(state.notes);
     const folders = Object.values(state.folders);
-    const naiveStart = performance.now();
-    for (let round = 0; round < rounds; round += 1) {
-      for (const id of folderIds) {
-        const scope = new Set([id, ...descendantFolderIds(id, state.folders)]);
-        notes.filter((note) => note.folderId !== null && scope.has(note.folderId)).sort((a, b) => b.updatedAt - a.updatedAt);
-        let counted = 0;
-        for (const note of notes) if (note.folderId && scope.has(note.folderId)) counted += 1;
-        folders.filter((folder) => (folder.parentId ?? null) === id).sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
-        void counted;
+    const naiveMs = measure(() => {
+      for (let round = 0; round < rounds; round += 1) {
+        for (const id of folderIds) {
+          const scope = new Set([id, ...descendantFolderIds(id, state.folders)]);
+          notes.filter((note) => note.folderId !== null && scope.has(note.folderId)).sort((a, b) => b.updatedAt - a.updatedAt);
+          let counted = 0;
+          for (const note of notes) if (note.folderId && scope.has(note.folderId)) counted += 1;
+          folders.filter((folder) => (folder.parentId ?? null) === id).sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
+          void counted;
+        }
       }
-    }
-    const naiveMs = performance.now() - naiveStart;
+    });
 
     console.log(
-      `[D25] 1200 篇/120 文件夹 × ${rounds} 轮：索引路径=${indexedMs.toFixed(1)}ms 旧路径=${naiveMs.toFixed(1)}ms 倍率=${(naiveMs / indexedMs).toFixed(1)}×`,
+      `[D25] 1200 篇/120 文件夹 × ${rounds} 轮（各取 7 批最优）：索引路径=${indexedMs.toFixed(1)}ms 旧路径=${naiveMs.toFixed(1)}ms 倍率=${(naiveMs / indexedMs).toFixed(1)}×`,
     );
     expect(folderIds).toHaveLength(120);
     expect(indexedMs * 5).toBeLessThan(naiveMs);

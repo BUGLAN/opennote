@@ -31,6 +31,7 @@ export class MockBackend implements FileSystemBackend {
   readonly files = new Map<string, MockEntry>();
   readonly dirs = new Set<string>([""]);
   readonly calls: string[] = [];
+  /** `onList`：扫描列目录时回调（`scanWorkspace` 读盘**之前**）。 */
   hooks: { onList?: (path: string) => void | Promise<void> } = {};
   private clock = 1_000;
 

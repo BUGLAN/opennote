@@ -142,8 +142,6 @@ export const fileStates = {
       }
       // 内容不同：内存后来被我们敲过（`bufferSeq > seen.seq`）就保留内存那一版；
       // 否则扫描读到的是真外部改动（或我们自己刚写下的那一版）→ 采纳磁盘。
-      // 内容不同：内存后来被我们敲过（`bufferSeq > seen.seq`）就保留内存那一版；
-      // 否则扫描读到的是真外部改动（或我们自己刚写下的那一版）→ 采纳磁盘。
       if (currentBufferSeq(id) <= seen.seq) {
         records.set(id, { stat: stamp, content: note.content, seq: seen.seq });
       }

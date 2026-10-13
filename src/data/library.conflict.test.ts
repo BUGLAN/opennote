@@ -46,14 +46,28 @@ afterEach(() => {
 
 describe("没开同步 ⇒ 行为与今天逐字节相同（磁盘赢 D3）", () => {
   it("dirty 笔记被外部改动：采纳磁盘、留前像、**不进冲突账本**", async () => {
-    const bridge = harness.installBridge();
+    /*
+     * ⚠️ 这条用例**刻意不走 watcher**（`bridge.emit` + 重扫），而是直接压
+     * `flushAll()` → `flushNote()` —— 也就是「发现磁盘变了 → 读盘 → 判定」那条**真**路径。
+     *
+     * 为什么改写：原来的写法是「`backend.seed()` 然后 `emit()`」，但链路上有**两个各自的
+     * 去抖** —— 自动保存 450ms、watcher 重扫 500ms。于是「外部写入在 emit 之前就摆好」
+     * 落进一个竞态：谁先跑决定了笔记那一刻是 dirty 还是 clean，
+     * 同一段代码在整套跑时会偶发走另一条分支（实测 1/5 概率红）。
+     * 靠调 `advanceTimersByTime` 的数值去凑是治不好的 —— 机器一忙就变。
+     *
+     * 现在：`autoSave` 设成 `onFocusChange`（**不排**自动保存定时器），
+     * 且**不** `emit`，所以没有任何东西在跟我们抢时序；落盘只由这一句显式 `flushAll()` 触发。
+     */
     const backend = harness.scenario("A", (b) => b.seed("a.md", "# 磁盘旧内容"));
     await openWorkspace(records.get("A")!, { silent: true });
+    patchUi({ autoSave: "onFocusChange" });
 
     updateNoteContent("a.md", "# 我没保存的编辑");
+    // 外部写入：刻意换个**长度不同**的内容 ⇒ stat 的 size 变 ⇒ `flushNote` 一定会去读盘。
     backend.seed("a.md", "# 外部新版本");
-    bridge.emit(harness.rootOf("A"));
-    await settleUntil(() => getLibrary().notes["a.md"]?.content === "# 外部新版本");
+
+    await flushAll();
 
     expect(getLibrary().notes["a.md"]?.content).toBe("# 外部新版本");
     // 本地那一版仍然留得住（隐藏前像），只是这一次**不需要用户裁决**。
@@ -68,15 +82,14 @@ describe("没开同步 ⇒ 行为与今天逐字节相同（磁盘赢 D3）", ()
 describe("开着同步 ⇒ 只报不猜（红线 5）", () => {
   it("dirty 笔记被外部改动：进冲突账本，两边的标识都在，并说明是哪一种冲突", async () => {
     setSyncActive(true);
-    const bridge = harness.installBridge();
     const backend = harness.scenario("A", (b) => b.seed("a.md", "# 磁盘旧内容"));
     await openWorkspace(records.get("A")!, { silent: true });
+    // 同上：不走 watcher、不排自动保存定时器（见上一条用例的说明）。
+    patchUi({ autoSave: "onFocusChange" });
 
     updateNoteContent("a.md", "# 我没保存的编辑");
     backend.seed("a.md", "# 远端新版本");
-    bridge.emit(harness.rootOf("A"));
-    // 等到「采纳了远端 + 记了账本」两件事都完成 —— 账本是判定链的最后一跳。
-    await settleUntil(() => conflictCount() > 0 && getLibrary().notes["a.md"]?.content === "# 远端新版本");
+    await flushAll();
 
     const conflicts = listConflicts();
     expect(conflicts).toHaveLength(1);
