@@ -199,9 +199,27 @@ export class NotebookStore {
    * —— 所以「有没有别的成员」这个判断必须发生在删库之前。
    */
   markDeleted(notebookId: string, now = Date.now()): { exclusive: boolean; otherMembers: string[] } {
-    const members = this.listMembers(notebookId).filter((member) => member.role !== "owner");
-    this.db.prepare("UPDATE notebooks SET deleted_at = ? WHERE id = ?").run(now, notebookId);
-    return { exclusive: members.length === 0, otherMembers: members.map((member) => member.accountId) };
+    const otherMembers = this.otherMembersOf(notebookId);
+    // ⚠️ **只有独占时才软删**。第一版无条件软删，于是「删账号」那条路上
+    // 「共享笔记本移交给别人」之后它**仍然是 deleted_at 非空** ⇒ `findById()` 返回 null
+    // ⇒ 从 Bob 的列表里彻底消失。而那本来就不该被删（它有别的成员）。
+    if (otherMembers.length === 0) {
+      this.db.prepare("UPDATE notebooks SET deleted_at = ? WHERE id = ?").run(now, notebookId);
+    }
+    return { exclusive: otherMembers.length === 0, otherMembers };
+  }
+
+  /**
+   * **只看**这个笔记本除了 owner 还有没有别的成员（**不写**）。
+   *
+   * 为什么要单独拆出来：删账号的处理流程需要**先问再决定**（独占 ⇒ 删库删行；
+   * 有共享成员 ⇒ 移交），而 `markDeleted()` 会改状态。把「判断」与「改状态」分开，
+   * 调用方就不会落进「先改了再发现不该改」的坑（第一版正是这样）。
+   */
+  otherMembersOf(notebookId: string): string[] {
+    return this.listMembers(notebookId)
+      .filter((member) => member.role !== "owner")
+      .map((member) => member.accountId);
   }
 
   /** 把一个笔记本的 owner 换成别人（「移交」而不是删掉，§7.1）。 */
@@ -321,6 +339,12 @@ export class NotebookStore {
       .run(accountId, input.bytesUsed ?? 0, now, input.bytesUsed ?? 0, now);
   }
 
+  /** 全站笔记本总数（控制台顶栏用；**不逐库问 CouchDB** —— 那会把库打满）。 */
+  totalNotebooks(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM notebooks WHERE deleted_at IS NULL").get() as unknown as { n: number };
+    return row.n;
+  }
+
   /* ---------------------------------------------------------------- 统计 */
 
   /**
@@ -410,6 +434,47 @@ export class NotebookStore {
    */
   __setCryptoModeForTests(notebookId: string, cryptoMode: CryptoMode): void {
     this.db.prepare("UPDATE notebooks SET crypto_mode = ? WHERE id = ?").run(cryptoMode, notebookId);
+  }
+
+  /**
+   * **物理删掉**某个账号名下的笔记本行（连同置备状态行）。
+   *
+   * 为什么需要它：`notebooks.owner_id` 有 `REFERENCES accounts(id)` 外键，
+   * 而 `markDeleted()` 是**软删**（行还在）。于是「删账号」必须先把这些行清掉，
+   * 否则外键会挡住 —— 而且是在**成员行已经删掉之后**才失败，
+   * 留下「删了一半」的状态。
+   *
+   * ⚠️ 只该在**库已经删掉**或**已移交**之后调（否则会留下无主的 CouchDB 库）。
+   */
+  deleteRowsOwnedBy(accountId: string): number {
+    const ids = (this.db.prepare("SELECT id FROM notebooks WHERE owner_id = ?").all(accountId) as unknown as { id: string }[]).map((row) => row.id);
+    for (const id of ids) {
+      /*
+       * ⚠️ **顺序：先把所有「指向这个笔记本」的子行清掉，最后才删 `notebooks` 本身。**
+       *
+       * `notebooks` 被三张表引用：`memberships`、`notebook_invites`、
+       * `notebook_provisioning`（还有 `client_stats`，它不是外键但同样按 notebook_id 记）。
+       * 第一版漏了 `memberships` 与 `client_stats`，于是删 `notebooks` 时
+       * `FOREIGN KEY constraint failed` —— 而且我在 admin 那侧把它包成了 500，
+       * 现象是「删账号直接 500」，根因藏在一层之外。
+       */
+      this.db.prepare("DELETE FROM memberships WHERE notebook_id = ?").run(id);
+      this.db.prepare("DELETE FROM notebook_invites WHERE notebook_id = ?").run(id);
+      this.db.prepare("DELETE FROM notebook_provisioning WHERE notebook_id = ?").run(id);
+      this.db.prepare("DELETE FROM client_stats WHERE notebook_id = ?").run(id);
+      this.db.prepare("DELETE FROM notebooks WHERE id = ?").run(id);
+    }
+    /*
+     * 还有一处**指向账号**（不是指向笔记本）的引用：`notebook_invites.created_by`。
+     *
+     * 它在上面那轮循环里**清不掉** —— 因为「共享笔记本被移交给别人」时，
+     * 那本笔记本的行留着，而它上面由该账号发出的邀请码仍然 `created_by = 该账号`。
+     * 现象是 `FOREIGN KEY constraint failed`，而当时「还有几个笔记本行指向它」查出来是 0
+     * —— 于是看起来像「没有任何东西指向它」，很容易查错方向。
+     */
+    this.db.prepare("DELETE FROM notebook_invites WHERE created_by = ?").run(accountId);
+    this.db.prepare("DELETE FROM invites WHERE created_by = ?").run(accountId);
+    return ids.length;
   }
 
   /* ---------------------------------------------------------------- 设备 */

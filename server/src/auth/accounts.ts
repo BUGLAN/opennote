@@ -300,9 +300,26 @@ export class AccountStore {
     return Number(result.changes ?? 0) > 0;
   }
 
+  /**
+   * 删账号行。
+   *
+   * ⚠️ **先清 `quota_usage`**：它有 `REFERENCES accounts(id)`，而账号删除时
+   * 它是唯一一张由**本模块**拥有的引用表（其它几处 —— `notebooks` / `memberships` /
+   * `notebook_invites` / `invites` / `devices` —— 由 `NotebookStore` 负责清理）。
+   * 漏掉它的现象是 `FOREIGN KEY constraint failed`，而且**报错位置离根因很远**
+   * （在管理员删账号的 HTTP 处理器里），查起来很费时间。
+   */
   delete(accountId: string): boolean {
-    const result = this.db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
-    return Number(result.changes ?? 0) > 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM quota_usage WHERE account_id = ?").run(accountId);
+      const result = this.db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
+      this.db.exec("COMMIT");
+      return Number(result.changes ?? 0) > 0;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   list(): AccountRow[] {
