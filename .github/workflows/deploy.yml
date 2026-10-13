@@ -15,6 +15,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  checks:
+    # 单仓的四条机械护栏（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §1.6、§10.1 F）：
+    # 边界 grep（src/ ↔ server/ 不许互相 import、server/ 不许有加解密能力 —— 红线 3）、
+    # 以及「忽略规则产物与源文件同步」。
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Tests
+        run: pnpm test
+
+      - name: Boundaries
+        run: pnpm check:boundaries
+
+      - name: 忽略规则产物与 src/sync/ignore.ts 一致
+        # `electron/ignore-rules.cjs` 是构建产物但**必须提交**（主进程 require 它）。
+        # 改了 `src/sync/ignore.ts` 却忘了重跑 `pnpm build:ignore` 时，这里会红。
+        run: |
+          pnpm build:ignore
+          git diff --exit-code -- electron/ignore-rules.cjs
+
   build:
     runs-on: ubuntu-latest
     steps:

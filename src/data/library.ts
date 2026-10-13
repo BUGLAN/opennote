@@ -43,6 +43,11 @@ import {
   sharedAssetFilesIn,
 } from "../lib/clip/landing";
 import { desktopBridge, type WorkspaceFileChange } from "../desktop/bridge";
+import { sha256Hex } from "../lib/clip/hash";
+// 同步层（P0）：冲突账本与「有没有开同步」这个开关。**方向永远是 data/ → sync/**，
+// 不许反过来（`src/sync/*` 不 import `data/*`），否则两边互相 import 成环。
+import { clearConflictIfIdentical, clearConflicts, recordConflict, remapConflict, resolveConflict } from "../sync/conflicts";
+import { isSyncActive } from "../sync/mode";
 import { beginWrite, fileStates, type FileRecord, type FileStamp } from "./fileStates";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
 import type { Folder, FolderChoice, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
@@ -758,6 +763,8 @@ function resetWorkspaceTransients(): void {
   editorComposing.clear();
   placeholderOrigin.clear();
   autoRenameDelay = AUTO_RENAME_DELAY;
+  // 冲突是**按路径**记的，而同一路径在另一个笔记本是另一篇笔记 —— 不得跨库携带（同 D22 规则）。
+  clearConflicts();
 }
 
 /** Make sure the workspace has the folders the notebook expects. */
@@ -1005,6 +1012,13 @@ async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileCha
       const dirty = Boolean(libraryStore.get().dirty[id]);
       if (!dirty) {
         // 干净：磁盘为准，直接采纳（不占前像——旧版本本就在历史里）。
+        //
+        // ⚠️ **不能无条件撤掉冲突**：`rescanWorkspace` 每次都会调到这里，而它自己那一步
+        // 「两边都改 → 记账本 → 采纳磁盘」之后 `dirty` 也已经清了。无条件撤掉会把刚刚
+        // 记下的冲突立刻抹掉（实测：`[reconcile] sync=true` 记上了，紧接着就没了）。
+        // 只有「磁盘上这一版确实是我们记录的那一版」才算这条路径重新收敛了。
+        const record = fileStates.get(id);
+        if (record && normalizeEol(onDisk) === normalizeEol(record.content)) resolveConflict(id);
         adoptExternal(id, onDisk, stat);
         continue;
       }
@@ -1246,17 +1260,25 @@ function adoptExternal(id: Id, content: string, stat: FileStamp): void {
 }
 
 /**
- * I4：外部改动的唯一处置入口（磁盘赢，D3）。
+ * I4：外部改动的唯一处置入口。
+ *
  * - 磁盘 = buffer → 磁盘已是内存那版：刷新记录、清 dirty（`unchanged`）；
  * - 磁盘 = record.content（我们自己写的上一版）→ 我的赢，调用方照常覆盖（`mine-wins`）；
- * - 其余 = 真外部改动 → buffer 进前像，采纳磁盘（`adopted`）。
+ * - 其余 = 真外部改动 → 按**处境**分两种语义（§6.1 L2，见 `src/sync/mode.ts` 的表）：
+ *   - 没开同步：磁盘赢（D3）—— buffer 进前像，采纳磁盘，返回 `adopted`；
+ *   - **开着同步**：可能是「本地改了 + 远端也改了」→ **只报不猜**：进冲突账本，
+ *     同时仍把 buffer 存进隐藏前像（两版都留得住），然后采纳磁盘，返回 `conflicted`。
+ *
+ * **为什么开了同步也采纳磁盘**：光标与内存必须先落在一个确定状态上，否则编辑会卡住；
+ * 而「不丢东西」由两件事保证 —— 本地那版进了 `.opennote/history/`（前像），
+ * 这条路径进了冲突账本（用户看得见、能裁决）。这条区分正是 §6.1 的 L2 层。
  */
 async function reconcileExternalChange(
   id: Id,
   disk: { content: string; stat: FileStamp },
   record: FileRecord | undefined,
   bufferContent: string,
-): Promise<"adopted" | "unchanged" | "mine-wins"> {
+): Promise<{ outcome: "adopted" | "unchanged" | "mine-wins" | "conflicted"; path: string }> {
   const diskNorm = normalizeEol(disk.content);
   const bufferNorm = normalizeEol(bufferContent);
   if (diskNorm === bufferNorm) {
@@ -1266,12 +1288,25 @@ async function reconcileExternalChange(
     fileStates.adoptFromDisk(id, disk.content, disk.stat);
     markClean(id);
     invalidateSearchCache(id);
-    return "unchanged";
+    // 两边恰好一样 ⇒ 这不是冲突（false conflict，Unison）。之前误报的要撤掉。
+    clearConflictIfIdentical(id, null, null);
+    return { outcome: "unchanged", path: id };
   }
-  if (record && diskNorm === normalizeEol(record.content)) return "mine-wins";
+  if (record && diskNorm === normalizeEol(record.content)) return { outcome: "mine-wins", path: id };
+  // 真外部改动：本地这一版无论如何都先进隐藏前像（可回捞）。
   await stashPreImage(id, bufferContent);
+  const conflicted = isSyncActive();
+  if (conflicted) {
+    // 明文模式下两边的标识就用内容哈希（E2EE 下换成 `ehash`，两者都只是「等价类」）。
+    recordConflict({
+      path: id,
+      kind: "both-modified",
+      localId: await sha256Hex(bufferContent),
+      remoteId: await sha256Hex(disk.content),
+    });
+  }
   adoptExternal(id, disk.content, disk.stat);
-  return "adopted";
+  return { outcome: conflicted ? "conflicted" : "adopted", path: id };
 }
 
 async function flushNote(id: Id): Promise<void> {
@@ -1303,14 +1338,15 @@ async function flushNote(id: Id): Promise<void> {
       if (onDisk !== null) {
         // buffer 取**最新**的内存正文：判定与留前像都不能用过期的快照。
         const latest = libraryStore.get().notes[id] ?? libraryStore.get().trash[id];
-        const outcome = await reconcileExternalChange(
+        const { outcome } = await reconcileExternalChange(
           id,
           { content: onDisk, stat: current ?? { size: onDisk.length, mtimeMs: Date.now() } },
           record,
           latest?.content ?? note.content,
         );
-        // adopted：磁盘赢，buffer 已进前像、内存已是磁盘版本；
-        // unchanged：磁盘本来就是内存那一版，无需写。两者都直接收工。
+        // adopted / conflicted：磁盘赢，buffer 已进前像、内存已是磁盘版本（冲突另记账本）；
+        // unchanged：磁盘本来就是内存那一版，无需写。三者都直接收工。
+        // 只有 mine-wins（磁盘上还是我们自己写的上一版）才继续往下写。
         if (outcome !== "mine-wins") return;
       }
     }
@@ -2781,6 +2817,8 @@ function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): voi
   }
   remapKeyed(plainCache, replace);
   fileStates.remap(replace);
+  // 冲突账本也是路径键：改名/移动后必须跟着换，否则用户会在一个已经不存在的路径上看到冲突。
+  remapConflict(replace);
   remapKeyed(lastSnapshotAt, replace);
   // 自动改名的状态也跟着走：定时器**必须按新路径重挂**（旧 id 上那个定时器的回调闭包
   // 指向的是一个已经不存在的路径），静默期/光标行/合成状态同理。
