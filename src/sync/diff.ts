@@ -72,10 +72,17 @@ export interface RemoteTree {
   entries: RemoteTreeEntry[];
 }
 
-/** 基线里的一条（与 `GithubBaselineFile` 同构；这里是 provider 无关的版本）。 */
+/**
+ * 基线里的一条（**provider 无关**的最小形状）。
+ *
+ * 注意字段名是 `remoteHash` 而不是 GitHub 基线里的 `remoteSha`：
+ * 「远端那一版的标识」在 `opennote` 那条路上是内容标识（明文 sha256 / E2EE 的 `ehash`），
+ * 不一定是 sha。GitHub 的 `GithubBaselineFile` 与同步账本 `SyncLedgerFile` **都**结构上
+ * 满足这一份（前者由 `src/lib/github/sync.ts` 映射，后者字段名本来就是 `remoteHash`）。
+ */
 export interface BaselineFile {
   /** 远端那一版的标识（判断「远端改没改」）。 */
-  remoteSha: string;
+  remoteHash: string | null;
   /** 上次同步时本地内容的标识（判断「本地改没改」）；没物化的文件是 `null`。 */
   localHash: string | null;
   /** 我们有没有把这一条写到本地。`false` = 只在基线里记账，同步永不触碰它。 */
@@ -149,7 +156,7 @@ export function planPull(baseline: BaselineLike, remote: RemoteTree, local: Loca
   for (const [path, entry] of remoteByPath) {
     const known = baseline.files[path];
     const localFile = localByPath.get(path);
-    const remoteChanged = !known || known.remoteSha !== entry.hash;
+    const remoteChanged = !known || known.remoteHash !== entry.hash;
     if (!remoteChanged) continue;
 
     if (!isMaterializable(path)) continue; // 源码 / 配置：只更新下面那一轮账本，绝不落地

@@ -27,7 +27,7 @@ function h(seed: string): string {
 describe("§6.2 · false conflict（两边都改但内容相同）", () => {
   it("两边都改、标识相同 ⇒ **不算冲突**，也不进 download", () => {
     const plan = planPull(
-      baselineOf({ "notes/a.md": { remoteSha: h("old"), localHash: h("base"), imported: true } }),
+      baselineOf({ "notes/a.md": { remoteHash: h("old"), localHash: h("base"), imported: true } }),
       { entries: [{ path: "notes/a.md", hash: h("same") }] },
       [{ path: "notes/a.md", hash: h("same"), bytes: 10 }],
     );
@@ -38,7 +38,7 @@ describe("§6.2 · false conflict（两边都改但内容相同）", () => {
 
   it("两边都改、标识不同 ⇒ 仍然列出冲突（别把上面那条放宽成「都改就放过」）", () => {
     const plan = planPull(
-      baselineOf({ "notes/a.md": { remoteSha: h("old"), localHash: h("base"), imported: true } }),
+      baselineOf({ "notes/a.md": { remoteHash: h("old"), localHash: h("base"), imported: true } }),
       { entries: [{ path: "notes/a.md", hash: h("remote") }] },
       [{ path: "notes/a.md", hash: h("local"), bytes: 10 }],
     );
@@ -49,7 +49,7 @@ describe("§6.2 · false conflict（两边都改但内容相同）", () => {
   it("只有一边改 ⇒ 照旧下载/上传，false-conflict 分支不参与", () => {
     // 远端改了、本地没动 → 下载
     const pullOnlyRemote = planPull(
-      baselineOf({ "notes/a.md": { remoteSha: h("old"), localHash: h("base"), imported: true } }),
+      baselineOf({ "notes/a.md": { remoteHash: h("old"), localHash: h("base"), imported: true } }),
       { entries: [{ path: "notes/a.md", hash: h("new") }] },
       [{ path: "notes/a.md", hash: h("base"), bytes: 10 }],
     );
@@ -58,7 +58,7 @@ describe("§6.2 · false conflict（两边都改但内容相同）", () => {
 
     // 本地改了、远端没动 → 推送
     const push = planPush(
-      baselineOf({ "notes/a.md": { remoteSha: h("same"), localHash: h("base"), imported: true } }),
+      baselineOf({ "notes/a.md": { remoteHash: h("same"), localHash: h("base"), imported: true } }),
       [{ path: "notes/a.md", hash: h("local"), bytes: 10 }],
     );
     expect(push.modified.map((file) => file.path)).toEqual(["notes/a.md"]);
@@ -89,8 +89,8 @@ describe("§6.3 · 删除保护阈值", () => {
 
 describe("§6.4 / C12 · truncated 时禁止推断删除", () => {
   const baseline = baselineOf({
-    "notes/a.md": { remoteSha: h("a"), localHash: h("a-local"), imported: true },
-    "notes/b.md": { remoteSha: h("b"), localHash: h("b-local"), imported: true },
+    "notes/a.md": { remoteHash: h("a"), localHash: h("a-local"), imported: true },
+    "notes/b.md": { remoteHash: h("b"), localHash: h("b-local"), imported: true },
   });
   const local = [
     { path: "notes/a.md", hash: h("a-local"), bytes: 1 },

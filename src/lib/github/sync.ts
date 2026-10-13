@@ -34,6 +34,7 @@ import {
   planPull as planPullNeutral,
   planPush as planPushNeutral,
   pushIsEmpty,
+  type BaselineLike,
   type LocalFile,
   type PullPlan,
   type PushPlan,
@@ -43,6 +44,19 @@ export { pushIsEmpty };
 export type { LocalFile, PullPlan, PushPlan };
 
 /**
+ * 把 GitHub 基线映射成中性的 `BaselineLike`（`remoteSha` → `remoteHash`）。
+ *
+ * 只做**改名**，一个判据都不动 —— 判定逻辑在 `src/sync/diff.ts`，两侧共用同一份。
+ */
+function neutralBaseline(baseline: GithubBaseline): BaselineLike {
+  const files: BaselineLike["files"] = {};
+  for (const [path, file] of Object.entries(baseline.files)) {
+    files[path] = { remoteHash: file.remoteSha, localHash: file.localHash, imported: file.imported };
+  }
+  return { files };
+}
+
+/**
  * 纯函数：基线 + 本地现状 → 推送计划。
  *
  * `本地现状` 由 {@link collectLocalFiles} 扫出来（跳过 `.opennote/` 与隐藏路径）。
@@ -50,7 +64,7 @@ export type { LocalFile, PullPlan, PushPlan };
  * 都可能改 mtime 而不改内容，用 mtime 会让整棵仓库每次都被判成「改过」。
  */
 export function planPush(baseline: GithubBaseline, local: LocalFile[]): PushPlan {
-  return planPushNeutral(baseline, local);
+  return planPushNeutral(neutralBaseline(baseline), local);
 }
 
 /**
@@ -65,7 +79,7 @@ export function planPush(baseline: GithubBaseline, local: LocalFile[]): PushPlan
  */
 export function planPull(baseline: GithubBaseline, remote: GithubTree, local: LocalFile[]): PullPlan {
   return planPullNeutral(
-    baseline,
+    neutralBaseline(baseline),
     { truncated: remote.truncated, entries: remote.entries.map((entry) => ({ path: joinPath(entry.path), hash: entry.sha })) },
     local,
   );
