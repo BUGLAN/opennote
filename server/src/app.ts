@@ -43,6 +43,9 @@ import { createAccountRoutes } from "./routes/account";
 import { createAdminRoutes } from "./routes/admin";
 import { createNotebookRoutes } from "./routes/notebooks";
 import { createV1Routes } from "./routes/v1";
+import { createPanelApi } from "./routes/panel";
+import { loadPanelAsset, panelAssetNames } from "./panelAssets";
+import { csrfGuard, isHttps, securityHeaders, PANEL_CSP } from "./panelSecurity";
 
 export interface AppOptions {
   config: ServerConfig;
@@ -106,6 +109,26 @@ export function createApp(options: AppOptions): BuiltApp {
     }),
   );
 
+  /* ------------------------------------------------------------ 安全响应头 */
+  /*
+   * §7.3 Node 第 2 条。**所有**响应都发（静态资源也发 —— `nosniff` 对它们同样重要：
+   * 这个服务到处在传用户可控的字节）。
+   * `csp` 只给控制台页面发：`/v1/*` 返回的是 JSON，给它发 CSP 没有意义（也没有害处，
+   * 但会让「CSP 到底保护了什么」变得含糊）。
+   */
+  const https = isHttps(config);
+  app.use("*", async (c, next) => {
+    await next();
+    const headers = securityHeaders({ https, csp: c.req.path.startsWith("/panel") ? PANEL_CSP : null });
+    for (const [key, value] of Object.entries(headers)) {
+      // 不覆盖路由自己设的头（例如静态资源已经给了准确的 content-type）。
+      if (!c.res.headers.has(key)) c.res.headers.set(key, value);
+    }
+  });
+
+  /* CSRF 闸门：只对**带 cookie 的变更类请求**生效（纯 Bearer 客户端不受影响）。 */
+  app.use("/panel/api/*", csrfGuard());
+
   app.route("/v1", createAccountRoutes({ accounts, notebooks, config, audit: (event) => notebooks.audit(event) }));
   app.route(
     "/v1",
@@ -132,6 +155,48 @@ export function createApp(options: AppOptions): BuiltApp {
       audit: (event) => notebooks.audit(event),
       ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
       ...(options.now === undefined ? {} : { now: options.now }),
+    }),
+  );
+
+  /* ------------------------------------------------------------ 控制台 */
+  /*
+   * §4.6：无构建步骤的静态页。只有三个资源（白名单在 `panelAssets.ts`），
+   * 所以这里**不是**一个通用静态服务器 —— 没有目录列表、没有路径拼接、没有缓存头。
+   */
+  for (const name of panelAssetNames()) {
+    const route = name === "index.html" ? "/panel" : `/panel/${name}`;
+    app.get(route, () => {
+      const asset = loadPanelAsset(name);
+      if (!asset) return new Response("not found", { status: 404 });
+      return new Response(asset.body, {
+        status: 200,
+        headers: {
+          "content-type": asset.contentType,
+          // 控制台是运维界面：**不缓存**，否则「改了没生效」会浪费很多时间。
+          "cache-control": "no-store",
+        },
+      });
+    });
+  }
+  // `/panel/` 与 `index.html` 也指向同一份（用户会手打这两种）。
+  app.get("/panel/", () => {
+    const asset = loadPanelAsset("index.html")!;
+    return new Response(asset.body, {
+      status: 200,
+      headers: { "content-type": asset.contentType, "cache-control": "no-store" },
+    });
+  });
+
+  app.route(
+    "/panel/api",
+    createPanelApi({
+      accounts,
+      notebooks,
+      config,
+      couch,
+      couchAdmin,
+      audit: (event) => notebooks.audit(event),
+      ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
     }),
   );
 

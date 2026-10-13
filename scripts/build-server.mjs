@@ -28,7 +28,7 @@
  */
 
 import { build } from "esbuild";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -87,6 +87,33 @@ for (const entry of entries) {
  * （或者镜像里只 COPY 了 dist），行为不会意外变化。
  */
 writeFileSync(join(outDir, "package.json"), `${JSON.stringify({ type: "module", private: true }, null, 2)}\n`, "utf8");
+
+/*
+ * ★ 把控制台静态资源拷到 `dist/panel/`。
+ *
+ * 它们是**给人改的文件**（§4.6「无构建步骤」），所以不打进 bundle —— 但
+ * `panelAssets.ts` 用 `new URL("./panel/", import.meta.url)` 定位它们，
+ * 而 bundle 里 `import.meta.url` 指向 `dist/index.js` ⇒ 它们必须在 `dist/panel/`。
+ *
+ * 「不拷」的后果是**运行时**才炸（`loadPanelAsset` 抛「读不到」），
+ * 而那时镜像已经构建完了 —— 所以这一步不能漏。
+ */
+/*
+ * 只拷**静态资源**（按扩展名白名单）。
+ *
+ * 为什么不用 `cpSync(dir, {recursive:true})`：第一版就是这么写的，结果把
+ * `panel/security.ts` 也拷进了 `dist/panel/` —— 因为那个 TS 模块当时放在
+ * `panel/` 里。它现在已经挪出去了，但**白名单仍然要留**：
+ * `server/src/panel/` 的约定是「只放静态资源」（§5.x 的目录表），
+ * 而「不把源码拷进镜像」这件事该由构建步骤保证，不该靠目录约定自觉。
+ */
+const PANEL_EXTENSIONS = [".html", ".css", ".js"];
+mkdirSync(join(outDir, "panel"), { recursive: true });
+for (const name of readdirSync(join(root, "server", "src", "panel"))) {
+  if (!PANEL_EXTENSIONS.some((ext) => name.endsWith(ext))) continue;
+  cpSync(join(root, "server", "src", "panel", name), join(outDir, "panel", name));
+}
+console.log("[build:server] 已拷贝控制台静态资源 → dist/panel/");
 
 const { statSync } = await import("node:fs");
 for (const entry of entries) {

@@ -182,33 +182,38 @@ describe("开着同步 ⇒ 只报不猜（红线 5）", () => {
   });
 
   it("关掉同步之后，同一场景不再进账本（开关是判定的一部分，不是全局副作用）", async () => {
-    // 先在开着同步时制造一条冲突。
+    /*
+     * ⚠️ 与上面两条一样：**不走 watcher**，直接压 `flushAll()` → `flushNote()` → 判定。
+     *
+     * 这条第一版写的是「`backend.seed()` + `emit()` + `settleUntil(conflictCount() > 0)`」，
+     * 于是在整套跑时约 1/6 概率红在 `expect(conflictCount()).toBe(1)` ——
+     * `settleUntil` 等不到就超时返回，而它返回的布尔值被忽略了，断言接着读到 0。
+     *
+     * 根因和那两条一样：自动保存（450ms）与 watcher 重扫（500ms）**各有各的去抖**，
+     * 谁先跑决定了笔记那一刻是 dirty 还是 clean。「等一等」治不好它；
+     * 只有「把要测的那一步显式调出来」才行。
+     */
     setSyncActive(true);
-    const bridge = harness.installBridge();
     const backend = harness.scenario("A", (b) => b.seed("a.md", "# 起点"));
     await openWorkspace(records.get("A")!, { silent: true });
+    patchUi({ autoSave: "onFocusChange" });
+
+    // ① 开着同步：两侧都改 ⇒ 进账本。
     updateNoteContent("a.md", "# 本地改的");
     backend.seed("a.md", "# 远端改的");
-    bridge.emit(harness.rootOf("A"));
-    await settleUntil(() => conflictCount() > 0);
+    await flushAll();
     expect(conflictCount()).toBe(1);
 
-    // 关掉同步，再制造一次外部改动：这一回应当只有磁盘赢。
+    // ② 关掉同步，同一场景再来一次 ⇒ 只有磁盘赢，**不进账本**。
     setSyncActive(false);
     resolveConflict("a.md");
     expect(conflictCount()).toBe(0);
     updateNoteContent("a.md", "# 又一次本地改动");
     backend.seed("a.md", "# 又一次远端改动");
-    bridge.emit(harness.rootOf("A"));
-    await settleUntil(() => getLibrary().notes["a.md"]?.content === "# 又一次远端改动");
-    /*
-     * 再空转几轮并**显式排空调度队列**：确认后面不会再冒出一条冲突。
-     *
-     * 这一条曾经在整套跑的时候偶发失败（单跑 9/9 全绿、整套偶红）。原因是
-     * `settleUntil(() => false)` 只是「推进几次」，而外部改动那条链
-     * （去抖 450ms → 重扫 → flushAll → 采纳磁盘）在负载高时可能还没走完 ——
-     * 断言读到的是中间态。改成「推进到没有任何待执行的定时器为止」。
-     */
+    await flushAll();
+    expect(getLibrary().notes["a.md"]?.content).toBe("# 又一次远端改动");
+
+    // 再排空调度队列：确认后面不会再冒出一条冲突。
     await drainTimers({ maxMs: 2000 });
     expect(conflictCount()).toBe(0);
   });

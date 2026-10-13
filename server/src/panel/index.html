@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- 控制台不该被搜索引擎收录，也不该被当成 PWA 装起来。 -->
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Opennote 控制台</title>
+    <link rel="stylesheet" href="/panel/styles.css" />
+  </head>
+  <body>
+    <!--
+      控制台（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §4.6）。
+
+      无构建步骤：原生 HTML + 一点 JS。它**不是产品的一部分**，只是一台多账号自托管
+      同步服务的「账户 + 仪表盘 + 开关」。
+
+      ★ 管理员区块在 HTML 里**只有容器、没有内容** —— 内容由 `app.js` 在确认 `isAdmin`
+        之后才创建。§10.1 M8 要求「越权控制台页面：页面不渲染 + API 403」，
+        「不渲染」必须是**不生成 DOM**，而不是生成后用 CSS 藏起来。
+    -->
+    <header>
+      <h1>Opennote 控制台</h1>
+      <p class="muted" id="who"></p>
+      <button id="logout" type="button" hidden>退出</button>
+    </header>
+
+    <main>
+      <!-- ============================ 未登录：导入密钥 ============================ -->
+      <section id="unlock">
+        <h2>用账号密钥进入</h2>
+        <p class="muted">
+          没有登录表单 —— 你的账号密钥就是账号本身。密钥在这台设备上派生出令牌，
+          服务端只保存它的哈希，<strong>看不到密钥</strong>。
+        </p>
+        <label for="key">账号密钥（导入或粘贴）</label>
+        <textarea id="key" rows="3" spellcheck="false" autocomplete="off"
+          placeholder="opennote-key-v1.<base64url>"></textarea>
+        <div class="row">
+          <button id="enter" type="button">进入</button>
+          <input id="keyfile" type="file" accept=".txt,.key,text/plain" />
+          <label class="file" for="keyfile">从文件导入</label>
+        </div>
+        <p class="error" id="unlock-error" hidden></p>
+        <p class="muted small">
+          密钥<b>不会</b>被发送到服务端：页面在这里派生出令牌，只把令牌放进 HttpOnly cookie。
+          但请注意：网页端终究信任「服务端当天发给它的这份 JS」——
+          <a href="/v1/health" target="_blank" rel="noopener">核对构建哈希</a>。
+        </p>
+      </section>
+
+      <!-- ============================ 已登录 ============================ -->
+      <div id="app" hidden>
+        <nav id="tabs"></nav>
+
+        <!-- 我的账号 -->
+        <section data-panel="account" hidden>
+          <h2>我的账号</h2>
+          <dl id="account-info"></dl>
+          <!-- ★ 三条能力边界说明由 API 下发（capabilityNotes），不写死在 HTML 里。 -->
+          <div class="notes" id="account-notes"></div>
+          <div class="row">
+            <button id="rotate" type="button" class="danger">轮换账号密钥</button>
+            <button id="delete-account" type="button" class="danger">删除账号</button>
+          </div>
+          <p class="error" id="rotate-error" hidden></p>
+        </section>
+
+        <!-- 我的设备 -->
+        <section data-panel="devices" hidden>
+          <h2>我的设备</h2>
+          <p class="muted" id="devices-note"></p>
+          <table id="devices"></table>
+        </section>
+
+        <!-- 我的笔记本 -->
+        <section data-panel="notebooks" hidden>
+          <h2>我的笔记本</h2>
+          <div class="row">
+            <input id="nb-name" placeholder="新笔记本的名字" />
+            <select id="nb-crypto">
+              <option value="none">明文（可共享）</option>
+              <option value="user-key">端到端加密（不可共享，v1 限制）</option>
+            </select>
+            <button id="nb-create" type="button">新建</button>
+          </div>
+          <p class="error" id="nb-error" hidden></p>
+          <table id="notebooks"></table>
+        </section>
+
+        <!-- 用量 -->
+        <section data-panel="usage" hidden>
+          <h2>用量</h2>
+          <dl id="usage-info"></dl>
+        </section>
+
+        <!-- 冲突与错误 -->
+        <section data-panel="stats" hidden>
+          <h2>冲突与错误</h2>
+          <p class="muted" id="stats-note"></p>
+          <table id="stats"></table>
+        </section>
+
+        <!--
+          ★ **管理员区块不在这里。** 它们在 `app.js` 里、只有在 `/panel/api/me` 回了
+            `isAdmin: true` 之后才被 **创建**。
+
+          为什么连「空容器」都不留：§10.1 M8 要求「页面不渲染 + API 403」。
+          留一个空容器意味着管理员的**区块名**出现在普通账号拿到的 HTML 里 ——
+          那不是漏洞（这些名字文档里就有），但它会让「页面不渲染」这句话变得含糊，
+          而含糊的边界迟早会被下一个人填上内容。**不生成**是没有歧义的。
+        -->
+      </div>
+    </main>
+
+    <script type="module" src="/panel/app.js"></script>
+  </body>
+</html>
