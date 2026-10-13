@@ -63,9 +63,15 @@ export const VALIDATE_DOC_UPDATE_SOURCE = String.raw`function (newDoc, oldDoc, u
    */
   if (newDoc._id === 'syncinfo') return;
 
-  // 只接受两种前缀：f:（模式 A 明文路径）与 h:（模式 B HMAC）。别的一律拒绝。
+  // 只接受三种前缀：f:（模式 A 明文路径）、h:（模式 B HMAC）、m:（元记录）。
+  // 别的一律拒绝。
+  //
+  // m: 是给「路径映射表」（m:pathmap）用的：模式 B 的 did 不可逆，
+  // 而 did↔path 映射按设计只存在本地，所以全新设备需要这张表才能把 did 翻回文件名。
+  // 它不是文件内容，但服务端不需要知道这一点 —— 它看到的仍然只是一条
+  // 不透明 id 的密文记录（那张表是用 encRoot 派生的密钥加密的，服务端没有 encRoot）。
   var prefix = newDoc._id.slice(0, 2);
-  if (prefix !== 'f:' && prefix !== 'h:') throw({ forbidden: 'bad id prefix' });
+  if (prefix !== 'f:' && prefix !== 'h:' && prefix !== 'm:') throw({ forbidden: 'bad id prefix' });
 
   if (newDoc.path !== undefined && newDoc.path !== null) {
     // ---- 模式 A：有明文 path，按 shared/paths.ts 的规则严格校验 ----

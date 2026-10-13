@@ -129,6 +129,31 @@ describe("id 前缀与保留 id", () => {
     expect(verdict({ _id: "_local/device-abc" })).toEqual({ ok: true });
   });
 
+  it("★ `m:` 前缀（路径映射表）必须放行，且**只**多放行这一个前缀", () => {
+    /*
+     * 客户端侧 `shared/contract.ts` 的 `PATH_MAP_DID` 是 `m:pathmap`。
+     * 如果这里不放行，客户端算出这个 did 去写会拿到 **403 bad id prefix** ——
+     * 而症状是「全新设备一个文件都拉不下来」，离根因（服务端前缀白名单）很远。
+     *
+     * 两侧必须一起改：这正是那种「各自都对、拼起来不对」的接缝。
+     */
+    /*
+     * ★ 元记录**不需要任何额外的服务端规则**：它只要像一条普通 E2EE 记录那样
+     * 带上 `epath` 与 `ehash`（它本来就是加密的），就自然通过校验。
+     * 所以「加一条映射表记录」在服务端**只多放行一个前缀**，别的都不用动。
+     *
+     * （我第一版只传了 `hash`，被 `missing path/epath` 拒了 ——
+     *  这条校验不是在针对元记录，它是对**所有**记录的通用要求。）
+     */
+    expect(verdict({ _id: "m:pathmap", epath: "a".repeat(43), ehash: "b".repeat(64) })).toEqual({ ok: true });
+    // 但它仍然要满足通用要求：既没有 path 也没有 epath ⇒ 照旧拒绝。
+    expect(verdict({ _id: "m:pathmap", hash: "a".repeat(64) })).toEqual({ ok: false, reason: "missing path/epath" });
+    // 只多放行了 `m:` 这一个前缀，别的一律照旧拒绝。
+    for (const id of ["x:abc", "n:abc", "M:pathmap", "mm:pathmap"]) {
+      expect(verdict({ _id: id, path: "a.md", hash: "a".repeat(64) }), id).toEqual({ ok: false, reason: "bad id prefix" });
+    }
+  });
+
   it("★ 服务端自己的元数据文档 `syncinfo` 必须放行", () => {
     /*
      * 这条是**真机跑出来的回归**（假 CouchDB 不执行 `validate_doc_update`，所以单测看不见）。
