@@ -32,6 +32,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "typecheck:shared": "tsc --noEmit -p shared/tsconfig.json",
+    "typecheck:all": "pnpm run typecheck && pnpm run typecheck:shared",
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "test": "vitest run",
     "test:watch": "vitest",

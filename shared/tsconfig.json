@@ -1,0 +1,27 @@
+{
+  "//": "两侧共用的纯 TS（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §1.6、§5.6①）。",
+  "//lib": "只有 ES2022 —— **没有 DOM、没有 node types**。这不是风格偏好，是机械保证：",
+  "//lib2": "在 shared/ 里写 `document` / `window` / `import fs from \"node:fs\"` 直接编译不过，",
+  "//lib3": "于是「共用代码必须是纯函数」不靠自觉。U29 就是验这一条。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": [],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "exactOptionalPropertyTypes": false,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["**/*.test.ts", "fixtures"]
+}

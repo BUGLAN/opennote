@@ -20,5 +20,12 @@
     "resolveJsonModule": true,
     "useDefineForClassFields": true
   },
-  "include": ["src", "capacitor.config.ts", "vite.config.ts", "vitest.config.ts", "vite.clip.config.ts"]
+  "include": [
+    "src",
+    "shared",
+    "capacitor.config.ts",
+    "vite.config.ts",
+    "vitest.config.ts",
+    "vite.clip.config.ts"
+  ]
 }
