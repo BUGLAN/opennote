@@ -58,8 +58,29 @@ export const GITIGNORE_FILE = ".gitignore";
  */
 const BUILT_IN_DIRS: readonly string[] = [".git", "node_modules", "dist", "release", ".opennote"];
 
-/** 内置忽略集：**精确文件名**。 */
-const BUILT_IN_FILES: readonly string[] = [".DS_Store", "Thumbs.db"];
+/**
+ * 内置忽略集：**精确文件名**。
+ *
+ * ⚠️ `.gitignore` 在列表里是**必须的**，不是可有可无的。§3.11 第 843 行：
+ * 「`.gitignore` **本身不会同步**（它是隐藏文件，本来就被排除）」——
+ * 而本文件第 38 行的注释也依赖这条（「因为 `.gitignore` 自己不同步，
+ * 设备 A 可能忽略 `foo.md` 而设备 B 不忽略」）。
+ *
+ * ## 这里曾经漏了它（一个「两张过滤表合一」时丢掉的排除）
+ *
+ * 文件头的注释记着：以前扫描侧靠「点开头的路径一律跳过」（`isHiddenPath`）
+ * **碰巧**排除了 `.gitignore`；合并成 `shouldIgnore()` 一个入口之后，
+ * 隐藏文件规则没有跟着过来，而内置列表里又没有 `.gitignore` ——
+ * 于是它**开始被同步**了。
+ *
+ * 症状很隐蔽：`.gitignore` 被推到远端、再被拉到另一台设备上，
+ * 于是**那台设备的同步范围被静默改掉**（§3.11 第 865 行把「改 `.gitignore`」
+ * 称作「改变同步范围的严肃操作」）。没有任何报错。
+ *
+ * 是 `workspaceFiles.test.ts` 的一条用例（断言 `.gitignore` 不进 `listLocal`）
+ * 把它抓出来的 —— 那条用例我一开始还以为是自己写错了。
+ */
+const BUILT_IN_FILES: readonly string[] = [".gitignore", ".DS_Store", "Thumbs.db"];
 
 /**
  * 内置忽略集：**文件名后缀**（编辑器临时文件）。
