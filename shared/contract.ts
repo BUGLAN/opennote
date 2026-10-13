@@ -43,6 +43,24 @@ export const MIN_SUPPORTED_PROTOCOL_VERSION = 1;
 export const cryptoModeSchema = z.enum(["none", "user-key"]);
 export type CryptoMode = z.infer<typeof cryptoModeSchema>;
 
+/**
+ * 新建笔记本时的**默认**加密模式。
+ *
+ * ## ★ P4 要改的就是**这一行**（已拍板的决定）
+ *
+ * 现在的值是 `"none"`（明文优先：先让同步跑起来，P4 再翻成 `"user-key"`）。
+ * 到 P4「E2EE 全量」时把这里改成 `"user-key"` 即可 —— **只有这一处**。
+ *
+ * 所以它必须是一个**具名常量**而不是散落的字面量：默认值一旦有第二份拷贝，
+ * 就会出现「服务端按 `none` 建、客户端按 `user-key` 解」这种**半翻**状态，
+ * 而症状是「新建的笔记本打不开」（且只在某些入口复现）。
+ *
+ * ⚠️ **不要**把它与 `server/src/notebooks.ts` 的 `CRYPTO_MODE_SHAREABLE` 混为一谈：
+ * 那个是「**哪种模式可以共享**」的语义常量（§1.4：E2EE 笔记本 v1 不可共享），
+ * 即使 P4 翻了默认值，它也**必须**保持 `"none"`。
+ */
+export const DEFAULT_CRYPTO_MODE: CryptoMode = "none";
+
 /** 成员角色（§4.3 `memberships.role`）。 */
 export const roleSchema = z.enum(["owner", "editor", "viewer"]);
 export type Role = z.infer<typeof roleSchema>;
@@ -187,7 +205,7 @@ export const notebookCreateRequestSchema = z.object({
    * 默认 `none`（§11.3 A 已拍板）：P2 先跑通明文同步，P4 上线 E2EE 时把默认值改成 `user-key`。
    * **已建的明文笔记本不会自动变密文**（那需要客户端做一次加密迁移，v1 不做）。
    */
-  cryptoMode: cryptoModeSchema.default("none"),
+  cryptoMode: cryptoModeSchema.default(DEFAULT_CRYPTO_MODE),
 });
 export type NotebookCreateRequest = z.infer<typeof notebookCreateRequestSchema>;
 

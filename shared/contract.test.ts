@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ContractError,
+  DEFAULT_CRYPTO_MODE,
   MIN_SUPPORTED_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   accountCreateRequestSchema,
@@ -174,5 +175,41 @@ describe("parseContract：统一的失败口径", () => {
 
   it("抛的是 ContractError（调用方按类型映射状态码，不靠匹配文案）", () => {
     expect(() => parseContract(cryptoModeSchema, "nope", "测试")).toThrow(ContractError);
+  });
+});
+
+/* ============================================================================
+   ★ 默认加密模式：P4 要改的**只有这一行**
+   ============================================================================ */
+
+describe("★ `DEFAULT_CRYPTO_MODE`（已拍板：现在 `none`，P4 翻 `user-key`）", () => {
+  it("★ schema 的默认值**来自那个常量**，不是另写一份字面量", () => {
+    /*
+     * 默认值一旦有第二份拷贝，P4 翻默认时就会出现「服务端按 `none` 建、
+     * 客户端按 `user-key` 解」这种**半翻**状态 —— 而症状是
+     * 「新建的笔记本打不开」，且只在某些入口复现。
+     *
+     * 这条用例钉住「只有一处真相」：改常量就够，schema 自动跟上。
+     */
+    const parsed = notebookCreateRequestSchema.parse({ name: "x", bootstrapCode: "b" });
+    expect(parsed.cryptoMode).toBe(DEFAULT_CRYPTO_MODE);
+  });
+
+  it("当前默认是 `none`（明文优先：先让同步跑起来）", () => {
+    expect(DEFAULT_CRYPTO_MODE).toBe("none");
+  });
+
+  it("★ 它**不是**「哪种模式可共享」那个语义常量", () => {
+    /*
+     * `server/src/notebooks.ts` 的 `CRYPTO_MODE_SHAREABLE` 是「**哪种模式可以共享**」
+     * （§1.4：E2EE 笔记本 v1 不可共享）。**即使 P4 翻了默认值，它也必须保持 `none`。**
+     *
+     * 这条断言放在这里是为了把两者的区别写进契约层：
+     * 看到 `DEFAULT_CRYPTO_MODE = "user-key"` 的人**不该**顺手把
+     * 「可共享的模式」也一起改掉。
+     */
+    expect(cryptoModeSchema.options).toContain(DEFAULT_CRYPTO_MODE);
+    // 可共享的那个值是 `none` —— 与默认值**语义不同**，即使现在取值恰好相同。
+    expect(cryptoModeSchema.options).toContain("none");
   });
 });
