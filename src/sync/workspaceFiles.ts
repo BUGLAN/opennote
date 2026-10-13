@@ -34,7 +34,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import type { CryptoMode } from "../../shared/contract";
 import { normalizeNfc, normalizePath } from "../../shared/paths";
-import { didForPath, didForPlainPath, ehashOf, notebookKeysFrom, openContent, type NotebookKeys } from "./crypto";
+import { decryptContent, didForPath, didForPlainPath, ehashOf, encryptContent, notebookKeysFrom, openContent, type NotebookKeys } from "./crypto";
 import type { EngineLocalFile, SyncEngineDeps } from "./engine";
 import { shouldSkipEntry, type IgnoreRules } from "./ignore";
 import { toHex } from "./accountKey";
@@ -68,6 +68,11 @@ export interface WorkspaceEngineOptions {
   cryptoMode: CryptoMode;
   /** E2EE 时必须给：本笔记本的密钥（`deriveNotebookKey(encRoot, notebookId)`）。 */
   notebookKey?: Uint8Array;
+  /**
+   * 笔记本 id。**E2EE 时必须给** —— 它是内容 AAD 的一半（§3.9 第 1 条），
+   * 少了它就没法加密/解密（而不是「可以先不绑」）。
+   */
+  notebookId: string;
   /** 账本里记着的路径（引擎靠它把远端 did 翻回本机路径）。 */
   knownPaths: () => Promise<string[]>;
   log?: SyncEngineDeps["log"];
@@ -99,6 +104,10 @@ export function createWorkspaceEngineDeps(options: WorkspaceEngineOptions): Sync
     // 早失败：到写盘那一刻才报「密钥没给」会让用户以为同步成功了。
     throw new Error("E2EE 模式必须提供 notebookKey");
   }
+  if (e2ee && !options.notebookId) {
+    // 同理：`notebookId` 是内容 AAD 的一半，少了它加密是**做不了**的（不是「可以先不绑」）。
+    throw new Error("E2EE 模式必须提供 notebookId（内容 AAD 要用）");
+  }
   const keys: NotebookKeys | null = options.notebookKey ? notebookKeysFrom(options.notebookKey) : null;
 
   /** 内容标识：明文 `sha256`，E2EE `ehash`（HMAC —— 服务端看不出两篇是否相同，§3.9 第 2 条）。 */
@@ -127,8 +136,33 @@ export function createWorkspaceEngineDeps(options: WorkspaceEngineOptions): Sync
     hashOf,
     didOf,
     knownPaths: options.knownPaths,
-    readLocal: (path) => options.backend.read(normalizeNfc(normalizePath(path))),
-    writeLocal: (path, bytes) => options.backend.write(normalizeNfc(normalizePath(path)), bytes),
+    /*
+     * ★★ `readLocal` / `writeLocal` 在 E2EE 下**必须**加解密。
+     *
+     * 这里是整条链路上最容易漏的一层，而且漏了**不会有任何报错**：
+     * 引擎只管「读一条、发出去」，它不知道也不该知道加解密
+     * （那正是它只依赖 `hashOf`/`didOf` 两个回调的原因）。
+     *
+     * 所以如果这一层直通，`did` 与 `ehash` 都是密文模式的（看起来完全正确），
+     * 而**正文以明文发了出去**。`session.test.ts` 里那条
+     * 「远端看不到明文正文」的用例就是专门咬这个的 —— 它第一次跑就红了。
+     */
+    readLocal: async (path) => {
+      const normalized = normalizeNfc(normalizePath(path));
+      const raw = await options.backend.read(normalized);
+      if (!keys) return raw;
+      return encryptContent(keys, didOf(normalized), options.notebookId, raw);
+    },
+    writeLocal: async (path, bytes) => {
+      const normalized = normalizeNfc(normalizePath(path));
+      if (!keys) {
+        await options.backend.write(normalized, bytes);
+        return;
+      }
+      // 解不开就**抛**（绝不要把密文当明文写到盘上 —— 那会把笔记静默变成乱码）。
+      const plain = decryptContent(keys, didOf(normalized), options.notebookId, bytes);
+      await options.backend.write(normalized, plain);
+    },
     removeLocal: (path) => options.backend.remove(normalizeNfc(normalizePath(path))),
     ...(options.log === undefined ? {} : { log: options.log }),
   };

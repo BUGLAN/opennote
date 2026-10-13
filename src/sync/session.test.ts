@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createSyncLedger } from "./state";
 import { createMemoryProvider } from "./providers/memory";
 import { createSyncSession, knownPathsOf } from "./session";
+import { deriveNotebookKey } from "./accountKey";
 import type { LocalEntry, SyncFileBackend } from "./workspaceFiles";
 
 const NOTEBOOK = "11111111-2222-4333-8444-555555555555";
@@ -216,5 +217,150 @@ describe("★ `knownPaths` 必须来自**账本**，不能只用本地扫描结�
     // 而 `listLocal` 只看本地**当前**存在的。
     expect((await session.deps.listLocal()).map((item) => item.path)).toEqual(["notes/还在的.md"]);
     expect(knownPathsOf(shared)).toContain("notes/已被删掉的.md");
+  });
+});
+
+/* ============================================================================
+   ★★ E2EE 端到端（P4 的验收判据：**库里看不到明文**）
+   ============================================================================ */
+
+describe("★★ E2EE 端到端：远端只有密文与不可逆的 did", () => {
+  const ENC_ROOT = Uint8Array.from({ length: 32 }, (_, index) => index);
+  const NOTEBOOK_KEY = deriveNotebookKey(ENC_ROOT, NOTEBOOK);
+
+  function e2eeSession(backend: SyncFileBackend, provider: ReturnType<typeof createMemoryProvider>) {
+    return createSyncSession({
+      config: { enabled: true, baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "user-key", accountRef: "a" },
+      ledger: createSyncLedger({ baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "user-key", protocolVersion: 1 }),
+      provider,
+      backend,
+      notebookId: NOTEBOOK,
+      notebookKey: NOTEBOOK_KEY,
+    });
+  }
+
+  it("★★ 推上去之后远端**看不到**明文正文，也看不到明文路径", async () => {
+    /*
+     * 这是 P4 的**验收判据**（§10）：「服务端日志与库里都看不到明文路径与正文」。
+     *
+     * 它必须在**整条链路**上验，而不是只验 `crypto.ts` —— 因为「哪一层忘了加密」
+     * 正是这类功能最典型的失败方式（单测各自都对，拼起来有一层直通了）。
+     */
+    const provider = createMemoryProvider();
+    const backend = memoryBackend({ "很机密的目录/客户名单.md": "张三 13800000000" });
+    await e2eeSession(backend, provider).syncNow();
+
+    const tree = await provider.tree();
+    expect(tree.entries).toHaveLength(1);
+    const entry = tree.entries[0]!;
+
+    // ① did **不含**路径痕迹（不可逆的 HMAC）。
+    expect(entry.did).toMatch(/^h:[0-9a-f]{64}$/);
+    expect(entry.did).not.toContain("客户");
+    expect(entry.did).not.toContain("机密");
+
+    // ② 远端那条的**内容标识**不是明文的 sha256（是 ehash）。
+    // ③ 把远端所有字节摊开看，**没有一处**出现明文。
+    const remote = await provider.read(entry.did);
+    expect(remote).not.toBeNull();
+    const remoteBytes = remote!.bytes;
+    const asText = new TextDecoder().decode(remoteBytes);
+    expect(asText).not.toContain("张三");
+    expect(asText).not.toContain("13800000000");
+    expect(asText).not.toContain("客户名单");
+    // 密文长度 = 明文 + nonce(24) + tag(16)，所以**长度是可见的**（§3.4 如实记录）。
+    expect(remoteBytes.length).toBe(new TextEncoder().encode("张三 13800000000").length + 40);
+  });
+
+  it("★ 同一条记录在**有 did↔path 映射**的设备上能还原出明文", async () => {
+    /*
+     * 这条模拟「已经知道路径」的设备：它把 did 算出来之后能对上远端那一条，
+     * 于是拉下来并解密。`knownPaths` 里给出 `notes/a.md` 就是在模拟那张映射表。
+     */
+    const provider = createMemoryProvider();
+    await e2eeSession(memoryBackend({ "notes/a.md": "# 机密" }), provider).syncNow();
+
+    const device2 = memoryBackend({});
+    const session = createSyncSession({
+      config: { enabled: true, baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "user-key", accountRef: "a" },
+      ledger: createSyncLedger({ baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "user-key", protocolVersion: 1 }),
+      provider,
+      backend: device2,
+      notebookId: NOTEBOOK,
+      notebookKey: NOTEBOOK_KEY,
+    });
+    // 这台设备「已经知道」那条路径（真实里来自本地的 did↔path 映射表）。
+    await device2.write("notes/a.md", new TextEncoder().encode("# 机密"));
+    const result = await session.syncNow();
+    // 内容一致 ⇒ 什么都不用做，但**没有**被误判成冲突或新增。
+    expect(result!.conflicts).toHaveLength(0);
+    expect(result!.pushed).toBe(0);
+    expect(new TextDecoder().decode(await device2.read("notes/a.md"))).toBe("# 机密");
+  });
+
+  it("★★ 全新设备（**没有** did↔path 映射）⇒ 认不出路径，如实报进 `unknownDids`", async () => {
+    /*
+     * ★ 这是 E2EE 的一个**真实缺口**，不是用例写错，如实钉在这里：
+     *
+     * 模式 B 的 `did = HMAC(idKey, path)` **不可逆**。所以一台全新设备
+     * （本地空、账本空）看到远端树时，**没有任何办法**把 did 翻回路径 ——
+     * 它拿不到「这个密文该写到哪个文件名」。
+     *
+     * §2.2 说「客户端靠本地的 did↔path 映射反查」，而全新设备**没有**那张表。
+     * 文档没有说明那张表从哪来（它本身不能明文上云，否则路径就泄露了）。
+     *
+     * 引擎的处理是**对的**：认不出来的 did 如实报进 `unknownDids`，
+     * **绝不猜路径、也绝不因此往盘上写东西**。但「全新设备怎么重建路径」
+     * 是 P4-b 必须解决的问题（候选：把路径映射表用 `encRoot` 派生的密钥加密后
+     * 作为一条特殊记录同步，或让用户在导入时提供）。
+     */
+    const provider = createMemoryProvider();
+    await e2eeSession(memoryBackend({ "notes/a.md": "# 机密" }), provider).syncNow();
+
+    const fresh = memoryBackend({});
+    const result = await e2eeSession(fresh, provider).syncNow();
+    expect(result!.pulled).toBe(0);
+    // 盘上**什么都没有**（没有乱码、没有猜出来的文件名）。
+    expect(fresh.snapshot()).toEqual({});
+    // 而那条 did 被如实报了出来，交给上层处置。
+    expect(result!.unknownDids).toHaveLength(1);
+  });
+
+  it("★ 换一把 notebookKey（另一台设备导入了别人的密钥）⇒ 拉不下来，且**不会写错内容**", async () => {
+    /*
+     * 这一条比「能拉下来」更重要：解不开时**不能**把密文当明文写到盘上
+     * （那会把用户的笔记变成乱码，而且是静默的）。
+     */
+    const provider = createMemoryProvider();
+    await e2eeSession(memoryBackend({ "notes/a.md": "# 机密" }), provider).syncNow();
+
+    const wrongKey = deriveNotebookKey(Uint8Array.from({ length: 32 }, (_, index) => 255 - index), NOTEBOOK);
+    const device2 = memoryBackend({});
+    const session = createSyncSession({
+      config: { enabled: true, baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "user-key", accountRef: "a" },
+      ledger: createSyncLedger({ baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "user-key", protocolVersion: 1 }),
+      provider,
+      backend: device2,
+      notebookId: NOTEBOOK,
+      notebookKey: wrongKey,
+    });
+    const result = await session.syncNow();
+    // 没拉下来任何东西，盘上也没有乱码。
+    expect(result!.pulled).toBe(0);
+    expect(device2.snapshot()).toEqual({});
+  });
+
+  it("★ 同一份内容在两种模式下的 did 与内容标识**都不同**（不会互相认成同一条）", async () => {
+    const plainProvider = createMemoryProvider();
+    await sessionFor(memoryBackend({ "notes/a.md": "# A" }), plainProvider).syncNow();
+    const plainDid = (await plainProvider.tree()).entries[0]!.did;
+
+    const e2eeProvider = createMemoryProvider();
+    await e2eeSession(memoryBackend({ "notes/a.md": "# A" }), e2eeProvider).syncNow();
+    const e2eeDid = (await e2eeProvider.tree()).entries[0]!.did;
+
+    expect(plainDid).not.toBe(e2eeDid);
+    expect(plainDid.startsWith("f:")).toBe(true);
+    expect(e2eeDid.startsWith("h:")).toBe(true);
   });
 });

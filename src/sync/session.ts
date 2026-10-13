@@ -85,6 +85,8 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
     backend: options.backend,
     rules,
     cryptoMode: options.config.cryptoMode,
+    // `notebookId` 是内容 AAD 的一半 —— 两种模式都给（明文模式不用它，但形状一致）。
+    notebookId: options.notebookId,
     ...(options.notebookKey === undefined ? {} : { notebookKey: options.notebookKey }),
     /*
      * ★ 必须是**本地扫描结果 ∪ 账本里记着的路径**（引擎那边的原话）。

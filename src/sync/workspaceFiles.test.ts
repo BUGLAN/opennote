@@ -66,6 +66,7 @@ function depsFor(files: Record<string, string>, options: { gitignore?: string; c
     backend,
     rules: createIgnoreRules(options.gitignore ?? ""),
     cryptoMode: options.cryptoMode ?? "none",
+    notebookId: NOTEBOOK,
     ...(options.cryptoMode === "user-key" ? { notebookKey: NOTEBOOK_KEY } : {}),
     knownPaths: async () => ["notes/a.md"],
   });
@@ -173,6 +174,7 @@ describe("§3.9 · 明文与 E2EE 的差别**只在这一层**", () => {
         backend: memoryBackend({}),
         rules: createIgnoreRules(""),
         cryptoMode: "user-key",
+        notebookId: NOTEBOOK,
         knownPaths: async () => [],
       }),
     ).toThrow(/必须提供 notebookKey/);
@@ -199,10 +201,10 @@ describe("透传与路径规范化", () => {
   });
 
   it("`log` 只在给了的时候挂上（不凭空造一个）", () => {
-    const without = createWorkspaceEngineDeps({ backend: memoryBackend({}), rules: createIgnoreRules(""), cryptoMode: "none", knownPaths: async () => [] });
+    const without = createWorkspaceEngineDeps({ backend: memoryBackend({}), rules: createIgnoreRules(""), cryptoMode: "none", notebookId: NOTEBOOK, knownPaths: async () => [] });
     expect(without.log).toBeUndefined();
     const log = vi.fn();
-    const withLog = createWorkspaceEngineDeps({ backend: memoryBackend({}), rules: createIgnoreRules(""), cryptoMode: "none", knownPaths: async () => [], log });
+    const withLog = createWorkspaceEngineDeps({ backend: memoryBackend({}), rules: createIgnoreRules(""), cryptoMode: "none", notebookId: NOTEBOOK, knownPaths: async () => [], log });
     withLog.log?.("tree", { count: 1 });
     expect(log).toHaveBeenCalledOnce();
   });
