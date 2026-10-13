@@ -25,6 +25,7 @@
 
 import { isHiddenPath, isImagePath, joinPath, META_DIR } from "../../fs/paths";
 import type { FileSystemBackend } from "../../fs/types";
+import { createDefaultIgnoreRules, type IgnoreRules } from "../../sync/ignore";
 import { sha256Hex } from "../clip/hash";
 import { GithubError, type GithubApi, type GithubTree } from "./api";
 import type { GithubBaseline } from "./baseline";
@@ -72,12 +73,27 @@ export function planPull(baseline: GithubBaseline, remote: GithubTree, local: Lo
 
 /* ------------------------------------------------------------ 本地现状扫描 */
 
-/** 扫出本地全部文件（跳过 `.opennote/`、隐藏路径与几个明显不是笔记的目录）。 */
+/**
+ * 扫出本地全部文件。
+ *
+ * ▍同步范围只剩**一个**判定函数（§3.11、红线 8）
+ *
+ * 以前这里靠 `isHiddenPath(path)` **碰巧**排除了 `.git/`、`.gitignore`、`.DS_Store`
+ * （它们都以 `.` 开头）。现在改走 `src/sync/ignore.ts` 的 `shouldIgnore()`：
+ * 同一批规则既管扫描、也管主进程 watcher（两条路径曾各写一张过滤表，watcher 那张漏了 `.git/`）。
+ *
+ * ⚠️ **但 `isHiddenPath` 那一层仍然保留**：新的忽略集只覆盖**具名**的目录与文件
+ * （`.git`/`node_modules`/`.opennote`/…）。如果把隐藏路径整条去掉，`.vscode/`、
+ * `.github/` 这类**任意**点开头的路径就会开始参与同步 —— 那是放宽同步范围，
+ * 属于独立改动，不在本次。两条一起用：`isHiddenPath` 管「点开头一律不碰」，
+ * `shouldIgnore` 管「具名目录与 `.gitignore`，且 watcher 也遵守」。
+ */
 export async function collectLocalFiles(
   target: FileSystemBackend,
-  options: { maxFiles?: number } = {},
+  options: { maxFiles?: number; rules?: IgnoreRules } = {},
 ): Promise<LocalFile[]> {
   const maxFiles = options.maxFiles ?? 20000;
+  const rules = options.rules ?? createDefaultIgnoreRules();
   const out: LocalFile[] = [];
   const queue: string[] = [""];
   const skipDirs = new Set(["node_modules", "dist", "release", META_DIR]);
@@ -93,6 +109,8 @@ export async function collectLocalFiles(
     }
     for (const entry of entries) {
       const path = joinPath(dir, entry.name);
+      // 目录名要按「目录」判（`build/` 这类规则只匹配带尾斜杠的目录）。
+      if (rules.shouldIgnore(path, entry.kind === "directory")) continue;
       if (isHiddenPath(path) || skipDirs.has(entry.name)) continue;
       if (entry.kind === "directory") {
         queue.push(path);
