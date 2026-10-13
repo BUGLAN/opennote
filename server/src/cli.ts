@@ -64,6 +64,7 @@ export interface CliDeps {
 
 export const CLI_COMMANDS = [
   "bootstrap-admin",
+  "setup-couch-user",
   "create-invite",
   "list-accounts",
   "disable-account",
@@ -80,6 +81,9 @@ export const USAGE = `opennote-server 运维 CLI（§4.12）
 命令：
   bootstrap-admin              发一个**一次性管理员引导码**（★ 唯一能在密钥丢失时救回管理入口的办法）
                                码只在 stdout 出现一次，不写日志、不落盘。**本命令不生成任何密钥。**
+  setup-couch-user             在 CouchDB 的 _users 里建/更新运行时专用账号（★ 首次部署必须先跑这个）
+                               否则每个笔记本请求都会 401 —— 因为 _security.members 里写的那个
+                               「专用账号」在 CouchDB 里根本不是一条配置，而是一条 _users 文档。
   create-invite [--max-uses N] [--days N]
                                应急生成注册邀请码（正常情况用控制台）
   list-accounts                列出账号（id / 标签 / 状态 / 用量）—— **不含任何密钥材料**
@@ -167,6 +171,8 @@ export async function runCli(argv: readonly string[], deps: CliDeps = {}): Promi
   switch (command as CliCommand) {
     case "bootstrap-admin":
       return bootstrapAdmin(context);
+    case "setup-couch-user":
+      return await setupCouchUser(context);
     case "create-invite":
       return createInvite(context, flags);
     case "list-accounts":
@@ -204,6 +210,58 @@ export function bootstrapAdmin(context: CliContext): number {
   context.err("");
   context.err("本命令**没有**、也不会生成任何账号密钥（红线 3 / §1.5）。");
   return 0;
+}
+
+/**
+ * ★ 首次部署**必须先跑**这一步：在 CouchDB 的 `_users` 里建运行时专用账号。
+ *
+ * ## 为什么它不是「锦上添花」
+ *
+ * 置备时我们写 `_security.members.names = [COUCH_USER]`（§7.3 第 2 条：运行时用专用账号、
+ * **不是 admin**）。但 CouchDB 里「专用账号」**不是一条配置**，而是 `_users` 库里的一条文档。
+ *
+ * 少了这一步，栈**能起来**、`/v1/health` 也正常，但**每个笔记本请求都 401** ——
+ * 而 401 看起来像「服务端配置错了」，会让人去查错方向。
+ * 这是我在真 CouchDB 3.3.3 上跑出来的：单独验 `_security` 用 admin 打一切正常，
+ * 换成 `sync-service` 就 401，因为它根本不存在。
+ *
+ * 幂等：重复跑只更新口令。
+ */
+export async function setupCouchUser(context: CliContext): Promise<number> {
+  const name = context.config.couchUser;
+  if (!name) {
+    context.err("COUCH_USER 没配，无法建专用账号。");
+    return 2;
+  }
+  if (name === context.config.couchAdminUser) {
+    /*
+     * 如果这两个配成同一个，那「运行时用专用账号」这条纪律就白写了：
+     * 服务端等于拿着 admin 凭据在跑，一次漏洞就能删库、改 `_design`（§7.3 第 2 条）。
+     * 这里**拒绝**而不是警告 —— 警告会被忽略，而配置错误的代价是整个租户隔离失效。
+     */
+    context.err("COUCH_USER 与 COUCH_ADMIN_USER 不能是同一个账号：");
+    context.err("  运行时用 admin 会让「一条漏洞 = 能删库、能改 _design」重新成立（§7.3 第 2 条）。");
+    return 2;
+  }
+
+  try {
+    // 先确认 `_users` 在（CouchDB 首次启动后它可能还不存在）。
+    if (!(await context.couchAdmin.databaseExists("_users"))) {
+      await context.couchAdmin.createDatabase("_users");
+      context.err("已创建 `_users` 库。");
+    }
+    const { created } = await context.couchAdmin.ensureUser(name, context.config.couchPassword);
+    context.out(created ? `已创建 CouchDB 专用账号：${name}` : `已更新 CouchDB 专用账号的口令：${name}`);
+    context.err("");
+    context.err("它是**普通用户**（roles 为空），不是 admin —— 于是它只能访问");
+    context.err("`_security.members` 里列了它的那些笔记本库（§7.3 第 2 条）。");
+    context.err("口令来自环境变量 COUCH_PASSWORD，**不会**被打印。");
+    return 0;
+  } catch (error) {
+    context.err(`建专用账号失败：${String(error)}`);
+    context.err("检查 COUCH_URL / COUCH_ADMIN_USER / COUCH_ADMIN_PASSWORD，以及 CouchDB 是否已起来。");
+    return 1;
+  }
 }
 
 /** 应急生成注册邀请码（正常情况用控制台）。 */

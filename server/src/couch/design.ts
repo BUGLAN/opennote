@@ -46,6 +46,22 @@ export const VALIDATE_DOC_UPDATE_SOURCE = String.raw`function (newDoc, oldDoc, u
   if (newDoc._deleted) return;
   // 保留 id（_design / _local）放行：它们是 CouchDB 自己的东西。
   if (newDoc._id.charAt(0) === '_') return;
+  /*
+   * 服务端自己的**元数据文档**放行（syncinfo）。
+   *
+   * ★ 这条是**真机跑出来的**：假 CouchDB 不执行 validate_doc_update，所以单测看不见 ——
+   * 一直到起了真 CouchDB 3.3.3 建第一个笔记本时才炸：
+   *
+   *   置备在「syncinfo」失败（已回滚删库）：CouchError: CouchDB 403：bad id prefix
+   *
+   * 也就是**我自己的校验规则拒绝了我自己的元数据文档**：syncinfo 既不以 _ 开头，
+   * 也不是 f: / h: 前缀。这属于「校验器必须放行服务端自身的保留文档」——
+   * 一个不写下来就会再犯的坑。
+   *
+   * ⚠️ 本段在 String.raw 模板字符串里，注释里**不能出现反引号** ——
+   * 那会提前结束模板字符串（这个坑我在这个文件里踩过两次了）。
+   */
+  if (newDoc._id === 'syncinfo') return;
 
   // 只接受两种前缀：f:（模式 A 明文路径）与 h:（模式 B HMAC）。别的一律拒绝。
   var prefix = newDoc._id.slice(0, 2);

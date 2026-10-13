@@ -251,6 +251,43 @@ export class CouchClient {
     }
   }
 
+  /**
+   * 建/更新 `_users` 里的一个用户（幂等）。
+   *
+   * ## 为什么需要它（真机跑出来的缺口）
+   *
+   * 置备时我们写 `_security.members.names = [COUCH_USER]`（§7.3 第 2 条：运行时用**专用账号**、
+   * 不是 admin）。但「专用账号」在 CouchDB 里**不是一条配置**，而是 `_users` 库里的一条文档。
+   * 没有它的话，每一个笔记本请求都会 401 —— 而症状看起来像「服务端配置错了」。
+   *
+   * 这一条是在真 CouchDB 3.3.3 上验证过才发现的：单独验 `_security` 时我用 admin 打，
+   * 一切正常；换成 `sync-service` 就 401，因为它根本不存在。
+   *
+   * 必须用 **admin** 客户端调（`_users` 只有 admin 能写）。
+   */
+  async ensureUser(name: string, password: string): Promise<{ created: boolean }> {
+    const id = `org.couchdb.user:${name}`;
+    const existing = await this.getDoc("_users", id).catch(() => null);
+    const body = {
+      _id: id,
+      name,
+      type: "user",
+      // ★ 不给任何 `roles`：它**不是** admin，只有各笔记本 `_security.members` 给它的权限。
+      roles: [] as string[],
+      password,
+    };
+    await this.request("PUT", `/_users/${encodeURIComponent(id)}`, {
+      body: JSON.stringify(existing?._rev === undefined ? body : { ...body, _rev: existing._rev }),
+    });
+    return { created: existing === null };
+  }
+
+  /** 读一个 `_users` 用户是否存在（**不返回任何口令材料**）。 */
+  async userExists(name: string): Promise<boolean> {
+    const doc = await this.getDoc("_users", `org.couchdb.user:${name}`).catch(() => null);
+    return doc !== null;
+  }
+
   /** `_all_docs?include_docs=true`（模式 B 的列树，§3.3）。 */
   async allDocs(
     db: string,

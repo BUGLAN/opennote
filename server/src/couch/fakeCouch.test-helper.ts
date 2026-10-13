@@ -124,8 +124,16 @@ export class FakeCouch {
     if (method === "PUT") {
       const existing = docs.get(docId);
       const payload = body ? (JSON.parse(body) as FakeDoc) : ({ _id: docId } as FakeDoc);
-      if (existing && rev !== existing._rev) return json(409, { error: "conflict" });
-      if (!existing && rev !== null) return json(409, { error: "conflict" });
+      /*
+       * ★ 版本号可以**在 body 里**给（`_rev`），也可以走 `?rev=` —— 真实 CouchDB 两种都收。
+       *
+       * 第一版只认 `?rev=`，于是 `ensureUser()`（它把 `_rev` 放在 body 里）在假夹具上
+       * 每次都被判成冲突，而它在**真 CouchDB 上是好的**。教训：夹具比产品严格时，
+       * 测出来的是夹具的脾气，不是产品的行为。
+       */
+      const baseRev = rev ?? (typeof payload._rev === "string" ? payload._rev : null);
+      if (existing && baseRev !== existing._rev) return json(409, { error: "conflict" });
+      if (!existing && baseRev !== null) return json(409, { error: "conflict" });
       const written = { ...payload, _id: docId, _rev: this.rev() };
       docs.set(docId, written);
       return json(201, { ok: true, rev: written._rev });

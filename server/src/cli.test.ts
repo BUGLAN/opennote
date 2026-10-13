@@ -248,6 +248,96 @@ describe("§4.12 · create-invite", () => {
   });
 });
 
+describe("★ `setup-couch-user` · 首次部署必须先跑（真机跑出来的缺口）", () => {
+  /*
+   * 这一条命令是**在真 CouchDB 3.3.3 上跑出来的**：置备时我们写
+   * `_security.members.names = [COUCH_USER]`，但「专用账号」在 CouchDB 里**不是一条配置**，
+   * 而是 `_users` 库里的一条文档。少了这一步，栈能起来、`/v1/health` 也正常，
+   * 但**每个笔记本请求都 401** —— 而 401 看起来像「服务端配置错了」，会让人查错方向。
+   */
+  async function withFakeCouch(
+    run: (context: CliContext, fake: { databases: Map<string, Map<string, { _rev: string }>> }) => Promise<void>,
+  ): Promise<void> {
+    const { FakeCouch, couchClient } = await import("./couch/fakeCouch.test-helper");
+    const { AccountStore } = await import("./auth/accounts");
+    const { NotebookStore } = await import("./notebooks");
+    const { loadConfig } = await import("./config");
+    const { openDatabase } = await import("./db");
+    const fake = new FakeCouch();
+    const db = openDatabase({ path: ":memory:" });
+    const context: CliContext = {
+      out: () => undefined,
+      err: () => undefined,
+      config: loadConfig({ ...ENV, COUCH_USER: "sync-service", COUCH_ADMIN_USER: "admin" }),
+      accounts: new AccountStore(db),
+      notebooks: new NotebookStore(db),
+      couch: couchClient(fake),
+      couchAdmin: couchClient(fake),
+    };
+    await run(context, fake as unknown as { databases: Map<string, Map<string, { _rev: string }>> });
+  }
+
+  it("建专用账号：落在 `_users` 里，`roles` 为空（**不是 admin**）", async () => {
+    await withFakeCouch(async (context, fake) => {
+      const result = await run(["setup-couch-user"], context);
+      expect(result.code).toBe(0);
+      expect(result.out).toContain("已创建 CouchDB 专用账号：sync-service");
+
+      const doc = fake.databases.get("_users")?.get("org.couchdb.user:sync-service") as unknown as {
+        name: string;
+        roles: string[];
+        type: string;
+      };
+      expect(doc).toBeTruthy();
+      expect(doc.name).toBe("sync-service");
+      expect(doc.type).toBe("user");
+      // ★ `roles: []` —— 它只能访问 `_security.members` 列了它的库（§7.3 第 2 条）。
+      expect(doc.roles).toEqual([]);
+    });
+  });
+
+  it("幂等：跑两次只更新（第二次说「已更新」而不是「已创建」）", async () => {
+    await withFakeCouch(async (context) => {
+      await run(["setup-couch-user"], context);
+      const second = await run(["setup-couch-user"], context);
+      expect(second.code).toBe(0);
+      expect(second.out).toContain("已更新");
+    });
+  });
+
+  it("★ 拒绝把 `COUCH_USER` 与 `COUCH_ADMIN_USER` 配成同一个（那是配置错误，不是警告）", async () => {
+    await withFakeCouch(async (context) => {
+      // 把运行时账号配成 admin。
+      context.config = { ...context.config, couchUser: context.config.couchAdminUser } as typeof context.config;
+      const result = await run(["setup-couch-user"], context);
+      expect(result.code).toBe(2);
+      expect(result.err).toContain("不能是同一个账号");
+      /*
+       * 为什么是**拒绝**而不是警告：配错的代价是「运行时拿着 admin 凭据」——
+       * 一次漏洞就能删库、改 `_design`，§7.3 第 2 条整条失效。
+       * 而警告会被忽略；拒绝不会。
+       */
+      expect(result.err).toContain("能删库、能改 _design");
+    });
+  });
+
+  it("`_users` 不存在时先建它（CouchDB 首次启动后它可能还没有）", async () => {
+    await withFakeCouch(async (context, fake) => {
+      expect(fake.databases.has("_users")).toBe(false);
+      await run(["setup-couch-user"], context);
+      expect(fake.databases.has("_users")).toBe(true);
+    });
+  });
+
+  it("口令**不会**出现在任何输出里", async () => {
+    await withFakeCouch(async (context) => {
+      const result = await run(["setup-couch-user"], context);
+      expect(`${result.out}${result.err}`).not.toContain("pw");
+      expect(`${result.out}${result.err}`).toContain("被打印");
+    });
+  });
+});
+
 describe("§4.12 · list-accounts / disable-account / recompute-quota", () => {
   it("没有账号时给一句人话，而不是一个空表头", async () => {
     const result = await run(["list-accounts"]);

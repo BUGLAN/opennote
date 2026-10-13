@@ -1,0 +1,133 @@
+# 编排（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §8.1、§7.3）。
+#
+# ★ 这个文件在**仓库根目录**（单仓）。
+#
+# ## 三个容器，**一个都不发布端口**
+#
+# | 容器 | 谁能访问 | 为什么 |
+# | --- | --- | --- |
+# | `couchdb` | 只有 compose 内网 | 它是数据的真源；公网直连等于把「_design 校验」之外的一切暴露出去 |
+# | `sync` | 只有 `tunnel` | 它是唯一的应用层；其它入口都从它过 |
+# | `tunnel` | 公网（出站隧道） | **出站**连接，所以宿主不用开任何入站端口、也不需要公网 IP |
+#
+# 三处都**故意不写 `ports:`** —— 这不是遗漏，是这套部署的安全边界本身。
+# 需要本地调试时用 `docker compose exec …` 或临时加 `ports:`（但别提交那一行）。
+#
+# ## 没有的东西（同样是设计的一部分）
+#
+# - **没有 `SESSION_SECRET`** —— 本版没有会话签名，`authToken` 本身就是凭据。
+# - **没有任何 `password` 相关的应用配置** —— 没有口令体系（密钥即身份）。
+# - **没有服务端密钥** —— 服务端不持有任何密钥（红线 3）。看到这样的项就是理解错了。
+
+name: opennote
+
+services:
+  couchdb:
+    image: couchdb:3.3
+    restart: unless-stopped
+    environment:
+      # 首次启动时建这个 admin，并立刻关掉 Admin Party。
+      COUCHDB_USER: ${COUCH_ADMIN_USER:?COUCH_ADMIN_USER 必填（见 .env.example）}
+      COUCHDB_PASSWORD: ${COUCH_ADMIN_PASSWORD:?COUCH_ADMIN_PASSWORD 必填}
+    volumes:
+      # CouchDB 的数据。★ 备份不能只 rsync 数据目录（见 §8.3）——
+      # 正确的做法是对每个库跑一次 `_all_docs?include_docs=true` 导出。
+      - ./data/couchdb:/opt/couchdb/data
+      # 加固配置：挂进 `local.d/`，文件名前缀决定加载顺序（见该文件里的说明）。
+      - ./etc/couchdb/local.ini:/opt/couchdb/etc/local.d/10-opennote.ini:ro
+    # ⚠️ 故意不写 ports —— 只在 compose 网络内可达。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5984/_up"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # ⚠️ **CouchDB 这里刻意不加 `read_only: true`** —— 这是真机跑出来的结论。
+    #
+    # 第一版我给它也加上了（以为「容器只读根文件系统」是通用的收紧，§7.3 第 6 条），
+    # 结果是**容器永远起不来，而且日志里什么都没有**：
+    #
+    #   1. 先加了 `read_only: true` → 入口脚本反复
+    #      `touch: cannot touch '/opt/couchdb/etc/local.d/docker.ini': Read-only file system`
+    #      （它要把 `COUCHDB_USER`/`COUCHDB_PASSWORD` 注入成配置）；
+    #   2. 于是给 `/opt/couchdb/etc/local.d` 挂 tmpfs → 退出码 1、**Restarts=11、
+    #      `docker logs` 完全空白** —— 它在能打日志之前就死了（还写不了
+    #      `/opt/couchdb/etc/vm.args` 之类的启动期文件）。
+    #
+    # 关键是**回头读文档**：§7.3 第 6 条写在「**Node**」标题下面，
+    # 本来就只针对 `sync` 容器。我把它当成通用条目套到了 CouchDB 上。
+    #
+    # 硬要只读也行（把整个 `/opt/couchdb/etc` 挂 tmpfs），但那样会盖掉镜像自带的
+    # `default.ini`，还得把配置一条条重建 —— **代价大于收益，而且更脆弱**。
+    # 所以这里如实去掉，并把理由写下来，免得后来者再试一遍。
+    security_opt:
+      - no-new-privileges:true
+    # 数据仍然只在数据卷里；`no-new-privileges` 与「不发布端口」才是真正起作用的两条。
+
+  sync:
+    build:
+      # ★ 上下文是**仓库根**：同仓构建，一次拿到 `shared/` 与 `server/`，
+      #   于是产物与 API 天然同版本（§5.6）。无需 PWA_VERSION / PWA_SHA256 这类交接物。
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: "8787"
+      EXTERNAL_BASE_URL: ${EXTERNAL_BASE_URL:?EXTERNAL_BASE_URL 必填}
+      # 启动时自检：与 shared/contract.ts 不一致就拒绝启动（挡住「镜像比自己以为的旧」）。
+      PROTOCOL_VERSION_EXPECTED: ${PROTOCOL_VERSION_EXPECTED:-1}
+
+      COUCH_URL: http://couchdb:5984
+      # 运行时用专用账号（**不是 admin**）。只在建库/置备时才用下面的 admin。
+      COUCH_USER: ${COUCH_SYNC_USER:?COUCH_SYNC_USER 必填}
+      COUCH_PASSWORD: ${COUCH_SYNC_PASSWORD:?COUCH_SYNC_PASSWORD 必填}
+      COUCH_ADMIN_USER: ${COUCH_ADMIN_USER:?}
+      COUCH_ADMIN_PASSWORD: ${COUCH_ADMIN_PASSWORD:?}
+
+      SQLITE_PATH: /app/data/control.db
+      MAX_FILE_BYTES: ${MAX_FILE_BYTES:-33554432}
+      DEFAULT_ACCOUNT_QUOTA_BYTES: ${DEFAULT_ACCOUNT_QUOTA_BYTES:-2147483648}
+      DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS: ${DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS:-100}
+
+      # —— 入口相关（不绑定任何厂商；换入口就改这三项）——
+      SSE_HEARTBEAT_MS: ${SSE_HEARTBEAT_MS:-25000}
+      # 默认空 = 谁都不信。用 CF 命名隧道时填 `cf-connecting-ip`。
+      TRUSTED_PROXY_HEADERS: ${TRUSTED_PROXY_HEADERS:-}
+
+      ACCOUNT_REQUESTS_PER_MINUTE: ${ACCOUNT_REQUESTS_PER_MINUTE:-120}
+      ACCOUNT_SSE_CONNECTIONS: ${ACCOUNT_SSE_CONNECTIONS:-4}
+      GLOBAL_REQUESTS_PER_MINUTE: ${GLOBAL_REQUESTS_PER_MINUTE:-600}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      # SQLite 控制面库（账号 / 笔记本 / 成员 / 邀请码 / 审计）。**这个要备份**（§8.3）。
+      - ./data/sync:/app/data
+    depends_on:
+      couchdb:
+        condition: service_healthy
+    # ⚠️ 也不写 ports —— 只有 tunnel 能访问它。
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # ★ 命名隧道（`run` 带 token），**不是** Quick Tunnel：
+    #   Quick Tunnel 的域名每次重启都变，而「用户核对地址」是 E2EE 的信任根之一。
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?TUNNEL_TOKEN 必填（Cloudflare Zero Trust → Networks → Tunnels）}
+    depends_on:
+      - sync
+    # 出站连接：宿主不开任何入站端口，也不需要公网 IP。
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+
+# 显式声明网络：默认网络就够（三个容器互相可达），但写出来是为了
+# 「谁在哪个网络里」这件事在文件里看得见，而不是靠 compose 的隐式默认。
+networks:
+  default:
+    driver: bridge

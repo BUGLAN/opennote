@@ -1,0 +1,49 @@
+{
+  "//": "服务端的**产出**配置（`pnpm build:server`）。",
+  "//why-not-tsconfig.json": "`server/tsconfig.json` 是**检查**用（`noEmit: true`），而且 include 了 `src/**/*.test.ts`。产出必须另起一份：",
+  "//2": "  1. 不能把测试编译进 `dist/`（会让镜像变大，也可能带上测试用的假 CouchDB）；",
+  "//3": "  2. 检查用的那份 `noEmit`，产出这份要 emit。",
+  "//module": "`module: ESNext` + `moduleResolution: bundler` 与源码一致；但 Node 直接跑到 ESM 需要**显式扩展名**，",
+  "//module2": "而本仓源码用的是无扩展名的相对导入（bundler 风格）。所以这里的产物**不**直接给 node 跑，",
+  "//module3": "而是保留 bundler 解析 —— compose 里用 `node --experimental-strip-types` 或 tsx 都不理想。",
+  "//module4": "★ 诚实的取舍：见本文件末尾的 `// NOTE`。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "..",
+    "sourceMap": true,
+    "declaration": false
+  },
+  "include": ["src/**/*.ts", "../shared/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "src/**/fakeCouch.test-helper.ts", "src/**/*.test-helper.ts"]
+}
+// NOTE（重要，别当成已完成）
+//
+// 这份配置会 emit 到 `server/dist/`（因为 `rootDir: ".."`，产物形状是
+// `dist/server/src/*.js` + `dist/shared/*.js`）。但它**还不能直接被 `node` 执行**：
+// 源码里的相对导入没有 `.js` 扩展名（`from "./config"`），而 Node 的 ESM 解析要求
+// 显式扩展名。
+//
+// 三种出路，**尚未拍板**（属于 P2-j 的范围，需要真栈验证过再选）：
+//   a. 产出一份给 Node 之前再过一遍打包器（esbuild/tsup）—— 简单、产物小，多一个构建依赖；
+//   b. 把服务端相对导入统一加上 `.js` 扩展名 —— 零构建依赖，但要改遍全仓导入；
+//   c. `module: "nodenext"` + 全仓加扩展名 —— 同上，且更严格。
+//
+// **在选定之前，`pnpm build:server` 的产物不被 compose 使用**；
+// compose 目前用 `tsx` 跑源码（见 `server/Dockerfile`），那是能跑通的路径。
+// 这一点必须如实写在这里，而不是假装「构建好了」。

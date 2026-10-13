@@ -28,3 +28,14 @@ coverage
 *.db
 *.db-shm
 *.db-wal
+
+# 服务端构建产物（`pnpm build:server`）。★ 部署时由 Dockerfile 现构建，不进仓库
+server/dist/
+
+# 部署密钥与本地环境：**绝不能进库**（CouchDB 管理口令、隧道 token 都在里面）
+.env
+.env.*
+!.env.example
+
+# compose 挂载的数据目录（CouchDB 数据 + SQLite 控制面库）
+data/

@@ -129,6 +129,22 @@ describe("id 前缀与保留 id", () => {
     expect(verdict({ _id: "_local/device-abc" })).toEqual({ ok: true });
   });
 
+  it("★ 服务端自己的元数据文档 `syncinfo` 必须放行", () => {
+    /*
+     * 这条是**真机跑出来的回归**（假 CouchDB 不执行 `validate_doc_update`，所以单测看不见）。
+     *
+     * 起真 CouchDB 3.3.3 建第一个笔记本时，置备的最后一跳炸了：
+     *   置备在「syncinfo」失败（已回滚删库）：CouchError: CouchDB 403：bad id prefix
+     * ——**我自己的校验规则拒绝了我自己的元数据文档**（`syncinfo` 既不以 `_` 开头，
+     * 也不是 `f:` / `h:` 前缀）。而回滚把库也删了，所以现场什么都没留下，只有一个 500。
+     * 这类 bug 只有「真引擎 + 全链路」才能暴露。
+     */
+    expect(verdict({ _id: "syncinfo", protocolVersion: 1, cryptoMode: "none" })).toEqual({ ok: true });
+    // 但别的「没有前缀」的 id 仍然要被拦（别把放行放宽成一个通配）。
+    expect(verdict({ _id: "随便一个 id", path: "a.md", hash: "a".repeat(64) })).toEqual({ ok: false, reason: "bad id prefix" });
+    expect(verdict({ _id: "syncinfo2", protocolVersion: 1 })).toEqual({ ok: false, reason: "bad id prefix" });
+  });
+
   it("tombstone 放行（删除不该被路径规则挡住，否则文件会在另一端复活）", () => {
     expect(verdict({ _id: `f:${Buffer.from("../x", "utf8").toString("base64url")}`, path: "../x", _deleted: true })).toEqual({ ok: true });
   });
