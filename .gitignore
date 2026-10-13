@@ -24,3 +24,7 @@ coverage
 .tmp-title/
 .tmp-verify/
 .tmp-migrate/
+# 测试临时数据库（迁移/版本守卫用例会在磁盘上造库；别把它们提交进来）
+*.db
+*.db-shm
+*.db-wal
