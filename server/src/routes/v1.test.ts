@@ -706,3 +706,99 @@ describe("§1.5 · 注册与轮换的端到端（K2 / K5）", () => {
     expect(text).not.toContain("encRoot");
   });
 });
+
+/* ============================================================================
+   §4.7 / §4.8 · `/v1/events` SSE 中继
+   ============================================================================ */
+
+describe("§4.7 · `/v1/events`（SSE 中继）", () => {
+  /** 读出流的第一块（够了 —— 首帧就是 `ready`）。 */
+  async function firstChunk(response: Response): Promise<string> {
+    const reader = response.body!.getReader();
+    const { value } = await reader.read();
+    await reader.cancel();
+    return new TextDecoder().decode(value);
+  }
+
+  it("★ 令牌可以走**查询串**（`EventSource` 不能设置请求头 —— 这是浏览器限制，不是我们的选择）", async () => {
+    /*
+     * §4.7 第 529 行明确写了「`authToken`（**query 参数**或 cookie）」。
+     * 别的接口一律要求 `Authorization` 头；只有 SSE 这一条给查询串的路。
+     */
+    const world = makeWorld();
+    const account = world.account();
+    const notebook = world.notebook(account.id);
+
+    const response = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`);
+    expect(response.status).toBe(200);
+    expect(await firstChunk(response)).toContain("event: ready");
+  });
+
+  it("`Authorization` 头也照常能用（非浏览器客户端会带）", async () => {
+    const world = makeWorld();
+    const account = world.account();
+    const notebook = world.notebook(account.id);
+    const response = await world.app.request(`/v1/events?nb=${notebook.id}`, { headers: { authorization: `Bearer ${account.token}` } });
+    expect(response.status).toBe(200);
+    await firstChunk(response);
+  });
+
+  it("没有令牌 ⇒ 401", async () => {
+    const world = makeWorld();
+    const account = world.account();
+    const notebook = world.notebook(account.id);
+    const response = await world.app.request(`/v1/events?nb=${notebook.id}`);
+    expect(response.status).toBe(401);
+  });
+
+  it("★ 非成员 ⇒ 404，且与「笔记本不存在」**不可区分**（§4.4 纪律 2）", async () => {
+    const world = makeWorld();
+    const owner = world.account();
+    const stranger = world.account();
+    const notebook = world.notebook(owner.id);
+
+    const nonMember = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${stranger.token}`);
+    const nonexistent = await world.app.request(`/v1/events?nb=00000000-0000-4000-8000-000000000000&authToken=${stranger.token}`);
+    expect(nonMember.status).toBe(404);
+    expect(nonexistent.status).toBe(404);
+    // 文案也必须一样（否则等于告诉攻击者「这个笔记本存在」）。
+    expect(await nonMember.text()).toBe(await nonexistent.text());
+  });
+
+  it("★ 响应头禁止中间层缓存/缓冲（否则事件会攒到连接关闭才发 —— §4.8 的 Quick Tunnel 教训）", async () => {
+    const world = makeWorld();
+    const account = world.account();
+    const notebook = world.notebook(account.id);
+    const response = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(response.headers.get("cache-control")).toContain("no-transform");
+    expect(response.headers.get("x-accel-buffering")).toBe("no");
+    await firstChunk(response);
+  });
+
+  it("★ 首帧就把游标与心跳间隔告诉客户端（它才知道从哪儿开始、多久算掉线）", async () => {
+    const world = makeWorld();
+    const account = world.account();
+    const notebook = world.notebook(account.id);
+    const response = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}&since=5`);
+    const chunk = await firstChunk(response);
+    expect(chunk).toContain('"cursor":"5"');
+    expect(chunk).toContain("heartbeatMs");
+  });
+
+  it("★ 连接数超上限 ⇒ 429（明确拒绝，不是静默把旧的踢掉）", async () => {
+    const world = makeWorld();
+    const account = world.account();
+    const notebook = world.notebook(account.id);
+    // 默认上限 4：开满之后第 5 条要被拒。
+    const opened: Response[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const response = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`);
+      opened.push(response);
+      await firstChunk(response);
+    }
+    const extra = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`);
+    expect(extra.status).toBe(429);
+    expect(await extra.text()).toContain("实时连接太多");
+  });
+});

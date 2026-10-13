@@ -524,10 +524,180 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     return new Response(null, { status: 204 });
   });
 
+  sseRoutes(deps, routes, json);
+
   return routes;
 }
 
 /** `sha256` 小写十六进制（模式 A 的兜底：明文正文在我们手里，与客户端算的必然一致）。 */
+/* ============================================================================
+   `/v1/events` —— SSE 中继（§4.7、§4.8、第 428/490/529 行）
+   ============================================================================ */
+
+/**
+ * 每账号的并发 SSE 连接计数（`ACCOUNT_SSE_CONNECTIONS`，默认 4）。
+ *
+ * 为什么要限：每条 SSE 连接在 Node 这边占一个挂着的响应、在 CouchDB 那边占一个
+ * 长轮询。一个客户端（或一个跑飞的脚本）开几百条就能把服务端拖垮 ——
+ * 而 SSE 是**唯一**会长期占着连接的接口。
+ */
+const sseConnections = new Map<string, number>();
+
+/** 取心跳间隔（配置项，**不写死** —— §4.8：换隧道就变，所以必须是配置）。 */
+function sseHeartbeatMsOf(deps: V1RoutesDeps): number {
+  const configured = (deps as { config?: { sseHeartbeatMs?: number } }).config?.sseHeartbeatMs;
+  return typeof configured === "number" && configured > 0 ? configured : 25000;
+}
+
+/** 取每账号连接上限。 */
+function sseMaxConnectionsOf(deps: V1RoutesDeps): number {
+  const configured = (deps as { config?: { accountSseConnections?: number } }).config?.accountSseConnections;
+  return typeof configured === "number" && configured > 0 ? configured : 4;
+}
+
+/**
+ * `GET /v1/events?nb=<notebookId>` —— 把 CouchDB 的 `_changes` 转成 SSE。
+ *
+ * ## ★ 为什么令牌可以从**查询串**来（与其它接口不同）
+ *
+ * 其它接口一律要求 `Authorization: Bearer`。但 **`EventSource` 不能设置请求头** ——
+ * 这是浏览器的限制，不是我们的选择。所以第 529 行明确写了
+ * 「`authToken`（**query 参数**或 cookie）」。
+ *
+ * ⚠️ 代价要如实说：**查询串会进访问日志**（我们的、隧道的、任何中间层的）。
+ * 所以这里**只**接受它作为 SSE 的入口，别的接口不给这条路 ——
+ * 一个泄露的令牌能被用来读写笔记本，把它的暴露面限制在一条只读的信号通道上。
+ *
+ * ## 它推的是「信号」，不是「内容」
+ *
+ * 事件体里只有游标（`cursor`）与条数，**没有路径、没有正文**。
+ * 客户端收到就去跑一轮普通同步（§4.6 规则 1：`_changes` 是**偏序**的，
+ * 只能当「脏了」的信号，不能当成「按这个顺序应用」）。
+ * 这样即使某个中间层重排/丢了事件，最坏也只是晚一轮同步，不会同步错。
+ */
+function sseRoutes(deps: V1RoutesDeps, routes: Hono, json: (body: unknown, status: number, headers?: Record<string, string>) => Response): void {
+  routes.get("/events", async (c) => {
+    /*
+     * 认证：先看 `Authorization` 头（非浏览器客户端会带），再退到 `?authToken=`。
+     * 两条都走**同一个** `deps.accounts.authenticate`，没有第二条鉴权链路。
+     */
+    let account = null as ReturnType<typeof deps.accounts.authenticate> | null;
+    const header = bearerToken(c.req.header("authorization"));
+    const queryToken = c.req.query("authToken");
+    const token = header ?? queryToken ?? null;
+    if (token) {
+      try {
+        account = deps.accounts.authenticate(token);
+      } catch {
+        account = null;
+      }
+    }
+    if (account === null) return json({ error: "缺少令牌", code: "unauthorized" }, 401);
+
+    /*
+     * ★ 这里**不能**用 `resolveNotebook()`：它内部会再调一次 `authenticate(c)`，
+     * 而那只读 `Authorization` 头 —— 于是查询串那条路刚认证成功就被它判成 401。
+     * 所以用**已经认证好的** `account` 走同一个授权点（`resolveMembership`），
+     * 并逐字复制它的 404 文案（§4.4 纪律 2：越权与不存在必须不可区分）。
+     */
+    const notebookId = c.req.query("nb");
+    if (!notebookId) return json({ error: "缺少 nb 参数", code: "bad-request" }, 400);
+    const notebook = deps.notebooks.findById(notebookId);
+    const membership = notebook ? deps.notebooks.resolveMembership(notebook.id, account.id) : null;
+    if (!notebook || !membership) return json({ error: "笔记本不存在", code: "not-found" }, 404);
+
+    // 连接数上限（超出就明确拒绝，不是静默把旧的踢掉）。
+    const limit = sseMaxConnectionsOf(deps);
+    const used = sseConnections.get(account.id) ?? 0;
+    if (used >= limit) {
+      return json({ error: `这个账号的实时连接太多了（上限 ${limit}）`, code: "too-many-connections" }, 429);
+    }
+    sseConnections.set(account.id, used + 1);
+
+    const heartbeatMs = sseHeartbeatMsOf(deps);
+    const encoder = new TextEncoder();
+    let cursor: string | null = c.req.query("since") ?? null;
+    let closed = false;
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (chunk: string): void => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(chunk));
+          } catch {
+            closed = true;
+          }
+        };
+        /** 先把当前游标告诉客户端，它才知道从哪儿开始。 */
+        send(`event: ready
+data: ${JSON.stringify({ cursor, heartbeatMs })}
+
+`);
+
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        let lastBeat = Date.now();
+
+        const tick = async (): Promise<void> => {
+          if (closed) return;
+          try {
+            const result = await deps.couch.changes(notebook.db_name, { since: cursor, limit: 100, timeoutMs: 10_000 });
+            const lastSeq = result.last_seq === undefined || result.last_seq === null ? null : String(result.last_seq);
+            if (result.results.length > 0 && lastSeq !== null && lastSeq !== cursor) {
+              cursor = lastSeq;
+              // ★ 只推**信号**（游标 + 条数），不推路径也不推正文。
+              send(`event: change
+data: ${JSON.stringify({ cursor, count: result.results.length })}
+
+`);
+              lastBeat = Date.now();
+            }
+          } catch {
+            // CouchDB 抖了一下不该把连接掐了 —— 客户端会重连，但我们先撑住。
+          }
+          // 心跳：**注释行**（SSE 规范里客户端会忽略它），只为把连接撑活。
+          if (Date.now() - lastBeat >= heartbeatMs) {
+            send(`: ping
+
+`);
+            lastBeat = Date.now();
+          }
+          timer = setTimeout(() => void tick(), 2000);
+        };
+        void tick();
+
+        // 客户端断开 ⇒ 收尾（**一定要减计数**，否则连接数会只增不减）。
+        const abort = c.req.raw.signal;
+        const cleanup = (): void => {
+          if (closed) return;
+          closed = true;
+          if (timer !== null) clearTimeout(timer);
+          const left = (sseConnections.get(account.id) ?? 1) - 1;
+          if (left <= 0) sseConnections.delete(account.id);
+          else sseConnections.set(account.id, left);
+          try {
+            controller.close();
+          } catch {
+            /* 已经关了 */
+          }
+        };
+        abort.addEventListener("abort", cleanup);
+      },
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        // 中间层不许缓存/缓冲 —— 否则事件会攒到连接关闭才发（§4.8 的 Quick Tunnel 教训）。
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+        "x-accel-buffering": "no",
+      },
+    });
+  });
+}
+
 function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
