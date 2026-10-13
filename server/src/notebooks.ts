@@ -398,6 +398,66 @@ export class NotebookStore {
     }));
   }
 
+  /**
+   * **测试用**：把一个笔记本的 `crypto_mode` 改掉。
+   *
+   * 为什么要它：`crypto_mode` 在正式流程里**没有**「改」这个操作（v1 不做加密迁移，
+   * §11.3 A），但用例需要模拟「发完邀请码之后模式被改过 / 有人手工改过库」这种状态 ——
+   * 那正是「用码处也要判可共享性」这条纪律要防的场景。
+   *
+   * 放在这里而不是让用例去凿私有 `db` 字段：后者在重构时会以「测试编译不过」炸掉，
+   * 而且会诱使别人照抄。
+   */
+  __setCryptoModeForTests(notebookId: string, cryptoMode: CryptoMode): void {
+    this.db.prepare("UPDATE notebooks SET crypto_mode = ? WHERE id = ?").run(cryptoMode, notebookId);
+  }
+
+  /* ---------------------------------------------------------------- 设备 */
+
+  /**
+   * 设备登记（**幂等**：同一 `deviceId` 重复登记只刷新 `last_seen_at`）。
+   *
+   * ⚠️ 这里**没有**「踢掉某台设备」—— 一个账号密钥所有设备共用，没有每设备凭据，
+   * 所以 `devices` 是**只读账本**（§1.5 代价 3）。唯一的吊销手段是轮换账号密钥。
+   */
+  upsertDevice(input: {
+    deviceId: string;
+    accountId: string;
+    name: string | null;
+    platform: string | null;
+    now?: number;
+    ip?: string | null;
+  }): void {
+    const now = input.now ?? Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO devices (id, account_id, name, platform, created_at, last_seen_at, last_ip)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform, last_seen_at = excluded.last_seen_at, last_ip = excluded.last_ip`,
+      )
+      .run(input.deviceId, input.accountId, input.name, input.platform, now, now, input.ip ?? null);
+  }
+
+  /** 列出某个账号的设备（控制台「我的设备」页 —— **只读**）。 */
+  listDevices(accountId: string): { deviceId: string; name: string | null; platform: string | null; createdAt: number; lastSeenAt: number | null }[] {
+    const rows = this.db
+      .prepare("SELECT * FROM devices WHERE account_id = ? ORDER BY created_at ASC")
+      .all(accountId) as unknown as {
+      id: string;
+      name: string | null;
+      platform: string | null;
+      created_at: number;
+      last_seen_at: number | null;
+    }[];
+    return rows.map((row) => ({
+      deviceId: row.id,
+      name: row.name,
+      platform: row.platform,
+      createdAt: row.created_at,
+      lastSeenAt: row.last_seen_at,
+    }));
+  }
+
   /** 审计写入（**永不包含正文或密钥材料**，§4.3）。 */
   audit(event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null; now?: number }): void {
     this.db
