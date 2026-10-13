@@ -20,7 +20,7 @@
  *     回传的消息一律不含宿主机绝对路径/用户名（审计 D35）
  */
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, nativeImage, session, shell } = require('electron')
+const { app, BrowserWindow, Menu, dialog, ipcMain, nativeImage, safeStorage, session, shell } = require('electron')
 const { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } = require('node:fs/promises')
 const { existsSync, watch, readdirSync, readFileSync } = require('node:fs')
 const { spawn } = require('node:child_process')
@@ -1128,6 +1128,87 @@ async function loadPersistentRoots() {
   return persistentRoots.size
 }
 
+/* ============================================================================
+   同步账号密钥的保管（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §3.9、§5.2、§5.5）
+
+   桌面端的密钥**只由主进程持有**，渲染层拿不到原文 —— 它只能请求主进程「读/写/清」。
+   这与令牌处理是同一条纪律（§5.5）：即使渲染层被 XSS，攻击者也只能**请求**主进程做事，
+   拿不到密钥原文去别的设备上用。
+
+   ## ★ 一个刻意的取舍：**没有 safeStorage 就不落盘**
+
+   `safeStorage` 不可用时（部分 Linux 桌面、没有 keyring 的环境），
+   落盘只能是**明文**。明文密钥落在用户目录里比「不记住」更糟：
+   它把一个「会话内有效」的秘密变成永久的、可被任何本地进程读到的文件。
+
+   所以这里的行为是：**只在 `safeStorage` 可用时加密落盘**；
+   否则密钥只留在主进程内存里（`persisted()` 如实报 false），
+   由 UI 告诉用户「这次退出后要重新导入」。**不假装已经持久化了。**
+   ============================================================================ */
+
+const SYNC_KEY_FILE = 'sync-account-key.bin'
+
+/** 主进程内存里的密钥（进程生命周期）。落盘是**额外的**，不是唯一来源。 */
+let syncAccountKeyMemory = null
+
+function syncKeyFilePath() {
+  return path.join(app.getPath('userData'), SYNC_KEY_FILE)
+}
+
+/** 能不能安全落盘（决定 `persisted()` 报什么）。 */
+function syncKeyPersistenceAvailable() {
+  try {
+    return safeStorage.isEncryptionAvailable()
+  } catch {
+    return false
+  }
+}
+
+async function readSyncAccountKey() {
+  if (syncAccountKeyMemory !== null) return syncAccountKeyMemory
+  if (!syncKeyPersistenceAvailable()) return null
+  try {
+    const encrypted = await readFile(syncKeyFilePath())
+    syncAccountKeyMemory = safeStorage.decryptString(encrypted)
+    return syncAccountKeyMemory
+  } catch {
+    // 文件不存在 / 解密失败（换过机器或 keyring 变了）：当「没有」。
+    // 让用户重新导入，而不是抛一个他无法处理的错误。
+    return null
+  }
+}
+
+async function writeSyncAccountKey(text) {
+  if (typeof text !== 'string' || text.trim() === '') throw new Error('密钥是空的')
+  syncAccountKeyMemory = text
+  if (!syncKeyPersistenceAvailable()) return
+  const file = syncKeyFilePath()
+  await mkdir(path.dirname(file), { recursive: true })
+  // 原子写（D21 同款）：被截断的密钥文件等于「密钥丢了」。
+  await writeFileAtomic(file, safeStorage.encryptString(text))
+}
+
+async function clearSyncAccountKey() {
+  syncAccountKeyMemory = null
+  try {
+    await rm(syncKeyFilePath(), { force: true })
+  } catch {
+    // 删不掉也没有可做的（文件本来就不在）。
+  }
+}
+
+/**
+ * 通道注册。与 `registerAppHandlers` 用同一个 `handle()` 包装
+ * （统一的错误降级 + 来源校验）。
+ */
+function registerSyncKeyHandlers() {
+  handle('opennote:sync:loadAccountKey', async () => readSyncAccountKey(), '读取同步密钥失败')
+  handle('opennote:sync:saveAccountKey', async (text) => { await writeSyncAccountKey(text); return true }, '保存同步密钥失败')
+  handle('opennote:sync:clearAccountKey', async () => { await clearSyncAccountKey(); return true }, '清除同步密钥失败')
+  // UI 要据此如实说明「退出后还在不在」——所以这是一个**必须能问**的问题。
+  handle('opennote:sync:keyPersisted', async () => syncKeyPersistenceAvailable(), '查询密钥持久化状态失败')
+}
+
 function registerAppHandlers() {
   handle('opennote:app:getRecentWorkspaces', async () => readRecentWorkspaces(), '读取最近工作区失败')
 
@@ -1233,6 +1314,7 @@ function registerIpcHandlers() {
   registerDialogHandlers()
   registerShellHandlers()
   registerAppHandlers()
+  registerSyncKeyHandlers()
   registerImportHandlers()
   registerNetHandlers()
   registerUpdateHandlers()

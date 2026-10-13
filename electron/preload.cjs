@@ -176,6 +176,24 @@ const bridge = {
     openExternal: (url) => invoke('opennote:shell:openExternal', url),
   },
 
+  /**
+   * 同步账号密钥的保管（§3.9、§5.5）。
+   *
+   * ★ 这里**只有读/写/清/问**四个动作，**没有**「取回原文给渲染层用」之外的能力 ——
+   * 因为渲染层本来就不该拿到密钥。真正的用途是「打开应用时把它取出来派生令牌」，
+   * 而派生也在渲染层做（noble 是纯 JS，四端同一份）。
+   *
+   * 之所以还要经过主进程：桌面端的 CSP 与 §5.5 都要求**落盘这件事由主进程负责**
+   * （`safeStorage` 只能在主进程用），渲染层只碰内存里那一份。
+   */
+  syncKeys: {
+    load: () => invoke('opennote:sync:loadAccountKey'),
+    save: (text) => invoke('opennote:sync:saveAccountKey', text),
+    clear: () => invoke('opennote:sync:clearAccountKey'),
+    /** UI 据此如实说明「退出后还在不在」（没有 safeStorage 时是 false）。 */
+    persisted: () => invoke('opennote:sync:keyPersisted'),
+  },
+
   app: {
     getRecentWorkspaces: () => invoke('opennote:app:getRecentWorkspaces'),
     addRecentWorkspace: (absolutePath) => invoke('opennote:app:addRecentWorkspace', absolutePath),
