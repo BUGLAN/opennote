@@ -29,8 +29,10 @@ export interface CommandContext {
   importFiles(): void;
   openWorkspace(): void;
   openLocalFolder(): void;
-  newBrowserWorkspace(): void;
-  uploadFolder(): void;
+  /** 新建浏览器笔记本（网页版专属；桌面版传 `null`，与 `importFromGithub` 同一套做法）。 */
+  newBrowserWorkspace: (() => void) | null;
+  /** 把本地文件夹导入到浏览器（网页版专属；桌面版传 `null`）。 */
+  uploadFolder: (() => void) | null;
   closeWorkspace(): void;
   toggleStar(): void;
   duplicateNote(): void;
@@ -116,19 +118,26 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       icon: "folder",
       run: () => ctx.openLocalFolder(),
     },
+    /*
+     * 浏览器专属的两条：桌面版（`null`）在面板里**看不到**它们 —— 理由与下面 GitHub 那组
+     * 一模一样，判据也共用 `data/entryOptions.ts`：桌面版有磁盘可写，把笔记藏进浏览器私仓
+     * 只会让文件树 / 外部编辑器 / 同步都看不见，留着就是「点了没反应」的假按钮。
+     */
     {
       id: "new-browser-workspace",
       label: "新建浏览器笔记本…",
       group: "笔记本",
       icon: "plus",
-      run: () => ctx.newBrowserWorkspace(),
+      enabled: () => ctx.newBrowserWorkspace !== null,
+      run: () => ctx.newBrowserWorkspace?.(),
     },
     {
       id: "upload-folder",
       label: "导入本地文件夹到浏览器…",
       group: "笔记本",
       icon: "upload",
-      run: () => ctx.uploadFolder(),
+      enabled: () => ctx.uploadFolder !== null,
+      run: () => ctx.uploadFolder?.(),
     },
     /*
      * GitHub 两条（0.4.0）。用 `enabled: () => ctx.…!== null` 而不是「在 run 里再判一次」：

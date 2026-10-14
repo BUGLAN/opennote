@@ -28,6 +28,7 @@ import {
   watchLibraryErrors,
 } from "./data/library";
 import { WELCOME_CONTENT } from "./data/welcome";
+import { entryOptions, type EntryOptions } from "./data/entryOptions";
 import {
   WorkspacePermissionError,
   addLocalFolder,
@@ -153,6 +154,20 @@ export default function App(): ReactNode {
   const deferredContent = useDeferredValue(activeNote?.content ?? "");
   const hasWorkspace = Boolean(library.workspace);
   const bridge = useMemo(() => desktopBridge(), []);
+  /*
+   * 三个「笔记本入口」按平台裁剪一次，欢迎页 / 侧栏笔记本菜单 / 命令面板共用。
+   * 三处各写一遍判断正是这次出问题的地方：欢迎页漏了桌面分支，桌面上照样列出
+   * 「新建浏览器笔记本 / 导入文件夹到浏览器」（判断本身见 `data/entryOptions.ts`）。
+   */
+  const entries = useMemo(
+    () =>
+      entryOptions({
+        desktop: Boolean(bridge),
+        localFolder: Boolean(bridge) || supportsFileSystemAccess() || isCapacitorNative(),
+        browserWorkspace: supportsOpfs(),
+      }),
+    [bridge],
+  );
   // 桌面端自更新：状态与动作都在 `src/lib/update.ts`（渲染层只显示状态、转发动作）。
   const update = useUpdateController();
 
@@ -1022,8 +1037,9 @@ export default function App(): ReactNode {
         importFiles: () => fileInputRef.current?.click(),
         openWorkspace: () => setSwitcherOpen(true),
         openLocalFolder: () => void openLocalFolder(),
-        newBrowserWorkspace: () => void newBrowserWorkspace(),
-        uploadFolder: () => void uploadFolderToBrowser(),
+        // 浏览器专属的两条：桌面版传 `null`，命令面板里整条不出现（与 GitHub 那组同一套做法）。
+        newBrowserWorkspace: entries.browserWorkspace ? () => void newBrowserWorkspace() : null,
+        uploadFolder: entries.uploadFolder ? () => void uploadFolderToBrowser() : null,
         importFromGithub: bridge ? null : () => void importFromGithub(),
         syncGithub: githubRemote ? () => void openGithubSync() : null,
         closeWorkspace: () => void closeCurrentWorkspace(),
@@ -1055,7 +1071,7 @@ export default function App(): ReactNode {
         notify: (message) => notify(message),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeId, activeNote, scope, hasWorkspace, ui.sidebarOpen, ui.outlineOpen, ui.typewriter, ui.focus, ui.showWordCount],
+    [activeId, activeNote, scope, hasWorkspace, ui.sidebarOpen, ui.outlineOpen, ui.typewriter, ui.focus, ui.showWordCount, entries],
   );
 
   const commandsRef = useRef(commands);
@@ -1231,8 +1247,7 @@ export default function App(): ReactNode {
         onUploadFolder={() => void uploadFolderToBrowser()}
         onImportGithub={bridge ? null : () => void importFromGithub()}
         onCloseWorkspace={() => void closeCurrentWorkspace()}
-        supportsLocalFolder={Boolean(bridge) || supportsFileSystemAccess() || isCapacitorNative()}
-        supportsBrowserWorkspace={supportsOpfs()}
+        entries={entries}
         inboxPending={inboxPending}
         onOpenInbox={() => setInboxOpen(true)}
         updateView={update.view}
@@ -1368,8 +1383,7 @@ export default function App(): ReactNode {
           <WelcomeScreen
             workspaces={workspaces}
             busy={busy}
-            supportsLocalFolder={Boolean(bridge) || supportsFileSystemAccess() || isCapacitorNative()}
-            supportsBrowserWorkspace={supportsOpfs()}
+            entries={entries}
             onOpen={(record) => void openRecord(record)}
             onAddLocal={() => void openLocalFolder()}
             onNewBrowser={() => void newBrowserWorkspace()}
@@ -1546,8 +1560,7 @@ export default function App(): ReactNode {
 function WelcomeScreen({
   workspaces,
   busy,
-  supportsLocalFolder,
-  supportsBrowserWorkspace,
+  entries,
   onOpen,
   onAddLocal,
   onNewBrowser,
@@ -1556,8 +1569,8 @@ function WelcomeScreen({
 }: {
   workspaces: WorkspaceRecord[];
   busy: string | null;
-  supportsLocalFolder: boolean;
-  supportsBrowserWorkspace: boolean;
+  /** 这个形态能提供哪些入口（桌面版只留「打开本机文件夹」，见 `data/entryOptions.ts`）。 */
+  entries: EntryOptions;
   onOpen: (record: WorkspaceRecord) => void;
   onAddLocal: () => void;
   onNewBrowser: () => void;
@@ -1576,27 +1589,35 @@ function WelcomeScreen({
         </p>
 
         <div className="workspace-choices">
-          <button type="button" className="choice" onClick={onAddLocal} disabled={!supportsLocalFolder}>
+          <button type="button" className="choice" onClick={onAddLocal} disabled={!entries.localFolder}>
             <Icon name="folder" size={18} />
             <strong>{isCapacitorNative() ? "新建手机笔记本" : "打开本机文件夹"}</strong>
             <small>
               {isCapacitorNative()
                 ? "笔记保存在手机的 Documents/OpenNote 文件夹里，随时用文件 App 查看"
-                : supportsLocalFolder
+                : entries.localFolder
                   ? "选一个目录，笔记就是里面的 .md 文件"
                   : "当前浏览器不支持直接读写磁盘，请用下面的方式"}
             </small>
           </button>
-          <button type="button" className="choice" onClick={onNewBrowser} disabled={!supportsBrowserWorkspace}>
-            <Icon name="note" size={18} />
-            <strong>新建浏览器笔记本</strong>
-            <small>存在浏览器自己的文件系统（OPFS）里，随时能导出带走</small>
-          </button>
-          <button type="button" className="choice" onClick={onUpload}>
-            <Icon name="upload" size={18} />
-            <strong>导入文件夹</strong>
-            <small>把本地文件夹拷进浏览器本地存储，之后照常编辑</small>
-          </button>
+          {/*
+            浏览器专属的两条：桌面版整项不渲染 —— 那里有磁盘可写，把笔记藏进浏览器私仓
+            只会让文件树 / 外部编辑器 / 同步都看不见（判断在 `data/entryOptions.ts`）。
+          */}
+          {entries.browserWorkspace ? (
+            <button type="button" className="choice" onClick={onNewBrowser}>
+              <Icon name="note" size={18} />
+              <strong>新建浏览器笔记本</strong>
+              <small>存在浏览器自己的文件系统（OPFS）里，随时能导出带走</small>
+            </button>
+          ) : null}
+          {entries.uploadFolder ? (
+            <button type="button" className="choice" onClick={onUpload}>
+              <Icon name="upload" size={18} />
+              <strong>导入文件夹</strong>
+              <small>把本地文件夹拷进浏览器本地存储，之后照常编辑</small>
+            </button>
+          ) : null}
           {onImportGithub ? (
             <button type="button" className="choice" onClick={onImportGithub}>
               <Icon name="download" size={18} />
