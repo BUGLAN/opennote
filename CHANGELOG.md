@@ -8,6 +8,79 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **macOS 桌面版自更新（真·原地替换）**。mac 现在和 Windows 一样有「检查更新 → 下载 →
+  重启并更新」这条链路，但落地方式完全不同：`.app` 是代码签名的，往里换任何一个文件都会让
+  签名失配、Apple Silicon 上直接起不来，所以 mac 走的是**整包替换**——
+  下载 `Opennote-<版本>-mac-arm64.zip` → 用系统 `ditto` 解压（保住符号链接）→
+  **换包前先 `codesign --verify --deep --strict` 验签并核对版本/架构** →
+  `rename` 整个 `Opennote.app` 就位 → 确认新版本能起来之后才删旧备份。
+
+  - **失败自动回滚**：新版本启动失败会把旧版本换回来 —— 这一点比 Windows 的逐文件覆盖更强
+    （后者没法回退，所以把 exe 放在最后覆盖）。
+  - **入口处就否决不能更新的位置**：从 dmg 里运行、或被 macOS 的 App Translocation 挂到
+    临时只读路径时，直接 `supported:false`（启动日志写明原因），而不是失败在替换那一步。
+  - 资产认的是 **zip 而不是 dmg**（要的是一个能直接换上去的完整 bundle）。
+  - **只能从 0.14.0 往后自更新**：helper 的代码来自正在运行的那个版本，0.13.0 及更早的 mac 包
+    没有这条链路，需要手动换一次。
+
+- **macOS 桌面版打包（`pnpm package:mac`）**。一条命令出三样东西，全部落在 `release/`：
+  `mac-arm64/Opennote.app`、`Opennote-<版本>-mac-arm64.dmg`（内含 `/Applications` 软链接，
+  拖进去即安装）、`Opennote-<版本>-mac-arm64.zip`，外加覆盖全部资产的 `SHA256SUMS`。
+  **全程不需要联网、不需要 Apple 开发者账号** —— 之前 `electron-builder.yml` 里声明了 `dmg`
+  却一直没交付，真去跑才发现它自带的图标 / dmg / zip 目标都要联网下载工具链，离线机器上
+  只能卡在 `fetch failed`。
+
+  - 图标：`pnpm icons` 新增用系统 `iconutil` 生成 `build/icon.icns`（16→1024 共 10 档），
+    `mac.icon` 直接指向它，绕开 electron-builder 那个要联网的图标转换器。
+  - 签名：Apple Silicon 上不签名直接「已损坏」，所以打的是 **ad-hoc 签名**
+    （`codesign -s -`，本地签、不用证书）。签完立刻复验，并**真启动一次产物**确认渲染进程
+    起得来 —— 只验签名验不出「动态库加载被拒」这类问题（本轮就踩到了，
+    见 RELEASING.md 坑 #12）。
+  - 分发产物用系统自带的 `hdiutil`（DMG）与 `ditto`（ZIP）。ZIP 不能用 `zip`/7z：`.app`
+    内部靠符号链接搭结构，解引用成副本就废了。
+  - 不支持 Intel（只出构建机架构）与自更新（更新器是 Windows 覆盖 exe 的写法）。
+
+- **发布流水线新增 macOS job**（[`release.yml`](.github/workflows/release.yml) 的 `release-mac`，
+  `macos-15`/arm64，`needs: release`）：出 dmg + zip 并追加进同一个 Release。
+  它是**纯追加**的，不动 Windows 那条链路。
+
+### 变更
+
+- **桌面版不再提供「新建浏览器笔记本 / 导入文件夹到浏览器」**（2026-10-14 用户反馈：
+  「桌面端打开的时候, 就不是浏览器了, 没必要显示这 3 个选项, 直接打开本地文件夹即可」）。
+  这两条是**网页版没有磁盘读写权限时的替代路径**：笔记落进 OPFS 私仓之后，侧栏文件树看不见它、
+  外部编辑器打不开它、GitHub 同步与整库备份都不认它；「导入文件夹」更是把磁盘上已有的文件夹
+  **拷一份**藏进私仓，之后两边各写各的。桌面版有磁盘可直接读写，留着它们只会误导。
+  于是欢迎页只剩「打开本机文件夹」+「最近的笔记本」，侧栏笔记本菜单与命令面板同步收紧
+  （面板沿用 GitHub 那组的做法：桌面版整条不出现，而不是留一个点了没反应的条目）。
+  三处判断合并成 `src/data/entryOptions.ts` 一份并附单测 —— 原来三处各写一遍，
+  欢迎页那份漏了桌面分支，正是这次漏出选项的原因。
+  浏览器版（三项 + GitHub 导入）与手机壳（手机笔记本 / 浏览器笔记本 / 导入文件夹）原样不变；
+  重启后自动重开上次的笔记本本来就有（`initLibrary()`），不需要用户每次手点。
+
+### 修复
+
+- **打包产物里混进了 `node_modules`（asar 219 MB → 11 MB，DMG 199.9 → 138.6 MB）**。
+  `electron-builder.yml` 的 `files` 只写了 `dist/`、`dist-clip/`、`electron/`、`package.json`
+  这些**正**模式，而 electron-builder 会把 `package.json` 的**生产依赖整包**收进 asar
+  （日志里 `searching for node modules pm=pnpm` 就是它）—— mermaid、codemirror、katex、
+  react、@fontsource 这些**只在 Vite 构建期用**的包全被打进去了（10001 个 node_modules 条目）。
+  补上 `'!node_modules/**/*'` 后 asar 回到 11 MB，DMG 138.6 MB、ZIP 126.5 MB。
+  安全性已核对：主进程只 require `electron`、node 内置模块与**可选**的 `@parcel/watcher`
+  （try/catch 包着，缺了就退化回 `node:fs` 递归 watch），运行时不需要任何第三方包。
+  （这其实是 [`RELEASING.md`](RELEASING.md) 坑 #4 警告过的第二次复发。）
+
+### 文档
+
+- README「下载与分发」补上 macOS 一栏，并如实写明 ad-hoc 签名下 Gatekeeper 的拦截与两种放行方式
+  （右键「打开」，或 `xattr -dr com.apple.quarantine`），以及 mac 版没有自更新、目前只出 arm64。
+- RELEASING.md 补 macOS 打包与签名基线、CI 两 job 的分工，以及 4 条实测踩出来的坑：
+  离线打包的工具链下载、`identity: "-"` 被按子串匹配到无关证书 + `hardenedRuntime` 只能走
+  `optionsForFile`（两条合起来会让应用根本起不来）、启动冒烟必须先摘 `ELECTRON_RUN_AS_NODE`、
+  macOS 的 zip 必须用 `ditto`。
+
 ## [0.13.0] - 2026-10-13
 
 ### 新增

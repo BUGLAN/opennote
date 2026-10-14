@@ -7,6 +7,7 @@
   public/icon-512.png         PWA 图标（含 maskable）
   public/apple-touch-icon.png iOS 主屏图标
   build/icon.ico              Windows 打包与窗口图标（多尺寸）
+  build/icon.icns             macOS 打包图标（多尺寸；见 write_icns）
   public/seal/<accent>-<kind>.png
                               侧栏左上角那枚印章：4 套强调色 × 明/暗 = 8 个文件。
                               颜色**逐字从 src/styles/tokens.css 读**（见 read_accent_tokens），
@@ -21,6 +22,10 @@
 """
 
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -206,6 +211,37 @@ def write_favicon_svg(path: Path) -> None:
     )
 
 
+# macOS 打包只认 `.icns`。electron-builder 自带的图标转换器会**联网下载** icons 工具链
+# （`icons@1.1.0`），离线环境直接 `fetch failed` 打包失败；系统自带的 `iconutil` 是纯本地
+# 转换，没有任何第三方依赖。所以这里自己出 `.icns`，`mac.icon` 直接指向它。
+#
+# (基准边长, 倍率)：iconutil 要求 iconset 目录里恰好是这套命名与尺寸。
+ICNS_SIZES = ((16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256, 1), (256, 2), (512, 1), (512, 2))
+
+
+def write_icns() -> None:
+    """生成 `build/icon.icns`（16→1024 共 10 档）。
+
+    只在 macOS 上做：`iconutil` 是系统自带的，其它平台没有也不需要一个 macOS 图标。
+    跳过时**明确打印**，不静默成功 —— 免得在 Windows 上以为 `.icns` 更新过了。
+    """
+    if sys.platform != "darwin" or shutil.which("iconutil") is None:
+        print("跳过 build/icon.icns（iconutil 只在 macOS 上有）—— Windows/Linux 图标不受影响")
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        iconset = Path(tmp) / "icon.iconset"
+        iconset.mkdir()
+        for base, scale in ICNS_SIZES:
+            suffix = "@2x" if scale == 2 else ""
+            draw_seal(base * scale).save(iconset / f"icon_{base}x{base}{suffix}.png")
+        subprocess.run(
+            ["iconutil", "-c", "icns", str(iconset), "-o", str(BUILD / "icon.icns")],
+            check=True,
+        )
+    print(f"build/icon.icns 已生成（{len(ICNS_SIZES)} 档，16→1024）")
+
+
 def main() -> None:
     PUBLIC.mkdir(parents=True, exist_ok=True)
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -219,6 +255,7 @@ def main() -> None:
     sizes = [16, 24, 32, 48, 64, 128, 256]
     icons = [draw_seal(size) for size in sizes]
     icons[-1].save(BUILD / "icon.ico", format="ICO", sizes=[(size, size) for size in sizes])
+    write_icns()
 
     # 侧栏左上角的印章：4 套强调色 × 明/暗。图标固定 8 个文件，界面按
     # `data-accent` + 主题明暗挑一个 —— 颜色来自 tokens.css，不是手抄的。
@@ -228,7 +265,7 @@ def main() -> None:
     for (accent, kind), (base, ink) in sorted(tokens.items()):
         draw_accent_seal(SEAL_ICON_SIZE, base, ink).save(seal_dir / f"{accent}-{kind}.png")
 
-    print(f"icons written to public/, public/seal/ ({len(tokens)} 个印章) and build/icon.ico")
+    print(f"icons written to public/, public/seal/ ({len(tokens)} 个印章)、build/icon.ico 与 build/icon.icns")
 
 
 if __name__ == "__main__":

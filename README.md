@@ -65,17 +65,29 @@ IndexedDB 只在两处出现，都不存笔记内容：一是 Chrome 的文件�
 | 形态 | 拿到它的方式 | 适合谁 |
 | --- | --- | --- |
 | 网页版 | 打开部署地址（PWA，浏览器里可「安装」到桌面） | 想零安装先用起来；也能把 GitHub 仓库当笔记本 |
-| 桌面版 | Releases 里的 `Opennote-<版本>-win-x64.zip`，解压即用、免安装 | 要直接读写本机文件夹 |
+| 桌面版（Windows） | Releases 里的 `Opennote-<版本>-win-x64.zip`，解压即用、免安装 | 要直接读写本机文件夹 |
+| 桌面版（macOS） | Releases 里的 `Opennote-<版本>-mac-arm64.dmg`（拖进「应用程序」）或同名 `.zip` | 同上；Apple Silicon 原生 |
 | 剪藏扩展 | Releases 里的 `Opennote-clip-<版本>.zip`，在 `chrome://extensions` 用「开发者模式 → 加载已解压的扩展程序」安装 | 要把网页整块内容剪进收件箱；浏览器里开着网页版时会多一个「剪藏到 <域名>」的按钮 |
 
 - 每个 Release 都带 `SHA256SUMS`，`sha256sum -c SHA256SUMS` 可验证下载完整性。
-- 桌面版目前只有 **Windows x64 免安装 zip**，且**没有代码签名**：首次运行会出现「Windows 已保护你的电脑」，
-  点「更多信息 → 仍要运行」即可。mac / Linux 的配置在 [`electron-builder.yml`](electron-builder.yml) 里声明了但尚未交付（未签名、未公证）。
-- 桌面版**可以自己更新**（Windows x64）：启动时只读一次 GitHub Releases，有新版本就在左上角
+- 桌面版**没有代码签名**（Windows 与 macOS 都没有）。
+  - **Windows**：首次运行会出现「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」即可。
+  - **macOS**：应用是 **ad-hoc 签名**（不是不签名 —— Apple Silicon 上不签根本起不来）。
+    从网上下载的包带 quarantine 标记，首次打开会被 Gatekeeper 拦成「已损坏，无法打开」。
+    放行方式：**右键图标 →「打开」→「打开」**，或者
+    `xattr -dr com.apple.quarantine /Applications/Opennote.app`。
+    要彻底消除这一步只能上 Apple 开发者账号（$99/年）+ 公证，见 [RELEASING.md](RELEASING.md) 第 5 节。
+  - macOS 包目前只出 **Apple Silicon（arm64）**。Intel 机器要么用 Rosetta 跑不了原生包、
+    要么等后续补 x64 产物（跨架构构建要另一份 Electron 发行版，见 RELEASING.md）。
+- 桌面版**可以自己更新**（Windows x64 与 macOS）：启动时只读一次 GitHub Releases，有新版本就在左上角
   （「Opennote」与「新建」之间）出现一个**强调色**下载图标；点它下载并校验，图标变成重启图标后
   点「重启并更新」——应用先保存笔记，再关闭、覆盖当前目录、自动重开。设置 →「帮助」里也能手动检查。
   只读一次、不上传任何数据（GitHub 会看到你的 IP）；**没有**后台常驻检查，也不会静默安装。
   你的笔记在自己的文件夹里，不受影响；机制与边界见 [docs/update/00-更新机制.md](docs/update/00-更新机制.md)。
+  - **macOS**：更新是**整包替换** `Opennote.app`（改 bundle 里任何文件都会让签名失效、应用打不开）。
+    换包前会先验签，新版本起不来会**自动回滚**到旧版本。
+    从 dmg 里直接试用、或应用还没被拖进「应用程序」时不会提供更新入口（那个位置只读）——
+    先拖进「应用程序」再检查即可。**0.13.0 及更早的 mac 包没有这条链路**，需要手动换一次。
 - 剪藏扩展**没有自动更新**：它没上架任何商店，`chrome://extensions` 的「加载已解压的扩展」也没有
   更新通道。升级就是下载新的 `Opennote-clip-<版本>.zip` 解压覆盖后点「重新加载」。
   将来上 Edge Add-ons（免费）或 Chrome Web Store 才有商店级自动更新，见 [RELEASING.md](RELEASING.md) 第 4 节。
@@ -102,15 +114,20 @@ pnpm release:build  # 一条命令出齐发布产物：桌面 zip + 扩展 zip +
 ```shell
 pnpm dev:electron     # 一条命令：起 Vite + 开 Electron 窗口（热更新）
 pnpm build:desktop    # 构建 Electron 用的资源（相对路径、关掉 Service Worker）
-pnpm package:desktop  # 打包成免安装 zip → release/Opennote-<版本>-win-x64.zip
+pnpm package:desktop  # Windows：打包成免安装 zip → release/Opennote-<版本>-win-x64.zip
+pnpm package:mac      # macOS：出 .app + DMG + ZIP → release/Opennote-<版本>-mac-arm64.{dmg,zip}
 ```
+
+`pnpm package:mac` 只能在 macOS 上跑（用系统自带的 `hdiutil` / `ditto` / `codesign`），全程不需要联网、
+不需要 Apple 开发者账号。它会 ad-hoc 签名并**真启动一次**产物做冒烟测试 —— 签名「看起来对」但动态库
+加载失败的包一样打不开，所以这一步不能省。分发形态与放行方式见上面的「下载与分发」。
 
 桌面版为什么单独构建：打包后的应用通过 `file://` 加载，资源必须用相对路径，`build:desktop` 会自动设置 `OPENNOTE_DESKTOP=1` 让 Vite 输出 `./assets/...` 并关闭 PWA。
 
 ## 桌面版（Electron）
 
 - **没有窗口菜单栏**：桌面端不显示「文件 / 编辑 / 视图 / 帮助」那条原生横条，这些操作全部收进应用内的 **设置**（状态栏齿轮按钮，或 `Ctrl/⌘ + ,`），分成外观 / 文件 / 编辑 / 视图 / 帮助五类，按钮直接取自界面同一份命令注册表，和命令面板、快捷键完全一致。
-- 应用图标与界面左上角的印章同源：`pnpm icons` 会从同一份绘制代码生成 `public/favicon.svg`、PWA 图标、`build/icon.ico`（多尺寸，打包时由 `electron-builder.yml` 的 `win.icon` 内嵌进 exe），以及界面左上角用的 `public/seal/<强调色>-<明暗>.png` 一套 8 个 —— 那套的颜色直接解析 `tokens.css`，所以**改了强调色要重跑一次 `pnpm icons`**。
+- 应用图标与界面左上角的印章同源：`pnpm icons` 会从同一份绘制代码生成 `public/favicon.svg`、PWA 图标、`build/icon.ico`（多尺寸，打包时由 `electron-builder.yml` 的 `win.icon` 内嵌进 exe）、`build/icon.icns`（macOS 用，由系统 `iconutil` 出 16→1024 共 10 档），以及界面左上角用的 `public/seal/<强调色>-<明暗>.png` 一套 8 个 —— 那套的颜色直接解析 `tokens.css`，所以**改了强调色要重跑一次 `pnpm icons`**。
 - 安全基线保持默认：`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，所有 IPC 文件操作都必须落在你选定的笔记本目录内（`../../../package.json` 这类路径会被拒绝并报「路径越界」）。
 - preload 只暴露一层薄接口（`window.opennote`），渲染进程拿不到 Node 能力。macOS 上会保留一份只含系统角色的最小菜单（否则 ⌘C/⌘V/⌘Q 不生效），Windows/Linux 直接置空。
 - 打包目标只有免安装 zip（便携、无需安装器）。想要 NSIS 安装包，把 `electron-builder.yml` 里 `win.target` 换成 `nsis` 即可。当前 zip 151 MB（Electron 本体占大头，`app.asar` 只有 11 MB）；发布流程见 [RELEASING.md](RELEASING.md)。

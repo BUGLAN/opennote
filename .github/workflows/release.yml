@@ -5,12 +5,19 @@
 #   - 或手动 workflow_dispatch，填一个已存在的 tag
 #
 # 产物（都进 Release 资产，同一目录 + SHA256SUMS）：
-#   Opennote-<版本>-win-x64.zip    桌面版免安装包（解压即用）
-#   Opennote-clip-<版本>.zip       浏览器剪藏扩展（开发者模式加载 / 商店上传同一份）
-#   SHA256SUMS                     GNU coreutils 格式校验和
+#   Opennote-<版本>-win-x64.zip     桌面版免安装包（解压即用）
+#   Opennote-<版本>-mac-arm64.dmg   macOS 安装镜像（拖进「应用程序」；ad-hoc 签名）
+#   Opennote-<版本>-mac-arm64.zip   macOS 免安装包（ditto 打包，保留符号链接）
+#   Opennote-clip-<版本>.zip        浏览器剪藏扩展（开发者模式加载 / 商店上传同一份）
+#   SHA256SUMS                      GNU coreutils 格式校验和
 #
-# 为什么只有 Windows：mac 需要 Apple 开发者证书 + 公证，Linux 未验证，
-# 都没签名就发等于给用户送「已损坏/已阻止」的包。见 RELEASING.md「平台与签名」。
+# 两个构建 job：
+#   release        windows-latest  出 Windows zip + 扩展 zip，然后建/更新 Release
+#   release-mac    macos-15 (arm64) 出 macOS dmg + zip，再把它们追加进同一个 Release
+#                  （`needs: release` 保证顺序；它**不改动** Windows 那条链路，
+#                    所以 macOS 打包出问题最多是「这个版本没有 mac 产物」，
+#                    不会连带把 Windows 发布弄挂）
+# Linux 仍未验证，不发。签名现状与放行方式见 RELEASING.md「平台与签名」。
 #
 # 私有仓库也能跑：Release 与 Actions 产物只有协作者可见；仓库转公开后，
 # 同一批资产自动对公众可见，流水线一个字都不用改。
@@ -123,3 +130,79 @@ jobs:
           else
             gh release create "$TAG" "${files[@]}" --title "Opennote $TAG" --generate-notes
           fi
+
+  # macOS：必须真机跑 —— `package:mac` 用的全是系统自带工具（hdiutil / ditto / codesign /
+  # iconutil），而且 ad-hoc 签名只有在 macOS 上才有意义。arm64 runner 才能出 arm64 产物
+  # （macos-13 是 Intel；electronDist 是单架构的 node_modules/electron/dist）。
+  release-mac:
+    needs: release
+    runs-on: macos-15
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 与 Windows job 同因：pnpm 11 全新安装不跑 electron 的 postinstall，
+      # 拿不到 node_modules/electron/dist 会让 electron-builder 秒败。见 RELEASING.md 坑 #9。
+      - name: Electron 二进制就位（pnpm 11 不跑它的 postinstall，实测）
+        run: node node_modules/electron/install.js
+
+      # 构建机必须是 arm64，否则产物会叫 mac-x64 而这里的说明写的是 arm64。
+      - name: 断构建机架构
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          echo "runner arch = $arch"
+          test "$arch" = "arm64" || { echo "::error::期望 arm64 runner（macos-15），实际 $arch"; exit 1; }
+
+      - name: 单测（渲染层）
+        run: pnpm test
+
+      # 一条命令 7 步：构建 → electron-builder → ad-hoc 签名 + 复验 → 启动冒烟 →
+      # DMG（hdiutil）→ ZIP（ditto）→ SHA256SUMS。脚本自己会在签名不合规或产物起不来时
+      # 以非 0 退出，所以这一步失败就是**产物确实不能用**，不要靠 --continue-on-error 绕过。
+      - name: 打包 macOS（dmg + zip）
+        run: pnpm package:mac
+
+      - name: 存档产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: opennote-mac-${{ github.event.inputs.tag || github.ref_name }}
+          path: |
+            release/Opennote-*-mac-*.dmg
+            release/Opennote-*-mac-*.zip
+          if-no-files-found: error
+
+      # SHA256SUMS 必须**一份、覆盖所有资产**，所以这里把 Windows job 已经传上去的资产
+      # 连同刚出的 mac 产物一起重新算一遍，再覆盖上传。注意 `--pattern` 只取 Opennote-*
+      # （避免把上一次的 SHA256SUMS 自己下回来参与哈希）。
+      - name: 合并 SHA256SUMS 并追加进 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          rm -rf release-all && mkdir -p release-all
+          gh release download "$TAG" -D release-all --clobber --pattern 'Opennote-*'
+          cp release/Opennote-*-mac-*.dmg release/Opennote-*-mac-*.zip release-all/
+          node scripts/make-checksums.mjs release-all
+          gh release upload "$TAG" release-all/Opennote-*-mac-*.dmg release-all/Opennote-*-mac-*.zip release-all/SHA256SUMS --clobber
+          echo "已追加 macOS 产物并重算 SHA256SUMS：" && cat release-all/SHA256SUMS
