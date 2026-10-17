@@ -2,9 +2,10 @@ import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { EditorSelection, EditorState, type TransactionSpec } from "@codemirror/state";
 import type { DecorationSet } from "@codemirror/view";
 import { Decoration } from "@codemirror/view";
-import { describe, expect, it, vi } from "vitest";
-import { FULL_REBUILD_LENGTH, findImageSource, livePreviewDecorations, livePreviewField } from "./livePreview";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { FULL_REBUILD_LENGTH, findImageSource, livePreviewDecorations, livePreviewField, unwrapSource } from "./livePreview";
 import { setBlockPad } from "./blockHeight";
+import { clearTableWidths, rememberTableWidths, tableMetricKey } from "./tableMetrics";
 import { markdownSupport } from "./markdown";
 import { editorSettings, setEditorSettings, type EditorSettings } from "./settings";
 
@@ -174,10 +175,14 @@ describe("D13 未闭合 $$ 不再吞掉后续内容", () => {
 /* -------------------------------------------------- D27 · 样式类可达性（保留 CSS） */
 
 describe("D27 md-table-src / md-math-src 仍然可达", () => {
-  it("marks table source lines while the cursor is in the table", () => {
-    const doc = "| a | b |\n| - | - |\n| 1 | 2 |\n";
-    const state = stateFor(doc, { anchor: 3 });
-    expect(keysContaining(currentKeys(state), "md-table-src").length).toBeGreaterThan(0);
+  it("表格：拆开之后仍然露出源码行（md-table-src）", () => {
+    const table = "| a | b |\n| - | - |\n| 1 | 2 |";
+    const doc = `${table}\n`;
+    let state = stateFor(doc, { anchor: 3 });
+    // 平进平出不再显示源码（见「表格：就地编辑态」），源码只留给「拆开」这一下
+    expect(keysContaining(currentKeys(state), "md-table-src")).toHaveLength(0);
+    state = state.update({ effects: unwrapSource.of({ from: 0, to: table.length }) }).state;
+    expect(keysContaining(currentKeys(state), "md-table-src")).toHaveLength(3);
   });
 
   it("marks formula source lines while the cursor is in the formula", () => {
@@ -360,6 +365,70 @@ describe("装饰器基线：未改动的形态保持原样", () => {
     expect(widgets[0]).toContain("block");
     expect(widgets[0]).toContain("<table");
   });
+  /* ---------------------------------------------- 表格：就地编辑态（样式不消失） */
+/**
+ * 光标进表格时不再塌成等宽源码：源码行用 `grid` 排成同一张表，
+ * 列宽取渲染态实测值；只有「边界按删除拆开它」才露原始 markdown。
+ */
+describe("表格：就地编辑态（样式不消失）", () => {
+  const table = "| a | b |\n| - | - |\n| 1 | 2 |";
+  const doc = `${table}\n`;
+
+  beforeEach(() => clearTableWidths());
+
+  it("光标在表格里 ⇒ 仍然按表格排，不塌成源码", () => {
+    const state = stateFor(doc, { anchor: 3 });
+    const keys = currentKeys(state);
+    expect(keysContaining(keys, "TableWidget")).toHaveLength(0);
+    expect(keysContaining(keys, "md-table-src")).toHaveLength(0);
+    expect(keysContaining(keys, "md-trow")).toHaveLength(3);
+    expect(keysContaining(keys, "md-thead")).toHaveLength(1);
+    expect(keysContaining(keys, "md-tsep")).toHaveLength(1);
+    // 表头 2 格 + 一行数据 2 格
+    expect(keysContaining(keys, "md-tcell")).toHaveLength(4);
+  });
+
+  it("量过列宽就照抄（px）；没量过先按内容给 fr 权重", () => {
+    const unmeasured = keysContaining(currentKeys(stateFor(doc, { anchor: 3 })), "md-thead");
+    expect(unmeasured[0]).toContain("grid-template-columns:4fr 4fr");
+
+    rememberTableWidths(tableMetricKey(table), [
+      { track: 64, content: 44 },
+      { track: 128.4, content: 108 },
+    ]);
+    const measured = keysContaining(currentKeys(stateFor(doc, { anchor: 3 })), "md-thead");
+    // 列宽保留小数：取整会让某一列窄 0.2px，长内容就会在编辑态多折一行
+    expect(measured[0]).toContain("grid-template-columns:64.00px 128.40px");
+  });
+
+  it("分隔行的 :---: / ---: 变成单元格的对齐类", () => {
+    const aligned = "| a | b |\n| :---: | ---: |\n| 1 | 2 |\n";
+    const keys = currentKeys(stateFor(aligned, { anchor: 3 }));
+    expect(keysContaining(keys, "md-talign-center")).toHaveLength(2);
+    expect(keysContaining(keys, "md-talign-right")).toHaveLength(2);
+  });
+
+  it("空单元格也占一格（否则后面的列会被顶掉）", () => {
+    const empty = "| a |  | c |\n| - | - | - |\n| 1 | 2 | 3 |\n";
+    expect(keysContaining(currentKeys(stateFor(empty, { anchor: 3 })), "md-tcell")).toHaveLength(6);
+  });
+
+  it("光标离开 ⇒ 回到渲染态 widget", () => {
+    const withBody = `${table}\n\n正文\n`;
+    const keys = currentKeys(stateFor(withBody, { anchor: withBody.length - 1 }));
+    expect(keysContaining(keys, "TableWidget")).toHaveLength(1);
+  });
+
+  it("边界拆开 ⇒ 露原始 markdown（md-table-src），且没有表格行类", () => {
+    let state = stateFor(doc, { anchor: table.length });
+    expect(keysContaining(currentKeys(state), "md-trow").length).toBeGreaterThan(0);
+    state = state.update({ effects: unwrapSource.of({ from: 0, to: table.length }) }).state;
+    const keys = currentKeys(state);
+    expect(keysContaining(keys, "md-table-src")).toHaveLength(3);
+    expect(keysContaining(keys, "md-trow")).toHaveLength(0);
+  });
+});
+
 
   it("专注模式：只给光标所在块加行类", () => {
     const doc = "# 标题\n\n正文一\n\n正文二\n";
@@ -574,9 +643,9 @@ describe("块级内容源码态补白", () => {
   it("setBlockPad 把补白落到块最后一行的 padding-bottom 上", () => {
     const doc = "| a | b |\n| - | - |\n| 1 | 2 |\n";
     const table = "| a | b |\n| - | - |\n| 1 | 2 |";
-    // 光标在表格里 ⇒ 表格是源码态
+    // 光标在表格里 ⇒ 表格是就地编辑态（源码行按表格排）
     let state = stateFor(doc, { anchor: 0 });
-    expect(keysContaining(currentKeys(state), "md-table-src").length).toBeGreaterThan(0);
+    expect(keysContaining(currentKeys(state), "md-trow").length).toBeGreaterThan(0);
     expect(keysContaining(currentKeys(state), "padding-bottom").length).toBe(0);
 
     state = state.update({ effects: setBlockPad.of({ key: table, pad: 92 }) }).state;

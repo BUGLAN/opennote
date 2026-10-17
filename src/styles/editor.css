@@ -376,6 +376,121 @@
   opacity: 0.65;
 }
 
+/* ---- table in-place editing -------------------------------------------
+ *
+ * 表格不再「光标一进去就塌成等宽源码」。编辑态下源码行仍然是真的文本
+ * （输入法、撤销、选区都是 CodeMirror 原生的），但用 `grid` 排成和渲染态
+ * 同一张表：列宽取渲染态实测值（`tableMetrics.ts`），`|` 被零宽隐藏，
+ * 分隔行压成 1px（`md-tsep`）—— 正好是表头与正文之间的那道线。
+ *
+ * 行与列的类名：`md-trow`（行）/ `md-thead`（表头行）/ `md-tlast`（末行，
+ * 负责表格下方的间距）/ `md-tsep`（分隔行）/ `md-tcell`（单元格）。
+ */
+.cm-content .cm-line.md-trow {
+  display: grid;
+  font-size: 0.94em;
+  padding-left: 0;
+  padding-right: 0;
+  /* 竖线与表头底色都画在行背景里：坐标系要取**内容盒** —— 表头行有 1.05em 的
+     上内边距，取 border-box 的话底色会往表格上方多铺一段（实测多出 16px）。 */
+  background-origin: content-box;
+}
+
+/* 渲染态的上下间距统一由 widget 自己的 padding 承担（0 1.05em）。
+   里面那张 <table> 不能再带 .prose table 的 1.05em 外边距 —— 否则渲染态
+   比编辑态高出一截，点进表格就会跳。 */
+.cm-content .table-widget table {
+  margin-block: 0;
+}
+
+/* 表格上下的间距（渲染态是 `.table-widget` 的 1.05em 内边距）。
+   放在行盒上而不是单元格上：表头底色不能铺到这段留白里。 */
+.cm-content .cm-line.md-trow.md-thead {
+  padding-top: 1.05em;
+}
+
+.cm-content .cm-line.md-trow.md-tlast {
+  padding-bottom: 1.05em;
+}
+
+/* 这里的字号必须和渲染态的 `.prose table` **完全同一套嵌套**：
+   `.table-widget` 是 0.94em、它里面的 `<table>` 又吃到 `.prose table` 的
+   0.94em —— 于是单元格实际是 0.8836em。少了这一层，行会高 6%，点进表格时
+   整块会先长高几十像素（用户看到的「临时跳动」），再靠补白也补不回来。 */
+.cm-content .cm-line.md-trow > .md-tcell {
+  box-sizing: border-box;
+  min-width: 0;
+  font-size: 0.94em;
+  padding: 0.42em 0.7em;
+  border-top: 1px solid var(--rule);
+  overflow-wrap: anywhere;
+  /* 断行属性必须逐项和渲染态**算出来的值**一致（不是照抄某种「直觉」的值）：
+     渲染态的单元格继承 `.cm-content.cm-lineWrapping` 的 break-spaces，
+     而编辑态的单元格继承 `.cm-line` 的 pre-wrap —— 两者在行尾空格、
+     换行点的规则上不同，窄列里就会「这边多折一行、那边少折一行」。 */
+  white-space: break-spaces;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  font-variant-ligatures: common-ligatures;
+}
+
+
+
+/* 表头下面那道线由分隔行（md-tsep）负责；正文第一行再画上边框就多 1px，
+   点进表格时整块会往下挪。 */
+.cm-content .cm-line.md-trow.md-tfirst > .md-tcell {
+  border-top: 0;
+}
+
+/* 表头底色挪到**行**上画（见 `livePreview.ts` 的 `rowFill`）：竖线也画在行背景里，
+   单元格一旦有底色就会把线盖住。这里只留字重与颜色。 */
+.cm-content .cm-line.md-trow.md-thead > .md-tcell {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.cm-content .cm-line.md-trow.md-tlast > .md-tcell {
+  border-bottom: 1px solid var(--rule);
+}
+
+/* 分隔行：内容已隐藏，这一行只剩 1px —— 与上下单元格的边框一起看，
+   就是表头和正文之间那道线。 */
+.cm-content .cm-line.md-trow.md-tsep {
+  height: 1px;
+  line-height: 0;
+  font-size: 0;
+  padding: 0;
+  border: 0;
+  /* 这道 1px 就是表头与正文之间的分隔线（宽度由 JS 按表格宽度写在行上）。 */
+  background: var(--rule);
+}
+
+.cm-content .md-tcell.md-talign-center {
+  text-align: center;
+}
+
+.cm-content .md-tcell.md-talign-right {
+  text-align: right;
+}
+
+
+/* 表格编辑态里，一个 grid 行只允许「单元格」是 grid 项。
+   竖线已经包进单元格内部（.md-tskip），这里只是兜底：万一还有直系子元素
+   （CM 给 replace widget 生成的 cm-widgetBuffer、悬空的语法高亮 span），
+   一律不参与布局，否则它们会各占一格，整行散架。 */
+.cm-content .cm-line.md-trow > :not(.md-tcell):not(.md-tskip) {
+  display: none;
+}
+
+/* 竖线：零宽隐藏，但**不能用 display:none** —— 那会让「行尾」这个位置在 DOM 里
+   无法落点，光标走到表格末尾会被夹回最后一个可见字，Backspace 就拆不开表格。
+   font-size: 0 保留了一个零宽的行内盒：看不见、不占宽，位置却仍可寻址。 */
+.cm-content .md-tskip {
+  font-size: 0;
+}
+
+
+
 .cm-content .cm-line.md-math-src {
   font-family: var(--font-mono);
   font-size: 0.88em;

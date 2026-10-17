@@ -20,9 +20,11 @@ import {
   ImageWidget,
   MathWidget,
   MermaidWidget,
+  TableCellWidget,
   TableWidget,
   WikiLinkWidget,
 } from "./widgets";
+import { lastTableWidths, parseTableAlignments, splitTableRow, tableMetricKey, tableWidthsFor } from "./tableMetrics";
 
 /** Above this size we stop decorating and fall back to plain markdown highlighting. */
 const MAX_DECORATED_LENGTH = 800_000;
@@ -166,8 +168,10 @@ function decorate(
   const lineDeco = (pos: number, cls: string, attributes?: Record<string, string>) => {
     decorations.push(Decoration.line(attributes ? { class: cls, attributes } : { class: cls }).range(lineFrom(pos)));
   };
-  const mark = (from: number, to: number, cls: string) => {
-    if (to > from) decorations.push(Decoration.mark({ class: cls }).range(from, to));
+  const mark = (from: number, to: number, cls: string, attributes?: Record<string, string>) => {
+    if (to > from) {
+      decorations.push(Decoration.mark(attributes ? { class: cls, attributes } : { class: cls }).range(from, to));
+    }
   };
   const hide = (from: number, to: number) => {
     if (to > from) decorations.push(Decoration.replace({}).range(from, to));
@@ -246,6 +250,173 @@ function decorate(
   const revealMarks = settings.showMarks;
   /** 这一个节点的标记要不要露出来。 */
   const showsSource = (from: number, to: number) => revealMarks || isUnwrapped(from, to);
+
+  /**
+   * 表格的**就地编辑态**：源码行仍可编辑，但按真表格排出来。
+   *
+   * 三条事实决定了它必须这么写：
+   *
+   * 1. 编辑必须是**原生文本编辑**（输入法、撤销、选区都是 CodeMirror 原生的）——
+   *    所以不能把表格换成 `contenteditable` 的 DOM，只能留源码在文档里；
+   * 2. 观感必须与渲染态一致——所以每一行用 `grid` 排出和真表格同一套列宽，
+   *    列宽取渲染态实测值（`tableMetrics.ts`），量不到时按内容长度给 `fr` 权重；
+   * 3. `|` 与分隔行都不该看见——竖线包进单元格后零宽隐藏（`md-tskip`），
+   *    分隔行压成 1px（`md-tsep`），它正好是表头与正文之间的那道线。
+   */
+  const renderTableInPlace = (table: SyntaxNode) => {
+    const key = state.sliceDoc(table.from, table.to);
+    let sep: SyntaxNode | null = null;
+    const rows: { node: SyntaxNode; header: boolean }[] = [];
+    for (let child = table.firstChild; child; child = child.nextSibling) {
+      if (child.name === "TableHeader") rows.push({ node: child, header: true });
+      else if (child.name === "TableRow") rows.push({ node: child, header: false });
+      else if (child.name === "TableDelimiter") sep = child;
+    }
+    if (!rows.length) return;
+    const aligns = sep ? parseTableAlignments(state.sliceDoc(sep.from, sep.to)) : [];
+    const lines = rows.map((row) => doc.lineAt(row.node.from));
+    const splits = lines.map((line) => splitTableRow(line.text));
+    // 列数以**分隔行/表头**为准（渲染态就是按它建的表格）：某一行多写了几格
+    // （例如整行被缩进、或多打了一根竖线）不能把整张表的列数带偏。
+    const headerCells = splits.find((_, index) => rows[index]?.header)?.cells.length ?? 0;
+    const columns = aligns.length || headerCells || Math.max(0, ...splits.map((split) => split.cells.length));
+    if (columns <= 0) return;
+
+    const measured = tableWidthsFor(tableMetricKey(key)) ?? lastTableWidths(columns);
+    const weights = new Array<number>(columns).fill(4);
+    for (let r = 0; r < rows.length; r += 1) {
+      splits[r].cells.forEach((cell, i) => {
+        if (i >= columns) return;
+        weights[i] = Math.max(weights[i], lines[r].text.slice(cell.from, cell.to).trim().length);
+      });
+    }
+    /** 设备像素比：竖线必须落在整设备像素上，否则被抗锯齿摊成半透明、看着像没画。 */
+    const dpr = typeof window !== "undefined" && window.devicePixelRatio ? window.devicePixelRatio : 1;
+    const snap = (value: number) => Math.round(value * dpr) / dpr;
+
+    /*
+     * 轨道宽度用实测值（小数），累计出每格左边界。竖线画在行背景上、坐标以表格左边缘
+     * 为原点，所以不需要为了让格子的起点对齐而取整（取整反而会把边界推偏 1px）。
+     */
+    const tracks: number[] = [];
+    const columnLefts: number[] = [];
+    if (measured && measured.length === columns) {
+      let left = 0;
+      for (const col of measured) {
+        columnLefts.push(left);
+        tracks.push(Math.max(1, col.track));
+        left += Math.max(1, col.track);
+      }
+    }
+    const template = tracks.length === columns
+      ? tracks.map((track) => `${track.toFixed(2)}px`).join(" ")
+      : weights.map((w) => `${Math.max(4, w)}fr`).join(" ");
+    // 表头与正文之间那道线由「分隔行」自己画（1px 背景），所以正文第一行不再画上边框
+    // —— 两边都画会多出 1px，点进表格时整块就会往下挪 1px。
+    const firstBody = rows.length > 1 && rows[0].header ? 1 : -1;
+    const tableWidth = tracks.length === columns ? columnLefts[columns - 1] + tracks[columns - 1] : null;
+
+    /**
+     * 整行的背景：**所有竖线 +（表头行的）底色**都画在行上，而不是每格自己画。
+     *
+     * 为什么不在单元格上画：单元格的坐标是浏览器排出来的，小数轨道会让「它以为的格子左边」
+     * 与我们的累计值差零点几像素，线就会偏一个设备像素。行背景的坐标系就是表格左边缘，
+     * 位置全由我们算，跟渲染态逐设备像素对齐。
+     *
+     * 线画在行上只能**衬在单元格底下**：所以单元格不能有自己的底色（表头底色也挪到行上，
+     * 用一层限宽 `tableWidth` 的渐变）。
+     */
+    const rowFill = (header: boolean): string => {
+      if (tableWidth == null) return "";
+      const layers: string[] = [];
+      const sizes: string[] = [];
+      const positions: string[] = [];
+      const line = (x: number) => {
+        layers.push("linear-gradient(var(--rule),var(--rule))");
+        sizes.push("1px 100%");
+        positions.push(`${x}px 0`);
+      };
+      // 外框两条在表格内侧；内部边界骑在边界上（−0.5px），与 border-collapse 一致。
+      line(0);
+      for (let i = 1; i < columns; i += 1) line(snap(columnLefts[i] - 0.5));
+      line(snap(tableWidth - 1));
+      if (header) {
+        layers.push("linear-gradient(var(--paper-3),var(--paper-3))");
+        sizes.push(`${tableWidth}px 100%`);
+        positions.push("0px 0");
+      }
+      return `;background-image:${layers.join(",")};background-repeat:no-repeat;background-size:${sizes.join(",")};background-position:${positions.join(",")}`;
+    };
+    const rowAttrs = (header: boolean) => ({ style: `grid-template-columns:${template}${rowFill(header)}` });
+
+    /** 单元格只负责内边距：内容宽度必须和渲染态逐像素相同，断行才会一致。 */
+    const cellStyle = (index: number, track: number): string => {
+      const pad = Math.max(0, (track - (measured![index]?.content ?? 0)) / 2);
+      return `padding-left:${pad.toFixed(2)}px;padding-right:${pad.toFixed(2)}px`;
+    };
+
+    for (let r = 0; r < rows.length; r += 1) {
+      const line = lines[r];
+      const { pipes, segments } = splits[r];
+      const tail = r === rows.length - 1 ? " md-tlast" : "";
+      const first = r === firstBody ? " md-tfirst" : "";
+      lineDeco(line.from, `md-trow${rows[r].header ? " md-thead" : ""}${tail}${first}`, rowAttrs(rows[r].header));
+      /*
+       * 每一段（含行首竖线与两侧空白）整体包成一个单元格。为什么不能只包内容：
+       * 竖线如果留在格子外面，它就是 grid 的直系子元素、会占掉一格，整行错位。
+       * 包进来之后，竖线藏在格子**内部**（`md-tskip`，零宽），而「行尾」这个
+       * 位置仍然可寻址 —— 它落在最后一个格子的末尾（见 `editor.css` 那段注释）。
+       */
+      for (let i = 0; i < segments.length && i < columns; i += 1) {
+        const segment = segments[i];
+        const align = aligns[i] ?? "left";
+        const alignCls = align === "center" ? " md-talign-center" : align === "right" ? " md-talign-right" : "";
+        if (segment.to > segment.from) {
+          // 内边距按**实测的内容盒宽度**反算：内容宽度必须和渲染态逐像素相同，
+          // 否则窄列里就是「这边两行、那边三行」——文字整块上下错位。
+          const col = measured && measured.length === columns ? measured[i] : null;
+          const attrs = col ? { style: cellStyle(i, tracks[i]) } : undefined;
+          mark(line.from + segment.from, line.from + segment.to, `md-tcell${alignCls}`, attrs);
+        } else {
+          // 零宽单元格（`||`）：插一个占位元素，这一列才不会被后面的格子顶掉
+          decorations.push(Decoration.widget({ widget: new TableCellWidget() }).range(line.from + segment.from));
+        }
+      }
+      // 超出列数的分段整段藏掉（与渲染态一致：markdown-it 只取前 N 格），
+      // 否则它会变成 grid 的直系文本节点、多占一格。
+      for (let i = columns; i < segments.length; i += 1) {
+        const extra = segments[i];
+        if (extra.to > extra.from) mark(line.from + extra.from, line.from + extra.to, "md-tskip");
+      }
+      // 竖线藏起来。它必须落在某个单元格内部 —— 这里只对有内容的分段里的竖线生效，
+      // 悬空的竖线由 CSS 的兜底规则压掉（`> :not(.md-tcell)`）。
+      //
+      // 连竖线**后面那串空格**一起藏：空格若留在单元格开头，会占掉 4px 宽，
+      // 长内容就会「渲染态两行、编辑态三行」，整块高度对不上（实测差 26px）。
+      for (const pipe of pipes) {
+        let end = pipe + 1;
+        while (end < line.text.length && (line.text[end] === " " || line.text[end] === "\t")) end += 1;
+        mark(line.from + pipe, line.from + end, "md-tskip");
+      }
+      // 单元格**末尾的空白**也要藏：它会参与断行计算 —— 51px 的窄列里，
+      // 「列一」+ 一个空格刚好放不下，渲染态一行、编辑态两行（整行高 26px）。
+      for (const segment of segments) {
+        let end = segment.to;
+        if (end > segment.from && line.text[end - 1] === "|") end -= 1;
+        let start = end;
+        while (start > segment.from && (line.text[start - 1] === " " || line.text[start - 1] === "\t")) start -= 1;
+        if (start < end) mark(line.from + start, line.from + end, "md-tskip");
+      }
+    }
+    // 分隔行：整行隐藏，只留 1px 高的一行，由 CSS 画成表头与正文之间的那道线
+    if (sep) {
+      const line = doc.lineAt(sep.from);
+      // 背景只铺到表格宽度；表格比正文窄时，不能拉出一条贯穿整行的线。
+      lineDeco(sep.from, "md-trow md-tsep", tableWidth ? { style: `width:${tableWidth}px` } : undefined);
+      // 同理：不显示原文，但也不留 replace 的占位 img
+      mark(line.from, line.to, "md-tskip");
+    }
+  };
 
   for (const span of spans) {
     tree.iterate({
@@ -596,9 +767,26 @@ function decorate(
             );
             return false;
           }
+          /*
+           * 光标在表格里，也就是「正在改它」。两条路：
+           *
+           * - **就地编辑态**（默认）：源码行按真表格排（`renderTableInPlace`），
+           *   样式不消失、也不再因为换形态而整块跳高度；
+           * - **源码态**：只有用户主动拆它（边界按删除，`unwrapSource`）或打开
+           *   `showMarks` 时才露原始 markdown。
+           */
+          if (!showsSource(from, to)) {
+            renderTableInPlace(node);
+            // 补白仍要落到最后一行：blockPad 插件按「渲染态高度 − 当前高度」算，
+            // 编辑态若比渲染态矮一点而不补，它会一轮轮把数值推大（发散）。
+            applyPad(from, to, endLine.from);
+            // **继续向下遍历**：单元格里的 `**粗体**`、`` `代码` `` 这些行内标记
+            // 要靠常规分支去隐藏与上样式。在这里 return false 的话，表格编辑态会
+            // 把 `**` 原样露出来（用户实测的第一眼就是这个）。
+            return;
+          }
           for (let n = startLine.number; n <= endLine.number; n += 1) lineDeco(doc.line(n).from, "md-table-src");
-          // 渲染态的表格比源码高得多（实测 4 列表格差 92px）：差额补成留白，
-          // 否则点进表格时它下方的内容整块上跳 130px。
+          // 源码态与渲染态高度差（实测 92px）补成留白，否则块下方内容跟着跳。
           applyPad(from, to, endLine.from);
           // keep descending: the delimiter marks live on the table's children
           return;
