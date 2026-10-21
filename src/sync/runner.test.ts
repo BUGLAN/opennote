@@ -344,7 +344,7 @@ describe("§5.3 · 状态栏文案：三种「说准」", () => {
   });
 
   it("同步中 ⇒ busy（界面据此转圈，且不该再给一个「立即同步」按钮）", () => {
-    const text = describeSyncStatus({ phase: "syncing", startedAt: 1 });
+    const text = describeSyncStatus({ phase: "syncing", startedAt: 1, progress: null });
     expect(text.label).toBe("同步中…");
     expect(text.tone).toBe("busy");
     expect(text.actionable).toBe(false);
@@ -354,7 +354,7 @@ describe("§5.3 · 状态栏文案：三种「说准」", () => {
     const all: SyncStatus[] = [
       { phase: "idle", lastSyncedAt: null, conflicts: 0 },
       { phase: "idle", lastSyncedAt: 1, conflicts: 1 },
-      { phase: "syncing", startedAt: 1 },
+      { phase: "syncing", startedAt: 1, progress: null },
       { phase: "offline", error: "x", lastSyncedAt: null },
       { phase: "key-rotated", lastSyncedAt: null },
       { phase: "error", error: "x", code: "server", lastSyncedAt: null },
