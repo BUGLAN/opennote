@@ -134,6 +134,13 @@ export function createWorkspaceEngineDeps(options: WorkspaceEngineOptions): Sync
       return out;
     },
     hashOf,
+    // 拉取落地后的基线：读**磁盘上的原始字节**再哈希（与 `listLocal` 同一基准）。
+    // E2EE 下等价于 ehash(明文) —— 与远端树里的 ehash 一致（见 engine 的说明）。
+    hashOfLocal: async (path) => {
+      const normalized = normalizeNfc(normalizePath(path));
+      const raw = await options.backend.read(normalized);
+      return hashOf(raw);
+    },
     didOf,
     knownPaths: options.knownPaths,
     /*

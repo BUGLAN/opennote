@@ -350,6 +350,39 @@ describe("★★ E2EE 端到端：远端只有密文与不可逆的 did", () => 
     expect(device2.snapshot()).toEqual({});
   });
 
+  it("★ 拉下来的文件下一轮**不再被重推**（基线以磁盘字节为准）", async () => {
+    /*
+     * 这条咬的是拉取基线的一个真 bug：引擎曾用 `hashOf(provider 给来的字节)` 记基线，
+     * E2EE 下那是**密文**的标识 —— 与下一次本地扫描（明文的标识）永远对不上，
+     * 于是每个拉下来的文件都会被当成「本地又改了」重推一遍。
+     * 明文模式下两种哈希恰好相同，所以只有 E2EE 的端到端用例能咬住它。
+     */
+    const provider = createMemoryProvider();
+    await e2eeSession(memoryBackend({ "notes/a.md": "# v1" }), provider).syncNow();
+
+    // 设备 2：账本里**知道**这条路径（imported: false，模拟「路径映射已重建」），本地是空的 ⇒ 真拉取。
+    const device2Ledger = createSyncLedger({ baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "user-key", protocolVersion: 1 });
+    device2Ledger.files["notes/a.md"] = { bid: 0, localHash: null, remoteHash: null, rev: null, imported: false, syncedAt: 0 };
+    device2Ledger.bids["notes/a.md"] = 0;
+    device2Ledger.nextBid = 1;
+    const device2 = createSyncSession({
+      config: { enabled: true, baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "user-key", accountRef: "a" },
+      ledger: device2Ledger,
+      provider,
+      backend: memoryBackend({}),
+      notebookId: NOTEBOOK,
+      notebookKey: NOTEBOOK_KEY,
+    });
+    const first = await device2.syncNow();
+    expect(first!.pulled).toBe(1);
+
+    // ★ 关键断言：第二轮什么也不做（修复前这里 pushed = 1）。
+    const second = await device2.syncNow();
+    expect(second!.pushed).toBe(0);
+    expect(second!.pulled).toBe(0);
+    expect(second!.conflicts).toHaveLength(0);
+  });
+
   it("★ 同一份内容在两种模式下的 did 与内容标识**都不同**（不会互相认成同一条）", async () => {
     const plainProvider = createMemoryProvider();
     await sessionFor(memoryBackend({ "notes/a.md": "# A" }), plainProvider).syncNow();

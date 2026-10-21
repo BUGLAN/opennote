@@ -53,6 +53,15 @@ export interface SyncEngineDeps {
   listLocal: () => Promise<EngineLocalFile[]>;
   /** 算一条本地内容的内容标识（明文 sha256 / E2EE 的 `ehash`）。 */
   hashOf: (bytes: Uint8Array) => Promise<string>;
+  /**
+   * 算一条**已经落盘**的路径的内容标识 —— 与 `listLocal` 同一基准（磁盘上的原始字节）。
+   *
+   * 拉取落地后记基线必须用它，而不是 `hashOf(provider 给来的字节)`：
+   * E2EE 下后者是密文的标识，与本地扫描（明文的标识）永远对不上，
+   * 症状是「每拉下来的文件，下一轮都被当成『本地又改了』再推一遍」。
+   * 明文模式下两者相同，所以这条只在 E2EE 才看得出差别 —— 也因此单测很容易漏。
+   */
+  hashOfLocal: (path: string) => Promise<string>;
   /** `path → did`。明文模式 = `idForPath`；E2EE = 用 `idKey` 算 HMAC。**引擎不反解 did。** */
   didOf: (path: string) => string;
   /**
@@ -378,7 +387,13 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       continue;
     }
     await deps.writeLocal(item.path, read.bytes);
-    const hash = await deps.hashOf(read.bytes);
+    /*
+     * ★ 基线以**磁盘上的字节**为准（`hashOfLocal`，与 `listLocal` 同一基准）。
+     *   E2EE 下 `read.bytes` 是密文：直接 `hashOf(read.bytes)` 记出来的基线
+     *   与下一次本地扫描永远对不上 —— 每一个拉下来的文件都会被重推一遍。
+     *   见 `SyncEngineDeps.hashOfLocal` 的说明。
+     */
+    const hash = await deps.hashOfLocal(item.path);
     const bid = ledger.bids[item.path] ?? allocateBid(ledger, item.path);
     ledger.files[item.path] = {
       bid,

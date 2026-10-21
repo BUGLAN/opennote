@@ -76,6 +76,11 @@ async function makeHarness(options: { seedLocal?: Record<string, string>; provid
       return out;
     },
     hashOf,
+    async hashOfLocal(path) {
+      const bytes = local.get(path);
+      if (!bytes) throw new Error(`本地没有这一条：${path}`);
+      return hashOf(bytes);
+    },
     didOf: (path) => idForPath(path),
     /*
      * 真实调用方会并上账本里记着的路径。这里也并上 —— 因为「账本里有、本地已经没有了」
