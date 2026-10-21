@@ -2218,6 +2218,28 @@ mark.hit {
   color: var(--ink-1);
 }
 
+.sync-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.sync-progress__bar {
+  flex: 1;
+  min-width: 0;
+  height: 6px;
+  border-radius: 99px;
+  background: var(--paper-4);
+  overflow: hidden;
+}
+
+.sync-progress__fill {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
 .sync-dialog__error {
   color: var(--danger, #b3413b);
 }

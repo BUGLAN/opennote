@@ -67,6 +67,10 @@ export interface AttachWorkspaceSyncOptions {
   realtime?: boolean;
   /** 每一轮同步成功都回调（账本落盘的挂点，见 runner.onSynced 的说明）。 */
   onSynced?: (result: SyncOnceResult) => void;
+  /** 实时状态（含 syncing 阶段的逐文件进度）。不接的话 UI 看到的永远是接上那一刻的快照。 */
+  onStatus?: (status: import("./runner").SyncStatus) => void;
+  /** 同步进行中的逐文件进度（状态对象里也带；二者选一即可，这里全透传）。 */
+  onProgress?: (progress: { done: number; total: number }) => void;
   now?: () => number;
   log?: (line: string) => void;
   /**
@@ -150,6 +154,8 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
     ...(options.gitignoreText === undefined ? {} : { gitignoreText: options.gitignoreText }),
     ...(notebookKey === undefined ? {} : { notebookKey }),
     ...(options.onSynced === undefined ? {} : { onSynced: options.onSynced }),
+    ...(options.onStatus === undefined ? {} : { onStatus: options.onStatus }),
+    ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.log === undefined ? {} : { log: options.log }),
   });

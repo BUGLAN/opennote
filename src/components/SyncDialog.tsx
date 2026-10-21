@@ -454,6 +454,26 @@ function StatusSection(): ReactNode {
           {text.detail ? <span className="muted"> — {text.detail}</span> : null}
         </p>
       ) : null}
+      {ui.status?.phase === "syncing" ? (
+        <div className="sync-progress">
+          <div className="sync-progress__bar">
+            <div
+              className="sync-progress__fill"
+              style={{
+                width:
+                  ui.status.progress && ui.status.progress.total > 0
+                    ? `${Math.round((ui.status.progress.done / ui.status.progress.total) * 100)}%`
+                    : "30%",
+              }}
+            />
+          </div>
+          <span className="muted">
+            {ui.status.progress && ui.status.progress.total > 0
+              ? `文件 ${ui.status.progress.done}/${ui.status.progress.total}`
+              : "正在列出与规划…"}
+          </span>
+        </div>
+      ) : null}
       {ui.last ? (
         <p className="dialog__note">
           上次同步 {formatRelativeTime(ui.last.at)}：推 {ui.last.pushed} · 拉 {ui.last.pulled} · 删 {ui.last.deleted + ui.last.remoteDeleted}

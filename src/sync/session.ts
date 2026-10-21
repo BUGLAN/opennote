@@ -34,7 +34,7 @@
 import type { CryptoMode } from "../../shared/contract";
 import { syncOnce, type SyncEngineDeps, type SyncOnceResult } from "./engine";
 import { createIgnoreRules, type IgnoreRules } from "./ignore";
-import { createSyncRunner, type SyncRunner, type SyncStatus } from "./runner";
+import { createSyncRunner, type SyncProgress, type SyncRunner, type SyncStatus } from "./runner";
 import type { SyncProvider } from "./provider-types";
 import type { SyncLedger } from "./state";
 import type { WorkspaceSyncConfig } from "../data/workspaces";
@@ -117,6 +117,11 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
     ...(options.log === undefined ? {} : { log: undefined }),
   });
 
+  /*
+   * 引擎的逐文件进度 → runner（由它发布带进度的 syncing 状态给 UI）。
+   * runner 在下面才创建，这里先用可重绑定的引用接住。
+   */
+  let reportProgress: ((progress: SyncProgress) => void) | undefined;
   const runner = createSyncRunner({
     syncOnce: async () => {
       /*
@@ -132,6 +137,7 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
         provider: options.provider,
         ledger: options.ledger,
         deps,
+        onProgress: (progress) => reportProgress?.(progress),
         ...(options.maxFiles === undefined ? {} : { maxFiles: options.maxFiles }),
         ...(options.now === undefined ? {} : { now: options.now }),
       });
@@ -143,6 +149,8 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.log === undefined ? {} : { log: options.log }),
   });
+
+  reportProgress = (progress) => runner.reportProgress(progress);
 
   return {
     deps,

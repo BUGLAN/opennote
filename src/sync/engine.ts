@@ -142,6 +142,11 @@ export interface SyncOnceInput {
   maxFiles?: number;
   /** 当前时间（测试可注入，让账本里的 `syncedAt` 确定）。 */
   now?: () => number;
+  /**
+   * 逐文件进度（规划完成后 total 才确定；推/拉/删每完成一项回调一次）。
+   * 给 UI 画进度条用 —— 第一轮全量同步几百个文件，没有它界面就是黑箱。
+   */
+  onProgress?: (progress: { done: number; total: number }) => void;
 }
 
 /**
@@ -260,6 +265,21 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   const pushAdded = pushPlan.added.filter((file) => !conflictedPaths.has(file.path));
   const pushModified = pushPlan.modified.filter((file) => !conflictedPaths.has(file.path));
 
+  /*
+   * 进度条：规划完成后总数即确定（推 + 拉 + 两类删除）。
+   * 冲突路径**不计入**（它们不会被引擎动）。
+   */
+  const onProgress = input.onProgress;
+  let progressDone = 0;
+  const progressTotal =
+    pushAdded.length +
+    pushModified.length +
+    pushPlan.deleted.length +
+    pullPlan.download.length +
+    pullPlan.removeLocal.length;
+  const tick = (): void => onProgress?.({ done: progressDone, total: progressTotal });
+  tick();
+
   for (const item of pullPlan.conflicts) {
     const local = localByPath.get(item.path);
     const remote = treeEntryByPath.get(item.path);
@@ -320,6 +340,8 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       syncedAt: now(),
     };
     pushed += 1;
+    progressDone += 1;
+    tick();
     log("push", { path: file.path, bytes: file.bytes });
   }
 
@@ -370,6 +392,8 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       syncedAt: now(),
     };
     remoteDeleted += 1;
+    progressDone += 1;
+    tick();
     log("delete", { path, remote: true });
   }
 
@@ -405,6 +429,8 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     };
     appliedPaths.push(item.path);
     pulled += 1;
+    progressDone += 1;
+    tick();
     log("pull", { path: item.path, bytes: read.bytes.byteLength });
   }
 
@@ -436,6 +462,8 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
           if (existing) delete ledger.files[path];
           appliedPaths.push(path);
           deleted += 1;
+          progressDone += 1;
+          tick();
           log("delete", { path });
         } catch (error) {
           console.warn("[opennote] 同步：删本地这一条失败", path, error);

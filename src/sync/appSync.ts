@@ -249,6 +249,8 @@ async function attachCurrent(): Promise<AttachResult> {
     notebookKeyForNotebook: (notebookId) =>
       config.cryptoMode === "user-key" ? deriveNotebookKey(encRootCache?.encRoot ?? new Uint8Array(), notebookId) : undefined,
     onSynced: (synced) => handleSynced(backend, ledger, synced),
+    // 实时状态（含进度）进 store —— 对话框与状态栏都从这里读。
+    onStatus: (status) => syncUiStore.set((prev) => ({ ...prev, status })),
     ...(isDesktop ? {} : { openEventStream: (url: string) => new EventSource(url) }),
     log: (line) => syncUiStore.set((prev) => ({ ...prev, error: line })),
   });

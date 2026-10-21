@@ -36,9 +36,16 @@ import { SyncProviderError } from "./provider-types";
 import type { SyncOnceResult } from "./engine";
 
 /** `StatusBar` 要显示的状态（§5.3 列了五种，这里一一对应）。 */
+/** 一轮同步进行中的逐文件进度（规划完成后 total 才确定）。 */
+export interface SyncProgress {
+  done: number;
+  total: number;
+}
+
 export type SyncStatus =
   | { phase: "idle"; lastSyncedAt: number | null; conflicts: number }
-  | { phase: "syncing"; startedAt: number }
+  | { phase: "syncing"; startedAt: number; /** 规划完成后的逐文件进度；规划前为 null。 */
+      progress: SyncProgress | null }
   | { phase: "offline"; error: string; lastSyncedAt: number | null }
   /** 密钥已被轮换 / 账号被禁用 —— **独立状态**，不是「错误」的一种（§1.5 代价 2）。 */
   | { phase: "key-rotated"; lastSyncedAt: number | null }
@@ -52,6 +59,8 @@ export interface SyncRunnerDeps {
   syncOnce: () => Promise<SyncOnceResult>;
   /** 状态变化（UI 订阅它）。 */
   onStatus?: (status: SyncStatus) => void;
+  /** 同步进行中的逐文件进度（引擎每完成一个文件回调一次；UI 画进度条用）。 */
+  onProgress?: (progress: SyncProgress) => void;
   /**
    * 每一次同步**成功跑完**都回调（不管有没有实际改动）。
    *
@@ -78,6 +87,8 @@ export interface SyncRunnerDeps {
 
 export interface SyncRunner {
   status(): SyncStatus;
+  /** 引擎每完成一个文件回调一次；更新「同步中」状态里的进度（UI 进度条）。 */
+  reportProgress(progress: SyncProgress): void;
   /**
    * 请求一次同步。
    *
@@ -118,6 +129,8 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
   let current: SyncStatus = { phase: "idle", lastSyncedAt: null, conflicts: 0 };
   /** 进行中的那一次（单飞用）。 */
   let inFlight: Promise<SyncOnceResult | null> | null = null;
+  /** 本轮进行中的逐文件进度（引擎回调；runOnce 开始时清零）。 */
+  let progress: SyncProgress | null = null;
   /** 进行中时又来了请求 ⇒ 跑完再来一次（**只记一次**，不排队）。 */
   let pendingAgain = false;
   let debounceHandle: unknown = null;
@@ -130,7 +143,8 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
 
   /** 跑一次（内部；调用方保证没有别的在跑）。 */
   const runOnce = async (): Promise<SyncOnceResult | null> => {
-    publish({ phase: "syncing", startedAt: now() });
+    progress = null;
+    publish({ phase: "syncing", startedAt: now(), progress: null });
     try {
       const result = await deps.syncOnce();
       lastSyncedAt = now();
@@ -154,6 +168,12 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
 
   return {
     status: () => current,
+
+    /** 引擎每完成一个文件回调一次（session 把它接到引擎的 onProgress 上）。 */
+    reportProgress(newProgress: SyncProgress): void {
+      progress = newProgress;
+      if (current?.phase === "syncing") publish({ ...current, progress });
+    },
 
     async request(trigger) {
       if (disposed) return null;
