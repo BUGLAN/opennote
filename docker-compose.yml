@@ -47,7 +47,15 @@ services:
       - ./etc/couchdb/local.ini:/opt/couchdb/etc/local.d/10-opennote.ini
     # ⚠️ 故意不写 ports —— 只在 compose 网络内可达。
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:5984/_up"]
+      # ⚠️ 必须带 admin 凭据 —— 真机跑出来的结论：etc/couchdb/local.ini 的加固项
+      #   `require_valid_user = true` 让 `/_up` **也要认证**，无凭据的探测恒 401，
+      #   `curl -f` 判失败 ⇒ 容器永远到不了 healthy，sync 卡在「Waiting」约 150 秒后
+      #   被 compose 以 unhealthy 拒掉。凭据就用容器里现成的 COUCHDB_USER/PASSWORD
+      #   （`$$` 是 compose 转义，实际在容器内展开）。
+      #   ⚠️ 改 `require_valid_user` 时**必须同步改这里** —— 两个文件各管一半。
+      test:
+        - CMD-SHELL
+        - curl -fsS -u "$$COUCHDB_USER:$$COUCHDB_PASSWORD" http://localhost:5984/_up || exit 1
       interval: 30s
       timeout: 5s
       retries: 5
