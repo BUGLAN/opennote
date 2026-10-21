@@ -163,6 +163,23 @@ function isSidebarTab(value: unknown): value is SidebarTab {
 }
 
 let backend: FileSystemBackend | null = null;
+
+/** 当前笔记本的文件后端（同步层 attach 要用；没有打开就是 null）。 */
+export function activeBackend(): FileSystemBackend | null {
+  return backend;
+}
+
+/**
+ * 本地落盘事件（同步层订阅它触发「保存后去抖推一次」）。
+ *
+ * 这里**刻意不 import 同步层**：库层与同步层互相 import 会把两套语义焊死
+ * （`src/sync/mode.ts` 的模块头），所以只留一个无类型约束的事件口。
+ */
+const localFlushListeners = new Set<() => void>();
+export function onLocalFlush(listener: () => void): () => void {
+  localFlushListeners.add(listener);
+  return () => localFlushListeners.delete(listener);
+}
 let meta: WorkspaceMeta = { ...defaultMeta };
 let metaTimer: ReturnType<typeof setTimeout> | null = null;
 const writeTimers = new Map<Id, ReturnType<typeof setTimeout>>();
@@ -1390,6 +1407,10 @@ export async function flushAll(): Promise<void> {
   // History counts as "written": a snapshot that is still on its way must not be
   // left behind by a close, and a rename must not move the directory it writes into (D22).
   if (pendingSnapshots.size) await Promise.allSettled([...pendingSnapshots.values()]);
+  // 只在真有落盘时通知同步层 —— 打开/关闭笔记本时的例行 flush 不该触发一轮推送。
+  if (ids.size > 0 || pendingWrites.size > 0) {
+    for (const listener of [...localFlushListeners]) listener();
+  }
 }
 
 function scheduleMeta(delay = 700): void {

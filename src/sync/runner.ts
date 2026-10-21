@@ -53,6 +53,15 @@ export interface SyncRunnerDeps {
   /** 状态变化（UI 订阅它）。 */
   onStatus?: (status: SyncStatus) => void;
   /**
+   * 每一次同步**成功跑完**都回调（不管有没有实际改动）。
+   *
+   * 与 `onApplied` 的差别：`onApplied` 只在有落地改动时触发，而账本在
+   * **纯推送**的那一轮也会变（rev / remoteHash 前进了）。落盘账本的调用方
+   * 必须在**每一轮**之后写盘，否则「推完就退出」会把 rev 丢在内存里 ——
+   * 下一次启动拿着空基线去 CAS，每条都撞 409。
+   */
+  onSynced?: (result: SyncOnceResult) => void;
+  /**
    * 拉取落地之后要刷新的**路径**（§5.4 第 2 条：**按路径**刷新，不要 `rescanWorkspace` 那种 O(库) 的）。
    * 上层把它接到 `applyExternalPaths()`。
    */
@@ -131,6 +140,8 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
        * 只在真有落地时才调 —— 空数组也调一次会让上层白跑一轮索引重建。
        */
       if (result.appliedPaths.length > 0) deps.onApplied?.(result.appliedPaths);
+      // 每一轮成功都通知（见 deps.onSynced 的说明：账本落盘不能只盯「有落地」的那几轮）。
+      deps.onSynced?.(result);
       publish({ phase: "idle", lastSyncedAt, conflicts });
       return result;
     } catch (error) {

@@ -33,7 +33,8 @@ import { decodeAccountKey, deriveFromAccountKey } from "./accountKey";
 import { createSyncController, type SyncController } from "./controller";
 import { createOpenNoteProvider } from "./providers/opennote";
 import { resolveSend } from "./http";
-import { createSyncSession } from "./session";
+import { createSyncSession, type SyncSession } from "./session";
+import type { SyncOnceResult } from "./engine";
 import { createSyncStream, type EventStreamLike } from "./stream";
 import { createBackendSyncFiles } from "./backendFiles";
 import type { SyncLedger } from "./state";
@@ -48,7 +49,8 @@ export type AttachSkipReason =
   | "no-account-key";
 
 export type AttachResult =
-  | { ok: true; controller: SyncController }
+  | { ok: true; controller: SyncController; /** 建好的会话（provider/ledger 供冲突裁决用）。 */
+      session: SyncSession }
   | { ok: false; reason: AttachSkipReason; message: string };
 
 export interface AttachWorkspaceSyncOptions {
@@ -63,6 +65,8 @@ export interface AttachWorkspaceSyncOptions {
   openEventStream?: (url: string) => EventStreamLike;
   /** 建流的开关（用户可能在设置里关掉实时）。默认开。 */
   realtime?: boolean;
+  /** 每一轮同步成功都回调（账本落盘的挂点，见 runner.onSynced 的说明）。 */
+  onSynced?: (result: SyncOnceResult) => void;
   now?: () => number;
   log?: (line: string) => void;
   /**
@@ -145,6 +149,7 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
     notebookId: config.notebookId,
     ...(options.gitignoreText === undefined ? {} : { gitignoreText: options.gitignoreText }),
     ...(notebookKey === undefined ? {} : { notebookKey }),
+    ...(options.onSynced === undefined ? {} : { onSynced: options.onSynced }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.log === undefined ? {} : { log: options.log }),
   });
@@ -167,5 +172,5 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
     ...(options.log === undefined ? {} : { log: options.log }),
   });
 
-  return { ok: true, controller };
+  return { ok: true, controller, session };
 }

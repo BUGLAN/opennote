@@ -56,6 +56,8 @@ export interface SyncSessionOptions {
   notebookId: string;
   onStatus?: (status: SyncStatus) => void;
   onApplied?: (paths: string[]) => void;
+  /** 每一轮成功都回调（含纯推送）—— 账本落盘的挂点，见 runner 的说明。 */
+  onSynced?: (result: SyncOnceResult) => void;
   now?: () => number;
   maxFiles?: number;
   log?: (line: string) => void;
@@ -67,6 +69,15 @@ export interface SyncSessionOptions {
 export interface SyncSession {
   readonly deps: SyncEngineDeps;
   readonly runner: SyncRunner;
+  /**
+   * 远端读写（与引擎用的同一个实例）。
+   *
+   * 暴露它只有一个正当用途：**冲突裁决（L3 收尾）**——「采用远端」要 `read`，
+   * 「保留本地」要 `put`。拿它做别的（绕过引擎直接搬数据）等于把三方 diff 甩开。
+   */
+  readonly provider: SyncProvider;
+  /** 账本（引擎原地更新同一对象；裁决动作也要更新它，所以一并交出）。 */
+  readonly ledger: SyncLedger;
   /** 手动同步一次（`enabled: false` 时直接返回 `null`）。 */
   syncNow(): Promise<SyncOnceResult | null>;
   status(): SyncStatus;
@@ -127,6 +138,7 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
     },
     ...(options.onStatus === undefined ? {} : { onStatus: options.onStatus }),
     ...(options.onApplied === undefined ? {} : { onApplied: options.onApplied }),
+    ...(options.onSynced === undefined ? {} : { onSynced: options.onSynced }),
     ...(options.localWriteDebounceMs === undefined ? {} : { localWriteDebounceMs: options.localWriteDebounceMs }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.log === undefined ? {} : { log: options.log }),
@@ -135,6 +147,8 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
   return {
     deps,
     runner,
+    provider: options.provider,
+    ledger: options.ledger,
     async syncNow() {
       if (!options.config.enabled) return null;
       return runner.request("manual");

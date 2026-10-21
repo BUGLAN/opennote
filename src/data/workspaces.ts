@@ -207,6 +207,25 @@ export function rememberWorkspace(input: { name: string; kind: BackendKind; loca
   return record;
 }
 
+/**
+ * 更新一个工作区的同步配置（设置对话框的唯一写入口）。
+ *
+ * 进来的值先过 `normalizeSyncConfig`：UI 半配好的状态（填了地址还没选笔记本）
+ * 存下去也必须是「关」—— 读回来的任何形状都不该能把同步意外打开。
+ */
+export function updateWorkspaceSync(id: string, sync: WorkspaceSyncConfig): WorkspaceRecord | null {
+  const state = workspaceStore.get();
+  const existing = state.workspaces.find((workspace) => workspace.id === id);
+  if (!existing) return null;
+  const updated: WorkspaceRecord = { ...existing, sync: normalizeSyncConfig(sync) };
+  workspaceStore.set({
+    workspaces: state.workspaces.map((workspace) => (workspace.id === id ? updated : workspace)),
+    activeId: state.activeId,
+  });
+  persist();
+  return updated;
+}
+
 export function setActiveWorkspace(id: string | null): void {
   const state = workspaceStore.get();
   workspaceStore.set({

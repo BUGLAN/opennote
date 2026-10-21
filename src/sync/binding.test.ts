@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createWorkspaceSyncBinding } from "./binding";
 import type { AttachResult } from "./attach";
 import type { SyncController } from "./controller";
+import type { SyncSession } from "./session";
 import type { SyncStatus } from "./runner";
 
 /** 一个可观测的假 controller。 */
@@ -41,7 +42,12 @@ function deferredAttach() {
   };
 }
 
-const ok = (controller: SyncController): AttachResult => ({ ok: true, controller });
+const ok = (controller: SyncController): AttachResult => ({
+  ok: true,
+  controller,
+  // 绑定层只用 controller；session 是给上层（冲突裁决）的，这里给个占位。
+  session: { runner: { scheduleAfterLocalWrite() {}, request: () => Promise.resolve(null) } } as unknown as SyncSession,
+});
 
 /** 让微任务跑一轮。 */
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));

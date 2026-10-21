@@ -2124,6 +2124,104 @@ mark.hit {
   font-size: var(--fs-md);
 }
 
+/* ─── 同步设置对话框（SyncDialog）─────────────────────────────────────────────
+   全部复用对话框既有变量；这里只补「卡片分组 / 表单行 / 冲突列表」三块结构。 */
+
+.sync-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.sync-dialog__card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+
+.sync-dialog__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--fs-md);
+  color: var(--ink-1);
+}
+
+.sync-dialog__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.sync-dialog__form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sync-dialog__label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+
+.sync-dialog__key {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  resize: vertical;
+}
+
+.sync-dialog__list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sync-dialog__option {
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+.sync-dialog__option:hover {
+  background: var(--paper-3);
+}
+
+.sync-dialog__conflicts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sync-dialog__conflict {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+
+.sync-dialog__conflict-path {
+  font-family: var(--font-mono, monospace);
+  font-size: 12.5px;
+  word-break: break-all;
+  color: var(--ink-1);
+}
+
+.sync-dialog__error {
+  color: var(--danger, #b3413b);
+}
+
 .switch input {
   appearance: none;
   width: 34px;

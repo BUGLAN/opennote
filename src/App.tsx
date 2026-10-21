@@ -68,6 +68,7 @@ import { desktopBridge, type ImportOutcome } from "./desktop/bridge";
 import { getUi, patchUi, setTheme as applyTheme, toggleAppearance, useUi } from "./data/ui";
 import type { Id, Snapshot, ThemeId, UiSettings } from "./data/types";
 import { buildAppCommands, isEditableTarget, matchesShortcut } from "./lib/appCommands";
+import { useStore } from "./lib/store";
 import { askConfirm, askText } from "./lib/dialogs";
 import { exportNoteHtml, exportNoteMarkdown, exportWorkspaceZip } from "./lib/export";
 import { importIntoWorkspace, migrateLegacyData } from "./lib/import";
@@ -104,6 +105,9 @@ import { ReadingView } from "./components/ReadingView";
 import { Sidebar, currentFolderId, type Scope } from "./components/Sidebar";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { StatusBar } from "./components/StatusBar";
+import { SyncDialog } from "./components/SyncDialog";
+import { closeWorkspaceSync, openWorkspaceSync, scheduleAfterLocalWrite, syncStatusBarInfo, syncUiStore } from "./sync/appSync";
+import { activeBackend, onLocalFlush } from "./data/library";
 import { TabBar } from "./components/TabBar";
 import { WindowControls } from "./components/WindowControls";
 import { setBridge } from "./editor/bridge";
@@ -115,6 +119,8 @@ export default function App(): ReactNode {
   const registry = useWorkspaces();
 
   const viewRef = useRef<EditorView | null>(null);
+  const syncUi = useStore(syncUiStore);
+  const [syncOpen, setSyncOpen] = useState(false);
   const [scope, setScope] = useState<Scope>({ kind: "all" });
   // D27: the sidebar tab is real state — it lives in the UI settings and in the
   // notebook's state.json, so it survives a reload (see `setSidebarTab`).
@@ -396,6 +402,27 @@ export default function App(): ReactNode {
     installImportConflictDialog();
     return () => uninstallImportConflictDialog();
   }, []);
+
+  // ─── 远端同步：工作区打开/关闭/配置变更时重绑（§5.3）────────────────────────
+  // 同步默认关：record.sync 里 enabled !== true 时这里只会调用 closeWorkspaceSync()，
+  // 那是「旁路」纪律 —— 不开就不碰网络。配置对象在 updateWorkspaceSync 里是**新建**的，
+  // 所以「保存并开启」会天然重跑这个 effect（关旧的、接新的）。
+  const workspaceRecord = library.workspace;
+  useEffect(() => {
+    const backend = workspaceRecord ? activeBackend() : null;
+    if (workspaceRecord && backend) {
+      void openWorkspaceSync(workspaceRecord, backend);
+    } else {
+      closeWorkspaceSync();
+    }
+    return () => {
+      // 卸载（切笔记本/关窗）时先停：binding 内部按代次丢弃在途的 attach。
+      closeWorkspaceSync();
+    };
+  }, [workspaceRecord]);
+
+  // 本地写盘 → 去抖推一次（library 只发事件，语义在这里接）。
+  useEffect(() => onLocalFlush(() => scheduleAfterLocalWrite()), []);
 
   // 收件箱变更检测：桌面端用主进程的独立 watcher（`.opennote/**` 被工作区
   // watcher 跳过，所以必须是另一条链路）；浏览器后端退化为轮询。
@@ -1449,6 +1476,10 @@ export default function App(): ReactNode {
                 }
               : null
           }
+          sync={(() => {
+            const info = syncStatusBarInfo(syncUi, library.workspace !== null);
+            return info ? { ...info, onOpen: () => setSyncOpen(true) } : null;
+          })()}
         />
       </div>
 
@@ -1503,6 +1534,7 @@ export default function App(): ReactNode {
         />
       ) : null}
       {shortcutsOpen ? <ShortcutsDialog onClose={() => setShortcutsOpen(false)} /> : null}
+      {syncOpen ? <SyncDialog workspace={library.workspace} onClose={() => setSyncOpen(false)} /> : null}
       {/* UI-03：外部导入的待确认内容。入库走 L2 接收端，落盘始终在渲染层。 */}
       <InboxPanel
         open={inboxOpen}

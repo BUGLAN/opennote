@@ -24,6 +24,11 @@ interface StatusBarProps {
    * `label` 是逐字显示的那一行，`title` 说明同步状态（悬浮可见），点击打开同步对话框。
    */
   github: { label: string; title: string; onOpen(): void; onForgetToken(): void } | null;
+  /**
+   * 远端同步的一位（未打开笔记本时 `null`，整个不渲染）。
+   * 文案来自 `syncStatusBarInfo`（与设置对话框同一份状态），点击打开同步设置。
+   */
+  sync: { label: string; title: string; onOpen(): void } | null;
 }
 
 /**
@@ -118,6 +123,18 @@ export function StatusBar(props: StatusBarProps): ReactNode {
           <Icon name="layers" size={13} />
           <span className="statusbar__label">{inboxText}</span>
         </button>
+        {props.sync ? (
+          <button
+            type="button"
+            className={cn("statusbar__item", "statusbar__item--button")}
+            aria-label={props.sync.label}
+            title={props.sync.title}
+            onClick={props.sync.onOpen}
+          >
+            <Icon name="rotate" size={13} />
+            <span className="statusbar__label">{props.sync.label}</span>
+          </button>
+        ) : null}
         {props.github ? (
           <>
             <button
