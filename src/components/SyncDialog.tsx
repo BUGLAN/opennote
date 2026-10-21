@@ -21,19 +21,22 @@ import { Icon } from "./Icons";
 import { formatRelativeTime } from "../lib/utils";
 import { useStore } from "../lib/store";
 import {
+  closeWorkspaceSync,
   completeRegistration,
   createNotebook as createNotebookApi,
   forgetAccountKey,
   importAccountKey,
   listNotebooks as listNotebooksApi,
   manualSync,
+  openWorkspaceSync,
   prepareRegistration,
   resolveConflict,
   saveWorkspaceConnection,
-  unlockAccount,
   syncStatusBarInfo,
+  unlockAccount,
   syncUiStore,
 } from "../sync/appSync";
+import { activeBackend } from "../data/library";
 import { describeSyncStatus } from "../sync/runner";
 import { normalizeSyncConfig, type WorkspaceRecord } from "../data/workspaces";
 import type { RegistrationMaterial } from "../sync/accountKey";
@@ -289,12 +292,30 @@ function ConnectionSection({ workspace }: { workspace: WorkspaceRecord }): React
       return;
     }
     setError(null);
-    saveWorkspaceConnection(workspace, {
+    const updated = saveWorkspaceConnection(workspace, {
       baseUrl: baseUrl.trim(),
       notebookId,
       cryptoMode: notebooks?.find((item) => item.notebookId === notebookId)?.cryptoMode ?? config.cryptoMode,
       enabled,
     });
+    /*
+     * ★ 保存后必须**在这里显式重绑**，不能指望 App 的绑定 effect 兜底：
+     *   effect 依赖的是 `library.workspace` —— 那是**打开笔记本那一刻**的记录副本，
+     *   而 updateWorkspaceSync 更新的是**注册表**里的记录，副本不会变
+     *   ⇒ effect 不重跑 ⇒ attach 永远不执行 ⇒ 同步永远停在「关」
+     *   （真机实测：点「保存并开启同步」毫无反应，状态栏纹丝不动）。
+     */
+    if (!updated) {
+      setError("保存失败：工作区记录不存在");
+      return;
+    }
+    if (enabled) {
+      const backend = activeBackend();
+      if (backend) void openWorkspaceSync(updated, backend);
+      else setError("笔记本还没有打开，无法开启同步");
+    } else {
+      closeWorkspaceSync();
+    }
   };
 
   const createNotebook = () => {
