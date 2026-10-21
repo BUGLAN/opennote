@@ -14,6 +14,7 @@
  */
 
 import { serve } from "@hono/node-server";
+import { pathToFileURL } from "node:url";
 import { loadConfig, describeConfig, ConfigError } from "./config";
 import { openDatabase } from "./db";
 import { createApp } from "./app";
@@ -86,9 +87,27 @@ export function startServer(options: { env?: Record<string, string | undefined>;
  * ⚠️ 必须判「是不是主模块」：否则 `import { startServer }` 会**顺手把服务起起来**，
  * 那会让测试莫名其妙地占端口（而且报错信息完全指不到原因）。
  */
+/*
+ * ★ 主模块判定**不能靠路径子串** —— 这是真机（Docker）跑出来的结论：
+ *
+ * 旧写法是 `entry.includes("server")`。开发时 `tsx server/src/index.ts`
+ * 路径里恰好有 "server"，怎么看怎么对；可容器里 CMD 是 `node dist/index.js`
+ * （Dockerfile 把 server/dist 拷成了 /app/dist），路径里**没有** "server"
+ * ⇒ 判定失败 ⇒ 模块加载完直接 exit 0 ⇒ `unless-stopped` 对 exit 0 也重启
+ * ⇒ 无限重启，且**一行报错都没有**（除了 node:sqlite 的实验性警告）。
+ *
+ * 正确姿势是拿「运行入口」与「本模块自身」做同一性比较（ESM 下稳定可用，
+ * tsx 开发与 esbuild 打包两种形态都成立）。测试进程的 argv[1] 是 vitest
+ * 自己的入口，比不中，于是 `import { startServer }` 依旧不会顺带起服务。
+ */
 const isMain = (() => {
-  const entry = process.argv[1] ?? "";
-  return /index\.(ts|js|mjs|cjs)$/.test(entry) && entry.includes("server");
+  const entry = process.argv[1];
+  if (!entry || !/index\.(ts|js|mjs|cjs)$/.test(entry)) return false;
+  try {
+    return pathToFileURL(entry).href === import.meta.url;
+  } catch {
+    return false;
+  }
 })();
 
 if (isMain) {
