@@ -73,7 +73,7 @@ export const VALIDATE_DOC_UPDATE_SOURCE = String.raw`function (newDoc, oldDoc, u
   var prefix = newDoc._id.slice(0, 2);
   if (prefix !== 'f:' && prefix !== 'h:' && prefix !== 'm:') throw({ forbidden: 'bad id prefix' });
 
-  if (newDoc.path !== undefined && newDoc.path !== null) {
+  if (prefix === 'f:') {
     // ---- 模式 A：有明文 path，按 shared/paths.ts 的规则严格校验 ----
     if (typeof newDoc.path !== 'string' || newDoc.path.length === 0) throw({ forbidden: 'bad path' });
     if (newDoc.path.indexOf('\u0000') >= 0) throw({ forbidden: 'path has NUL' });
@@ -87,10 +87,18 @@ export const VALIDATE_DOC_UPDATE_SOURCE = String.raw`function (newDoc, oldDoc, u
     for (var i = 0; i < segments.length; i++) {
       if (segments[i].indexOf(':') >= 0) throw({ forbidden: 'path segment has colon' });
     }
-  } else if (typeof newDoc.epath !== 'string' || newDoc.epath.length === 0) {
-    // 两者必有一个：既没有明文 path，也没有密文 epath。
-    throw({ forbidden: 'missing path/epath' });
   }
+  // ---- 模式 B（h:）与元记录（m:）：服务端看不到明文路径，**不要求 path/epath**。
+  //
+  // ★ 真机跑出来的回归（假 CouchDB 不执行 validate_doc_update，单测看不见）：
+  //   epath 是「每条记录自带一份密文路径」的**旧设计**；P4-b 起 did↔path 映射统一进
+  //   每笔记本一条的 m:pathmap 元记录，客户端**不再为每条文件记录产出 epath**。
+  //   而这里的校验还停在旧设计上 —— 于是真 CouchDB 3.3.3 上 E2EE 的每一次写入都是
+  //     CouchDB 403：missing path/epath
+  //   E2EE 同步整体不可用。路径的保密与还原已经由 m:pathmap 一条记录承担，
+  //   这里再逼一份 per-file epath 既没收益（服务端看不懂密文）也违背 P4-b 的设计。
+  //   所以对 h:/m: 只要求「内容标识」（下方 hash/ehash），epath 在就带着、不在不拦。
+  //   模式 A 的明文路径校验**一条不松**（上面那段原样保留）。
 
   // 内容标识也必须有其一：明文模式给 hash，E2EE 给 ehash。
   if (typeof newDoc.hash !== 'string' && typeof newDoc.ehash !== 'string') {

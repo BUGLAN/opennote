@@ -108,13 +108,30 @@ describe("§3.8 ⚠️ · 模式 B 只能校验形状（E2EE 的固有代价）"
     expect(verdict({ _id: `h:${"a".repeat(32)}`, epath: "base64(iv||ct)", ehash: "b".repeat(64), esize: 10 })).toEqual({ ok: true });
   });
 
-  it("既没有 path 也没有 epath ⇒ 拒绝", () => {
-    const result = verdict({ _id: `h:${"a".repeat(32)}`, hash: "a".repeat(64) });
-    expect(result).toEqual({ ok: false, reason: "missing path/epath" });
+  it("★ **不带** `epath` 也放行：路径映射已统一进 m:pathmap（P4-b），客户端不再产 per-file epath", () => {
+    /*
+     * 这条是真机跑出来的回归。假 CouchDB 不执行 validate_doc_update，所以单测看不见：
+     * 真 CouchDB 3.3.3 上 E2EE 的每一次写入都是 **403 missing path/epath** ——
+     * 因为校验器还停在「每条记录自带一份密文路径」的旧设计上，而 P4-b 起 did↔path
+     * 映射已经统一进每笔记本一条的 `m:pathmap`，客户端**不产出** epath。
+     * 症状是「E2EE 完全不能用」，离根因（校验器要求一个没人再写的字段）很远。
+     */
+    expect(verdict({ _id: `h:${"a".repeat(32)}`, ehash: "b".repeat(64), size: 10 })).toEqual({ ok: true });
+    // 客户端现在实际发出去的形状（/v1/file 写的就是这几个字段）。
+    expect(verdict({ _id: `h:${"c".repeat(64)}`, ehash: "d".repeat(64), size: 1024 })).toEqual({ ok: true });
+  });
+
+  it("内容标识仍然必须有其一：只有 path 而没有 hash/ehash ⇒ 拒绝", () => {
+    const result = verdict({ _id: `h:${"a".repeat(32)}`, epath: "base64(iv||ct)" });
+    expect(result).toEqual({ ok: false, reason: "missing hash/ehash" });
   });
 
   it("有 path 也有 epath 时按 path 严格校验（不因为带了密文就放宽）", () => {
     expect(verdict({ ...plainDoc("../x.md"), epath: "whatever" }).ok).toBe(false);
+  });
+
+  it("模式 A 的文档**没有** path ⇒ 拒绝（校验一条都不松）", () => {
+    expect(verdict({ _id: `f:${Buffer.from("a.md", "utf8").toString("base64url")}`, hash: "a".repeat(64) })).toEqual({ ok: false, reason: "bad path" });
   });
 });
 
@@ -139,15 +156,17 @@ describe("id 前缀与保留 id", () => {
      */
     /*
      * ★ 元记录**不需要任何额外的服务端规则**：它只要像一条普通 E2EE 记录那样
-     * 带上 `epath` 与 `ehash`（它本来就是加密的），就自然通过校验。
-     * 所以「加一条映射表记录」在服务端**只多放行一个前缀**，别的都不用动。
+     * 带上内容标识（`ehash`）就自然通过校验 —— 服务端看不懂那个密文块，
+     * 它看到的仍然只是一条不透明 id 的记录。所以「加一条映射表记录」在服务端
+     * **只多放行一个前缀**，别的都不用动。
      *
-     * （我第一版只传了 `hash`，被 `missing path/epath` 拒了 ——
-     *  这条校验不是在针对元记录，它是对**所有**记录的通用要求。）
+     * （`epath` 曾经也是必需的；P4-b 把路径映射收进这一条元记录之后，
+     *  per-file 的 epath 不再有客户端写 —— 详见「模式 B」那一组的回归说明。）
      */
     expect(verdict({ _id: "m:pathmap", epath: "a".repeat(43), ehash: "b".repeat(64) })).toEqual({ ok: true });
-    // 但它仍然要满足通用要求：既没有 path 也没有 epath ⇒ 照旧拒绝。
-    expect(verdict({ _id: "m:pathmap", hash: "a".repeat(64) })).toEqual({ ok: false, reason: "missing path/epath" });
+    expect(verdict({ _id: "m:pathmap", ehash: "b".repeat(64) })).toEqual({ ok: true });
+    // 但它仍然要满足通用要求：内容标识必须有其一。
+    expect(verdict({ _id: "m:pathmap", path: undefined })).toEqual({ ok: false, reason: "missing hash/ehash" });
     // 只多放行了 `m:` 这一个前缀，别的一律照旧拒绝。
     for (const id of ["x:abc", "n:abc", "M:pathmap", "mm:pathmap"]) {
       expect(verdict({ _id: id, path: "a.md", hash: "a".repeat(64) }), id).toEqual({ ok: false, reason: "bad id prefix" });
