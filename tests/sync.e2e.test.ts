@@ -43,6 +43,7 @@ import { mkdtemp, rm, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serve } from "@hono/node-server";
+import { createRequire } from "node:module";
 import type { DatabaseSync } from "node:sqlite";
 
 import { FakeCouch, couchClient } from "../server/src/couch/fakeCouch.test-helper";
@@ -58,6 +59,8 @@ import { createSyncSession } from "../src/sync/session";
 import { createOpenNoteProvider } from "../src/sync/providers/opennote";
 import { deriveFromAccountKey, createRegistrationMaterial, encodeAccountKey, decodeAccountKey, deriveNotebookKey, unwrapEncRoot, deriveFromAccountKey as deriveToken } from "../src/sync/accountKey";
 import { describeSyncStatus, type SyncStatus } from "../src/sync/runner";
+import { openAccountApi } from "../src/sync/accountApi";
+import { desktopSend, type HttpSend } from "../src/sync/http";
 import type { FileSystemBackend } from "../src/fs/types";
 
 /* ============================================================================
@@ -784,4 +787,111 @@ describe("401 语义", () => {
     expect(events.join("")).toContain("event: change");
     expect(events.join("")).toContain("event: ready");
   }, 90_000);
+});
+
+/* ============================================================================
+   ★ 桌面端主进程代理路径（渲染层 body 序列化 → IPC → createSyncProxy → 服务端）
+   ============================================================================ */
+
+describe("桌面端主进程代理路径（真实 createSyncProxy）", () => {
+  /**
+   * ★ 真机回归：桌面端的 JSON 请求（注册 / 解锁 / 建笔记本 / checkpoint）经
+   * `desktopSend` 序列化成 **number[]** 过 IPC，主进程把它塞进 fetch —— undici
+   * 不认普通数组，会按 USVString 拼成「104,116,116,112,…」发给服务端，
+   * 于是 `c.req.json()` 失败 → null → 「形状不符合契约：expected object,
+   * received null」。症状是桌面端注册必失败，而浏览器/移动端（fetch 直连）
+   * 一切正常 —— 单靠浏览器形态的全链路测试抓不到它。
+   *
+   * 这条用例把**真实的** `desktopSend` 与**真实的** `createSyncProxy`（主进程
+   * 实际使用的模块）接上真实服务端，锁住整条序列化链路。
+   */
+  it("注册请求经 IPC 数组序列化后，服务端仍能解析 JSON", async () => {
+    const require = createRequire(import.meta.url);
+    const { createSyncProxy } = require("../electron/sync.cjs") as {
+      createSyncProxy: (options: {
+        baseUrl: string;
+        authToken: unknown;
+        transport: unknown;
+      }) => {
+        request: (input: {
+          method: string;
+          relPath: string;
+          headers: Record<string, string>;
+          body?: number[];
+        }) => Promise<{ status: number; headers: Record<string, string>; body: Uint8Array }>;
+      };
+    };
+
+    const code = world.accounts.createBootstrapCode().code;
+    const material = createRegistrationMaterial();
+
+    // 与 main.cjs 的 `configureSyncProxy` 同构：authToken 由主进程持有，
+    // transport 负责真正出网（含真机回归的字节转换）。
+    const storedToken = { current: "" };
+    const bridge = {
+      configure: async () => ({ baseUrl: world.base, changed: true }),
+      setAuthToken: async (token: string) => {
+        storedToken.current = token;
+        return true;
+      },
+      request: (input: { method: string; relPath: string; headers: Record<string, string>; body?: number[] }) => {
+        const proxy = createSyncProxy({
+          baseUrl: world.base,
+          authToken: () => storedToken.current,
+          transport: async ({
+            method,
+            url,
+            headers,
+            body,
+            timeoutMs,
+          }: {
+            method: string;
+            url: string;
+            headers: Record<string, string>;
+            body?: number[];
+            timeoutMs: number;
+          }) => {
+            const response = await fetch(url, {
+              method,
+              headers,
+              body: Array.isArray(body) ? Uint8Array.from(body) : body,
+              signal: AbortSignal.timeout(timeoutMs),
+            });
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            return { status: response.status, headers: Object.fromEntries(response.headers.entries()), body: bytes };
+          },
+        });
+        return proxy.request(input);
+      },
+    };
+
+    // 与 resolveSend 同一调用序：先 configure + setAuthToken（把令牌一次性交给主进程），
+    // 之后渲染层的请求**不带** authorization（desktopSend 会剥），由主进程注入。
+    const sendFor = async (authToken: string): Promise<HttpSend> => {
+      await bridge.configure(world.base);
+      await bridge.setAuthToken(authToken);
+      return desktopSend(bridge as never, world.base);
+    };
+
+    const api = await openAccountApi({ baseUrl: world.base }, await sendFor(""));
+
+    const response = await api.register({
+      accountId: material.accountId,
+      authToken: material.authToken,
+      wrappedEncRoot: material.wrappedEncRoot,
+      bootstrapCode: code,
+    });
+    // ★ 服务端把请求体**当 JSON 解析成功**了 —— body 没有在序列化链路上变成数字串。
+    expect(response.isAdmin).toBe(true);
+    expect(response.accountId).toBe(material.accountId);
+
+    // 带令牌的请求：渲染层头会被剥离，主进程注入自己保管的令牌。
+    const notebooks = await (
+      await openAccountApi(
+        { baseUrl: world.base, authToken: material.authToken },
+        await sendFor(material.authToken),
+      )
+    ).listNotebooks();
+    expect(Array.isArray(notebooks.notebooks)).toBe(true);
+  });
 });

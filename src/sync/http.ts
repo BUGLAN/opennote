@@ -151,11 +151,24 @@ export function desktopSend(bridge: DesktopSyncBridge, baseUrl: string): HttpSen
     const result = await bridge.request({
       method: request.method,
       relPath: url.pathname + url.search,
-      headers: request.headers,
+      // ★ 剥掉渲染层自己带的 authorization —— 主进程代理**拒绝**渲染层传它
+      //   （electron/sync.cjs 的 sanitizeHeaders：「凭证由主进程贴」）。
+      //   令牌在 resolveSend 里已经一次性交给了主进程（setAuthToken），
+      //   之后逐请求由主进程注入。HttpTransport 无条件带的那个头在这里消失，
+      //   桌面端安全模型才成立（真机实测：不剥则每个请求都被拒）。
+      headers: stripAuthorization(request.headers),
       ...(request.body === undefined ? {} : { body: toByteArray(request.body) }),
     });
     return { status: result.status, headers: result.headers, bytes: Uint8Array.from(result.body) };
   };
+}
+
+/** 凭证只由主进程注入 —— 渲染层带来的任何形态的 authorization 一律剥离。 */
+function stripAuthorization(headers: Record<string, string>): Record<string, string> {
+  const rest = { ...headers };
+  delete rest.authorization;
+  delete rest.Authorization;
+  return rest;
 }
 
 /** 把 `Uint8Array | string` 统一成普通数组（过 IPC）。 */

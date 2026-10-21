@@ -1260,7 +1260,11 @@ async function configureSyncProxy(baseUrl, confirmImpl) {
       const response = await fetch(url, {
         method,
         headers,
-        body,
+        // ★ 渲染层过 IPC 的 body 是 **number[]**（字节值的普通数组）。undici 的 fetch
+        //   不认它 —— 会把它当 USVString 拼成「104,116,116,112,…」发给服务端，
+        //   于是服务端 JSON.parse 失败，报「形状不符合契约：expected object,
+        //   received null」。真机（桌面注册）实测，先转回字节再发。
+        body: Array.isArray(body) ? Uint8Array.from(body) : body,
         signal: AbortSignal.timeout(timeoutMs),
       })
       const bytes = new Uint8Array(await response.arrayBuffer())
