@@ -2,16 +2,17 @@
 #
 # ★ 这个文件在**仓库根目录**（单仓）。
 #
-# ## 三个容器，**一个都不发布端口**
+# ## 两个容器 + 宿主机隧道
 #
-# | 容器 | 谁能访问 | 为什么 |
+# | 组件 | 谁能访问 | 为什么 |
 # | --- | --- | --- |
 # | `couchdb` | 只有 compose 内网 | 它是数据的真源；公网直连等于把「_design 校验」之外的一切暴露出去 |
-# | `sync` | 只有 `tunnel` | 它是唯一的应用层；其它入口都从它过 |
-# | `tunnel` | 公网（出站隧道） | **出站**连接，所以宿主不用开任何入站端口、也不需要公网 IP |
+# | `sync` | **仅宿主回环**（`127.0.0.1:8787`） | 它是唯一的应用层；宿主机上的 `cloudflared`（systemd 服务）把它转发到公网 |
+# | 宿主 `cloudflared` | 公网（出站隧道） | **出站**连接，宿主不用开任何入站端口、也不需要公网 IP |
 #
-# 三处都**故意不写 `ports:`** —— 这不是遗漏，是这套部署的安全边界本身。
-# 需要本地调试时用 `docker compose exec …` 或临时加 `ports:`（但别提交那一行）。
+# `sync` 的端口**只绑回环**：公网到不了它，宿主上的隧道却够得着 ——
+# 安全边界与「容器内 tunnel」方案等价，但隧道由宿主机 systemd 管理
+# （`cloudflared service install <token>`），升级/重启应用不必动隧道。
 #
 # ## 没有的东西（同样是设计的一部分）
 #
@@ -34,7 +35,16 @@ services:
       # 正确的做法是对每个库跑一次 `_all_docs?include_docs=true` 导出。
       - ./data/couchdb:/opt/couchdb/data
       # 加固配置：挂进 `local.d/`，文件名前缀决定加载顺序（见该文件里的说明）。
-      - ./etc/couchdb/local.ini:/opt/couchdb/etc/local.d/10-opennote.ini:ro
+      #
+      # ⚠️ **不要加 `:ro`** —— 真机（Ubuntu 22 + 真 Linux 服务器）跑出来的结论：
+      #   镜像入口脚本在 `set -e` 下执行
+      #     find /opt/couchdb \! \( -user couchdb -group couchdb \) -exec chown -f couchdb:couchdb '{}' +
+      #   对 root 属主的只读挂载文件 chown 必然失败（EROFS），而 `chown -f` 把**报错文本也吞掉**
+      #   —— 症状是「容器秒退、exit 1、日志完全为空」，全新 Linux 部署必踩。
+      #   开发机（Docker Desktop 的文件映射）不触发，所以本地看起来一切正常。
+      #   去掉 `:ro` 并没有放松什么：CouchDB 运行时本来就会往**同一个目录**写 `docker.ini`，
+      #   这里的只读是表演性加固。
+      - ./etc/couchdb/local.ini:/opt/couchdb/etc/local.d/10-opennote.ini
     # ⚠️ 故意不写 ports —— 只在 compose 网络内可达。
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:5984/_up"]
@@ -100,33 +110,27 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       # SQLite 控制面库（账号 / 笔记本 / 成员 / 邀请码 / 审计）。**这个要备份**（§8.3）。
+      #
+      # ⚠️ 真机（全新 Linux 部署）踩过的坑：容器以非 root 的 `node`（uid 1000）运行，
+      # 而 Docker 首次自动创建的宿主目录是 **root:root** —— node 在里面写 `control.db`
+      # 必然失败。首次启动前执行一次：
+      #   sudo mkdir -p ./data/sync && sudo chown 1000:1000 ./data/sync
       - ./data/sync:/app/data
     depends_on:
       couchdb:
         condition: service_healthy
-    # ⚠️ 也不写 ports —— 只有 tunnel 能访问它。
+    # ★ 只绑**宿主回环**：宿主机上的 cloudflared（systemd）转发它到公网，
+    #   除此之外任何人（包括同网段的其它机器）都到不了 8787。
+    #   别改成 "8787:8787" —— 那等于把未鉴权的 CouchDB 前门焊到了局域网上。
+    ports:
+      - "127.0.0.1:8787:8787"
     read_only: true
     tmpfs:
       - /tmp
     security_opt:
       - no-new-privileges:true
 
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    # ★ 命名隧道（`run` 带 token），**不是** Quick Tunnel：
-    #   Quick Tunnel 的域名每次重启都变，而「用户核对地址」是 E2EE 的信任根之一。
-    command: tunnel --no-autoupdate run
-    environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?TUNNEL_TOKEN 必填（Cloudflare Zero Trust → Networks → Tunnels）}
-    depends_on:
-      - sync
-    # 出站连接：宿主不开任何入站端口，也不需要公网 IP。
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-
-# 显式声明网络：默认网络就够（三个容器互相可达），但写出来是为了
+# 显式声明网络：默认网络就够（两个容器互相可达），但写出来是为了
 # 「谁在哪个网络里」这件事在文件里看得见，而不是靠 compose 的隐式默认。
 networks:
   default:
