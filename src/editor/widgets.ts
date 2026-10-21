@@ -7,6 +7,7 @@ import { imageSizeFor, markImageLoaded, parkImageElement, pooledImageElement, re
 import { bridge } from "./bridge";
 import { mathHtmlSync, renderMath } from "./math";
 import { mermaidHtmlSync, renderMermaid } from "./mermaid";
+import { rememberTableWidths, splitTableRow, tableMetricKey, type TableColumn } from "./tableMetrics";
 
 /* ------------------------------------------------------- block height report */
 
@@ -442,6 +443,81 @@ export class WikiLinkWidget extends WidgetType {
   }
 }
 
+/**
+ * 点到渲染态表格的哪一格 ⇒ 源码里的哪个位置。
+ *
+ * 表格渲染出来之后，点它应该**落进那一格**（和 Typora 一样），而不是永远把光标
+ * 丢到表格开头再让用户点第二次。行号从源码行推：表头 = 第 0 行，分隔行 = 第 1 行，
+ * 正文第 n 行 = 第 n + 2 行；列号就是 `cellIndex`。
+ */
+function tableCellAnchor(
+  view: EditorView,
+  host: HTMLElement,
+  target: EventTarget | null,
+  source: string,
+): number | null {
+  const cell = (target as HTMLElement | null)?.closest?.("td,th") as HTMLTableCellElement | null;
+  if (!cell || !host.contains(cell)) return null;
+  const row = cell.closest("tr");
+  const table = cell.closest("table");
+  if (!row || !table) return null;
+  const lines = source.split("\n");
+  let lineIndex: number;
+  if (row.parentElement?.tagName === "THEAD") {
+    lineIndex = 0;
+  } else {
+    const bodyRows = Array.from(table.querySelectorAll("tbody tr"));
+    lineIndex = 2 + Math.max(0, bodyRows.indexOf(row));
+  }
+  const line = lines[lineIndex];
+  if (line == null) return null;
+  const { cells } = splitTableRow(line);
+  const segment = cells[cell.cellIndex] ?? cells[cells.length - 1];
+  if (!segment) return null;
+  const raw = line.slice(segment.from, segment.to);
+  const lead = raw.length - raw.trimStart().length;
+  let offset = segment.from + lead;
+  for (let i = 0; i < lineIndex; i += 1) offset += lines[i].length + 1;
+  return view.posAtDOM(host) + offset;
+}
+
+
+/**
+ * 读渲染态表格每一列的**两个**数：轨道宽度（边界间距）与内容盒宽度。
+ *
+ * 两个都必须精确到小数，因为它们决定了**断行**：
+ *   - `track` 用**每格左边线**之差算 —— `border-collapse` 下各格 width 之和比表宽少
+ *     1px（共享边框各算一半），按边界相减才是真正的列位置；
+ *   - `content` 塞一个 block 探针撑满内容盒再量 —— `clientWidth` 是整数、
+ *     `getComputedStyle().width` 在表格里不可靠，差 0.5px 就会让某一格多折一行。
+ */
+function readTableMetrics(host: HTMLElement): TableColumn[] | null {
+  const table = host.querySelector("table");
+  const row = host.querySelector("thead tr") ?? host.querySelector("tbody tr");
+  if (!table || !row) return null;
+  const cells = Array.from(row.children).filter((cell): cell is HTMLElement => cell instanceof HTMLElement);
+  if (cells.length === 0) return null;
+  const tableRect = table.getBoundingClientRect();
+  const rects = cells.map((cell) => cell.getBoundingClientRect());
+  if (!rects.every((rect) => rect.width > 0)) return null;
+  const tracks = rects.map((rect, i) => {
+    const right = i + 1 < rects.length ? rects[i + 1].left : tableRect.right;
+    return right - rect.left;
+  });
+  // 第一列把表格左边框那一小截也吃掉，整张表的宽度才与渲染态完全一致。
+  tracks[0] += rects[0].left - tableRect.left;
+  const probes = cells.map((cell) => {
+    const probe = document.createElement("div");
+    probe.style.cssText = "display:block;height:0;margin:0;padding:0;border:0;width:auto";
+    cell.appendChild(probe);
+    return probe;
+  });
+  const contents = probes.map((probe) => probe.getBoundingClientRect().width);
+  for (const probe of probes) probe.remove();
+  const columns = tracks.map((track, i) => ({ track, content: contents[i] }));
+  return columns.every((col) => col.track > 0 && col.content > 0 && col.content <= col.track) ? columns : null;
+}
+
 export class TableWidget extends WidgetType {
   constructor(
     readonly html: string,
@@ -464,13 +540,64 @@ export class TableWidget extends WidgetType {
     return estimatedBlockHeight(this.blockKey, this.rows * 30 + 40);
   }
 
+  /**
+   * 量一次每列的宽度，记进 `tableMetrics.ts`。
+   *
+   * 编辑态要把源码行排成同一张表，列宽只能从这里来（`getBoundingClientRect`
+   * 拿到的是**渲染后**的真宽度，含内边距与边框）。和高度一样放在
+   * `requestMeasure` 的 read 阶段量：`toDOM` 刚返回时元素还没进文档、布局是空的。
+   *
+   * ⚠️ 表格的列宽会**变**：字体晚一点加载完、窗口/侧栏改宽度、`--measure` 设置被改，
+   * 都会让渲染态的列宽在 widget 挂载之后重新排一次。所以要一直跟着量：
+   * ① 挂载时量一次；② 用 `ResizeObserver` 盯着 `<table>`，它一变就重量；
+   * ③ 用户点进来时**再同步量一次**（这一下是最权威的，晚一帧都不行）。
+   * 少了任何一条，点进表格都会看到列宽跳一下。
+   */
+  private measureWidths(view: EditorView, host: HTMLElement): void {
+    if (!this.blockKey) return;
+    const key = tableMetricKey(this.blockKey);
+    view.requestMeasure({
+      read: () => readTableMetrics(host),
+      write: (columns) => {
+        if (columns) rememberTableWidths(key, columns);
+      },
+    });
+  }
+
+  /** 跟着渲染态的表格重量列宽（字体加载、容器改宽都会触发）。 */
+  private watchWidths(host: HTMLElement): void {
+    if (typeof ResizeObserver === "undefined" || !this.blockKey) return;
+    const key = tableMetricKey(this.blockKey);
+    const table = host.querySelector("table");
+    if (!table) return;
+    let last = "";
+    const observer = new ResizeObserver(() => {
+      const columns = readTableMetrics(host);
+      if (!columns) return;
+      const signature = columns.map((col) => `${Math.round(col.track * 10)}/${Math.round(col.content * 10)}`).join(",");
+      if (signature === last) return;
+      last = signature;
+      rememberTableWidths(key, columns);
+    });
+    observer.observe(table);
+    this.widthObserver = observer;
+  }
+
   toDOM(view: EditorView): HTMLElement {
     const host = document.createElement("div");
     host.className = "md-table table-widget prose";
     host.contentEditable = "false";
-    host.title = "点击编辑表格源码";
-    host.innerHTML = this.html;
+    host.title = "点击单元格编辑";
+    /*
+     * 必须 trim：markdown-it 给表格吐的 HTML 末尾带一个换行，而编辑器里的
+     * `.cm-content` 是 `white-space: pre-wrap` —— 那个换行会在 widget 里
+     * 变成一整行空白（实测 26px）。它既不是设计也不是留白，还会让渲染态比
+     * 「就地编辑态」高出一行，点进表格时整块往下跳一下。
+     */
+    host.innerHTML = this.html.trim();
     reportBlockHeight(view, host, this.blockKey);
+    this.measureWidths(view, host);
+    this.watchWidths(host);
     host.addEventListener("mousedown", (event) => {
       const anchor = (event.target as HTMLElement | null)?.closest("a");
       if (anchor instanceof HTMLAnchorElement) {
@@ -480,11 +607,50 @@ export class TableWidget extends WidgetType {
         return;
       }
       event.preventDefault();
+      // 点进来的这一下同步量一遍：编辑态第一帧就要用**当前**列宽，
+      // 不能用挂载时那份可能已经过期的。
+      if (this.blockKey) {
+        const columns = readTableMetrics(host);
+        if (columns) rememberTableWidths(tableMetricKey(this.blockKey), columns);
+      }
       // resolved from the DOM: the table may have moved since it was rendered
-      view.dispatch({ selection: { anchor: view.posAtDOM(host) }, scrollIntoView: true });
+      const start = view.posAtDOM(host);
+      const cell = tableCellAnchor(view, host, event.target, this.blockKey);
+      // 不加 `scrollIntoView`：用户点的就是眼前这张表，光标落点必然可见；
+      // 一带滚动，整页会跟着挪一下（实测 15px），看起来就像「点一下跳一下」。
+      view.dispatch({ selection: { anchor: cell ?? start } });
       view.focus();
     });
     return host;
+  }
+
+  destroy(): void {
+    this.widthObserver?.disconnect();
+    this.widthObserver = null;
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+
+  private widthObserver: ResizeObserver | null = null;
+}
+
+/**
+ * 零宽单元格（`||`）的占位元素。
+ *
+ * 编辑态里每一格都是一个 `grid` 项；空到连空格都没有的格子如果没有元素，
+ * 这一列就会被后面的格子顶掉、整行错位。给一个空 `<span>` 占住位置。
+ */
+export class TableCellWidget extends WidgetType {
+  eq(): boolean {
+    return true;
+  }
+
+  toDOM(): HTMLElement {
+    const span = document.createElement("span");
+    span.className = "md-tcell";
+    return span;
   }
 
   ignoreEvent(): boolean {

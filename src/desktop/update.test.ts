@@ -12,7 +12,9 @@ const {
   parseVersion,
   parseRepoSlug,
   assetNameFor,
+  pickAsset,
   pickWindowsAsset,
+  platformToken,
   parseChecksums,
   isSha256,
 } = requireCjs("../../electron/update.cjs") as {
@@ -21,10 +23,15 @@ const {
   parseVersion: (value: unknown) => { major: number; minor: number; patch: number; prerelease: string[] } | null;
   parseRepoSlug: (url: unknown) => { owner: string; repo: string } | null;
   assetNameFor: (version: string, options?: { platform?: string; arch?: string }) => string;
+  pickAsset: (
+    release: { assets: { name: string; browser_download_url?: string; size?: number; digest?: string }[] },
+    options?: { platform?: string; arch?: string },
+  ) => { name: string; version: string; url: string; size: number; digest: string } | null;
   pickWindowsAsset: (
     release: { assets: { name: string; browser_download_url?: string; size?: number; digest?: string }[] },
     options?: { arch?: string },
   ) => { name: string; version: string; url: string; size: number; digest: string } | null;
+  platformToken: (platform: string) => string | null;
   parseChecksums: (text: unknown) => Map<string, string>;
   isSha256: (value: unknown) => boolean;
 };
@@ -96,6 +103,36 @@ describe("资产挑选", () => {
     expect(pickWindowsAsset(release, { arch: "arm64" })).toBeNull();
     expect(pickWindowsAsset({ assets: [] })).toBeNull();
     expect(pickWindowsAsset({ assets: [] }, {})).toBeNull();
+  });
+});
+
+describe("按平台挑资产（macOS 原地自更新）", () => {
+  const release = {
+    assets: [
+      { name: "Opennote-0.14.0-win-x64.zip", browser_download_url: "u-win", size: 100 },
+      { name: "Opennote-0.14.0-mac-arm64.dmg", browser_download_url: "u-dmg", size: 145364377 },
+      { name: "Opennote-0.14.0-mac-arm64.zip", browser_download_url: "u-mac", size: 132593498 },
+      { name: "SHA256SUMS", browser_download_url: "u-sums", size: 183 },
+    ],
+  };
+
+  it("macOS 认的是 **zip** 而不是 dmg —— 要的是一个能直接换上去的完整 bundle", () => {
+    const asset = pickAsset(release, { platform: "mac", arch: "arm64" });
+    expect(asset?.name).toBe("Opennote-0.14.0-mac-arm64.zip");
+    expect(asset?.url).toBe("u-mac");
+  });
+
+  it("平台与架构都要对得上，互不串台", () => {
+    expect(pickAsset(release, { platform: "mac", arch: "x64" })).toBeNull();
+    expect(pickAsset(release, { platform: "win", arch: "arm64" })).toBeNull();
+    expect(pickAsset(release, { platform: "win", arch: "x64" })?.name).toBe("Opennote-0.14.0-win-x64.zip");
+  });
+
+  it("platformToken 只认 win32/darwin，其余一律 null（不支持的平台不显示更新入口）", () => {
+    expect(platformToken("win32")).toBe("win");
+    expect(platformToken("darwin")).toBe("mac");
+    expect(platformToken("linux")).toBeNull();
+    expect(platformToken("freebsd")).toBeNull();
   });
 });
 

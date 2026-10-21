@@ -22,6 +22,7 @@
  * 主进程不许 require 第三方包）。
  */
 
+const { spawn } = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
@@ -43,9 +44,39 @@ const PROTOCOL = {
   applyingMarker: '.applying',
   stagingPrefix: 'staging-',
   exeName: 'Opennote.exe',
-  handoffKeys: ['pid', 'installDir', 'stagingDir', 'exeName', 'argv', 'logPath', 'version', 'resultPath', 'from'],
+  /**
+   * 两种落地形态（`handoff.layout`）：
+   *   `files`  —— Windows：把 staging 里的**逐个文件**复制进安装目录。
+   *   `bundle` —— macOS：把 staging 里的整个 `Opennote.app` **整包换过去**。
+   * 为什么 mac 不能复用 files：bundle 是代码签名的，改里面任何一个文件都会让
+   * `_CodeSignature/CodeResources` 失配，Apple Silicon 上内核直接拒绝启动。
+   * 而 ad-hoc 签名不绑定路径，所以「整包搬过去」签名依然有效（见 update-helper.cjs）。
+   */
+  layoutFiles: 'files',
+  layoutBundle: 'bundle',
+  bundleName: 'Opennote.app',
+  handoffKeys: [
+    'pid',
+    'installDir',
+    'stagingDir',
+    'exeName',
+    'argv',
+    'logPath',
+    'version',
+    'resultPath',
+    'from',
+    'layout',
+    'bundleName',
+  ],
   resultKeys: ['ok', 'from', 'to', 'at', 'error'],
 }
+
+/** mac 上系统自带的三个工具（不依赖 Xcode CLT，也不联网）。 */
+const CODESIGN = '/usr/bin/codesign'
+const PLUTIL = '/usr/bin/plutil'
+const DITTO = '/usr/bin/ditto'
+const LIPO = '/usr/bin/lipo'
+const XATTR = '/usr/bin/xattr'
 
 const CHECK_COOLDOWN_MS = 30 * 1000
 const PROGRESS_EMIT_INTERVAL_MS = 200
@@ -137,11 +168,30 @@ function assetNameFor(version, options = {}) {
   return `Opennote-${version}-${platform}-${arch}.zip`
 }
 
-/** 只认 Windows 免安装包；找不到就返回 null（由调用方报「没有可用的安装包」）。 */
-function pickWindowsAsset(release, options = {}) {
+/**
+ * `process.platform` → 资产名里的平台段。认不出来返回 null（调用方据此拒绝）。
+ * 只有这两个平台有可自更新的免安装包，其余一律不支持。
+ */
+function platformToken(platform) {
+  if (platform === 'win32') return 'win'
+  if (platform === 'darwin') return 'mac'
+  return null
+}
+
+/**
+ * 在 release 的资产列表里挑出对应平台的免安装包；找不到返回 null
+ * （由调用方报「没有可用的安装包」）。
+ *
+ * 认的是 **zip** 而不是 mac 的 dmg：原地自更新要的是「一个可以直接换上去的
+ * 完整 bundle」，而 ditto 打出来的 zip 里正好就是那个 bundle（dmg 还得先挂载）。
+ */
+function pickAsset(release, options = {}) {
+  const platform = options.platform || 'win'
   const arch = options.arch || 'x64'
   const assets = release && Array.isArray(release.assets) ? release.assets : []
-  const wanted = new RegExp(`^Opennote-(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)-win-${arch}\\.zip$`)
+  const wanted = new RegExp(
+    `^Opennote-(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)-${platform}-${arch}\\.zip$`,
+  )
   for (const asset of assets) {
     if (!asset || typeof asset.name !== 'string') continue
     const match = wanted.exec(asset.name)
@@ -155,6 +205,11 @@ function pickWindowsAsset(release, options = {}) {
     }
   }
   return null
+}
+
+/** 仅 Windows 的旧名（`src/desktop/update.test.ts` 咬住它；实现已平台参数化）。 */
+function pickWindowsAsset(release, options = {}) {
+  return pickAsset(release, { ...options, platform: 'win' })
 }
 
 /** `SHA256SUMS`（GNU coreutils 格式：`<64 hex>  <文件名>`，可带 `*` 二进制标记）。 */
@@ -380,6 +435,134 @@ function errorDetailForLog(error) {
  * @param {(message: string) => void} [config.log]
  * @param {() => number} [config.now]
  */
+/** 跑一个系统工具并收走输出（macOS 的 ditto / codesign / plutil / lipo 都走这里）。 */
+function runTool(command, args, options = {}) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (error) {
+      resolve({ ok: false, code: -1, stdout: '', stderr: errorMessageOf(error) })
+      return
+    }
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk
+    })
+    const timer = setTimeout(
+      () => {
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          /* 已经退出了 */
+        }
+      },
+      options.timeoutMs || 120000,
+    )
+    timer.unref?.()
+    const finish = (value) => {
+      clearTimeout(timer)
+      resolve(value)
+    }
+    child.on('error', (error) => finish({ ok: false, code: -1, stdout, stderr: errorMessageOf(error) }))
+    child.on('close', (code) => finish({ ok: code === 0, code, stdout, stderr }))
+  })
+}
+
+async function fileExists(target) {
+  try {
+    await fsp.access(target)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * macOS 专用解压：`ditto -x -k`（系统自带，永远在 `/usr/bin/ditto`）。
+ *
+ * 为什么**不能**复用 `./zip.cjs`：它对每个条目一律 `createWriteStream`，没有符号链接
+ * 处理；而 `.app` 全靠符号链接搭结构（`Electron Framework.framework/Versions/Current -> A`
+ * 之类）。用 zip.cjs 解出来的 bundle 符号链接会变成「内容是链接目标的普通文件」，
+ * 换上去必然起不来。ditto 是唯一能原样恢复符号链接、权限位与资源分叉的选择。
+ *
+ * `--norsrc`：不要把 AppleDouble（`._*`）解出来 —— bundle 里多出未封签的文件会让
+ * `codesign --verify --strict` 失败。反正后面有验签兜底，这里少留一类变量。
+ */
+async function extractWithDitto(zipPath, destinationDir, options = {}) {
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {}
+  await fsp.mkdir(destinationDir, { recursive: true })
+  onProgress(0, 0)
+  const result = await runTool(DITTO, ['-x', '-k', '--norsrc', zipPath, destinationDir], {
+    timeoutMs: 10 * 60 * 1000,
+  })
+  if (!result.ok) {
+    throw new UpdateError(
+      'EXTRACT_FAILED',
+      `解压失败（ditto 退出码 ${result.code}）。已取消更新，磁盘上的 Opennote 没有被改动。`,
+    )
+  }
+  // 打包时用了 `ditto -c -k --sequesterRsrc`，所以压缩包里有一份 AppleDouble 清单
+  // （`__MACOSX/`，实测 2.1 MB 的 `._*`）。它落在 staging **根**、不在 `.app` 里
+  // （已确认 bundle 内没有 `._*`，验签也过），但留着只是垃圾，顺手删掉。
+  // 删之前不需要担心签名：`__MACOSX` 在 bundle 之外，且删完复验依然通过（实测）。
+  await fsp.rm(path.join(destinationDir, '__MACOSX'), { recursive: true, force: true }).catch(() => {})
+  // 去掉 quarantine（廉价保险）。本应用的 Info.plist **没有** `LSFileQuarantineEnabled`
+  // （已核对产物），所以它自己下载的文件本来就不会被 LaunchServices 打上隔离标记 ——
+  // e2e 里换上去的 bundle 也确实能直接启动。但万一将来那个键被打开，带 quarantine 的
+  // bundle 首次启动会被 Gatekeeper 拦下，而那时**旧版本已经被换掉了**，用户就没有退路。
+  // 下载的字节已经过 SHA256SUMS 与 codesign 双重校验，去掉隔离标记是安全的。
+  await runTool(XATTR, ['-dr', 'com.apple.quarantine', destinationDir])
+  onProgress(1, 1)
+}
+
+/**
+ * **换包之前的最后一道闸门**（macOS）。任何一条不过就抛错、绝不发车。
+ *
+ * 为什么值得单独一个函数、还放在下载阶段就跑一遍：`files` 形态的覆盖是「复制文件」，
+ * 复制错一个还能再复制一次；而 `bundle` 形态是**整包替换**，换上一个坏的 bundle
+ * 就等于把用户的应用弄没了。所以在动已安装的那份之前，必须确认 staging 里这个 bundle
+ * 是「版本对、架构对、签名自洽」的 —— 这三件事各自都真实踩过坑。
+ */
+async function verifyStagedBundle(stagingDir, options = {}) {
+  const bundleName = options.bundleName || PROTOCOL.bundleName
+  const expectedVersion = typeof options.version === 'string' ? options.version : ''
+  const arch = options.arch || process.arch
+  const bundle = path.join(stagingDir, bundleName)
+  const fail = (message) => new UpdateError('VERIFY_FAILED', message)
+
+  if (!(await fileExists(bundle))) {
+    throw fail(`解压出来的压缩包里没有 ${bundleName}，已取消更新。`)
+  }
+  const plist = path.join(bundle, 'Contents', 'Info.plist')
+  const execNameResult = await runTool(PLUTIL, ['-extract', 'CFBundleExecutable', 'raw', plist])
+  const execName = execNameResult.stdout.trim()
+  if (!execNameResult.ok || !execName) {
+    throw fail(`${bundleName} 的 Info.plist 读不出可执行文件名，安装包不完整，已取消更新。`)
+  }
+  const versionResult = await runTool(PLUTIL, ['-extract', 'CFBundleShortVersionString', 'raw', plist])
+  const version = versionResult.stdout.trim()
+  if (expectedVersion && version !== expectedVersion) {
+    throw fail(`安装包里的版本是 ${version || '未知'}，与要更新的 ${expectedVersion} 对不上，已取消更新。`)
+  }
+  const archResult = await runTool(LIPO, ['-archs', path.join(bundle, 'Contents', 'MacOS', execName)])
+  const archs = archResult.stdout.trim()
+  if (archResult.ok && archs && !archs.split(/\s+/).includes(arch)) {
+    throw fail(`安装包是为 ${archs} 构建的，当前机器是 ${arch}，已取消更新。`)
+  }
+  // 最关键的一条：签名必须自洽。Apple Silicon 上签名坏掉的 bundle 根本起不来，
+  // 而「起不来」是在替换**之后**才会发现的 —— 那时用户的应用已经没了。
+  const verify = await runTool(CODESIGN, ['--verify', '--deep', '--strict', bundle], { timeoutMs: 5 * 60 * 1000 })
+  if (!verify.ok) {
+    throw fail('安装包的代码签名复验没有通过，出于安全考虑已取消更新（磁盘上的 Opennote 没有被改动）。')
+  }
+  return { bundle, execName, version, archs }
+}
+
 function createUpdater(config = {}) {
   const appVersion = typeof config.appVersion === 'string' ? config.appVersion : '0.0.0'
   const repositoryUrl = typeof config.repositoryUrl === 'string' ? config.repositoryUrl : ''
@@ -391,6 +574,12 @@ function createUpdater(config = {}) {
   const updatesDir = config.updatesDir || ''
   const installDir = config.installDir || ''
   const arch = config.arch || process.arch
+  const platform = config.platform || process.platform
+  /** 资产名里的平台段（`win` / `mac`）；null = 这个平台没有可自更新的包。 */
+  const token = platformToken(platform)
+  /** `files` = Windows 逐文件覆盖；`bundle` = macOS 整包替换（见 PROTOCOL 的注释）。 */
+  const layout = config.layout === PROTOCOL.layoutBundle ? PROTOCOL.layoutBundle : PROTOCOL.layoutFiles
+  const bundleName = config.bundleName || PROTOCOL.bundleName
   /**
    * 硬门：既要平台/打包形态对，也要**仓库身份能解析出来**。
    * 解析不出来（`repository.url` 缺失或写错组织）时宁可完全不显示更新入口 ——
@@ -405,7 +594,12 @@ function createUpdater(config = {}) {
   const apply = typeof config.apply === 'function' ? config.apply : null
   const now = typeof config.now === 'function' ? config.now : () => Date.now()
   const fileSystem = config.fs || fsp
-  const extractZip = config.extract || extract
+  /**
+   * 解压器按平台选：macOS 必须用系统 `ditto`（保住符号链接），Windows 用自带的
+   * `./zip.cjs`（理由见 extractWithDitto 的注释）。允许整体注入，便于测试。
+   */
+  const extractZip =
+    config.extract || (platform === 'darwin' ? extractWithDitto : extract)
 
   let phase = 'idle'
   let latest = null
@@ -530,7 +724,7 @@ function createUpdater(config = {}) {
             // staged 的包仍是最新的（GitHub 同版本，或 GitHub 上反而没有更新了）：
             // 保持 ready，只把检查得来的元数据补齐（resume 恢复的 url/size 是空的）。
             if (compareVersions(release.version, resumedReady.version) === 0) {
-              const asset = pickWindowsAsset({ assets: release.assets }, { arch })
+              const asset = pickAsset({ assets: release.assets }, { platform: token, arch })
               if (asset && asset.name === resumedReady.assetName) assetInfo = asset
             }
             phase = 'ready'
@@ -548,19 +742,20 @@ function createUpdater(config = {}) {
           phase = 'idle'
           return statusPayload()
         }
-        let asset = pickWindowsAsset({ assets: release.assets }, { arch })
-        if (!asset && release.assets.length === 0) {
+        let asset = token ? pickAsset({ assets: release.assets }, { platform: token, arch }) : null
+        if (!asset && release.assets.length === 0 && token) {
           // 降级路径拿不到资产列表：按命名约定拼一个，完整性仍由 SHA256SUMS 保证。
+          const fallbackName = assetNameFor(release.version, { platform: token, arch })
           asset = {
-            name: assetNameFor(release.version, { platform: 'win', arch }),
+            name: fallbackName,
             version: release.version,
-            url: `${downloadBase}/download/${release.tag}/${assetNameFor(release.version, { platform: 'win', arch })}`,
+            url: `${downloadBase}/download/${release.tag}/${fallbackName}`,
             size: 0,
             digest: '',
           }
         }
         if (!asset) {
-          throw new UpdateError('UNSUPPORTED', '最新版本没有 Windows x64 免安装包')
+          throw new UpdateError('UNSUPPORTED', `最新版本没有适用于本机（${platform} ${arch}）的免安装包`)
         }
         assetInfo = asset
         phase = 'available'
@@ -592,6 +787,7 @@ function createUpdater(config = {}) {
       installWritable = false
       throw new UpdateError('READ_ONLY_INSTALL', '无法确定 Opennote 的安装目录，不能自动覆盖更新')
     }
+    // macOS 探的是 `.app` 的**父目录**（要能把它换掉）；Windows 探的是安装目录本身。
     const probe = path.join(installDir, `.opennote-write-probe-${process.pid}`)
     try {
       await fileSystem.writeFile(probe, 'probe', 'utf8')
@@ -601,7 +797,9 @@ function createUpdater(config = {}) {
       installWritable = false
       throw new UpdateError(
         'READ_ONLY_INSTALL',
-        'Opennote 所在的目录不可写（例如 Program Files），无法自动覆盖。请到 Releases 页面手动下载解压覆盖。',
+        platform === 'darwin'
+          ? 'Opennote 所在的目录不可写（例如正在只读的磁盘映像里运行，或需要管理员权限），无法原地更新。请到 Releases 页面下载 dmg 覆盖安装。'
+          : 'Opennote 所在的目录不可写（例如 Program Files），无法自动覆盖。请到 Releases 页面手动下载解压覆盖。',
       )
     }
   }
@@ -687,13 +885,32 @@ function createUpdater(config = {}) {
         signal,
         onProgress: (done, total) => reportProgress('extract', done, total),
       })
+      // macOS：换包之前先验签（见 verifyStagedBundle）。放在这里而不是放在 helper 里，
+      // 是为了让「包是坏的」在**下载阶段**就变成一条用户看得懂的报错 —— 此时磁盘上的
+      // Opennote 一个字节都还没动，用户点重试就行。
+      let verified = null
+      if (layout === PROTOCOL.layoutBundle) {
+        progress = { kind: 'verify', received: 0, total: 0, percent: 0 }
+        emit()
+        verified = await verifyStagedBundle(stagingDir, { bundleName, version, arch })
+        log(`v${version} 的 bundle 已通过验签与版本/架构核对`)
+      }
       // 解压成功后 zip 就没用了（helper 从 staging 复制，不再碰它）：立刻删掉，
       // 别把 151 MB 留在 userData 里。`readyPlan.zipPath` 只作记录，不代表文件还在。
       await fileSystem.rm(zipPath, { force: true }).catch(() => {})
+      // 标记里连 layout / bundleName / exeName 一起记：下次启动 resume 时就不用再猜
+      // （macOS 的 exeName 在 bundle 里，靠重新读 Info.plist 才能算出来）。
       await withAsarDisabled(() =>
         fileSystem.writeFile(
           path.join(stagingDir, PROTOCOL.readyMarker),
-          JSON.stringify({ version, at: new Date(now()).toISOString(), asset: asset.name }),
+          JSON.stringify({
+            version,
+            at: new Date(now()).toISOString(),
+            asset: asset.name,
+            layout,
+            bundleName,
+            exeName: verified ? path.join('Contents', 'MacOS', verified.execName) : PROTOCOL.exeName,
+          }),
           'utf8',
         ),
       )
@@ -702,7 +919,11 @@ function createUpdater(config = {}) {
         tag,
         zipPath,
         stagingDir,
-        exeName: PROTOCOL.exeName,
+        // Windows 用 exeName；macOS 的 exeName 是 bundle 内部相对路径（取自验过的
+        // Info.plist 的 CFBundleExecutable，不写死 productName）。
+        exeName: verified ? path.join('Contents', 'MacOS', verified.execName) : PROTOCOL.exeName,
+        layout,
+        bundleName,
         assetName: asset.name,
       }
       progress = null
@@ -783,15 +1004,43 @@ function createUpdater(config = {}) {
         const hasReady = await pathExists(path.join(target, PROTOCOL.readyMarker))
         const applying = await pathExists(path.join(target, PROTOCOL.applyingMarker))
         if (hasReady && isNewer(version, appVersion)) {
+          // 从 `.ready` 里读回形态信息（下载时写的），这样 mac 的 bundle 布局也能原样恢复。
+          let marker = null
+          try {
+            marker = JSON.parse(
+              await withAsarDisabled(() => fileSystem.readFile(path.join(target, PROTOCOL.readyMarker), 'utf8')),
+            )
+          } catch {
+            marker = null
+          }
+          const planLayout =
+            marker && marker.layout === PROTOCOL.layoutBundle ? PROTOCOL.layoutBundle : PROTOCOL.layoutFiles
+          const planBundleName = marker && typeof marker.bundleName === 'string' ? marker.bundleName : bundleName
+          const planExeName =
+            marker && typeof marker.exeName === 'string' && marker.exeName ? marker.exeName : PROTOCOL.exeName
+          // macOS：staging 里必须真的还有那个 bundle，否则「待重启」是个空壳。
+          if (planLayout === PROTOCOL.layoutBundle && !(await pathExists(path.join(target, planBundleName)))) {
+            log(`staging-${version} 里没有 ${planBundleName}，判定为半成品并清理`)
+            await withAsarDisabled(() => fileSystem.rm(target, { recursive: true, force: true }).catch(() => {}))
+            continue
+          }
           latest = version
-          assetInfo = { name: assetNameFor(version, { platform: 'win', arch }), version, url: '', size: 0, digest: '' }
+          assetInfo = {
+            name: assetNameFor(version, { platform: token || 'win', arch }),
+            version,
+            url: '',
+            size: 0,
+            digest: '',
+          }
           readyPlan = {
             version,
             tag: `v${version}`,
-            zipPath: path.join(updatesDir, assetNameFor(version, { platform: 'win', arch })),
+            zipPath: path.join(updatesDir, assetNameFor(version, { platform: token || 'win', arch })),
             stagingDir: target,
-            exeName: PROTOCOL.exeName,
-            assetName: assetNameFor(version, { platform: 'win', arch }),
+            exeName: planExeName,
+            layout: planLayout,
+            bundleName: planBundleName,
+            assetName: assetNameFor(version, { platform: token || 'win', arch }),
           }
           phase = 'ready'
           log(`发现上次已下载的 v${version}，等待重启更新`)
@@ -859,6 +1108,8 @@ module.exports = {
   isNewer,
   parseRepoSlug,
   assetNameFor,
+  platformToken,
+  pickAsset,
   pickWindowsAsset,
   parseChecksums,
   requestStream,
@@ -866,6 +1117,9 @@ module.exports = {
   fetchJson,
   downloadToFile,
   isSha256,
+  runTool,
+  extractWithDitto,
+  verifyStagedBundle,
   UpdateError,
   PROTOCOL,
 }

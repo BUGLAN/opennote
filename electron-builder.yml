@@ -1,6 +1,9 @@
 # Opennote 桌面端打包配置（electron-builder 26.x）
 #
-# 交付形态：Windows 免安装绿色压缩包（解压即用、不写注册表、不需要管理员权限）。
+# 交付形态：
+#   · Windows 免安装绿色压缩包（解压即用、不写注册表、不需要管理员权限）。
+#   · macOS ad-hoc 签名的 .app（未公证），外加 hdiutil/ditto 出的 DMG + ZIP
+#     （scripts/build-mac.mjs）。
 # 这是刻意的选择，不要随手改成 nsis：zip 的代价只是「没有安装器」，换来的是
 # 打包机上不需要签名/安装器依赖。将来要出安装包时，把下面的 win 段改成：
 #
@@ -54,6 +57,14 @@ files:
   - dist-clip/**/*
   - electron/**/*
   - package.json
+  # ⚠️ 这条 negate 不能删 —— 上面那句「打包只需要带上 dist/、主进程代码和 package.json」
+  # 只靠**正列**是不成立的：electron-builder 会把 package.json 里的**生产依赖整包**收进
+  # asar（pnpm 收集器，日志里的 "searching for node modules pm=pnpm" 就是它）。
+  # 0.13.0 实测漏掉这条时：`app.asar` = **219 MB / 10001 个 node_modules 条目**，
+  # 里面全是 mermaid / codemirror / katex / react / @fontsource 这些**只在 Vite 构建期用**
+  # 的包（渲染层早就把它们打进 dist/ 了）。补上之后 asar 回到 ~11 MB 量级，
+  # 交付包体积直接掉一大截。RELEASING.md「已知坑」#4 说的就是这件事，别再删。
+  - '!node_modules/**/*'
   # 见文件头「关于体积」：这些依赖只在构建期用，运行时不需要。
   # P1c-2 注：@parcel/watcher（工作区监听源）在 devDependencies——`pnpm dev` 直接用
   # 它；打包版 main.cjs require 不到时自动退化回 node:fs 递归 watch（同一内核事件源，
@@ -80,15 +91,45 @@ win:
       arch:
         - x64
 
-# 下面两个目标目前是「声明了但未交付」：没有签名/公证配置，也没有进发布流水线。
-# 真要发布时先读 RELEASING.md 的「平台与签名」一节。
+# macOS 交付形态：`release/mac-<arch>/Opennote.app`，再由 scripts/build-mac.mjs 用系统
+# 自带的 hdiutil/ditto 包成 DMG + ZIP（`pnpm package:mac`）。见下面 mac 段的注释。
 mac:
-  # macOS 不吃 .ico：用已经生成好的那张 512 位图（与 build/icon.ico 同一份 art，
-  # 由 `pnpm icons` 产出），electron-builder 会据此生成 .icns。
-  # 开发模式下同一个文件由 main.cjs 的 applyDockIcon() 设给 Dock。
-  icon: public/icon-512.png
-  target: dmg
+  # 直接指向预生成的 .icns（`pnpm icons` 用系统 iconutil 出的，16→1024 共 10 档）。
+  #
+  # ⚠️ 不要改回 .png：electron-builder 的图标转换器要**联网下载** icons 工具链
+  # （icons@1.1.0），离线机器上 `pnpm package:mac` 会以 `fetch failed` 失败。
+  # 而 `.icns` 作为源文件走的是「扩展名已经等于目标格式 → 原样使用」的短路分支，
+  # 全程不碰那个下载器（app-builder-lib/out/util/iconConverter.js 的 doConvertIcon）。
+  icon: build/icon.icns
+  # 只让 electron-builder 出 unpacked 目录。为什么不用它自带的 dmg / zip：
+  #   · dmg 目标要联网下载 dmgbuild（dmg-builder@1.2.5）；
+  #   · zip 目标要联网下载 7zip 工具链。
+  #   两个都只能卡在 fetch failed。分发产物由 scripts/build-mac.mjs 自己出
+  #   （DMG 用 hdiutil、ZIP 用 ditto，都是系统自带，零下载）。
+  target:
+    - target: dir
   category: public.app-category.productivity
+  # 没有 Apple 开发者账号。但 Apple Silicon 上**必须**有签名才能启动：bundle 被改过
+  # Info.plist / 加过 app.asar 之后，Electron 自带的那份 ad-hoc 签名就失效了，内核会
+  # 直接杀掉进程（表现为「已损坏」或闪退）。
+  #
+  # `null` = 让 electron-builder **完全不要签名**，改由 scripts/build-mac.mjs 自己 ad-hoc 签
+  # （`codesign -s -` 那一套，等价于 Xcode 的 ad-hoc）。为什么不写 `"-"` 让
+  # electron-builder 自己签 ad-hoc —— 它那条分支根本走不到，实测被带偏过：
+  #   macCodeSign.js 的 `_findIdentity()` 用 `line.includes(qualifier)` 匹配证书名，
+  #   qualifier = `"-"` 于是**任何名字里带连字符的证书**都算命中；signed 分支里还有一段
+  #   「type 是 Developer ID Application 就退而求其次找非 Apple 证书」。
+  #   本机因此被签成了无关的自签证书 "Snow Shot Local Installer C8C84F83-…"：
+  #   换台机器（没有那张证书）产物就完全不同，发布物不可复现。
+  #   `null` 走的是 handleNullIdentity()，确定性跳过，不碰钥匙串。
+  # 正式发布要换成 Developer ID + 公证，见 RELEASING.md 第 5 节。
+  identity: null
+  # ad-hoc 签名 + hardened runtime 会打开 library validation，应用起不来
+  # （electron-builder 自己也会警告要补 com.apple.security.cs.disable-library-validation）。
+  # 公证发布之前不要打开。
+  hardenedRuntime: false
+  # 不指定 arch：随构建机架构走（arm64 机器出 arm64）。上面 electronDist 指向的是
+  # node_modules 里那一份**单架构** Electron，跨架构构建需要另一份发行版，见 RELEASING.md。
 
 linux:
   target: AppImage

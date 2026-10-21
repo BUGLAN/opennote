@@ -2121,9 +2121,78 @@ function loadUpdateModule() {
   return updateModule
 }
 
-/** 硬门：只有「打包版 + Windows x64」有可用的免安装包。 */
+/**
+ * 从可执行文件路径反推 `.app` bundle（macOS）。
+ *
+ * `app.getPath('exe')` 在 mac 上是
+ * `/Applications/Opennote.app/Contents/MacOS/Opennote`，而真正要替换的是那个
+ * `Opennote.app`、要写的是它的父目录 `/Applications`。写死层数会在将来改 bundle
+ * 结构时静默失效，所以这里按「第一个以 .app 结尾的祖先」来找。
+ */
+function macBundlePathFrom(exePath) {
+  let current = path.dirname(exePath)
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (current.endsWith('.app')) return current
+    const parent = path.dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return null
+}
+
+/**
+ * macOS 上「能不能原地自更新」的额外否决条件。
+ *
+ * **App Translocation**：带 quarantine 的应用如果没被拖进「应用程序」就直接启动，
+ * macOS 会把它挂到一个随机只读路径下运行
+ * （`/private/var/folders/.../AppTranslocation/.../Opennote.app`）。那种情况下
+ * exe 路径既不指向真实安装位置，也根本不可写 —— 必须明确拒绝，而不是失败在替换那一步。
+ */
+function macUpdateBlockReason() {
+  if (process.platform !== 'darwin') return null
+  const exePath = app.getPath('exe')
+  if (exePath.includes('/AppTranslocation/')) {
+    return 'Opennote 正从 macOS 的临时只读位置运行（应用还没有被移到「应用程序」文件夹）。请先把它拖进「应用程序」，再检查更新。'
+  }
+  if (exePath.startsWith('/Volumes/')) {
+    return 'Opennote 正从磁盘映像（dmg）里运行，该位置是只读的，无法原地更新。请先把应用拖进「应用程序」。'
+  }
+  return null
+}
+
+/**
+ * 两种落地形态对应的安装位置信息（与 `electron/update.cjs` 的 PROTOCOL 对齐）：
+ *   · Windows `files` —— 安装目录 = exe 所在目录，可执行文件名 `Opennote.exe`。
+ *   · macOS `bundle` —— 安装目录 = `.app` 的**父目录**（/Applications），
+ *     要替换的是整个 `.app`，`exeName` 是 bundle 内的相对路径。
+ */
+function updateInstallLayout() {
+  const exePath = app.getPath('exe')
+  if (process.platform !== 'darwin') {
+    return { layout: 'files', installDir: path.dirname(exePath), exeName: 'Opennote.exe', bundleName: null }
+  }
+  const bundlePath = macBundlePathFrom(exePath)
+  if (!bundlePath) return null
+  return {
+    layout: 'bundle',
+    installDir: path.dirname(bundlePath),
+    exeName: path.relative(bundlePath, exePath),
+    bundleName: path.basename(bundlePath),
+  }
+}
+
+/**
+ * 硬门：只有「打包版 + 有免安装包、且能原地替换」的平台才有自更新。
+ *   · Windows x64（沿用 0.6.0 起的逐文件覆盖）
+ *   · macOS arm64/x64（整包替换；Translocation / dmg 里运行会被上面的预检挡掉）
+ */
 function updateSupported() {
-  return app.isPackaged && process.platform === 'win32' && process.arch === 'x64'
+  if (!app.isPackaged) return false
+  if (!updateInstallLayout()) return false
+  if (macUpdateBlockReason()) return false
+  if (process.platform === 'win32') return process.arch === 'x64'
+  if (process.platform === 'darwin') return process.arch === 'arm64' || process.arch === 'x64'
+  return false
 }
 
 function updateDirectory() {
@@ -2171,7 +2240,8 @@ function ensureUpdater() {
     apiBase: process.env.OPENNOTE_UPDATE_API_BASE || undefined,
     downloadBase: process.env.OPENNOTE_UPDATE_DOWNLOAD_BASE || undefined,
     updatesDir: updateDirectory(),
-    installDir: path.dirname(app.getPath('exe')),
+    // mac 的 installDir 是 `.app` 的父目录（要替换整个 bundle），win 是 exe 所在目录。
+    ...(updateInstallLayout() || { installDir: path.dirname(app.getPath('exe')) }),
     platform: process.platform,
     arch: process.arch,
     supported: updateSupported(),
@@ -2221,21 +2291,31 @@ async function prepareUpdateApply(plan) {
     'utf8',
   )
 
+  const layout = updateInstallLayout()
   const handoffPath = path.join(updatesDir, handoffFile)
   const handoff = {
     pid: process.pid,
-    installDir: path.dirname(app.getPath('exe')),
+    installDir: layout ? layout.installDir : path.dirname(app.getPath('exe')),
     stagingDir: plan.stagingDir,
-    exeName: plan.exeName || 'Opennote.exe',
+    exeName: plan.exeName || (layout && layout.exeName) || 'Opennote.exe',
     // 原样带走启动参数：`--user-data-dir` 之类必须跟着新进程走。
     argv: process.argv.slice(1),
     logPath: path.join(updatesDir, logFile),
     version: plan.version,
     resultPath: path.join(updatesDir, resultFile),
     from: app.getVersion(),
+    // mac：整包替换；win：逐文件覆盖。见 electron/update.cjs 的 PROTOCOL。
+    layout: plan.layout || (layout ? layout.layout : 'files'),
+    bundleName: plan.bundleName || (layout ? layout.bundleName : null),
   }
   await writeFile(handoffPath, `${JSON.stringify(handoff, null, 2)}\n`, 'utf8')
-  return { handoffPath, helperName, stagedExe: path.join(plan.stagingDir, handoff.exeName) }
+  // helper 用 **staging 里的新可执行文件** 跑：win 是 staging/Opennote.exe，
+  // mac 是 staging/Opennote.app/Contents/MacOS/<executable>。
+  const stagedExe =
+    handoff.layout === 'bundle'
+      ? path.join(plan.stagingDir, handoff.bundleName, handoff.exeName)
+      : path.join(plan.stagingDir, handoff.exeName)
+  return { handoffPath, helperName, stagedExe }
 }
 
 /**
@@ -2805,7 +2885,8 @@ app.whenReady().then(async () => {
     flushDeeplink()
 
     // 自更新：先收尾上次的覆盖结果，再按「每次启动检查一次」查一遍。
-    // 只有打包版 Windows x64 才启用（没有产物的平台不显示图标，也不发请求）。
+    // 只有「打包版 + Windows x64 / macOS」才启用（其它平台不显示图标，也不发请求）。
+    // mac 上如果是从 dmg 或 AppTranslocation 里跑，这里会明确记一条原因到日志。
     if (updateSupported()) {
       await resumeUpdateOnStartup()
       const updateTimer = setTimeout(() => {
@@ -2813,6 +2894,9 @@ app.whenReady().then(async () => {
         if (controller) void controller.check()
       }, UPDATE_STARTUP_CHECK_DELAY_MS)
       updateTimer.unref?.()
+    } else if (app.isPackaged) {
+      const reason = macUpdateBlockReason()
+      if (reason) console.log(`[opennote] 本次运行不提供自更新：${reason}`)
     }
 
     // 本地接口：默认关闭。只有用户上次显式开启过（bridge.json 里 enabled=true，

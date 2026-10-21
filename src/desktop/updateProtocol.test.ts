@@ -23,10 +23,24 @@ const helper = requireCjs("../../electron/update-helper.cjs") as {
   APPLYING_MARKER: string;
   RESULT_FILE: string;
   EXE_NAME: string;
+  LAYOUT_FILES: string;
+  LAYOUT_BUNDLE: string;
+  BUNDLE_NAME: string;
   BACKUP_SUFFIX: string;
   collectFiles: (root: string, relative?: string) => string[];
   rankOf: (relative: string, exeName?: string) => number;
   sortForApply: (files: string[], exeName?: string) => string[];
+  bundlePathsFor: (handoff: Record<string, unknown>) => {
+    bundleName: string;
+    installDir: string;
+    target: string;
+    staged: string;
+    exeName: string;
+  };
+  applyBundleSwap: (
+    handoff: Record<string, unknown>,
+    deps?: Record<string, unknown>,
+  ) => Promise<{ ok: boolean; error: string | null }>;
   runUpdate: (
     handoff: Record<string, unknown>,
     deps?: Record<string, unknown>,
@@ -61,6 +75,12 @@ describe("helper ↔ 主进程协议逐字一致", () => {
     expect(helper.APPLYING_MARKER).toBe(protocol.applyingMarker);
     expect(helper.RESULT_FILE).toBe(protocol.resultFile);
     expect(helper.EXE_NAME).toBe(protocol.exeName);
+  });
+
+  it("两种落地形态与 bundle 名两边逐字一致", () => {
+    expect(helper.LAYOUT_FILES).toBe(protocol.layoutFiles);
+    expect(helper.LAYOUT_BUNDLE).toBe(protocol.layoutBundle);
+    expect(helper.BUNDLE_NAME).toBe(protocol.bundleName);
   });
 });
 
@@ -198,5 +218,146 @@ describe("runUpdate 真跑一遍覆盖", () => {
     expect(outcome.error).toContain("ENOENT");
     // 文件已经覆盖（这一步无法回退），但结果必须如实说「没起来」
     expect(fs.readFileSync(path.join(installDir, "Opennote.exe"), "utf8")).toBe("NEW-EXE");
+  });
+});
+
+/**
+ * macOS 的落地形态是**整包替换**，不是逐文件覆盖：`.app` 是代码签名的，
+ * 改里面任何一个文件都会让签名失配、应用彻底打不开。所以这一组的重点是
+ * 「**绝不把用户唯一那份能跑的应用弄没**」——每个失败分支都必须能回到旧版本。
+ */
+describe("macOS：整包替换 + 失败回滚", () => {
+  const bundleExe = path.join("Contents", "MacOS", "Opennote");
+
+  function bundleSetup() {
+    const installDir = tempDir("mac-install");
+    const stagingDir = tempDir("mac-staging");
+    const updatesDir = tempDir("mac-updates");
+
+    const newApp = path.join(stagingDir, helper.BUNDLE_NAME);
+    fs.mkdirSync(path.join(newApp, "Contents", "MacOS"), { recursive: true });
+    fs.writeFileSync(path.join(newApp, "Contents", "MacOS", "Opennote"), "NEW-EXE", "utf8");
+    fs.writeFileSync(path.join(newApp, "Contents", "Info.plist"), "NEW-PLIST", "utf8");
+    fs.writeFileSync(path.join(stagingDir, helper.HELPER_NAME), "HELPER", "utf8");
+    fs.writeFileSync(path.join(stagingDir, helper.APPLYING_MARKER), "{}", "utf8");
+
+    const oldApp = path.join(installDir, helper.BUNDLE_NAME);
+    fs.mkdirSync(path.join(oldApp, "Contents", "MacOS"), { recursive: true });
+    fs.writeFileSync(path.join(oldApp, "Contents", "MacOS", "Opennote"), "OLD-EXE", "utf8");
+    fs.writeFileSync(path.join(oldApp, "Contents", "Info.plist"), "OLD-PLIST", "utf8");
+
+    return {
+      installDir,
+      stagingDir,
+      oldApp,
+      handoff: {
+        pid: 999999999, // 一定不存在 → 等待立刻返回
+        installDir,
+        stagingDir,
+        exeName: bundleExe,
+        argv: ["--user-data-dir=/tmp/opennote-ud"],
+        logPath: path.join(updatesDir, "apply.log"),
+        version: "0.14.0",
+        resultPath: path.join(updatesDir, helper.RESULT_FILE),
+        from: "0.13.0",
+        layout: helper.LAYOUT_BUNDLE,
+        bundleName: helper.BUNDLE_NAME,
+      },
+    };
+  }
+
+  const readOld = (installDir: string) =>
+    fs.readFileSync(path.join(installDir, helper.BUNDLE_NAME, "Contents", "MacOS", "Opennote"), "utf8");
+
+  it("bundlePathsFor：installDir 是 .app 的父目录，staged/target 各自指对", () => {
+    const { handoff, installDir, stagingDir } = bundleSetup();
+    const paths = helper.bundlePathsFor(handoff);
+    expect(paths.target).toBe(path.join(installDir, helper.BUNDLE_NAME));
+    expect(paths.staged).toBe(path.join(stagingDir, helper.BUNDLE_NAME));
+    expect(paths.exeName).toBe(bundleExe);
+  });
+
+  it("成功：整包换过去 → 启动新版本 → 删掉备份、清掉 applying 标记", async () => {
+    const { handoff, installDir, stagingDir } = bundleSetup();
+    const launched: { exe: string; argv: unknown }[] = [];
+    const outcome = await helper.applyBundleSwap(handoff, {
+      verify: () => true,
+      launch: (exe: string, argv: unknown) => {
+        launched.push({ exe, argv });
+        return { unref() {} };
+      },
+      log: () => {},
+    });
+    expect(outcome.ok).toBe(true);
+    expect(readOld(installDir)).toBe("NEW-EXE");
+    // 旧版本备份必须被清掉，不能在 /Applications 里留一份 `.Opennote.app.old-*`
+    expect(fs.readdirSync(installDir).filter((n) => n.includes(helper.BACKUP_SUFFIX))).toHaveLength(0);
+    expect(fs.existsSync(path.join(stagingDir, helper.APPLYING_MARKER))).toBe(false);
+    expect(launched).toHaveLength(1);
+    expect(launched[0]?.exe).toBe(path.join(installDir, helper.BUNDLE_NAME, bundleExe));
+    expect(launched[0]?.argv).toEqual(["--user-data-dir=/tmp/opennote-ud"]);
+  });
+
+  it("签名复验不过 → 一个字节都不动，staging 保留（坏包绝不发车）", async () => {
+    const { handoff, installDir, stagingDir } = bundleSetup();
+    const outcome = await helper.applyBundleSwap(handoff, {
+      verify: () => false,
+      launch: () => ({ unref() {} }),
+      log: () => {},
+    });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toContain("签名");
+    expect(readOld(installDir)).toBe("OLD-EXE");
+    expect(fs.existsSync(path.join(stagingDir, helper.BUNDLE_NAME))).toBe(true);
+  });
+
+  it("staging 里没有 bundle → 放弃替换且旧版本原样", async () => {
+    const { handoff, installDir, stagingDir } = bundleSetup();
+    fs.rmSync(path.join(stagingDir, helper.BUNDLE_NAME), { recursive: true, force: true });
+    const outcome = await helper.applyBundleSwap(handoff, { verify: () => true, log: () => {} });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toContain("没有");
+    expect(readOld(installDir)).toBe("OLD-EXE");
+  });
+
+  it("**启动失败 → 回滚到旧版本**（这是 bundle 比逐文件覆盖强的地方）", async () => {
+    const { handoff, installDir } = bundleSetup();
+    const outcome = await helper.applyBundleSwap(handoff, {
+      verify: () => true,
+      launch: async () => ({ ok: false, error: "启动新版本失败：ENOENT" }),
+      log: () => {},
+    });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toContain("已回滚");
+    // 关键断言：旧版本被换回来了，磁盘上仍然是一个能跑的旧版
+    expect(readOld(installDir)).toBe("OLD-EXE");
+    expect(fs.readdirSync(installDir).filter((n) => n.includes(helper.BACKUP_SUFFIX))).toHaveLength(0);
+  });
+
+  it("runUpdate 按 handoff.layout 分派到整包替换（而不是逐文件覆盖）", async () => {
+    const { handoff, installDir } = bundleSetup();
+    const seen: string[] = [];
+    const outcome = await helper.runUpdate(handoff, {
+      verify: () => true,
+      launch: () => ({ unref() {} }),
+      waitForExit: async () => true,
+      log: (line: string) => seen.push(line),
+    });
+    expect(outcome.ok).toBe(true);
+    expect(readOld(installDir)).toBe("NEW-EXE");
+    expect(seen.some((line) => line.includes("整包替换"))).toBe(true);
+  });
+
+  it("旧进程迟迟不退 → 整包替换也不会动任何东西", async () => {
+    const { handoff, installDir } = bundleSetup();
+    const outcome = await helper.runUpdate(handoff, {
+      verify: () => true,
+      launch: () => ({ unref() {} }),
+      waitForExit: async () => false,
+      log: () => {},
+    });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toContain("没有在 2 分钟内退出");
+    expect(readOld(installDir)).toBe("OLD-EXE");
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "opennote",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -47,6 +47,8 @@
     "build:clip": "vite build --config vite.clip.config.ts",
     "build:desktop": "node scripts/build-ignore-rules.mjs && node scripts/build-desktop.mjs",
     "package:desktop": "node scripts/build-desktop.mjs && electron-builder --config electron-builder.yml",
+    "package:mac": "node scripts/build-mac.mjs",
+    "update:e2e:mac": "node scripts/update-e2e-mac.cjs",
     "build:mobile": "node scripts/build-mobile.mjs",
     "cap:sync": "node scripts/build-mobile.mjs && cap sync android",
     "cap:sync:web": "cap sync android",

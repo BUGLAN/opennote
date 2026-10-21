@@ -109,6 +109,63 @@ describe("unwrapSource：拆开之后源码真的露出来了", () => {
   });
 });
 
+
+describe("unwrap：表格（唯一的块级例外）", () => {
+  const table = "| a | b |\n| - | - |\n| 1 | 2 |";
+  const doc = `${table}\n`;
+
+  it("Backspace 在表格末尾 ⇒ 拆开整张表（先露源码）", () => {
+    const { view, specs } = viewOf(stateAt(table.length, doc));
+    expect(unwrapBackspace(view)).toBe(true);
+    expect((specs[0] as { effects: { value: { from: number; to: number } } }).effects.value).toEqual({
+      from: 0,
+      to: table.length,
+    });
+  });
+
+  it("Delete 在表格开头 ⇒ 拆开整张表", () => {
+    const { view, specs } = viewOf(stateAt(0, doc));
+    expect(unwrapDelete(view)).toBe(true);
+    expect((specs[0] as { effects: { value: { from: number; to: number } } }).effects.value).toEqual({
+      from: 0,
+      to: table.length,
+    });
+  });
+
+  it("光标在单元格中间 ⇒ 不拆（那一下该正常改字）", () => {
+    expect(unwrapBackspace(viewOf(stateAt(3, doc)).view)).toBe(false);
+    expect(unwrapDelete(viewOf(stateAt(3, doc)).view)).toBe(false);
+  });
+
+  it("表格下面那一行的行首按 Backspace ⇒ 也先拆表格（否则那行会被并进表格）", () => {
+    const withPara = `${table}\n\n正文\n`;
+    const paraStart = withPara.indexOf("正文");
+    const { view, specs } = viewOf(stateAt(paraStart, withPara));
+    expect(unwrapBackspace(view)).toBe(true);
+    expect((specs[0] as { effects: { value: { from: number; to: number } } }).effects.value).toEqual({
+      from: 0,
+      to: table.length,
+    });
+  });
+
+  it("隔一个空行也算 —— 空行不影响「上面是表格」这个判定", () => {
+    const withGap = `${table}\n\n\n正文\n`;
+    const paraStart = withGap.indexOf("正文");
+    expect(unwrapBackspace(viewOf(stateAt(paraStart, withGap)).view)).toBe(true);
+  });
+
+  it("Delete 在表格最后一行的末尾 ⇒ 拆开（否则删掉换行会把下一行并进表格）", () => {
+    const withPara = `${table}\n\n正文\n`;
+    expect(unwrapDelete(viewOf(stateAt(table.length, withPara)).view)).toBe(true);
+  });
+
+  it("上面是普通段落时，行首 Backspace 照常删字", () => {
+    const doc2 = "一段话\n\n正文\n";
+    const paraStart = doc2.indexOf("正文");
+    expect(unwrapBackspace(viewOf(stateAt(paraStart, doc2)).view)).toBe(false);
+  });
+});
+
 /** 与 `livePreview.test.ts` 里的同名工具一致：`from-to|class|...`。 */
 function keysOf(state: EditorState): string[] {
   const out: string[] = [];

@@ -26,6 +26,7 @@ import {
   trashNote,
   type LibraryState,
 } from "../data/library";
+import type { EntryOptions } from "../data/entryOptions";
 import type { Folder, Id, Note, UiSettings } from "../data/types";
 import { themeKind } from "../data/ui";
 import type { WorkspaceRecord } from "../data/workspaces";
@@ -57,8 +58,11 @@ export interface SidebarProps {
   workspace: WorkspaceRecord | null;
   workspaces: WorkspaceRecord[];
   switcherOpen: boolean;
-  supportsLocalFolder: boolean;
-  supportsBrowserWorkspace: boolean;
+  /**
+   * 这个形态能提供哪些笔记本入口：桌面版有磁盘可写，浏览器那两项整条不出现
+   * （判断在 `data/entryOptions.ts`，与欢迎页、命令面板共用）。
+   */
+  entries: EntryOptions;
   onSwitcherOpen(open: boolean): void;
   onOpenWorkspace(record: WorkspaceRecord): void;
   onAddLocalFolder(): void;
@@ -273,24 +277,29 @@ export function Sidebar(props: SidebarProps): ReactNode {
               </button>
             ))}
             {props.workspaces.length ? <div className="menu__sep" /> : null}
-            <button type="button" className="menu__item" disabled={!props.supportsLocalFolder} onClick={props.onAddLocalFolder}>
+            <button type="button" className="menu__item" disabled={!props.entries.localFolder} onClick={props.onAddLocalFolder}>
               <Icon name="folder" size={14} />
               <span>
                 {isCapacitorNative()
                   ? "新建手机笔记本…"
-                  : props.supportsLocalFolder
+                  : props.entries.localFolder
                     ? "打开本机文件夹…"
                     : "本机文件夹（需 Chrome/Edge 或桌面版）"}
               </span>
             </button>
-            <button type="button" className="menu__item" disabled={!props.supportsBrowserWorkspace} onClick={props.onNewBrowserWorkspace}>
-              <Icon name="plus" size={14} />
-              <span>新建浏览器笔记本…</span>
-            </button>
-            <button type="button" className="menu__item" onClick={props.onUploadFolder}>
-              <Icon name="upload" size={14} />
-              <span>导入文件夹到浏览器…</span>
-            </button>
+            {/* 浏览器专属的两条：桌面版整条不渲染 —— 那里有磁盘可写（见 `data/entryOptions.ts`）。 */}
+            {props.entries.browserWorkspace ? (
+              <button type="button" className="menu__item" onClick={props.onNewBrowserWorkspace}>
+                <Icon name="plus" size={14} />
+                <span>新建浏览器笔记本…</span>
+              </button>
+            ) : null}
+            {props.entries.uploadFolder ? (
+              <button type="button" className="menu__item" onClick={props.onUploadFolder}>
+                <Icon name="upload" size={14} />
+                <span>导入文件夹到浏览器…</span>
+              </button>
+            ) : null}
             {/*
               从 GitHub 仓库导入（0.4.0）：**只有网页版**能看见这一项 —— 桌面版的 CSP 里没有
               api.github.com（`electron/main.cjs` 的 `cspPolicy()` 是 `connect-src 'self' file:`），
