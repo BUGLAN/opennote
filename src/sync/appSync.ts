@@ -38,7 +38,7 @@ import {
 } from "./accountKey";
 import { describeKeyStorage, resolveAccountKeyStore, type AccountKeyStore } from "./keys";
 import { openAccountApi, type NotebookSummary } from "./accountApi";
-import { createSyncLedger, readSyncLedger, writeSyncLedger, type SyncLedger } from "./state";
+import { createSyncLedger, isSameRemote, readSyncLedger, writeSyncLedger, type SyncLedger } from "./state";
 import { createHashCache, readHashCache, writeHashCache, type HashCache } from "./hashCache";
 import { resolveCursorStore } from "./cursor";
 import { createDesktopEventStream, supportsDesktopStream } from "./desktopStream";
@@ -200,13 +200,22 @@ async function ensureUnlocked(baseUrl: string, material: Awaited<ReturnType<type
 async function loadLedger(backend: FileSystemBackend, record: WorkspaceRecord): Promise<SyncLedger> {
   const config = normalizeSyncConfig(record.sync);
   const existing = await readSyncLedger(backend).catch(() => null);
-  if (
-    existing &&
-    existing.remote.notebookId === config.notebookId &&
-    existing.remote.baseUrl === config.baseUrl &&
-    existing.remote.cryptoMode === config.cryptoMode
-  ) {
+  /*
+   * ★ 用 `isSameRemote()` 比较，**不是逐字比字符串**：`http://host:8787/` 与
+   * `http://host:8787` 是同一个服务。逐字比会判成「换了服务器」⇒ 丢掉账本 ⇒
+   * 每次打开应用全量重推（真机事故：880 篇、每次 2~3 分钟，远端文档被反复改写）。
+   */
+  if (existing && isSameRemote(existing.remote, config)) {
     return existing;
+  }
+  /*
+   * 丢掉账本意味着**下一轮会把整个库重推一遍**（几百篇 = 几分钟）。这件事必须留一行日志：
+   * 它是「为什么又全量了」的唯一线索，而且它在这里**只发生一次**（重建之后身份就对上了）。
+   */
+  if (existing) {
+    onBindingLog(
+      `[sync] 账本与当前配置不一致（账本 ${existing.remote.baseUrl} / ${existing.remote.notebookId}，当前 ${config.baseUrl} / ${config.notebookId}），重建账本`,
+    );
   }
   return createSyncLedger({
     baseUrl: config.baseUrl,

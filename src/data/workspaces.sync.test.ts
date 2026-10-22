@@ -71,6 +71,19 @@ describe("★ 半配好的同步视为**关**（绝不能往没验证过的地�
   it("地址两边的空白被去掉（用户从文档里复制常常带上空格）", () => {
     expect(normalizeSyncConfig({ ...GOOD, baseUrl: "  https://notes.example.com  " }).baseUrl).toBe("https://notes.example.com");
   });
+
+  it("★ 尾部斜杠被去掉（带斜杠与不带斜杠是**同一个服务**）", () => {
+    /*
+     * 真机事故：存储里是带斜杠的地址，账本里是不带斜杠的（createSyncLedger 会剥）。
+     * 逐字比较 ⇒ 判成「换了服务器」⇒ 丢账本 ⇒ **每次打开应用把 880 篇全量重推一遍**。
+     */
+    expect(normalizeSyncConfig({ ...GOOD, baseUrl: "http://45.202.241.98:8787/" }).baseUrl).toBe("http://45.202.241.98:8787");
+    expect(normalizeSyncConfig({ ...GOOD, baseUrl: "https://notes.example.com//" }).baseUrl).toBe("https://notes.example.com");
+    // 子路径部署要保留路径，不能把 /notes 一起吃掉。
+    expect(normalizeSyncConfig({ ...GOOD, baseUrl: "https://example.com/notes/" }).baseUrl).toBe("https://example.com/notes");
+    // 剥完仍然是合法地址 ⇒ 同步照常开着。
+    expect(normalizeSyncConfig({ ...GOOD, baseUrl: "http://45.202.241.98:8787/" }).enabled).toBe(true);
+  });
 });
 
 describe("坏形状不许抛（`load()` 是把 JSON 直接断言成记录数组的）", () => {

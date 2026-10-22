@@ -98,11 +98,36 @@ export interface CreateLedgerInput {
   protocolVersion: number;
 }
 
+/** 服务地址的**规范形式**：去掉首尾空白与尾部斜杠。 */
+export function stripBaseUrlSlashes(value: string): string {
+  return String(value).trim().replace(/\/+$/, "");
+}
+
+/**
+ * 账本记的远端身份，与当前配置**是不是同一个**。
+ *
+ * ## 为什么是一条独立的、可测的判定（而不是 appSync 里的一串 `&&`）
+ *
+ * 判错的代价不对称：判「是同一个」错了，最多多比一轮；判「不是」错了，会**丢掉基线**
+ * 然后全量重推 —— 用户看到的是「每次打开应用都同步好几分钟」（真机事故）。
+ * 而 baseUrl 有不只一种等价写法（尾部斜杠、首尾空白），逐字比较必然踩。
+ */
+export function isSameRemote(
+  recorded: { baseUrl: string; notebookId: string; cryptoMode: CryptoMode },
+  current: { baseUrl: string; notebookId: string; cryptoMode: CryptoMode },
+): boolean {
+  return (
+    stripBaseUrlSlashes(recorded.baseUrl) === stripBaseUrlSlashes(current.baseUrl) &&
+    recorded.notebookId === current.notebookId &&
+    recorded.cryptoMode === current.cryptoMode
+  );
+}
+
 export function createSyncLedger(input: CreateLedgerInput): SyncLedger {
   return {
     version: SYNC_LEDGER_VERSION,
     remote: {
-      baseUrl: String(input.baseUrl).replace(/\/+$/, ""),
+      baseUrl: stripBaseUrlSlashes(input.baseUrl),
       notebookId: input.notebookId,
       cryptoMode: input.cryptoMode,
       protocolVersion: input.protocolVersion,

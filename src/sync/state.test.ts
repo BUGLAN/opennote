@@ -18,9 +18,11 @@ import {
   buildDidIndex,
   createSyncLedger,
   forgetPath,
+  isSameRemote,
   readSyncLedger,
   renamePath,
   renamePrefix,
+  stripBaseUrlSlashes,
   writeSyncLedger,
   type SyncLedger,
 } from "./state";
@@ -267,3 +269,34 @@ describe("did ↔ path 反查（本机解密结果，不进持久化）", () => 
     expect(warn).toHaveBeenCalled();
   });
 });
+/* ============================================================================
+   远端身份的判定（2026-10-22 的真机事故）
+   ============================================================================ */
+
+describe("★ 远端身份：尾部斜杠**不是**另一台服务器", () => {
+  const remote = { baseUrl: "http://45.202.241.98:8787", notebookId: "nb-1", cryptoMode: "none" as const };
+
+  it("带不带尾部斜杠/首尾空白 ⇒ 同一个（否则每次打开应用都会全量重推）", () => {
+    /*
+     * 事故现场：存储里是 `http://host:8787/`，账本里是 `http://host:8787`（createSyncLedger
+     * 会剥斜杠）。逐字比较 ⇒ 判成「换了服务器」⇒ 丢账本 ⇒ 880 篇全推一遍，
+     * 每次打开应用 2~3 分钟。
+     */
+    for (const baseUrl of ["http://45.202.241.98:8787", "http://45.202.241.98:8787/", "  http://45.202.241.98:8787//  "]) {
+      expect(isSameRemote(remote, { ...remote, baseUrl }), baseUrl).toBe(true);
+    }
+  });
+
+  it("换了笔记本 / 换了加密模式 ⇒ 确实不是同一个（该重建账本）", () => {
+    expect(isSameRemote(remote, { ...remote, notebookId: "nb-2" })).toBe(false);
+    expect(isSameRemote(remote, { ...remote, cryptoMode: "user-key" })).toBe(false);
+    expect(isSameRemote(remote, { ...remote, baseUrl: "http://other.example.com:8787" })).toBe(false);
+  });
+
+  it("路径要保留（子路径部署不能被「去斜杠」抹掉）", () => {
+    expect(stripBaseUrlSlashes("https://a.com/opennote/")).toBe("https://a.com/opennote");
+    expect(isSameRemote({ ...remote, baseUrl: "https://a.com/opennote/" }, { ...remote, baseUrl: "https://a.com/opennote" })).toBe(true);
+    expect(isSameRemote({ ...remote, baseUrl: "https://a.com/opennote" }, { ...remote, baseUrl: "https://a.com/other" })).toBe(false);
+  });
+});
+

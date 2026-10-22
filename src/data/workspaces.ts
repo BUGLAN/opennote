@@ -75,7 +75,18 @@ export function normalizeSyncConfig(raw: unknown): WorkspaceSyncConfig {
 
   // 只有**恰好** `true` 才算开 —— 坏值不许把同步意外打开。
   const wantsEnabled = value.enabled === true;
-  const baseUrl = typeof value.baseUrl === "string" ? value.baseUrl.trim() : "";
+  /*
+   * ★ **去掉尾部斜杠**（2026-10-22，这是一次真机事故的修复）。
+   *
+   * 用户填 `http://host:8787/` 与 `http://host:8787` 是同一个服务，但字符串不相等。
+   * 而账本的「我是哪个笔记本」判定是**逐字比较** baseUrl 的（`isSameRemote`）——
+   * 于是每次打开应用都判成「换了一台服务器」，丢弃账本、把 880 个文件全量重推一遍
+   * （实测 2~3 分钟，而且每打开一次就把远端所有文档再写一版，另一台设备跟着抖）。
+   *
+   * 规范化放在这里（而不是只放在账本比较那一侧）：地址是**同一个东西**，
+   * 不该在 UI、账本、URL 拼接三处各有一套等价判定。
+   */
+  const baseUrl = typeof value.baseUrl === "string" ? value.baseUrl.trim().replace(/\/+$/, "") : "";
   const notebookId = typeof value.notebookId === "string" ? value.notebookId.trim() : "";
   const accountRef = typeof value.accountRef === "string" ? value.accountRef : "";
   const cryptoMode: CryptoMode = value.cryptoMode === "user-key" ? "user-key" : "none";
