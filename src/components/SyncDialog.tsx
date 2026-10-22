@@ -24,6 +24,7 @@ import {
   closeWorkspaceSync,
   completeRegistration,
   createNotebook as createNotebookApi,
+  exportCurrentKey,
   forgetAccountKey,
   importAccountKey,
   listNotebooks as listNotebooksApi,
@@ -108,6 +109,7 @@ function AccountSection(): ReactNode {
         </p>
       ) : null}
       <div className="sync-dialog__row">
+        <CopyKeyButton />
         <button
           type="button"
           className="btn btn--danger"
@@ -121,6 +123,29 @@ function AccountSection(): ReactNode {
         </button>
       </div>
     </section>
+  );
+}
+
+/** 已登录状态下导出密钥：多设备接第二台设备的唯一入口。 */
+function CopyKeyButton(): ReactNode {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="btn"
+      onClick={() => {
+        void exportCurrentKey().then((text) => {
+          if (!text) return;
+          void navigator.clipboard.writeText(text).then(() => {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 2500);
+          });
+        });
+      }}
+      title="把这把密钥粘到另一台设备的「导入已有密钥」里 —— 两台设备共用同一个账号"
+    >
+      <Icon name="copy" size={13} /> {copied ? "已复制到剪贴板" : "复制密钥"}
+    </button>
   );
 }
 

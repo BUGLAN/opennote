@@ -360,6 +360,17 @@ export async function importAccountKey(text: string): Promise<void> {
   await refreshAccountState();
 }
 
+/**
+ * 取当前保存的密钥文本（已登录状态下「复制密钥」用）。
+ *
+ * 多设备流程的必需品：注册之后密钥文本只在注册表单里出现过一次，
+ * 没有它，第二台设备永远拿不到正确的钥匙（真机踩过：用户拿着旧环境的
+ * 密钥导入新环境，症状是「令牌无效」）。
+ */
+export async function exportCurrentKey(): Promise<string | null> {
+  return keyStore.load();
+}
+
 /** 清除本机密钥（账号不变，只是这台设备退出登录）。同步随之停掉。 */
 export async function forgetAccountKey(): Promise<void> {
   await keyStore.clear();
