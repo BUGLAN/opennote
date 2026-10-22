@@ -49,10 +49,24 @@ function joinPath(parent: string, name: string): string {
  * 顺序：深度优先，同一层内**按名字排序**。排序不是装饰：
  * 它让「同一棵树两次列出得到同样的顺序」，于是用例与诊断输出可比对。
  */
-async function listAll(options: BackendSyncFilesOptions): Promise<LocalEntry[]> {
+export interface ScanResult {
+  entries: LocalEntry[];
+  /** 读不到的目录（权限 / 被占用 / 竞态删掉）。**不是空目录** —— 上报给引擎，让它别推断删除。 */
+  unreadable: { path: string; message: string }[];
+}
+
+async function listAll(options: BackendSyncFilesOptions): Promise<ScanResult> {
   const maxDepth = options.maxDepth ?? MAX_SYNC_DEPTH;
   const maxEntries = options.maxEntries ?? MAX_SYNC_ENTRIES;
   const out: LocalEntry[] = [];
+  /*
+   * ★ 读不到的目录**必须上报**，不能 `continue` 了事（H3）。
+   *
+   * 一个被占用/无权限的子目录如果静默消失，它下面的每一条都会从扫描结果里消失 ⇒
+   * `planPush` 把「没看见」判成「用户删了」⇒ 远端批量墓碑 ⇒ 其它设备跟着删。
+   * 这里只做到「如实收集」，要不要因此挂起删除由引擎决定（它才有账本与预算的视野）。
+   */
+  const unreadable: { path: string; message: string }[] = [];
   /** 显式的栈，避免深目录把调用栈压爆。 */
   const queue: { path: string; depth: number }[] = [{ path: "", depth: 0 }];
 
@@ -65,8 +79,9 @@ async function listAll(options: BackendSyncFilesOptions): Promise<LocalEntry[]> 
     let entries;
     try {
       entries = await options.backend.list(current.path);
-    } catch {
-      // 读不了的目录（权限 / 竞态删掉了）跳过这一支，而不是让整轮同步失败。
+    } catch (error) {
+      // 读不了的目录（权限 / 被占用 / 竞态删掉）：跳过这一支，但**如实记下来**。
+      unreadable.push({ path: current.path, message: error instanceof Error ? error.message : String(error) });
       continue;
     }
     for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
@@ -84,7 +99,7 @@ async function listAll(options: BackendSyncFilesOptions): Promise<LocalEntry[]> 
       if (isDir) queue.push({ path, depth: current.depth + 1 });
     }
   }
-  return out;
+  return { entries: out, unreadable };
 }
 
 /**
@@ -96,7 +111,12 @@ async function listAll(options: BackendSyncFilesOptions): Promise<LocalEntry[]> 
  */
 export function createBackendSyncFiles(options: BackendSyncFilesOptions): SyncFileBackend {
   return {
-    list: () => listAll(options),
+    list: async () => (await listAll(options)).entries,
+    /*
+     * ★ 带「扫描是否完整」的那一版（H3）。引擎优先用它；
+     * 没有它的后端（测试替身 / 老适配器）退回 `list()`，语义是「这一轮我扫全了」。
+     */
+    listWithIssues: () => listAll(options),
     read: (path) => options.backend.readBytes(path),
     write: (path, bytes) => options.backend.writeBytes(path, bytes),
     stat: (path) => options.backend.stat(path),

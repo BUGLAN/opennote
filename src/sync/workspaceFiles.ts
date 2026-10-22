@@ -65,6 +65,13 @@ export interface LocalEntry {
 export interface SyncFileBackend {
   /** 列出工作区里**全部**条目（含被忽略的；过滤是本层的事）。 */
   list(): Promise<LocalEntry[]>;
+  /**
+   * 同 `list()`，但**如实报告读不到的目录**（H3）。
+   *
+   * 给了它，引擎就能区分「这个目录真的空了」与「这一轮我没看全」——
+   * 后者绝不允许推断删除。没给（测试替身 / 老适配器）= 这一轮扫全了。
+   */
+  listWithIssues?(): Promise<{ entries: LocalEntry[]; unreadable: { path: string; message: string }[] }>;
   read(path: string): Promise<Uint8Array>;
   write(path: string, bytes: Uint8Array): Promise<void>;
   remove(path: string): Promise<void>;
@@ -153,9 +160,8 @@ export function createWorkspaceEngineDeps(options: WorkspaceEngineOptions): Sync
   /** 缓存（可能是 `undefined` = 调用方没开）。 */
   const cache: HashCache | undefined = options.hashCache;
 
-  return {
-    async listLocal(): Promise<EngineLocalFile[]> {
-      const entries = await options.backend.list();
+  /** 过滤 + 算哈希（`listLocal` 与 `listLocalDetailed` 共用这一份，别写两遍）。 */
+  const hashEntries = async (entries: LocalEntry[]): Promise<EngineLocalFile[]> => {
       const syncable = selectSyncableEntries(entries, options.rules);
       const out: EngineLocalFile[] = [];
       for (const entry of syncable) {
@@ -193,7 +199,22 @@ export function createWorkspaceEngineDeps(options: WorkspaceEngineOptions): Sync
         }
       }
       return out;
-    },
+  };
+
+  return {
+    listLocal: async () => hashEntries(await options.backend.list()),
+    /*
+     * ★ 带「扫描是否完整」的那一版（H3）：后端报出读不到的目录时，引擎会因此
+     * **挂起删除推断**（只挂起删除，新增/修改照常 —— 一个被占用的目录不该让整个笔记本停摆）。
+     */
+    ...(options.backend.listWithIssues === undefined
+      ? {}
+      : {
+          listLocalDetailed: async () => {
+            const scan = await options.backend.listWithIssues!();
+            return { files: await hashEntries(scan.entries), unreadable: scan.unreadable };
+          },
+        }),
     hashOf,
     // 拉取落地后的基线：读**磁盘上的原始字节**再哈希（与 `listLocal` 同一基准）。
     // E2EE 下等价于 ehash(明文) —— 与远端树里的 ehash 一致（见 engine 的说明）。
@@ -217,6 +238,13 @@ export function createWorkspaceEngineDeps(options: WorkspaceEngineOptions): Sync
     didOf,
     knownPaths: options.knownPaths,
     /*
+     * ★ 忽略判定的**唯一入口**再给引擎一份（红线 8）。
+     *
+     * 扫描侧（`listLocal`）已经过滤过了，但引擎还要用它对齐**账本视图**与**远端树** ——
+     * 只过滤扫描会出现「账本有、扫描没有 ⇒ 推墓碑」和「远端有、本地忽略 ⇒ 又拉下来」。
+     */
+    isIgnored: (path) => shouldSkipEntry(options.rules, path, false),
+    /*
      * ★★ `readLocal` / `writeLocal` 在 E2EE 下**必须**加解密。
      *
      * 这里是整条链路上最容易漏的一层，而且漏了**不会有任何报错**：
@@ -227,6 +255,17 @@ export function createWorkspaceEngineDeps(options: WorkspaceEngineOptions): Sync
      * 而**正文以明文发了出去**。`session.test.ts` 里那条
      * 「远端看不到明文正文」的用例就是专门咬这个的 —— 它第一次跑就红了。
      */
+    /*
+     * ★★ **给人看的明文**（M8）。
+     *
+     * `readLocal` 的契约是「**要发出去的**字节」—— E2EE 下必须密文；
+     * 而冲突预览 / 「仅格式不同」的判定要的是「**磁盘上的**那一份」（E2EE 下本来就是明文，
+     * 加密只发生在发出去之前）。两者混用会造成：预览读出来是密文 ⇒ 严格 UTF-8 解码失败 ⇒
+     * 界面显示「本机这一份读不出来」。
+     */
+    readLocalPlain: async (path) => options.backend.read(normalizeNfc(normalizePath(path))),
+    /** 把**远端**字节解成明文（E2EE 时解密；明文模式直通）。与 `openRemoteBytes` 同一套逻辑。 */
+    decodeRemote: (did, bytes) => (keys ? decryptContent(keys, did, options.notebookId, bytes) : bytes),
     readLocal: async (path) => {
       const normalized = normalizeNfc(normalizePath(path));
       const raw = await options.backend.read(normalized);

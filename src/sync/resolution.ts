@@ -39,7 +39,7 @@ export interface ConflictPreview {
   path: string;
   /** 本机那一份；不是合法文本（图片等）就是 `null`。 */
   local: string | null;
-  /** 远端那一份；已是**明文**（E2EE 下由 provider 解密）。 */
+  /** 远端那一份（已是**明文**：E2EE 下由 `deps.decodeRemote` 解密）。 */
   remote: string | null;
   /** 两边是否仅格式不同（BOM / 换行符 / 末尾空行）。 */
   formattingOnly: boolean;
@@ -53,12 +53,19 @@ export interface ConflictPreview {
  */
 export async function previewConflict(session: SyncSession, path: string): Promise<ConflictPreview> {
   const did = session.deps.didOf(path);
+  /*
+   * ★ 两边都取**明文**（M8）：E2EE 下 `readLocal` 是密文、`provider.read` 也是密文，
+   * 直接解码必然失败 ⇒ 预览两边都空，界面还会误导成「本机这一份读不出来（可能已被删）」。
+   */
+  const readPlain = session.deps.readLocalPlain ?? session.deps.readLocal;
   const [localBytes, remote] = await Promise.all([
-    session.deps.readLocal(path).catch(() => null),
+    readPlain(path).catch(() => null),
     session.provider.read(did).catch(() => null),
   ]);
   const local = localBytes === null ? null : decodeText(localBytes);
-  const remoteText = remote === null ? null : decodeText(remote.bytes);
+  const remoteText = remote === null
+    ? null
+    : decodeText(session.deps.decodeRemote === undefined ? remote.bytes : session.deps.decodeRemote(did, remote.bytes));
   return {
     path,
     local,

@@ -40,6 +40,7 @@
 
 import { assertSafeRelative, joinPath, META_DIR } from "../fs/paths";
 import type { FileSystemBackend } from "../fs/types";
+import type { ConflictKind } from "./conflicts";
 import { assertSafeLocalMetaPayload } from "./boundary";
 import type { CryptoMode } from "../../shared/contract";
 
@@ -68,6 +69,23 @@ export interface SyncLedgerFile {
   imported: boolean;
   /** 上次同步时间（毫秒）；诊断与控制台展示用。 */
   syncedAt: number;
+  /**
+   * **还没裁决**的冲突（引擎侧「只报不猜」的落地）。
+   *
+   * 为什么必须落在账本里（而不是只放在某一轮的返回值里）：
+   * - 「远端这轮没变化」时引擎**不跑 planPull**（`remoteUnchanged`），冲突就会从列表里消失；
+   * - 用户还没来得及裁决，界面已经看不到它了 —— 一条冲突不该因为"下一轮没事发生"而蒸发。
+   *
+   * 只要它还在，引擎就**不推也不删**这条路径；用户裁决（`resolution.ts`）或冲突自然消解
+   * （本地/远端任一侧变成了别的版本）时，这个字段会被清掉。
+   */
+  pendingConflict?: {
+    kind: ConflictKind;
+    localId: string | null;
+    remoteId: string | null;
+    /** 第一次/最近一次发现它的时间（毫秒）。 */
+    at: number;
+  };
 }
 
 export interface SyncLedgerRemote {

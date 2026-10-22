@@ -128,6 +128,8 @@ export function createMemoryProvider(options: MemoryProviderOptions = {}): Memor
         // 列树的游标 = 当前变更序号（「你列树时看到的是这个时刻的状态」）。
         cursor: String(sequence),
         truncated,
+        // 与服务端同一语义：翻页锚点是**这一页最后一条原始行**（而不是过滤后的可见条目）。
+        ...(truncated && slice.length > 0 ? { nextStartKey: slice[slice.length - 1]![0] } : {}),
         entries: slice.map(([did, doc]) => ({
           did,
           hash: doc.hash,

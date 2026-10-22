@@ -548,18 +548,20 @@ describe("E2EE：两台设备互相同步，库里看不到明文", () => {
     const r1 = await syncAndPersist(a);
     expect(r1.pushed).toBe(1);
 
-    // ★ B 在「写入路径」之前先放一个同名占位文件 —— 模拟「账本/映射里已知这条路径」
-    // 的设备（P4-c 的 did↔path 映射同步尚未接线,见 7fa5209 的「尚未做」注记:
-    // session 的 push/pull 还不写/读 m:pathmap,新设备重建流程也未实现）。
-    // 在那张表接上之前,一个**全新空设备**拿不出路径,只能看到 unknownDids（下一条用例）。
+    // ★ B 必须**知道这条路径**才能反解 did（P4-c 的 did↔path 映射同步尚未接线，
+    //   见 7fa5209 的「尚未做」注记）。这里直接把「账本里记着这一条、但从未物化过」
+    //   写进账本 —— 等价于真实流程里「映射已重建」的状态，且不会伪造本地内容。
+    //   全新空设备拿不出路径、只能看到 unknownDids 的情况见下一条用例。
     const b = await unlockOnDevice(world.base, account.keyText);
     const notebookKeyB = deriveNotebookKey(b.encRoot, notebookId);
     expect(Buffer.from(notebookKeyB).equals(Buffer.from(notebookKeyA))).toBe(true);
 
     const deviceB = await world.device({ cryptoMode: "user-key", authToken: b.authToken, notebookKey: notebookKeyB, notebookId });
-    await deviceB.disk.write("机密/名单.md", "占位 —— 马上被远端版本覆盖");
+    deviceB.ledger.files["机密/名单.md"] = { bid: 1, localHash: null, remoteHash: null, rev: null, imported: false, syncedAt: 0 };
+    deviceB.ledger.bids["机密/名单.md"] = 1;
+    deviceB.ledger.nextBid = 2;
     const r2 = await syncAndPersist(deviceB);
-    // B 已知该路径 → did 反查成功 → 拉取并以远端版本覆盖本地占位。
+    // B 已知该路径 → did 反查成功 → 这条「从未物化过」的记录会被拉下来落盘。
     expect(r2.pulled).toBe(1);
     expect(await deviceB.disk.read("机密/名单.md")).toBe("张三 13800000000");
 

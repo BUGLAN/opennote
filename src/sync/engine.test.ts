@@ -19,7 +19,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { idForPath } from "../../shared/paths";
-import { syncOnce, syncOnceIncremental, type EngineLocalFile, type SyncEngineDeps } from "./engine";
+import { fetchWholeTree, runBounded, syncOnce, syncOnceIncremental, type EngineLocalFile, type SyncEngineDeps } from "./engine";
+import type { SyncProvider } from "./provider-types";
 import { createSyncLedger, type SyncLedger } from "./state";
 import { createMemoryProvider, type MemoryProvider } from "./providers/memory";
 
@@ -53,7 +54,15 @@ interface Harness {
   logs: { kind: string; detail: Record<string, unknown> }[];
 }
 
-async function makeHarness(options: { seedLocal?: Record<string, string>; provider?: MemoryProvider } = {}): Promise<Harness> {
+async function makeHarness(
+  options: {
+    seedLocal?: Record<string, string>;
+    provider?: MemoryProvider;
+    ignore?: (path: string) => boolean;
+    /** 模拟「某些目录读不到」（H3）：给了它就相当于后端支持 `listWithIssues`。 */
+    unreadable?: { path: string; message: string }[];
+  } = {},
+): Promise<Harness> {
   const provider = options.provider ?? createMemoryProvider();
   const ledger = createSyncLedger({
     baseUrl: "https://notes.example.com",
@@ -103,6 +112,14 @@ async function makeHarness(options: { seedLocal?: Record<string, string>; provid
       removes.push(path);
       local.delete(path);
     },
+    ...(options.ignore === undefined ? {} : { isIgnored: options.ignore }),
+    ...(options.unreadable === undefined
+      ? {}
+      : {
+          async listLocalDetailed() {
+            return { files: await deps.listLocal(), unreadable: options.unreadable! };
+          },
+        }),
     log: (kind, detail) => logs.push({ kind, detail }),
   };
 
@@ -244,9 +261,19 @@ describe("§6.3/§6.4 · 删除语义", () => {
     const b = await makeHarness({ provider: a.provider });
     await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
 
-    // A 端删掉 25 篇。
+    // ① **推送侧**：A 端删掉 25 篇 —— 现在这里就会被拦住（H3 补上的那道闸门）。
     for (let index = 0; index < 25; index += 1) a.deleteLocalFile(`notes/n${index}.md`);
-    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+    const aResult = await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+    expect(aResult.remoteDeleted).toBe(0);
+    expect(aResult.blockedDeletes).toBe(25);
+    expect(aResult.deletionGuardMessage).toContain("25");
+    expect(a.provider.tombstones()).toEqual([]);
+
+    // ② **拉取侧**：假设另一端确实推上来 25 个墓碑（旧客户端 / 脚本绕过预算），
+    //    B 也不能一次删掉 25 篇。
+    for (let index = 0; index < 25; index += 1) {
+      await a.provider.delete({ did: idForPath(`notes/n${index}.md`), baseHash: null });
+    }
 
     const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
     expect(result.deleted).toBe(0);
@@ -255,6 +282,27 @@ describe("§6.3/§6.4 · 删除语义", () => {
     expect(result.deletionGuardMessage).toContain("20");
     // 一条都没删 —— 半删状态比不删更难收拾。
     expect(b.local.size).toBe(30);
+  });
+
+  it("★ 远端删掉一张已物化的图片 ⇒ 本地也删、账本清掉（L5）", async () => {
+    /*
+     * 删除候选是按「账本里有、远端没了」生成的，图片也会进来；
+     * 而引擎那一侧以前只放行 Markdown ⇒ 图片永远删不掉、账本条目也不清，每轮重算一次。
+     */
+    const a = await makeHarness({ seedLocal: { "assets/pic.png": "PNG-BYTES" } });
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider: a.provider });
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+    expect(b.local.has("assets/pic.png")).toBe(true);
+
+    // 另一端把它删了（留墓碑）。
+    await a.provider.delete({ did: idForPath("assets/pic.png"), baseHash: null });
+
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+    expect(result.deleted).toBe(1);
+    expect(b.local.has("assets/pic.png")).toBe(false);
+    expect(b.ledger.files["assets/pic.png"]).toBeUndefined();
   });
 
   it("C12 · 树不完整 ⇒ 删除**全部挂起**，且如实返回清单（不静默丢弃）", async () => {
@@ -371,7 +419,7 @@ describe("§6.4 规则 2 · 游标过期 ⇒ 走 resync 全量比对，已删文
 });
 
 describe("CAS 撞车：远端在我们列树之后前进了", () => {
-  it("put 冲突 ⇒ 列为冲突、**不重试不强推**，并刷新账本的 CAS 依据（避免死循环）", async () => {
+  it("put 冲突 ⇒ 列为冲突、**不重试不强推**，且**不推进** CAS 依据（否则下一轮会静默覆盖）", async () => {
     const harness = await makeHarness({ seedLocal: { "notes/a.md": "# v1" } });
     // 让 provider 在第一次 put 之前被「另一端」抢先写一次。
     const provider = harness.provider;
@@ -389,8 +437,13 @@ describe("CAS 撞车：远端在我们列树之后前进了", () => {
     expect(result.pushed).toBe(0);
     expect(result.pushConflicts).toHaveLength(1);
     expect(result.pushConflicts[0]!.path).toBe("notes/a.md");
-    // 账本的 remoteHash 被更新成远端的当前值 —— 下一次不会拿过期依据再撞一次。
-    expect(harness.ledger.files["notes/a.md"]!.remoteHash).toBe(await hashOf(enc("# 另一端抢先改的")));
+    /*
+     * ★ 账本**不应该**被写进远端的当前值（那正是 H1）。
+     * 这是一条「本地新建 + 第一次推就撞车」的路径：账本里还没有这一条，
+     * 所以正确的结果就是**仍然没有** —— 下一轮会以「新增」再 409 一次（安全），
+     * 直到用户裁决（`resolution.ts` 才会把 `remoteHash` 写进去）。
+     */
+    expect(harness.ledger.files["notes/a.md"]).toBeUndefined();
   });
 });
 
@@ -531,5 +584,437 @@ describe("仅格式不同的冲突", () => {
 
     const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
     expect(result.conflicts).toHaveLength(1);
+  });
+});
+
+/* ============================================================================
+   ★ H1 · CAS 冲突之后的下一轮：**绝不静默覆盖**（红线 5）
+   ============================================================================ */
+
+describe("★ H1 · 冲突后的下一轮不静默覆盖", () => {
+  it("put 冲突后再跑一轮：远端仍是对方的版本，冲突仍然列着", async () => {
+    const harness = await makeHarness({ seedLocal: { "notes/a.md": "# v1" } });
+    const provider = harness.provider;
+    await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+
+    // 本地改成 v2；同时在我们要推之前，远端也被另一端改成了另一份。
+    await harness.writeLocalFile("notes/a.md", "# 本地 v2");
+    const remoteText = "# 远端 v2";
+    provider.seed(idForPath("notes/a.md"), await hashOf(enc(remoteText)), enc(remoteText));
+
+    const first = await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+    // 这一轮就应该判出冲突（列树时远端已经变了 ⇒ planPull 直接判 both-modified，连 put 都不发）。
+    expect(first.conflicts.length + first.pushConflicts.length).toBe(1);
+
+    /*
+     * ★ 关键：**再跑一轮**。真实触发源是本地写去抖（1.2s）/ SSE 信号 / 自动重试 ——
+     * 也就是「用户还没来得及裁决」的那几秒。
+     */
+    const second = await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+
+    expect(await harnessText(provider, "notes/a.md")).toBe(remoteText);
+    // 冲突不能消失（否则用户永远看不到它）。
+    expect(second.pushConflicts.length + second.conflicts.length).toBeGreaterThan(0);
+    // 本地那一份也没被动过。
+    expect(new TextDecoder().decode(harness.local.get("notes/a.md")!)).toBe("# 本地 v2");
+  });
+
+  it("delete 冲突后再跑一轮：远端**不被墓碑**，冲突仍然列着", async () => {
+    const a = await makeHarness({ seedLocal: { "notes/a.md": "# v1" } });
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    // 另一端改了并推上来。
+    const b = await makeHarness({ provider: a.provider });
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+    await b.writeLocalFile("notes/a.md", "# 远端改的");
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    // A 本地删掉 → 第一轮 delete 撞上 CAS。
+    a.deleteLocalFile("notes/a.md");
+    const first = await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+    expect(first.pushConflicts.length + first.conflicts.length).toBeGreaterThan(0);
+
+    // ★ 再跑一轮：**绝不能**把远端那一版墓碑掉。
+    const second = await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+    expect(a.provider.tombstones()).toEqual([]);
+    expect(await harnessText(a.provider, "notes/a.md")).toBe("# 远端改的");
+    expect(second.pushConflicts.length + second.conflicts.length).toBeGreaterThan(0);
+  });
+
+  it("删除冲突的 kind 指向「本地删了、远端又改了」（L1）", async () => {
+    const harness = await makeHarness({ seedLocal: { "notes/a.md": "# v1" } });
+    await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    harness.deleteLocalFile("notes/a.md");
+    const provider = harness.provider;
+    const originalDelete = provider.delete.bind(provider);
+    let sneaked = false;
+    // 模拟「远端在我们列树之后、删除之前被别人改了」——这是 delete 409 的唯一入口。
+    provider.delete = async (input) => {
+      if (!sneaked) {
+        sneaked = true;
+        const text = "# 远端改的";
+        provider.seed(input.did, await hashOf(enc(text)), enc(text));
+      }
+      return originalDelete(input);
+    };
+
+    const result = await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+    expect(result.pushConflicts).toHaveLength(1);
+    expect(result.pushConflicts[0]!.kind).toBe("deleted-locally-modified-remotely");
+  });
+});
+
+/* ============================================================================
+   ★ H2 · 忽略 = 该路径在同步里**双向不存在**（红线 8）
+   ============================================================================ */
+
+describe("★ H2 · 忽略路径不参与推/拉/删", () => {
+  it("账本里有、本地扫描里没有（被忽略）⇒ **不产生远端墓碑**", async () => {
+    const harness = await makeHarness({ seedLocal: { "notes/a.md": "# A", "notes/b.md": "# B" } });
+    await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+    expect(Object.keys(harness.provider.snapshot())).toHaveLength(2);
+
+    // 用户在 .gitignore 里加了 notes/a.md ⇒ 下一次扫描看不到它（但远端还在）。
+    harness.deleteLocalFile("notes/a.md");
+    harness.deps.isIgnored = (path) => path === "notes/a.md";
+
+    const result = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    expect(result.remoteDeleted).toBe(0);
+    expect(harness.provider.tombstones()).toEqual([]);
+    expect(await harnessText(harness.provider, "notes/a.md")).toBe("# A");
+    // 账本条目保留（用户解除忽略后能自然恢复）。
+    expect(harness.ledger.files["notes/a.md"]).toBeDefined();
+  });
+
+  it("远端新增、本地忽略 ⇒ **不下载、不写盘**", async () => {
+    const a = await makeHarness({ seedLocal: { "secret.md": "# 秘密" } });
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider: a.provider, ignore: (path) => path === "secret.md" });
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    expect(result.pulled).toBe(0);
+    expect(b.writes).toEqual([]);
+    expect(b.local.has("secret.md")).toBe(false);
+  });
+
+  it("忽略路径不产生冲突噪音（远端改了它、本地忽略了它）", async () => {
+    const a = await makeHarness({ seedLocal: { "notes/a.md": "# v1" } });
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    // B 的设备忽略它，但账本里记着（之前同步过）。
+    const b = await makeHarness({ provider: a.provider, ignore: (path) => path === "notes/a.md" });
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    // 远端改成 v2。
+    await a.writeLocalFile("notes/a.md", "# v2");
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+    expect(result.conflicts).toEqual([]);
+    expect(result.pushConflicts).toEqual([]);
+  });
+});
+
+/* ============================================================================
+   ★ H3 · 推送侧的删除闸门：扫描不完整 / 超预算都不许推墓碑
+   ============================================================================ */
+
+describe("★ H3 · 推送侧删除的防误删闸门", () => {
+  it("本地扫描没扫全（有目录读不到）⇒ **一条都不推墓碑**", async () => {
+    const harness = await makeHarness({
+      seedLocal: { "notes/a.md": "# A", "notes/deep/b.md": "# B" },
+      unreadable: [{ path: "notes/deep", message: "EPERM: operation not permitted" }],
+    });
+    await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+    expect(Object.keys(harness.provider.snapshot())).toHaveLength(2);
+
+    // 模拟「notes/deep 这一轮读不到」⇒ 它下面的 b.md 从扫描里消失。
+    harness.deleteLocalFile("notes/deep/b.md");
+    const result = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    expect(result.scanIncomplete).toBe(true);
+    expect(result.suspendedPushDeletes).toEqual(["notes/deep/b.md"]);
+    expect(result.remoteDeleted).toBe(0);
+    expect(harness.provider.tombstones()).toEqual([]);
+    expect(await harnessText(harness.provider, "notes/deep/b.md")).toBe("# B");
+  });
+
+  it("一次要推的删除超过阈值 ⇒ 整批不删，说明原因（而不是删一部分）", async () => {
+    const seed: Record<string, string> = {};
+    for (let index = 0; index < 22; index += 1) seed[`notes/n${index}.md`] = `# ${index}`;
+    const harness = await makeHarness({ seedLocal: seed });
+    await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    // 用户（或一次误操作）把 22 篇全删了：预算 = max(20, 22×25%) = 20 ⇒ 22 > 20。
+    for (const path of Object.keys(seed)) harness.deleteLocalFile(path);
+    const result = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    expect(result.remoteDeleted).toBe(0);
+    expect(result.blockedDeletes).toBe(22);
+    expect(result.deletionGuardMessage).toContain("超过保护阈值");
+    expect(harness.provider.tombstones()).toEqual([]);
+  });
+
+  it("没超预算的少量删除照常推（别把正常删除也拦了）", async () => {
+    const harness = await makeHarness({ seedLocal: { "notes/a.md": "# A", "notes/b.md": "# B" } });
+    await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    harness.deleteLocalFile("notes/a.md");
+    const result = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    expect(result.remoteDeleted).toBe(1);
+    expect(result.blockedDeletes).toBe(0);
+    expect(harness.provider.tombstones()).toEqual([idForPath("notes/a.md")]);
+  });
+});
+
+describe("★ M7 · runBounded：失败后先收尾，再抛出", () => {
+  it("一个 worker 抛错后**不再领取新条目**，并等其余 worker 收尾", async () => {
+    const events: string[] = [];
+    let release0: () => void = () => undefined;
+    const gate0 = new Promise<void>((resolve) => {
+      release0 = resolve;
+    });
+
+    const run = runBounded([0, 1, 2, 3], 2, async (item) => {
+      events.push(`start:${item}`);
+      if (item === 0) {
+        await gate0;
+        events.push("end:0");
+        return;
+      }
+      if (item === 1) throw new Error("boom");
+      events.push(`end:${item}`);
+    }).catch((error: unknown) => error);
+
+    // 让两个 worker 都进到自己的第一条（0 挂起、1 抛错）。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    release0();
+    const error = await run;
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("boom");
+    // ★ 2 / 3 从未启动：失败之后不再领取新条目。
+    expect(events).toEqual(["start:0", "start:1", "end:0"]);
+  });
+});
+
+describe("★ M2 · 整页被过滤干净时仍能翻页", () => {
+  it("空页 + truncated ⇒ 用服务端给的 nextStartKey 继续翻，而不是放弃", async () => {
+    const pages: { cursor: string | null; truncated: boolean; nextStartKey?: string; entries: { did: string; hash: string; rev: string }[] }[] = [
+      // 第一页 1000 行全是墓碑：可见条目为空，但服务端知道下一页从哪开始。
+      { cursor: "c1", truncated: true, nextStartKey: "f:page-2", entries: [] },
+      { cursor: "c2", truncated: false, entries: [{ did: "f:b", hash: "h", rev: "1" }] },
+    ];
+    const startKeys: (string | undefined)[] = [];
+    const provider = {
+      name: "stub",
+      cryptoMode: "none",
+      tree: async (options: { startKey?: string } = {}) => {
+        startKeys.push(options.startKey);
+        return pages.shift()!;
+      },
+    } as unknown as SyncProvider;
+
+    const tree = await fetchWholeTree(provider, 1000);
+
+    expect(tree.truncated).toBe(false);
+    expect(tree.entries.map((entry) => entry.did)).toEqual(["f:b"]);
+    // 第二次请求用的是服务端给的锚点（不是「可见条目的最后一条」——那条根本不存在）。
+    expect(startKeys).toEqual([undefined, "f:page-2"]);
+  });
+
+  it("老服务端没有 nextStartKey ⇒ 行为不变（仍然如实报 truncated）", async () => {
+    const provider = {
+      name: "stub",
+      cryptoMode: "none",
+      tree: async () => ({ cursor: "c1", truncated: true, entries: [] }),
+    } as unknown as SyncProvider;
+
+    const tree = await fetchWholeTree(provider, 1000);
+    expect(tree.truncated).toBe(true);
+    expect(tree.entries).toEqual([]);
+  });
+});
+
+describe("★ L3 · 进度必须能走到 100%", () => {
+  it("有冲突的一轮：冲突路径也计入「已处理」，最终 done === total", async () => {
+    const harness = await makeHarness({ seedLocal: { "notes/a.md": "# v1", "notes/b.md": "# b" } });
+    await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    // 两边都改同一篇 ⇒ 这一轮必然有一条冲突（它不进任何推送/拉取计划项）。
+    await harness.writeLocalFile("notes/a.md", "# 本地 v2");
+    const remoteText = "# 远端 v2";
+    harness.provider.seed(idForPath("notes/a.md"), await hashOf(enc(remoteText)), enc(remoteText));
+
+    const progress: { done: number; total: number }[] = [];
+    const result = await syncOnce({
+      provider: harness.provider,
+      ledger: harness.ledger,
+      deps: harness.deps,
+      onProgress: (value) => progress.push(value),
+    });
+
+    expect(result.conflicts.length + result.pushConflicts.length).toBe(1);
+    const last = progress.at(-1)!;
+    expect(last.done).toBe(last.total);
+  });
+
+  it("被 truncated 挂起的一轮：挂起的删除也算「已处理」", async () => {
+    // pageSize 3、5 篇 ⇒ 树不完整 ⇒ 删除全部挂起。
+    const provider = createMemoryProvider({ pageSize: 3 });
+    const seed: Record<string, string> = {};
+    for (let index = 0; index < 5; index += 1) seed[`notes/n${index}.md`] = `# ${index}`;
+    const a = await makeHarness({ seedLocal: seed, provider });
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider });
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    // A 端删两篇（少量，不会触发预算），B 端再同步：树不完整 ⇒ 删除挂起。
+    a.deleteLocalFile("notes/n1.md");
+    a.deleteLocalFile("notes/n2.md");
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const progress: { done: number; total: number }[] = [];
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps, onProgress: (value) => progress.push(value) });
+    const last = progress.at(-1)!;
+    expect(last.done).toBe(last.total);
+  });
+});
+
+describe("★ M8 · E2EE 下「仅格式不同」仍然能收敛", () => {
+  it("readLocal 是密文、readLocalPlain 才是明文 ⇒ 仍然判成格式差异并收敛", async () => {
+    const provider = createMemoryProvider();
+    const a = await makeHarness({ provider });
+    await a.writeLocalFile("笔记.md", "第一行\n第二行\n");
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider });
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    /*
+     * 模拟 E2EE 客户端：`readLocal` 给出的是"密文"（严格 UTF-8 解不出来），
+     * 而 `readLocalPlain` 才是磁盘上的明文、`decodeRemote` 负责解密远端。
+     */
+    b.deps.readLocal = async () => new Uint8Array([0xff, 0xfe, 0x00, 0x01]);
+    b.deps.readLocalPlain = async (path) => b.local.get(path)!;
+    b.deps.decodeRemote = (_did, bytes) => bytes;
+
+    await a.writeLocalFile("笔记.md", "第一行\n第二行\n第三行\n");
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+    await b.writeLocalFile("笔记.md", "第一行\r\n第二行\r\n第三行\r\n");
+
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    expect(result.conflicts).toHaveLength(0);
+    // 收敛成远端那一份（LF）。
+    expect(new TextDecoder().decode(b.local.get("笔记.md")!)).toBe("第一行\n第二行\n第三行\n");
+  });
+});
+
+describe("★ N1 · 冲突要跨轮次活着（不能因为「这轮没变化」就蒸发）", () => {
+  it("远端没变化（remoteUnchanged）时，已存在的冲突仍然报出来，且不推不删", async () => {
+    const harness = await makeHarness({ seedLocal: { "notes/a.md": "# v1" } });
+    const provider = harness.provider;
+    await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+
+    await harness.writeLocalFile("notes/a.md", "# 本地 v2");
+    const remoteText = "# 远端 v2";
+    provider.seed(idForPath("notes/a.md"), await hashOf(enc(remoteText)), enc(remoteText));
+
+    const first = await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+    expect(first.conflicts.length + first.pushConflicts.length).toBe(1);
+    expect(harness.ledger.files["notes/a.md"]?.pendingConflict).toBeDefined();
+
+    // 下一轮：远端**没有任何变化** ⇒ 引擎不列树、不跑 planPull（以前冲突就在这里消失）。
+    const second = await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps, remoteUnchanged: true });
+
+    expect(second.conflicts.length + second.pushConflicts.length).toBe(1);
+    expect(second.pushed).toBe(0);
+    expect(await harnessText(provider, "notes/a.md")).toBe(remoteText);
+  });
+
+  it("本地那一版改了之后，旧标记过期 ⇒ 不再挡住新一轮的判定", async () => {
+    const harness = await makeHarness({ seedLocal: { "notes/a.md": "# v1" } });
+    const provider = harness.provider;
+    await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+
+    await harness.writeLocalFile("notes/a.md", "# 本地 v2");
+    provider.seed(idForPath("notes/a.md"), await hashOf(enc("# 远端 v2")), enc("# 远端 v2"));
+    await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+
+    // 用户又改了一版（本地 hash 变了）⇒ 标记过期，diff 重新判（仍然是冲突，但用的是新版本）。
+    await harness.writeLocalFile("notes/a.md", "# 本地 v3");
+    const again = await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+    expect(again.conflicts.length + again.pushConflicts.length).toBe(1);
+    expect(harness.ledger.files["notes/a.md"]?.pendingConflict?.localId).toBe(await hashOf(enc("# 本地 v3")));
+    expect(await harnessText(provider, "notes/a.md")).toBe("# 远端 v2");
+  });
+});
+
+describe("★ N5 · 两边都新建了同一路径：不许静默覆盖本地", () => {
+  it("本地有同名文件、账本里没有、远端也新增了它 ⇒ **冲突**，本地那份不动", async () => {
+    const provider = createMemoryProvider();
+    const a = await makeHarness({ provider, seedLocal: { "notes/new.md": "# 远端的" } });
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    // B：本地也有一份同名但内容不同的文件，账本为空（新设备 / 拷过来的目录）。
+    const b = await makeHarness({ provider, seedLocal: { "notes/new.md": "# 本地的" } });
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    expect(result.pulled).toBe(0);
+    expect(result.conflicts).toEqual([
+      {
+        path: "notes/new.md",
+        kind: "both-modified",
+        localId: await hashOf(enc("# 本地的")),
+        remoteId: await hashOf(enc("# 远端的")),
+      },
+    ]);
+    expect(new TextDecoder().decode(b.local.get("notes/new.md")!)).toBe("# 本地的");
+    expect(await harnessText(a.provider, "notes/new.md")).toBe("# 远端的");
+  });
+
+  it("本地那份内容恰好相同 ⇒ 不算冲突（照常记基线）", async () => {
+    const provider = createMemoryProvider();
+    const a = await makeHarness({ provider, seedLocal: { "notes/new.md": "# 一样" } });
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider, seedLocal: { "notes/new.md": "# 一样" } });
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    expect(result.conflicts).toEqual([]);
+    expect(b.ledger.files["notes/new.md"]?.localHash).toBe(await hashOf(enc("# 一样")));
+  });
+});
+
+describe("★ N1 · 用户手工把本地改回远端那一版 ⇒ 冲突自动消解", () => {
+  it("内容一致就不再拦着：标记清掉、基线对齐、下一轮空转", async () => {
+    const harness = await makeHarness({ seedLocal: { "notes/a.md": "# v1" } });
+    const provider = harness.provider;
+    await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+
+    await harness.writeLocalFile("notes/a.md", "# 本地 v2");
+    const remoteText = "# 远端 v2";
+    provider.seed(idForPath("notes/a.md"), await hashOf(enc(remoteText)), enc(remoteText));
+    const conflicted = await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+    expect(conflicted.conflicts.length + conflicted.pushConflicts.length).toBe(1);
+
+    // 用户在编辑器里把本地那一份改成了远端的内容。
+    await harness.writeLocalFile("notes/a.md", remoteText);
+
+    const converged = await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+    expect(converged.conflicts).toEqual([]);
+    expect(converged.pushConflicts).toEqual([]);
+    expect(harness.ledger.files["notes/a.md"]?.pendingConflict).toBeUndefined();
+    expect(harness.ledger.files["notes/a.md"]?.localHash).toBe(await hashOf(enc(remoteText)));
+
+    const idle = await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
+    expect(idle.pushed).toBe(0);
+    expect(idle.pulled).toBe(0);
   });
 });

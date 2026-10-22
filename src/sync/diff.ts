@@ -160,12 +160,26 @@ export function planPull(baseline: BaselineLike, remote: RemoteTree, local: Loca
     if (!remoteChanged) continue;
 
     if (!isMaterializable(path)) continue; // 源码 / 配置：只更新下面那一轮账本，绝不落地
-    if (!known || !known.imported) {
+    if (!known) {
       /*
-       * 两种情况都直接拉：
-       * - 远端新增的笔记或图片：没有本地改动可言；
-       * - **上次没物化成功的**（超上限 / 取字节失败）：`localHash` 是 null、本地也确实没有这个文件，
-       *   那不是「用户删了它」—— 这里给它一次重试机会（拉下来之后 `localHash` 才成为真值）。
+       * 远端新增。分两种：
+       * - 本地**没有**这一条 ⇒ 直接拉；
+       * - 本地**也有**这一条（路径相同、但没有共同基线）⇒ 这是「两边都新建了同一路径」，
+       *   内容若不同就**必须列为冲突**（§6.2 的三方 diff 没有共同祖先，猜不了谁对）。
+       *   ⚠️ 以前这里无条件 `download`，会把用户本地那份**静默覆盖**掉 —— 与红线 5 同一条。
+       */
+      const localFile = localByPath.get(path);
+      if (localFile !== undefined && localFile.hash !== entry.hash) {
+        conflicts.push({ path, reason: "both-modified" });
+        continue;
+      }
+      download.push({ path, sha: entry.hash });
+      continue;
+    }
+    if (!known.imported) {
+      /*
+       * **上次没物化成功的**（超上限 / 取字节失败）：`localHash` 是 null、本地也确实没有这个文件，
+       * 那不是「用户删了它」—— 给它一次重试机会（拉下来之后 `localHash` 才成为真值）。
        */
       download.push({ path, sha: entry.hash });
       continue;
@@ -206,6 +220,13 @@ export function planPull(baseline: BaselineLike, remote: RemoteTree, local: Loca
   for (const [path, known] of Object.entries(baseline.files)) {
     if (!known.imported) continue;
     if (remoteByPath.has(path)) continue;
+    /*
+     * 只推断**可物化**的路径（笔记 + 图片）的删除。
+     *
+     * 与下载分支用**同一个判据**（`isMaterializable`）：以前删除这一侧没判，
+     * 于是图片会进 `removeLocal`，而引擎那一侧又只删 Markdown ⇒ 每轮重算、永远删不掉（L5）。
+     */
+    if (!isMaterializable(path)) continue;
     const localFile = localByPath.get(path);
     if (!localFile) continue; // 两边都没了
     const localChanged = localFile.hash !== known.localHash;

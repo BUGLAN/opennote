@@ -85,6 +85,8 @@ describe("采用远端", () => {
 
     const outcome = await resolveConflictWithRemote(b, "notes/x.md");
     expect(outcome.ok).toBe(true);
+    // 裁决之后「待裁决」标记必须消失，否则这条路径会被永久挡住（N1）。
+    expect(b.ledger.files["notes/x.md"]?.pendingConflict).toBeUndefined();
     expect(new TextDecoder().decode(await b.deps.readLocal("notes/x.md"))).toBe("A 的版本");
 
     // ★ 关键：裁决之后下一轮是**空转**（基线对了，不再来回震荡）。
@@ -184,5 +186,46 @@ describe("previewConflict", () => {
     expect(preview.local).toBe("还在\n");
     expect(preview.remote).toBeNull();
     expect(preview.formattingOnly).toBe(false);
+  });
+});
+
+describe("★ M8 · E2EE 下冲突预览必须是明文", () => {
+  const NOTEBOOK_KEY = new Uint8Array(32).fill(9);
+
+  function e2eeSession(backend: SyncFileBackend, provider: ReturnType<typeof createMemoryProvider>): SyncSession {
+    return createSyncSession({
+      config: { enabled: true, baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "user-key", accountRef: "a" },
+      ledger: createSyncLedger({ baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "user-key", protocolVersion: 1 }),
+      provider,
+      backend,
+      notebookId: NOTEBOOK,
+      notebookKey: NOTEBOOK_KEY,
+    });
+  }
+
+  it("两边都给出**明文**（以前两边都是密文 ⇒ 解码失败 ⇒ 预览全空）", async () => {
+    const provider = createMemoryProvider({ cryptoMode: "user-key" });
+    const backendA = memoryBackend({ "notes/x.md": "base" });
+    const a = e2eeSession(backendA, provider);
+    await a.syncNow();
+
+    /*
+     * B 从**同一份起点**开始（E2EE 下新设备需要 did↔path 映射才能拉，空的 B 反查不到路径）。
+     * 先跑一轮让它记下基线，之后再两边各改。
+     */
+    const backendB = memoryBackend({ "notes/x.md": "base" });
+    const b = e2eeSession(backendB, provider);
+    await b.syncNow();
+
+    // 两边各改（都直接写**明文**到磁盘 —— E2EE 下磁盘上本来就是明文）。
+    await backendA.write("notes/x.md", new TextEncoder().encode("A 的版本"));
+    await backendB.write("notes/x.md", new TextEncoder().encode("B 的最终版"));
+    await a.syncNow();
+    const conflicted = await b.syncNow();
+    expect(conflicted!.conflicts.length + conflicted!.pushConflicts.length).toBeGreaterThan(0);
+
+    const preview = await previewConflict(b, "notes/x.md");
+    expect(preview.local).toBe("B 的最终版");
+    expect(preview.remote).toBe("A 的版本");
   });
 });

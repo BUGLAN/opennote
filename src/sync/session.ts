@@ -136,7 +136,17 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
       const local = selectSyncableEntries(await options.backend.list(), rules).map((entry) => entry.path);
       return Array.from(new Set([...local, ...knownPathsOf(options.ledger)]));
     },
-    ...(options.log === undefined ? {} : { log: undefined }),
+    ...(options.log === undefined
+      ? {}
+      : {
+          /*
+           * ★ 引擎的日志是**结构化**的（`(kind, detail)`），而会话的 `log` 是给人看的一行文本。
+           * 这里必须做一次适配：直接写 `{ log: options.log }` 虽然能通过类型检查
+           * （参数更少是合法的），但引擎每记一条只会把 `kind` 传进去、`detail` 全丢 ——
+           * 诊断面板里只剩孤零零的 `tree` / `push`，比没有更难查（L2）。
+           */
+          log: (kind, detail) => options.log?.(`[sync] ${kind} ${JSON.stringify(detail)}`),
+        }),
   });
 
   /*

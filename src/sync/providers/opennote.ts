@@ -68,6 +68,7 @@ export interface OpenNoteProviderOptions extends Omit<HttpTransportOptions, "not
 interface TreeResponse {
   cursor: string | null;
   truncated: boolean;
+  nextStartKey?: string;
   files: { did: string; path?: string; hash?: string; ehash?: string; size?: number; esize?: number; rev: string; deleted?: boolean }[];
 }
 
@@ -151,6 +152,7 @@ export class OpenNoteProvider implements SyncProvider {
       cursor: response.cursor ?? null,
       // ★ 原样上报（见模块头 ③）。
       truncated: response.truncated === true,
+      ...(typeof response.nextStartKey === "string" ? { nextStartKey: response.nextStartKey } : {}),
       entries,
     };
   }

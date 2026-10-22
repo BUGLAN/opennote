@@ -397,3 +397,23 @@ describe("★★ E2EE 端到端：远端只有密文与不可逆的 did", () => 
     expect(e2eeDid.startsWith("h:")).toBe(true);
   });
 });
+
+/* ============================================================================
+   ★ L2 · 引擎的结构化日志必须真的到得了诊断日志
+   ============================================================================ */
+
+describe("★ L2 · 引擎结构化日志没有被丢掉", () => {
+  it("传入 log ⇒ 能看到 tree / push / checkpoint 三类事件", async () => {
+    const provider = createMemoryProvider();
+    const backend = memoryBackend({ "notes/a.md": "# A" });
+    const lines: string[] = [];
+    const session = sessionFor(backend, provider, { log: (line: string) => lines.push(line) });
+
+    await session.syncNow();
+
+    const joined = lines.join("\n");
+    expect(joined).toContain("tree");
+    expect(joined).toContain("push");
+    expect(joined).toContain("checkpoint");
+  });
+});

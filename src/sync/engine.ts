@@ -29,7 +29,7 @@
  * 这也是「E2EE 放 P4 不会造成迁移」的结构性原因（§9 末段）。
  */
 
-import { assertSafeRelative, isMarkdownPath } from "../fs/paths";
+import { assertSafeRelative, isMaterializable } from "../fs/paths";
 import { applyTruncationGuard, assertDeletionBudget, planPull, planPush, type BaselineLike } from "./diff";
 import type { ConflictKind } from "./conflicts";
 import { isSameUpToFormatting } from "./textDiff";
@@ -57,6 +57,13 @@ export interface EngineLocalFile {
 export interface SyncEngineDeps {
   /** 扫本地文件（跳过同步范围之外的 —— 判定在 `ignore.ts`，引擎不重复实现）。 */
   listLocal: () => Promise<EngineLocalFile[]>;
+  /**
+   * 同 `listLocal`，但**如实报告读不到的目录**（H3）。
+   *
+   * 没给它 = 「这一轮扫全了」。给了而且 `unreadable` 非空时，引擎会**挂起推送侧的删除推断**：
+   * 一个被占用/无权限的子目录不该让整棵子树的文件被当成「用户删了」推成远端墓碑。
+   */
+  listLocalDetailed?: () => Promise<{ files: EngineLocalFile[]; unreadable: { path: string; message: string }[] }>;
   /** 算一条本地内容的内容标识（明文 sha256 / E2EE 的 `ehash`）。 */
   hashOf: (bytes: Uint8Array) => Promise<string>;
   /**
@@ -81,8 +88,28 @@ export interface SyncEngineDeps {
    * 更不会因此把文件写到盘上 —— 认不出来的 did 只如实报进 `unknownDids`，交给上层处置。
    */
   knownPaths: () => Promise<string[]>;
-  /** 读本地一条的原始字节。 */
+  /**
+   * 这条路径是不是被忽略（`.gitignore` / 内置集；判定在 `ignore.ts`，引擎不重复实现）。
+   *
+   * ★ **忽略 = 该路径在同步里双向不存在**（红线 8）：不 push、不 pull、不删除、不进 diff。
+   * 引擎用它对齐**三个**输入视图（本地扫描 / 账本 / 远端树）——只过滤其中一个是不够的：
+   * 只过滤本地扫描，账本里那条就会变成「用户删了它」（H2 的成因）。
+   */
+  isIgnored?: (path: string) => boolean;
+  /** 读本地一条的原始字节（**要发出去的**那一版：E2EE 下是密文）。 */
   readLocal: (path: string) => Promise<Uint8Array>;
+  /**
+   * 读本地一条的**明文**（E2EE 下磁盘上本来就是明文；明文模式与 `readLocal` 相同）。
+   *
+   * 只给「给人看 / 给人比」的场合用（冲突预览、「仅格式不同」判定）。没给就退回 `readLocal`。
+   */
+  readLocalPlain?: (path: string) => Promise<Uint8Array>;
+  /**
+   * 把**远端**字节解成明文（E2EE 时解密；明文模式直通）。没给就当作已是明文。
+   *
+   * ⚠️ 需要 `did`：内容加密的 AAD 是 `(did, notebookId)`。
+   */
+  decodeRemote?: (did: string, bytes: Uint8Array) => Uint8Array;
   /** 把远端一条写到本地（**只写盘，不记账**，记账由引擎交给 `onApplied` 后的调用方）。 */
   writeLocal: (path: string, bytes: Uint8Array) => Promise<void>;
   /** 删本地一条（远端已确认删除）。 */
@@ -131,6 +158,10 @@ export interface SyncOnceResult {
   /** 删除保护拦下的条数（>0 表示这次一条都没删，并把原因放在 `deletionGuardMessage`）。 */
   blockedDeletes: number;
   deletionGuardMessage: string | null;
+  /** 这一轮本地扫描**没扫全**（有目录读不到）⇒ 推送侧删除已挂起（H3）。 */
+  scanIncomplete: boolean;
+  /** 因扫描不完整而**挂起**的推送侧删除（与 `suspendedDeletes` 对称：一个是远端树不全，一个是本地扫不全）。 */
+  suspendedPushDeletes: string[];
   /** 远端说游标过期 ⇒ 这次走的是全树比对（`planPush`/`planPull` 本来就是全树比对）。 */
   resynced: boolean;
   /** 引擎更新后的账本（调用方负责落盘）。 */
@@ -222,7 +253,27 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   const ledger = input.ledger;
   const log = deps.log ?? (() => undefined);
 
-  const localFiles = await deps.listLocal();
+  /*
+   * ★ 忽略路径在引擎里**双向不存在**（红线 8）。
+   * 三个视图都要过滤：本地扫描、账本、远端树。少过滤一个就会出现
+   * 「账本有、扫描没有 ⇒ 推墓碑」或「远端有、本地忽略 ⇒ 又拉下来写盘」。
+   */
+  const isIgnored = deps.isIgnored ?? (() => false);
+  const ignoreCache = new Map<string, boolean>();
+  const ignored = (path: string): boolean => {
+    let value = ignoreCache.get(path);
+    if (value === undefined) {
+      value = isIgnored(path);
+      ignoreCache.set(path, value);
+    }
+    return value;
+  };
+  const scan = deps.listLocalDetailed === undefined
+    ? { files: await deps.listLocal(), unreadable: [] as { path: string; message: string }[] }
+    : await deps.listLocalDetailed();
+  /** 这一轮**没扫全**（有目录读不到）⇒ 禁止推断删除（H3）。 */
+  const scanIncomplete = scan.unreadable.length > 0;
+  const localFiles = scan.files.filter((file) => !ignored(file.path));
   const localByPath = new Map(localFiles.map((file) => [file.path, file]));
 
   /*
@@ -314,6 +365,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       unknownDids.push(entry.did);
       continue;
     }
+    if (ignored(path)) continue; // 忽略路径不进远端视图（否则会被当成「远端新增」拉下来）
     remoteEntries.push({ path, hash: entry.hash });
   }
   if (unknownDids.length > 0) log("tree", { unknownDids: unknownDids.length });
@@ -322,11 +374,56 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   const treeEntryByPath = new Map(remoteTree.entries.map((entry) => [entry.path, entry]));
 
   /*
+   * ★★ **还没裁决的冲突**（N1）：它们只该被"列出来"，绝不能被推/拉/删。
+   *
+   * 账本里的 `pendingConflict` 是上一轮（或更早）判出来的冲突。这里做两件事：
+   * 1. 若**两边都没变**（本地 hash 与远端 hash 都还等于记录里的标识）⇒ 仍然挂着，挡在推送之外；
+   * 2. 若任一侧变了（用户又改了 / 远端又改了）⇒ 标记过期，删掉，交回这一轮的 diff 重新判定
+   *    （它会重新判出冲突并写下新的标记，或者自然收敛）。
+   *
+   * ⚠️ 「远端这轮不完整」时**不做**过期判断：`remoteUnchanged` / `partialRemote` 都没有权威的
+   * 远端视图，拿它比会把有效的标记误删。
+   */
+  const remoteFullyKnown = !remoteUnchanged && partial === null;
+  const blockedPaths = new Set<string>();
+  for (const [path, file] of Object.entries(ledger.files)) {
+    const pending = file.pendingConflict;
+    if (pending === undefined) continue;
+    if (remoteFullyKnown) {
+      const currentLocal = localByPath.get(path)?.hash ?? null;
+      const currentRemote = treeEntryByPath.get(path)?.hash ?? null;
+      /*
+       * 两边**已经一样了**（用户手工把文件改回远端那一版 / 远端回滚了）⇒ 这不是冲突，
+       * 顺手把基线对齐、撤销标记。少了这一条，用户"自己把它改回去"之后仍然会被
+       * 一条内容相同的冲突挡着（推也推不动、拉也不拉）。
+       */
+      if (currentLocal !== null && currentRemote !== null && currentLocal === currentRemote) {
+        file.localHash = currentLocal;
+        file.remoteHash = currentRemote;
+        file.syncedAt = now();
+        delete file.pendingConflict;
+        continue;
+      }
+      if (currentLocal !== pending.localId || currentRemote !== pending.remoteId) {
+        delete file.pendingConflict;
+        continue;
+      }
+    }
+    blockedPaths.add(path);
+  }
+
+  /*
    * 账本结构上已经满足 `BaselineLike`（`localHash` / `remoteHash` / `imported` 三个字段名相同，
    * 只是多带了 `bid` / `rev` / `syncedAt`）。这里做一次显式窄化，好处是 diff 那一层
    * **看不到** bid/rev —— 它只该关心「谁改没改」，不该有机会去动账本的其它字段。
    */
-  const baselineView: BaselineLike = { files: ledger.files };
+  /*
+   * ⚠️ 这是**视图**，不是账本本身：被忽略的路径只是不参与这一轮的 diff，
+   * 账本条目原样保留 —— 用户解除忽略后它们能自然恢复（不会丢 rev/CAS 依据）。
+   */
+  const baselineView: BaselineLike = {
+    files: Object.fromEntries(Object.entries(ledger.files).filter(([path]) => !ignored(path))),
+  };
   const pushPlan = planPush(baselineView, localFiles);
   /*
    * ★ 远端没变时**不跑 `planPull`**。
@@ -383,8 +480,54 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   });
 
   const conflictedPaths = new Set(effectiveConflicts.map((item) => item.path));
-  const pushAdded = pushPlan.added.filter((file) => !conflictedPaths.has(file.path));
-  const pushModified = pushPlan.modified.filter((file) => !conflictedPaths.has(file.path));
+  const pushAdded = pushPlan.added.filter(
+    (file) => !conflictedPaths.has(file.path) && !ignored(file.path) && !blockedPaths.has(file.path),
+  );
+  const pushModified = pushPlan.modified.filter(
+    (file) => !conflictedPaths.has(file.path) && !ignored(file.path) && !blockedPaths.has(file.path),
+  );
+  /*
+   * ★ **冲突路径不推删除**：`planPull` 已经判出「本地删了、远端改过」时，
+   * 再去 `delete` 只会拿一个过期的 CAS 依据撞 409 —— 而且每轮都撞一次。
+   * 直接交给冲突清单，等用户裁决（§6.1 L2）。
+   *
+   * 忽略路径同理：它们在同步里双向不存在（红线 8），既不推删除也不进 diff。
+   */
+  const pushDeleted = pushPlan.deleted.filter(
+    (path) => !conflictedPaths.has(path) && !ignored(path) && !blockedPaths.has(path),
+  );
+
+  /*
+   * ★★ **推送侧的删除闸门**（H3）。
+   *
+   * 拉取侧一直有 `applyTruncationGuard` + `assertDeletionBudget` 两道闸门，而推送侧
+   * （「本地扫描里没有 ⇒ 推墓碑」）**一道都没有** —— 恰恰是最容易把一次误判放大成
+   * 「所有设备一起删文件」的那条路。这里补上同样的两道：
+   *
+   * 1. 本地扫描没扫全（有目录读不到）⇒ 一条都不删（挂起，等下一轮扫全再说）；
+   * 2. 一次要删的条数超过阈值 ⇒ 整批不删，把原因交给上层请用户确认。
+   */
+  const totalKnown = Object.values(ledger.files).filter((file) => file.imported).length;
+  let blockedDeletes = 0;
+  let deletionGuardMessage: string | null = null;
+  const suspendedPushDeletes: string[] = [];
+  let pushDeletesToRun = pushDeleted;
+  if (pushDeleted.length > 0) {
+    if (scanIncomplete) {
+      suspendedPushDeletes.push(...pushDeleted);
+      pushDeletesToRun = [];
+      log("guard", { suspendedPushDeletes: pushDeleted.length, scanIncomplete: true });
+    } else {
+      const budgetMessage = assertDeletionBudget(totalKnown, pushDeleted.length);
+      if (budgetMessage !== null) {
+        // 一条都不删（不是「删一部分」）—— 半删状态比不删更难收拾。
+        blockedDeletes += pushDeleted.length;
+        deletionGuardMessage = budgetMessage;
+        pushDeletesToRun = [];
+        log("guard", { blockedDeletes, totalKnown, side: "push" });
+      }
+    }
+  }
 
   /*
    * 进度条：规划完成后总数即确定（推 + 拉 + 两类删除）。
@@ -392,10 +535,21 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    */
   const onProgress = input.onProgress;
   let progressDone = 0;
+  /**
+   * 一个计划项**处理完了**（不管结果是通过、冲突、还是"跳过"）。
+   *
+   * ★ 进度条的数必须能走到 100%（L3）：以前只有"真的写成功了"才 tick，而冲突 / 伪冲突 /
+   * vanished / 被挂起 / 被预算拦下的条目虽然计入了 total，却永远不推进 ——
+   * 于是 `done < total` 恒成立，界面停在 87/100 然后整条消失。
+   */
+  const finishOne = (count = 1): void => {
+    progressDone += count;
+    tick();
+  };
   const progressTotal =
     pushAdded.length +
     pushModified.length +
-    pushPlan.deleted.length +
+    pushDeletesToRun.length +
     pullPlan.download.length +
     pullPlan.removeLocal.length;
   const tick = (): void => onProgress?.({ done: progressDone, total: progressTotal });
@@ -410,7 +564,35 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       localId: local?.hash ?? null,
       remoteId: remote?.hash ?? null,
     });
+    // ★ 记进账本：下一轮即使「远端没变、不跑 planPull」，这条冲突也不会从列表里消失（N1）。
+    const entry = ledger.files[item.path];
+    if (entry !== undefined) {
+      entry.pendingConflict = {
+        kind: item.reason,
+        localId: local?.hash ?? null,
+        remoteId: remote?.hash ?? null,
+        at: now(),
+      };
+    }
     log("conflict", { path: item.path, reason: item.reason });
+  }
+
+  /*
+   * 账本里**仍然挂着**的冲突也要报出来（本轮没有被 diff 重新判出来的那些）。
+   * 去重按路径：同一路径本轮已经报过就不再追加。
+   */
+  const reportedConflicts = new Set(conflicts.map((item) => item.path));
+  for (const path of blockedPaths) {
+    if (reportedConflicts.has(path)) continue;
+    const pending = ledger.files[path]?.pendingConflict;
+    if (pending === undefined) continue;
+    conflicts.push({
+      path,
+      kind: pending.kind,
+      localId: localByPath.get(path)?.hash ?? pending.localId,
+      remoteId: treeEntryByPath.get(path)?.hash ?? pending.remoteId,
+    });
+    log("conflict", { path, reason: pending.kind, pending: true });
   }
 
   /* ------------------------------------------------------------------ 推送 */
@@ -434,12 +616,15 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     });
     if ("conflict" in result) {
       /*
-       * 远端在我们列树之后前进了。**不重试、不强推**（§6.1 L1：leaf 不丢，让用户裁决）。
-       * 把它并进冲突账本，并把账本的 `remoteHash` 更新成远端的当前值 ——
-       * 否则下一次同步会拿一个过期的 CAS 依据再撞一次，陷入死循环。
+       * 远端在我们列树之后前进了。**不重试、不强推**（§6.1 L2：两份都留着，让用户裁决）。
+       *
+       * ★★ **绝不把 CAS 依据前移到远端当前值**（这正是 H1 的成因）。
+       * 一旦前移：下一轮 `planPush` 判「本地改了」、`If-Match` 又恰好命中远端当前版本
+       * ⇒ 本地那一版**静默覆盖**掉对方的修改，用户根本来不及裁决（红线 5）。
+       * 保持旧依据 ⇒ 下一轮仍然是 409 ⇒ 冲突每轮都如实列出（幂等、不多写一个字节），
+       * `planPull` 也会把「两边都改了」判进冲突清单。**一个多余的请求 << 一次静默覆盖。**
        */
       const remoteEntry = result.conflict.current;
-      const existing = ledger.files[file.path];
       /*
        * ★ **false conflict（伪冲突）**：两边都改了，但**改成了同一份内容**。
        *
@@ -460,16 +645,21 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
           syncedAt: now(),
         };
         log("push", { path: file.path, redundant: true });
+        finishOne();
         return;
       }
-      ledger.files[file.path] = {
-        bid: ledger.bids[file.path] ?? allocateBid(ledger, file.path),
-        localHash: existing?.localHash ?? null,
-        remoteHash: remoteEntry?.hash ?? null,
-        rev: remoteEntry?.rev ?? null,
-        imported: existing?.imported ?? true,
-        syncedAt: now(),
-      };
+      // ★ 账本的 CAS 依据（`localHash` / `remoteHash` / `rev`）**一个字都不改** ——
+      //   远端当前值只用于把冲突描述清楚（`remoteId`）。但冲突本身要**记下来**（N1），
+      //   否则下一轮「远端没变」时它会从界面上消失。
+      const conflictedEntry = ledger.files[file.path];
+      if (conflictedEntry !== undefined) {
+        conflictedEntry.pendingConflict = {
+          kind: "both-modified",
+          localId: file.hash,
+          remoteId: remoteEntry?.hash ?? null,
+          at: now(),
+        };
+      }
       pushConflicts.push({
         path: file.path,
         kind: "both-modified",
@@ -477,6 +667,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
         remoteId: remoteEntry?.hash ?? null,
       });
       log("push", { path: file.path, conflict: true });
+      finishOne();
       return;
     }
     const bid = ledger.bids[file.path] ?? allocateBid(ledger, file.path);
@@ -489,8 +680,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       syncedAt: now(),
     };
     pushed += 1;
-    progressDone += 1;
-    tick();
+    finishOne();
     log("push", { path: file.path, bytes: file.bytes });
   });
 
@@ -508,20 +698,37 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    * 走 `provider.delete()`（**逻辑**删除、留墓碑），不是物理删。CAS 用账本里的
    * `remoteHash`：远端在我们列树之后被别人改过 → 返回冲突 → 不删，交用户裁决。
    */
-  await runBounded(pushPlan.deleted, concurrency, async (path) => {
+  await runBounded(pushDeletesToRun, concurrency, async (path) => {
     const did = deps.didOf(path);
     const known = ledger.files[path];
     const result = await provider.delete({ did, baseHash: known?.remoteHash ?? null });
     if ("conflict" in result) {
+      /*
+       * 本地删了、远端又改了 ⇒ **不删、不重试**，交给用户裁决。
+       * 同样**不改写**账本的 CAS 依据（理由见上面 put 那条注释）。
+       *
+       * kind 必须是 `deleted-locally-modified-remotely`（本地删 / 远端改）——
+       * 之前写成 `deleted-remotely-modified-locally`（远端删 / 本地改）是反的，
+       * 界面上会把冲突方向说反（L1）。
+       */
       const current = result.conflict.current;
-      if (known) ledger.files[path] = { ...known, remoteHash: current?.hash ?? known.remoteHash, rev: current?.rev ?? known.rev };
+      const conflictedEntry = ledger.files[path];
+      if (conflictedEntry !== undefined) {
+        conflictedEntry.pendingConflict = {
+          kind: "deleted-locally-modified-remotely",
+          localId: null,
+          remoteId: current?.hash ?? null,
+          at: now(),
+        };
+      }
       pushConflicts.push({
         path,
-        kind: "deleted-remotely-modified-locally",
+        kind: "deleted-locally-modified-remotely",
         localId: null,
         remoteId: current?.hash ?? null,
       });
       log("delete", { path, conflict: true });
+      finishOne();
       return;
     }
     /*
@@ -541,8 +748,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       syncedAt: now(),
     };
     remoteDeleted += 1;
-    progressDone += 1;
-    tick();
+    finishOne();
     log("delete", { path, remote: true });
   });
 
@@ -562,6 +768,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
        * 「远端删除」处理。这里**不猜**（§6.1）。
        */
       log("pull", { path: item.path, vanished: true });
+      finishOne();
       return;
     }
     await deps.writeLocal(item.path, read.bytes);
@@ -583,8 +790,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     };
     appliedPaths.push(item.path);
     pulled += 1;
-    progressDone += 1;
-    tick();
+    finishOne();
     log("pull", { path: item.path, bytes: read.bytes.byteLength });
   };
 
@@ -641,9 +847,6 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   /* -------------------------------------------------------------- 删除（拉取侧） */
 
   const guarded = applyTruncationGuard(pullPlan, tree.truncated);
-  const totalKnown = Object.values(ledger.files).filter((file) => file.imported).length;
-  let blockedDeletes = 0;
-  let deletionGuardMessage: string | null = null;
 
   if (guarded.removeLocal.length > 0) {
     const budgetMessage = assertDeletionBudget(totalKnown, guarded.removeLocal.length);
@@ -651,23 +854,29 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       // 一条都不删（不是「删一部分」）—— 半删状态比不删更难收拾。
       blockedDeletes = guarded.removeLocal.length;
       deletionGuardMessage = budgetMessage;
+      // 整批不删也要把进度推过去，否则 `done < total` 恒成立（L3）。
+      finishOne(guarded.removeLocal.length);
       log("guard", { blockedDeletes, totalKnown });
     } else {
       for (const path of guarded.removeLocal) {
         /*
-         * 只删**我们物化过的笔记/图片**。`planPull` 已经用 `isMaterializable` 过滤过
-         * 远端条目的下载，但删除这一侧还要再判一次：目录、附件目录这类不该被「远端没有」
-         * 推断成删除。
+         * 只删**我们物化过的笔记/图片**（`isMaterializable`）。
+         *
+         * 以前这里用 `isMarkdownPath`，而 `planPull` 的删除候选是按「账本里有、远端没了」
+         * 生成的 —— 图片也能进来。于是图片永远删不掉、账本条目也不清，每轮重算一次（L5）。
+         * 判据统一成 `isMaterializable`，与下载分支同源。
          */
-        if (!isMarkdownPath(path)) continue;
+        if (!isMaterializable(path)) {
+          finishOne();
+          continue;
+        }
         try {
           await deps.removeLocal(path);
           const existing = ledger.files[path];
           if (existing) delete ledger.files[path];
           appliedPaths.push(path);
           deleted += 1;
-          progressDone += 1;
-          tick();
+          finishOne();
           log("delete", { path });
         } catch (error) {
           console.warn("[opennote] 同步：删本地这一条失败", path, error);
@@ -675,6 +884,9 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       }
     }
   }
+
+  // 被 `truncated` 挂起的删除也在计划里：它们不会被引擎动，但要计入"已处理"（L3）。
+  if (guarded.suspendedDeletes.length > 0) finishOne(guarded.suspendedDeletes.length);
 
   /* ---------------------------------------------------------------- 检查点 */
 
@@ -724,6 +936,8 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     treeTruncated: tree.truncated,
     blockedDeletes,
     deletionGuardMessage,
+    scanIncomplete,
+    suspendedPushDeletes,
     resynced: false,
     ledger,
     appliedPaths,
@@ -861,12 +1075,21 @@ export async function fetchWholeTree(
 
     if (!tree.truncated) return { entries: [...byDid.values()], truncated: false, cursor };
 
-    const last = tree.entries.at(-1);
-    // 空页却说 truncated：服务端状态可疑，如实报「没取全」，让删除继续被挂起。
-    if (!last) return { entries: [...byDid.values()], truncated: true, cursor };
+    /*
+     * ★★ **翻页锚点优先用服务端给的 `nextStartKey`**（= 这一页**原始行**的最后一条）。
+     *
+     * 为什么不能只用 `tree.entries.at(-1)`：服务端按原始行分页，而客户端看到的条目
+     * 已经过滤掉 `_design/` / `_local/` / `syncinfo` / 墓碑 / 坏条目。一旦**整页都被过滤掉**，
+     * 可见条目为空 ⇒ 旧代码直接放弃翻页 ⇒ 删除永久挂起、后面的页永远拉不到（M2）。
+     *
+     * 老服务端没有这个字段 ⇒ 回退到旧行为（可见条目最后一条），不改变既有语义。
+     */
+    const advance = tree.nextStartKey ?? tree.entries.at(-1)?.did;
+    // 没有锚点（老服务端 + 空页）：服务端状态可疑，如实报「没取全」，让删除继续被挂起。
+    if (advance === undefined) return { entries: [...byDid.values()], truncated: true, cursor };
     // 没前进（startkey 语义被改坏）：同上，宁可挂起删除也不猜。
-    if (startKey === last.did) return { entries: [...byDid.values()], truncated: true, cursor };
-    startKey = last.did;
+    if (startKey === advance) return { entries: [...byDid.values()], truncated: true, cursor };
+    startKey = advance;
   }
 
   return { entries: [...byDid.values()], truncated: true, cursor };
@@ -995,12 +1218,20 @@ async function filterFormattingOnly(
       kept.push(item);
       return;
     }
+    /*
+     * ★ 两边都要**先变明文**再比（M8）：E2EE 下 `readLocal` 给的是密文、`provider.read`
+     * 给的也是密文 —— 直接 `decodeText` 必然失败，这条优化在 E2EE 下等于不存在。
+     */
+    const readPlain = context.deps.readLocalPlain ?? context.deps.readLocal;
+    const did = context.deps.didOf(item.path);
     const [localBytes, remote] = await Promise.all([
-      context.deps.readLocal(item.path).catch(() => null),
-      context.provider.read(context.deps.didOf(item.path)).catch(() => null),
+      readPlain(item.path).catch(() => null),
+      context.provider.read(did).catch(() => null),
     ]);
     const left = localBytes === null ? null : decodeText(localBytes);
-    const right = remote === null ? null : decodeText(remote.bytes);
+    const right = remote === null
+      ? null
+      : decodeText(context.deps.decodeRemote === undefined ? remote.bytes : context.deps.decodeRemote(did, remote.bytes));
     if (left === null || right === null || !isSameUpToFormatting(left, right)) {
       kept.push(item);
       return;
@@ -1061,15 +1292,36 @@ export async function runBounded<T>(
   if (items.length === 0) return;
   let cursor = 0;
   const width = Math.max(1, Math.min(Math.floor(limit) || 1, items.length));
-  await Promise.all(
-    Array.from({ length: width }, async () => {
-      for (;;) {
-        const index = cursor;
-        cursor += 1;
-        if (index >= items.length) return;
+  /** 第一个失败（只留第一个：后面的是它的连锁反应，报出来只会淹没根因）。 */
+  let failure: unknown = null;
+
+  /*
+   * ★★ 失败时**先收尾、再抛出**（M7）。
+   *
+   * 旧实现是 `Promise.all`：任何一个 worker 抛错就**立刻** reject，而其余 worker
+   * 还在飞（它们甚至会继续领取新条目）。调用方（runner）看到 reject 就认为「这一轮结束了」，
+   * 于是下一轮同步与上一轮的僵尸 worker **并发改同一个账本和同一批文件** ——
+   * 账本记录与磁盘内容错位，症状是「拉下来的内容闪回旧版」。
+   *
+   * 现在：记下第一个错误、**停止领取新条目**、等所有 worker 收尾，最后才抛。
+   * 「这一轮结束」的定义因此变成「所有 worker 都已经停下来」。
+   */
+  const workers = Array.from({ length: width }, async () => {
+    for (;;) {
+      if (failure !== null) return;
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) return;
+      try {
         await worker(items[index]!, index);
+      } catch (error) {
+        if (failure === null) failure = error;
+        return;
       }
-    }),
-  );
+    }
+  });
+  // workers 自己吞掉了错误（记在 `failure` 里），所以这里不会提前 reject。
+  await Promise.all(workers);
+  if (failure !== null) throw failure;
 }
 

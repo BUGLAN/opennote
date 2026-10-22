@@ -88,6 +88,13 @@ export interface ProviderTree {
    * 最严重的误删来源，所以这个字段是**必填**的、不是可选。
    */
   truncated: boolean;
+  /**
+   * 下一页的 `startKey`（服务端给的**原始行**锚点）。
+   *
+   * 给了就优先用它翻页 —— 只按 `entries.at(-1)` 前进的话，一页全被过滤掉时会卡住（M2）。
+   * 老服务端没有它 ⇒ 回退到旧行为。
+   */
+  nextStartKey?: string;
   entries: ProviderTreeEntry[];
 }
 
