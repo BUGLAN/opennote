@@ -347,15 +347,30 @@ describe("collectLocalFiles · 本地扫描", () => {
     }
   });
 
-  it("maxFiles 封顶，只取扫描顺序里的前几个", async () => {
+  it("★ 撞到 maxFiles 上限 ⇒ **抛错**，而不是静默少扫一部分（M6）", async () => {
+    /*
+     * 静默截断的后果不是「少同步几个文件」，而是「没扫到的那些被当成删除了」：
+     * `planPush.deleted` 会把它们以 `sha: null` 提交进远端。
+     */
     const backend = new MemoryBackend();
     backend.seed("a.md", "A");
     backend.seed("b.md", "B");
     backend.seed("c.md", "C");
 
+    // 用户看到的是 `userMessage`（`describeGithubError` 只贴它），所以断言也看它。
+    await expect(collectLocalFiles(backend, { maxFiles: 2 })).rejects.toMatchObject({
+      code: "GH-TOO-MANY",
+      userMessage: expect.stringContaining("超过 2"),
+    });
+  });
+
+  it("正好扫满上限且没有剩余 ⇒ 不抛（别把「刚好两万个」当成错误）", async () => {
+    const backend = new MemoryBackend();
+    backend.seed("a.md", "A");
+    backend.seed("b.md", "B");
+
     const local = await collectLocalFiles(backend, { maxFiles: 2 });
-    expect(local.map((file) => file.path)).toEqual(["a.md", "b.md"]);
-    expect(local[0]).toEqual({ path: "a.md", hash: await sha256Hex("A"), bytes: 1 });
+    expect(local.map((file) => file.path).sort()).toEqual(["a.md", "b.md"]);
   });
 });
 
@@ -650,5 +665,61 @@ describe("pullChanges · 拉取", () => {
     expect({ downloaded: result.downloaded, removed: result.removed }).toEqual({ downloaded: 0, removed: 0 });
     expect(result.files["src/main.ts"]).toEqual({ remoteSha: "r-src-new", localHash: null, imported: false });
     expect(await backend.exists("src/main.ts")).toBe(false);
+  });
+});
+
+describe("★ M5 · 远端树 truncated ⇒ 禁止推断删除", () => {
+  it("远端只列出一部分 ⇒ **一条本地文件都不删**，并如实上报挂起条数", async () => {
+    const backend = new MemoryBackend();
+    backend.seed("notes/keep.md", "v1");
+    backend.seed("notes/gone.md", "v2");
+    const baseline = baselineOf({
+      "notes/keep.md": { remoteSha: "r-keep", localHash: await sha256Hex("v1"), imported: true },
+      "notes/gone.md": { remoteSha: "r-gone", localHash: await sha256Hex("v2"), imported: true },
+    });
+
+    // GitHub 的递归树被截断：gone.md 落在「没取到」的那一段里。
+    const { api } = fakeApi({ trees: { main: treeOf([blob("notes/keep.md", "r-keep")], "tree-1", true) } });
+    const result = await pullChanges({ api, backend, baseline });
+
+    expect(result.removed).toBe(0);
+    expect(result.treeTruncated).toBe(true);
+    expect(result.suspendedDeletes).toBe(1);
+    expect(result.guardMessage).toContain("不完整");
+    expect(backend.text("notes/gone.md")).toBe("v2");
+  });
+
+  it("树完整时才照常删（不能因为怕误删就永不删）", async () => {
+    const backend = new MemoryBackend();
+    backend.seed("notes/gone.md", "v2");
+    const baseline = baselineOf({
+      "notes/gone.md": { remoteSha: "r-gone", localHash: await sha256Hex("v2"), imported: true },
+    });
+
+    const { api } = fakeApi({ trees: { main: treeOf([], "tree-1", false) } });
+    const result = await pullChanges({ api, backend, baseline });
+
+    expect(result.removed).toBe(1);
+    expect(result.suspendedDeletes).toBe(0);
+    expect(backend.text("notes/gone.md")).toBeNull();
+  });
+});
+
+describe("★ H3 · GitHub 推送侧的删除预算", () => {
+  it("一次提交要删太多 ⇒ 抛错拒绝，一个写操作都不做", async () => {
+    const backend = new MemoryBackend();
+    const files: Record<string, GithubBaselineFile> = {};
+    for (let index = 0; index < 21; index += 1) {
+      files[`notes/n${index}.md`] = { remoteSha: `r${index}`, localHash: "h", imported: true };
+    }
+    const baseline = baselineOf(files);
+
+    const { api, rec } = fakeApi({});
+    await expect(pushChanges({ api, backend, baseline, message: "mass delete" })).rejects.toMatchObject({
+      code: "GH-DELETE-GUARD",
+      userMessage: expect.stringContaining("保护阈值"),
+    });
+    // 连 blob/tree 都不该创建。
+    expect(rec.log).toEqual(["headSha"]);
   });
 });

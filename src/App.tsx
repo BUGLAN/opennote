@@ -923,7 +923,7 @@ export default function App(): ReactNode {
         notify(
           `已从远端拉取：更新 ${result.downloaded} 个、删除 ${result.removed} 个${
             result.conflicts.length ? `；${result.conflicts.length} 个两边都改了，没有动` : ""
-          }`,
+          }${result.guardMessage ? `；${result.guardMessage}` : ""}`,
         );
       }
     } catch (error) {

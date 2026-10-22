@@ -31,6 +31,7 @@ import { GithubError, type GithubApi, type GithubTree } from "./api";
 import type { GithubBaseline } from "./baseline";
 
 import {
+  assertDeletionBudget,
   planPull as planPullNeutral,
   planPush as planPushNeutral,
   pushIsEmpty,
@@ -111,6 +112,13 @@ export async function collectLocalFiles(
   const out: LocalFile[] = [];
   const queue: string[] = [""];
   const skipDirs = new Set(["node_modules", "dist", "release", META_DIR]);
+  /**
+   * 撞到 `maxFiles` 上限时**有没有剩下没扫的东西**。
+   *
+   * ★ 以前这里静默截断（M6）：剩下的文件不进 `local` 列表 ⇒ `planPush.deleted`
+   * 把它们当成「用户删了」⇒ 一次提交从远端删除。护栏的作用是**拒绝**，不是**假装没看见**。
+   */
+  let overflow = false;
 
   while (queue.length && out.length < maxFiles) {
     const dir = queue.shift() ?? "";
@@ -121,7 +129,8 @@ export async function collectLocalFiles(
       console.warn("[opennote] 同步：读不到目录", dir, error);
       continue;
     }
-    for (const entry of entries) {
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index]!;
       const path = joinPath(dir, entry.name);
       // 目录名要按「目录」判（`build/` 这类规则只匹配带尾斜杠的目录）。
       if (rules.shouldIgnore(path, entry.kind === "directory")) continue;
@@ -136,8 +145,20 @@ export async function collectLocalFiles(
       } catch (error) {
         console.warn("[opennote] 同步：读不到文件", path, error);
       }
-      if (out.length >= maxFiles) break;
+      if (out.length >= maxFiles) {
+        // 还有没处理完的条目/目录 ⇒ 这一轮**没扫全**。
+        if (index < entries.length - 1 || queue.length > 0) overflow = true;
+        break;
+      }
     }
+    if (overflow) break;
+  }
+  if (overflow) {
+    throw new GithubError(
+      "GH-TOO-MANY",
+      `工作区里有超过 ${maxFiles} 个要同步的文件。请缩小同步范围（.gitignore 或换一个更小的目录），否则「没扫到」会被当成「删除了」。`,
+      null,
+    );
   }
   return out;
 }
@@ -184,6 +205,18 @@ export async function pushChanges(input: PushInput): Promise<PushResult> {
    * `updateRef` 之后抛错**（远端引用已经前进、本地基线却没更新，用户看到的话还会误导他再点一次）。
    * 整条链的顺序因此是「先把所有会失败的事做完，最后才动引用」。
    */
+  /*
+   * ★ 推送侧的删除预算（与引擎那边同一条纪律）：一次提交删掉太多文件时**整批拒绝**，
+   * 让用户先确认「这些真的都删了吗」，而不是一个提交把仓库删空。
+   */
+  const budgetMessage = assertDeletionBudget(
+    Object.values(baseline.files).filter((file) => file.imported).length,
+    plan.deleted.length,
+  );
+  if (budgetMessage !== null) {
+    throw new GithubError("GH-DELETE-GUARD", budgetMessage, null);
+  }
+
   const treeEntries: { path: string; sha: string | null }[] = [];
   const uploaded = new Map<string, string>();
   for (const file of [...plan.added, ...plan.modified]) {
@@ -236,6 +269,14 @@ export interface PullResult {
   files: GithubBaseline["files"];
   headSha: string;
   treeSha: string;
+  /** 远端树**没取全**（GitHub 对大仓库会置 `truncated`）⇒ 删除被禁止推断（§6.4 规则 1）。 */
+  treeTruncated: boolean;
+  /** 因树不完整而**挂起**的本地删除条数。 */
+  suspendedDeletes: number;
+  /** 因删除预算而**整批拦下**的条数（>0 表示一条都没删）。 */
+  blockedDeletes: number;
+  /** 拦下/挂起的原因（界面直接显示）。 */
+  guardMessage: string | null;
 }
 
 /** 拉取：远端新增/修改覆盖**没动过**的本地文件；两边都改的一律跳过并列出。 */
@@ -262,8 +303,25 @@ export async function pullChanges(input: PullInput): Promise<PullResult> {
       console.warn("[opennote] 拉取这个文件失败", item.path, error);
     }
   }
+  /*
+   * ★★ **树不完整 ⇒ 禁止推断删除**（§6.4 规则 1）。
+   *
+   * GitHub 的递归树 API 在大仓库上会置 `truncated`（约 10 万条目 / 7 MB）。
+   * 此时「树里没有它」只说明「这次没取到它」，把它当删掉会把本地文件静默删光（M5）。
+   * 与 `diff.ts` 的注释、新引擎的 `applyTruncationGuard` 是同一条纪律。
+   */
+  const budgetMessage = assertDeletionBudget(
+    Object.values(baseline.files).filter((file) => file.imported).length,
+    plan.removeLocal.length,
+  );
+  const suspendedDeletes = tree.truncated ? plan.removeLocal.length : 0;
+  const blockedDeletes = !tree.truncated && budgetMessage !== null ? plan.removeLocal.length : 0;
+  const removable = tree.truncated || budgetMessage !== null ? [] : plan.removeLocal;
+  const guardMessage = tree.truncated
+    ? "远端文件列表不完整（仓库太大），这次没有删除任何本地文件。"
+    : budgetMessage;
   let removed = 0;
-  for (const path of plan.removeLocal) {
+  for (const path of removable) {
     try {
       await backend.remove(path);
       delete files[path];
@@ -281,7 +339,19 @@ export async function pullChanges(input: PullInput): Promise<PullResult> {
     files[path] = { remoteSha: entry.sha, localHash: null, imported: false };
   }
 
-  return { downloaded, removed, failed, conflicts: plan.conflicts, files, headSha: head, treeSha: tree.sha };
+  return {
+    downloaded,
+    removed,
+    failed,
+    conflicts: plan.conflicts,
+    files,
+    headSha: head,
+    treeSha: tree.sha,
+    treeTruncated: tree.truncated,
+    suspendedDeletes,
+    blockedDeletes,
+    guardMessage,
+  };
 }
 
 export interface ResolveConflictsInput {
