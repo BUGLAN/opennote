@@ -460,6 +460,8 @@
   .sidebar,
   .sidebar__head,
   .sidebar__resizer,
+  /* 正文宽度拖拽条是纯交互外壳，不该印到纸上（同 .sidebar__resizer）。 */
+  .content-resize,
   .outline,
   .tabbar,
   .statusbar,

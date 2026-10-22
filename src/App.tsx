@@ -94,6 +94,7 @@ import { parseRepoInput, targetLabel } from "./lib/github/parse";
 import { collectLocalFiles, planPull, planPush, pullChanges, pushChanges, resolvePullConflicts } from "./lib/github/sync";
 import { GithubDialogHost } from "./components/GithubDialog";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
+import { ContentWidthHandles } from "./components/ContentWidthHandles";
 import { EditorPane, type CursorInfo } from "./components/EditorPane";
 import { HistoryDialog, SettingsDialog, ShortcutsDialog, type SettingsSectionId } from "./components/AppDialogs";
 import { Icon } from "./components/Icons";
@@ -1453,6 +1454,22 @@ export default function App(): ReactNode {
         {/* 只读锁 = 阅读视图（0.4.0 用户反馈）：锁上时编辑器留在挂载状态（undo/光标都在），
             上面整篇渲染成文章排版 —— 读笔记就该是读文章，不是盯着一个不能打字的光标。 */}
         {hasWorkspace && activeNote && activeLocked ? <ReadingView note={activeNote} /> : null}
+
+        {/* 正文宽度拖拽条：铺在 .main 上、贴着正文栏左右边缘（见组件的文件头注释）。
+            没有打开的笔记时不挂；只读锁时量的是阅读视图的 .reading。
+            onWidthChange 里让活跃编辑器重新量一次 —— 只改 CSS 变量的话 CodeMirror
+            的滚动锚点与行高表不会自己刷新，长文档拖宽后会停在旧的折行位置。 */}
+        <ContentWidthHandles
+          enabled={Boolean(hasWorkspace && activeNote)}
+          preset={ui.width}
+          activeId={activeId}
+          locked={activeLocked}
+          // 只读锁时活跃编辑器是隐藏的（display:none），对它 requestMeasure 会把行高表
+          // 量成 0（EditorPane 的注册表注释里记过这个坑）；阅读视图不需要 CM 重新排版。
+          onWidthChange={() => {
+            if (!activeLocked) viewRef.current?.requestMeasure();
+          }}
+        />
 
         <StatusBar
           counts={counts}

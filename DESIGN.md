@@ -218,6 +218,12 @@ components:
     area: "grid-area: 1 / 2 / 3 / 3（跨两行）；收起时只跨顶行"
     cursor: "col-resize"
     desktop: "-webkit-app-region: no-drag（它不在 .sidebar__head 里，那条「子元素自动 no-drag」管不到）"
+  content-resize:
+    scope: ".main 上的绝对定位层，只有左右两条 22px 命中区可交互（pointer-events: none 的容器）"
+    horizontal: "贴正文栏左右边缘：left/right 由 ContentWidthHandles 量出的 --content-handle-left/right 决定（正文在 .cm-scroller 里居中，滚动条宽度只有量才准）；命中区 = 16px 外侧 + 6px 压进 .cm-content 的 10px 内边距"
+    visual: "2px × 64px 的竖线（::before），默认 opacity 0，hover / focus-visible / 拖动中淡入；拖动侧 --accent，另一侧隐藏"
+    cursor: "col-resize；拖动期间 :root 挂 .is-resizing-content（全页 col-resize + user-select: none）"
+    hidden: "没有正文、拖不动（可用宽度 ≤ 预设，例如满幅）、≤820px、hover: none / pointer: coarse 时整条不显示"
   sidebar-head:
     area: "grid-area: 1 / 1 / 2 / 2（顶行，与 .tabbar 同一行；不是 .sidebar 的子元素）"
     width: "{layout.sidebar-w}（恒为拖出来的宽度，收起时也不变 → 标签栏不跳）"
@@ -1054,6 +1060,12 @@ font-variation-settings: "SOFT" 40, "WONK" 1;
 ### 正文栏
 
 - `--measure` 是正文的最大宽度，默认 `46rem`，用户可切 `38rem`（窄）/ `46rem`（标准）/ `56rem`（宽）/ `100%`（满幅）。
+- **拖拽调宽**：正文栏左右边缘各有一条拖拽条（`components/ContentWidthHandles.tsx`）。拖出来的宽度写在
+  `--measure-override`（**不覆盖 `--measure`**，预设仍是默认值的真源），消费方写
+  `max-width: var(--measure-override, var(--measure))`；持久化在独立的 localStorage 键
+  `opennote.contentWidth.v1`，记录「宽度 + 当时的栏宽预设」，换预设即作废。双击 / `Home` 清除覆盖值回到预设。
+  可拖范围：`[预设宽度, min(编辑器可用宽度, 视口宽度) − 28px×2]`（28 = 16 命中区 + 10 滚动条 + 2 余量），
+  见 `lib/contentWidth.ts` 的 `contentWidthBounds()`。
 - 阅读区默认居中（`.clip__prose { max-width: var(--measure); margin: 0 auto }`）。
 - 正文行高 `--doc-lh` 默认 `1.78`（用户可调），**比一般 UI 的 1.6 松得多** —— 这是「一张纸」的感觉来源之一，不要为了「更紧凑」把它收窄。
 
@@ -1062,6 +1074,7 @@ font-variation-settings: "SOFT" 40, "WONK" 1;
 | 常量 | 值 | 说明 |
 | --- | --- | --- |
 | `--sidebar-w` | 268px | 展开态侧栏的**默认**宽度。用户在右边框拖拽后由 `applyUi()` 写成内联值（夹取 200–520px）。≤820px 变 `min(84vw, 320px)` 浮层 |
+| `--measure-override` | 无（缺省） | **正文宽度拖拽**的结果，内联写在 `:root` 上；缺省时正文走 `--measure` 预设。窄屏 / 触摸设备上被 `app.css` 强制 `unset`，退回默认版式 |
 | `--outline-w` | 232px | 大纲面板。≤1080px 整个隐藏 |
 | `--tabbar-h` | 40px | 标签栏高度。**侧栏头部也是它**（`height: var(--tabbar-h)`），两条底边线连成一条 |
 | `--statusbar-h` | 30px | **底行两条底栏共用的高度**：`.statusbar` 与侧栏脚注 `.sidebar__foot`。两条底边线靠它连成一条（顶行靠 `--tabbar-h`，同一个原则的上下镜像）。内容多时**按底栏自身宽度**分档隐藏信息项（`@container statusbar`，见 §Responsive · 状态栏降级），按钮一颗都不许被裁 |

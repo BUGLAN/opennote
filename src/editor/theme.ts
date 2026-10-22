@@ -24,7 +24,8 @@ const baseTheme = EditorView.theme({
     overscrollBehavior: "contain",
   },
   ".cm-content": {
-    maxWidth: "var(--measure)",
+    // 用户拖过正文宽度后走 --measure-override；没拖过就还是栏宽预设（--measure）。
+    maxWidth: "var(--measure-override, var(--measure))",
     width: "100%",
     margin: "0 auto",
     padding: "56px 10px 45vh",

@@ -1,5 +1,6 @@
 import { createStore, useStore } from "../lib/store";
 import { DEFAULT_UI, THEMES, clampSidebarWidth, type ThemeId, type UiSettings } from "./types";
+import { applyContentWidthOverride, readContentWidthPreference } from "./contentWidth";
 
 export const STORAGE_KEY = "opennote.ui.v1";
 
@@ -129,6 +130,17 @@ export function applyUi(ui: UiSettings): void {
   root.dataset.font = ui.font;
   root.dataset.width = ui.width;
   root.dataset.appearance = ui.appearance;
+  /*
+   * 正文宽度：用户拖过之后，自定义宽度存在单独的 localStorage 键里（见 data/contentWidth.ts）。
+   * 这里按**当前栏宽预设**再读一次 —— 预设被改过时旧记录会作废，于是「设置里切栏宽」
+   * 永远立即可见，不会被上一次拖拽留下的宽度盖住。启动时（main.tsx 首帧前）也走这条路，
+   * 所以刷新页面不会先按默认宽度闪一下再跳成拖拽宽度。
+   * 拖拽进行中跳过：此时宽度归把手管，任何一次 patchUi 都不该把它重置回上一次落盘值。
+   */
+  if (!root.classList.contains("is-resizing-content")) {
+    // 「满幅」没有可拖的余量（拖拽条本来就隐藏），一律按预设走，不读自定义值。
+    applyContentWidthOverride(ui.width === "full" ? null : readContentWidthPreference(ui.width));
+  }
   // 紧凑断行（`compactWrap`）：只落一个属性，具体规则在 `editor.css` / `prose.css`。
   root.dataset.wrap = ui.compactWrap ? "compact" : "normal";
   root.style.setProperty("--doc-fs", `${ui.fontSize}px`);
