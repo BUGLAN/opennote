@@ -43,6 +43,17 @@ export interface SyncControllerOptions {
    * 有那种流时**不需要**它：连上那一刻会自己判断落后没落后（见 `start()`）。
    */
   syncOnStart?: boolean;
+  /**
+   * 流多久还没连上，就退回「启动先同步一轮」。默认 5000ms。
+   *
+   * 为什么必须有这道兜底：跳过启动同步的**唯一依据**是流会发来 `ready`。
+   * 而流可能根本连不上（被代理拦、服务端挂了、旧版 preload 的 `EventSource`
+   * 被 CSP 静默拦掉）—— 那时 `ready` 永远不会来，症状是**打开应用什么都不发生**。
+   * 宁可白跑一轮，也不能让同步静默地不工作。
+   */
+  streamOpenTimeoutMs?: number;
+  setTimeoutFn?: (fn: () => void, ms: number) => unknown;
+  clearTimeoutFn?: (handle: unknown) => void;
   log?: (line: string) => void;
 }
 
@@ -58,9 +69,22 @@ export interface SyncController {
   subscribed(): boolean;
 }
 
+const DEFAULT_STREAM_OPEN_TIMEOUT_MS = 5000;
+
 export function createSyncController(options: SyncControllerOptions): SyncController {
+  const setTimer = options.setTimeoutFn ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
+  const clearTimer = options.clearTimeoutFn ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+
   let stream: SyncStream | null = null;
   let running = false;
+  /** 「流没连上就退回启动同步」的兜底定时器。 */
+  let openFallback: unknown = null;
+
+  const clearOpenFallback = (): void => {
+    if (openFallback === null) return;
+    clearTimer(openFallback);
+    openFallback = null;
+  };
 
   return {
     start() {
@@ -88,11 +112,30 @@ export function createSyncController(options: SyncControllerOptions): SyncContro
        * 否则离线期间别人写的东西永远补不上 —— 流只报告「连上之后」的变化。
        */
       const reconciles = stream !== null && stream.reconcilesCursor();
-      if (!reconciles && options.syncOnStart !== false) void options.runner.request("startup");
+      if (!reconciles) {
+        if (options.syncOnStart !== false) void options.runner.request("startup");
+        return;
+      }
+      /*
+       * ★ 兜底：流**连不上**时不能干等着。
+       *
+       * 「跳过启动同步」的依据只有一条 —— 流会发来 `ready` 让我们比游标。
+       * 万一它连不上（被代理拦 / 服务端挂了 / 旧版 preload 的 `EventSource`
+       * 被 CSP 静默拦掉），`ready` 永远不会来，症状就是**打开应用什么都不发生**，
+       * 用户只能手动点同步。所以超时之后一律补一轮 —— 宁可白跑，不可静默不工作。
+       */
+      openFallback = setTimer(() => {
+        openFallback = null;
+        if (!running) return;
+        if (stream !== null && stream.phase() === "open") return;
+        options.log?.("[sync] 实时流没连上，退回「启动先同步一轮」");
+        void options.runner.request("startup");
+      }, options.streamOpenTimeoutMs ?? DEFAULT_STREAM_OPEN_TIMEOUT_MS);
     },
 
     stop() {
       running = false;
+      clearOpenFallback();
       stream?.stop();
       stream = null;
       options.runner.dispose();

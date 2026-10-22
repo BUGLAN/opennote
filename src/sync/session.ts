@@ -65,6 +65,13 @@ export interface SyncSessionOptions {
    * 增量同步的游标（见 `cursor.ts`）。不给就每轮都全树比对（正确、但慢）。
    */
   cursorStore?: CursorStore;
+  /**
+   * 游标存在哪个键上。默认 = `notebookId`。
+   *
+   * ★ 调用方**应当**给一个「笔记本 + 工作区」的组合键：同一个笔记本可以有多个
+   * 工作区（换了文件夹 / 从别处拷一份），共用一个游标会让后一个直接「继承」前一个的进度。
+   */
+  cursorKey?: string;
   onStatus?: (status: SyncStatus) => void;
   onApplied?: (paths: string[]) => void;
   /** 每一轮成功都回调（含纯推送）—— 账本落盘的挂点，见 runner 的说明。 */
@@ -154,7 +161,8 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
        * 游标来自站点存储（`cursor.ts`：它是设备属性，不能跟着笔记本目录走）。
        * 没有游标 ⇒ `since = null` ⇒ 引擎自动退化成全树比对（正确性优先）。
        */
-      const since = options.cursorStore?.load(options.notebookId) ?? null;
+      const cursorKey = options.cursorKey ?? options.notebookId;
+      const since = options.cursorStore?.load(cursorKey) ?? null;
       const result = await syncOnceIncremental({
         provider: options.provider,
         ledger: options.ledger,
@@ -166,7 +174,7 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       // 只有真的拿到了游标才推进；拿不到就保持旧值 —— 下一轮会再问一次（安全方向）。
-      if (result.checkpoint !== null) options.cursorStore?.save(options.notebookId, result.checkpoint);
+      if (result.checkpoint !== null) options.cursorStore?.save(cursorKey, result.checkpoint);
       return result;
     },
     ...(options.onStatus === undefined ? {} : { onStatus: options.onStatus }),

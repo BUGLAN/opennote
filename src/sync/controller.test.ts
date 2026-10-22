@@ -8,7 +8,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createSyncController } from "./controller";
 import type { SyncRunner, SyncStatus } from "./runner";
-import type { SyncStream } from "./stream";
+import type { StreamPhase, SyncStream } from "./stream";
 
 /** 一个记录触发的假调度器。 */
 function fakeRunner() {
@@ -31,19 +31,29 @@ function fakeRunner() {
  * `reconciles` 决定它会不会在连上时比对游标 —— 那正是「启动要不要无条件拉一轮」的分水岭，
  * 所以它必须是**可配的**，而不是写死一个值。
  */
-function fakeStream(options: { reconciles?: boolean } = {}) {
+function fakeStream(options: { reconciles?: boolean; phase?: StreamPhase } = {}) {
   const reconciles = options.reconciles === true;
   const stop = vi.fn();
+  let phase: StreamPhase = options.phase ?? "open";
   const stream: SyncStream = {
     start: vi.fn(),
     stop,
-    phase: () => "open",
+    phase: () => phase,
     reconcilesCursor: () => reconciles,
   };
-  return { stream, stop };
+  return { stream, stop, setPhase: (next: StreamPhase) => void (phase = next) };
 }
 
-function make(overrides: { openStream?: () => SyncStream | null; syncOnStart?: boolean; reconciles?: boolean } = {}) {
+function make(
+  overrides: {
+    openStream?: () => SyncStream | null;
+    syncOnStart?: boolean;
+    reconciles?: boolean;
+    phase?: StreamPhase;
+  } = {},
+) {
+  /** 手动定时器：用例自己决定「兜底超时」什么时候到点。 */
+  const timers: { fn: () => void; ms: number }[] = [];
   const runner = fakeRunner();
   const created: { stream: SyncStream; stop: ReturnType<typeof vi.fn> }[] = [];
   let onSignal: ((cursor: string | null) => void) | null = null;
@@ -55,11 +65,19 @@ function make(overrides: { openStream?: () => SyncStream | null; syncOnStart?: b
       onSignal = handler;
       onUpToDate = upToDate;
       if (overrides.openStream) return overrides.openStream();
-      const made = fakeStream({ reconciles: overrides.reconciles === true });
+      const made = fakeStream({
+        reconciles: overrides.reconciles === true,
+        ...(overrides.phase === undefined ? {} : { phase: overrides.phase }),
+      });
       created.push(made);
       return made.stream;
     },
     ...(overrides.syncOnStart === undefined ? {} : { syncOnStart: overrides.syncOnStart }),
+    setTimeoutFn: (fn: () => void, ms: number) => {
+      timers.push({ fn, ms });
+      return timers.length - 1;
+    },
+    clearTimeoutFn: () => undefined,
   });
 
   return {
@@ -70,6 +88,12 @@ function make(overrides: { openStream?: () => SyncStream | null; syncOnStart?: b
     signal: (cursor: string | null = "42") => onSignal?.(cursor),
     /** 模拟「连上后核对：已经是最新」。 */
     upToDate: () => onUpToDate?.(),
+    /** 让所有已排队的定时器到点。 */
+    fireTimers: () => {
+      const queued = timers.splice(0, timers.length);
+      for (const timer of queued) timer.fn();
+    },
+    timers,
   };
 }
 
@@ -180,6 +204,37 @@ describe("连上后核对为最新：不跑同步，但状态要跟上", () => {
     world.controller.start();
     world.upToDate();
     expect(note).toHaveBeenCalledOnce();
+    expect(world.triggers).toEqual([]);
+  });
+});
+
+describe("兜底：流连不上时不能干等着", () => {
+  it("★ 流一直没连上 ⇒ 超时后补一轮 startup（否则打开应用什么都不发生）", () => {
+    /*
+     * 「跳过启动同步」的依据只有一条：流会发来 `ready` 让我们比游标。
+     * 流连不上（被代理拦 / 服务端挂了 / 旧 preload 的 EventSource 被 CSP 拦）时
+     * `ready` 永远不来 —— 没有这道兜底，用户只能手点同步。
+     */
+    const world = make({ reconciles: true, phase: "connecting" });
+    world.controller.start();
+    expect(world.triggers).toEqual([]);
+
+    world.fireTimers();
+    expect(world.triggers).toEqual(["startup"]);
+  });
+
+  it("流已经连上 ⇒ 超时什么都不做（不白跑一轮）", () => {
+    const world = make({ reconciles: true, phase: "open" });
+    world.controller.start();
+    world.fireTimers();
+    expect(world.triggers).toEqual([]);
+  });
+
+  it("`stop()` 之后兜底不再触发（关掉工作区别在后台偷偷同步）", () => {
+    const world = make({ reconciles: true, phase: "connecting" });
+    world.controller.start();
+    world.controller.stop();
+    world.fireTimers();
     expect(world.triggers).toEqual([]);
   });
 });

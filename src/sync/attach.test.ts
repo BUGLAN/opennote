@@ -10,8 +10,9 @@
  * 所以下面每一条都在试「怎么让它退化成更糟的行为」，并断言它没有。
  */
 import { describe, expect, it, vi } from "vitest";
-import { attachWorkspaceSync } from "./attach";
+import { attachWorkspaceSync, knownCursorFor } from "./attach";
 import { createSyncLedger } from "./state";
+import { createMemoryCursorStore } from "./cursor";
 import { encodeAccountKey, createRegistrationMaterial } from "./accountKey";
 import { DISABLED_SYNC, type WorkspaceRecord, type WorkspaceSyncConfig } from "../data/workspaces";
 import type { FileSystemBackend } from "../fs/types";
@@ -202,5 +203,41 @@ describe("接上之后", () => {
     expect(opened[0]).toContain("/v1/events?nb=");
     expect(opened[0]).toContain("authToken=");
     result.controller.stop();
+  });
+});
+
+describe("knownCursorFor：什么情况下**不认**游标", () => {
+  /** 造一个账本：每条都当作「以前同步成功过」。 */
+  const ledgerWith = (paths: string[]) => {
+    const ledger = createSyncLedger({
+      baseUrl: "https://e.com",
+      notebookId: NOTEBOOK,
+      cryptoMode: "none",
+      protocolVersion: 1,
+    });
+    paths.forEach((path, index) => {
+      ledger.files[path] = { bid: index + 1, localHash: "l", remoteHash: "r", rev: "1-a", imported: true, syncedAt: 0 };
+    });
+    return ledger;
+  };
+
+  it("没有游标存储 ⇒ 返回 undefined（controller 会退回「启动无条件同步一轮」）", () => {
+    expect(knownCursorFor(ledgerWith(["a.md"]), undefined, "key")).toBeUndefined();
+  });
+
+  it("★ 账本为空 ⇒ 即使存着游标也返回 null（全新 / 被清空的工作区必须同步一轮）", () => {
+    /*
+     * 这正是「换成一个空文件夹后什么都不拉、必须手点同步」的那条：
+     * 游标和服务端一致只说明**远端没动过**，不说明**本机有文件**。
+     */
+    const store = createMemoryCursorStore({ [`${NOTEBOOK}|E:/notes`]: "42" });
+    const known = knownCursorFor(ledgerWith([]), store, `${NOTEBOOK}|E:/notes`)!;
+    expect(known()).toBeNull();
+  });
+
+  it("账本非空 ⇒ 返回**该工作区**的游标（不串到别的工作区）", () => {
+    const store = createMemoryCursorStore({ [`${NOTEBOOK}|E:/a`]: "11", [`${NOTEBOOK}|E:/b`]: "22" });
+    expect(knownCursorFor(ledgerWith(["a.md"]), store, `${NOTEBOOK}|E:/a`)!()).toBe("11");
+    expect(knownCursorFor(ledgerWith(["a.md"]), store, `${NOTEBOOK}|E:/b`)!()).toBe("22");
   });
 });

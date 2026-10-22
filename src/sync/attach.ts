@@ -42,6 +42,27 @@ import type { HashCache } from "./hashCache";
 import type { CursorStore } from "./cursor";
 
 /** 接不上的原因（返回给 UI 显示 —— 不要只返回 `null` 让界面自己猜）。 */
+/**
+ * 造一个「本机游标」读取函数，给 `stream` 连上时比对用。
+ *
+ * 两条纪律都在这一个函数里（所以它值得被单独测）：
+ *
+ * 1. **按工作区分键**（`cursorKey` 由调用方拼成「笔记本 + 工作区」）。
+ *    共用一个键会让第二个工作区直接继承第一个的进度，然后一条都不拉。
+ * 2. **账本为空时不认这个游标**。「游标和服务端一致」只说明远端没动过，
+ *    不说明本机有文件 —— 全新 / 被清空的工作区必须老老实实同步一轮。
+ */
+export function knownCursorFor(
+  ledger: SyncLedger,
+  cursorStore: CursorStore | undefined,
+  cursorKey: string,
+): (() => string | null) | undefined {
+  if (cursorStore === undefined) return undefined;
+  return () => {
+    if (Object.keys(ledger.files).length === 0) return null;
+    return cursorStore.load(cursorKey);
+  };
+}
 export type AttachSkipReason =
   /** 配置里同步是关的（默认）。 */
   | "disabled"
@@ -162,6 +183,15 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
       ...(options.log === undefined ? {} : { log: options.log }),
     });
 
+  /*
+   * 游标（增量同步的 `since`）。两件事都在这里定：
+   * ① **按工作区**分开存（不是按笔记本 —— 同一笔记本可以有多个工作区）；
+   * ② **账本为空时不认它**（空工作区不能因为旧游标就跳过同步）。
+   * 细节见下面的两条注释。
+   */
+  const cursorStore = options.cursorStore;
+  const cursorKey = `${config.notebookId}|${options.record.location}`;
+  const knownCursor = knownCursorFor(options.ledger, cursorStore, cursorKey);
   const session = createSyncSession({
     config,
     ledger: options.ledger,
@@ -171,6 +201,7 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
     ...(options.gitignoreText === undefined ? {} : { gitignoreText: options.gitignoreText }),
     ...(options.hashCache === undefined ? {} : { hashCache: options.hashCache }),
     ...(options.cursorStore === undefined ? {} : { cursorStore: options.cursorStore }),
+    cursorKey,
     ...(notebookKey === undefined ? {} : { notebookKey }),
     ...(options.onSynced === undefined ? {} : { onSynced: options.onSynced }),
     ...(options.onStatus === undefined ? {} : { onStatus: options.onStatus }),
@@ -181,16 +212,6 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
   });
 
   const realtime = options.realtime !== false;
-  /*
-   * 游标存储的读取函数：`stream` 连上时用它和 `ready.cursor` 比一比，
-   * **落后才同步**（见 `stream.ts` 的 `knownCursor`）。
-   *
-   * 没有游标存储时传 `undefined` —— 那会让 `controller` 退回「启动无条件拉一轮」，
-   * 方向是安全的（宁可多拉一次，不可漏一次）。
-   */
-  const cursorStore = options.cursorStore;
-  const knownCursor = cursorStore === undefined ? undefined : () => cursorStore.load(config.notebookId);
-
   const controller = createSyncController({
     runner: session.runner,
     openStream: (onSignal, onUpToDate) => {
