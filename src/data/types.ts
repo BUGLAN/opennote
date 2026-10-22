@@ -184,6 +184,15 @@ export interface UiSettings {
   expanded: Id[];
   /** Folders the user collapsed while in "expand all" mode — keeps siblings open. */
   collapsed: Id[];
+  /**
+   * 「标签」页里展开的标签分支（键 = 完整标签路径，如 `os/linux`）。与 `expanded`
+   * 同一套语义：空 = 全部收起；过滤（筛选）时反向读 `collapsedTags`。
+   * 只落 localStorage、不进 `state.json` 的 meta：标签的展开是纯界面状态，
+   * 不像文件夹那样需要跨设备同步。
+   */
+  expandedTags: string[];
+  /** 过滤时被用户手动收起的标签分支 —— 命中路径默认全展开，这列表是例外。 */
+  collapsedTags: string[];
   lastNoteId: Id | null;
   /**
    * 「设置 · 文件 · 导入与接口」里的三项（设计稿 R1/R2/R8）。
@@ -283,6 +292,9 @@ export const DEFAULT_UI: UiSettings = {
   activeId: null,
   expanded: [],
   collapsed: [],
+  // 标签树的展开 / 收起（见 UiSettings.expandedTags）：空 = 全部收起。
+  expandedTags: [],
+  collapsedTags: [],
   lastNoteId: null,
   // 0.3.0（00 号 §6.14㉕）默认「先进入收件箱」：外部导入先落 `.opennote/inbox/`，
   // 由用户在收件箱里确认落点后再入库。这样任何外部客户端都不可能静默写进笔记库。

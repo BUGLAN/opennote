@@ -3113,6 +3113,73 @@ export function allTags(state: LibraryState): { tag: string; count: number }[] {
     .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag, "zh-Hans-CN"));
 }
 
+/**
+ * 标签树的一个节点：「标签」页的数据源。标签按 `/` 切出层级（嵌套标签 `#os/linux`，
+ * Obsidian 同款约定）—— 存储仍是 `note.tags` 里的扁平字符串，层级只在这里归并；
+ * 中间段没有对应标签也会补出父节点（只出现 `a/b` 时 `a` 照样是可展开的分支）。
+ */
+export interface TagTreeNode {
+  /** 完整标签（含父级路径），如 `os/linux`；scope 与展开状态都用它做键。 */
+  path: string;
+  /** 显示名：路径的最后一段，如 `linux`。 */
+  name: string;
+  /** 子标签分支。 */
+  children: TagTreeNode[];
+  /** 直接打了这个**完整**标签的笔记（不含子标签的）。 */
+  notes: Note[];
+  /** 自身 + 全部子孙标签的笔记数：分支收起时显示的那个数。 */
+  total: number;
+}
+
+/**
+ * 把 `note.tags` 归并成一棵标签树。与 `allTags` 的差异都在**视图语义**上：
+ * - 回收站里的笔记不进来（`allTags` 连 trashed 一起数 —— 那是给命令面板留的候选全集）；
+ * - 同一篇笔记重复写同一个标签只算一次（front matter 与正文 `#tag` 双写是常态）。
+ */
+export function tagTree(state: LibraryState, options: { sort?: SortKey } = {}): TagTreeNode[] {
+  const { sort = "updated" } = options;
+  const byPath = new Map<string, TagTreeNode>();
+
+  /** 取（或建出）某个路径的节点，连同缺的祖先一起 —— 树的形状由用到的路径决定。 */
+  const nodeFor = (path: string): TagTreeNode => {
+    const existing = byPath.get(path);
+    if (existing) return existing;
+    const slash = path.lastIndexOf("/");
+    const node: TagTreeNode = { path, name: path.slice(slash + 1), children: [], notes: [], total: 0 };
+    byPath.set(path, node);
+    if (slash >= 0) nodeFor(path.slice(0, slash)).children.push(node);
+    return node;
+  };
+
+  for (const note of Object.values(state.notes)) {
+    if (note.trashed) continue;
+    for (const tag of new Set(note.tags)) {
+      const path = tag
+        .split("/")
+        .map((segment) => segment.trim())
+        .filter(Boolean)
+        .join("/");
+      if (!path) continue;
+      nodeFor(path).notes.push(note);
+    }
+  }
+
+  /** 自底向上：先算 total（子标签的排序要用它），再排子标签与笔记。 */
+  const finish = (node: TagTreeNode): number => {
+    let total = node.notes.length;
+    for (const child of node.children) total += finish(child);
+    node.total = total;
+    node.notes = sortNotes(node.notes, sort);
+    node.children.sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, "zh-Hans-CN"));
+    return total;
+  };
+
+  const roots = [...byPath.values()].filter((node) => !node.path.includes("/"));
+  for (const root of roots) finish(root);
+  roots.sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, "zh-Hans-CN"));
+  return roots;
+}
+
 const plainCache = new Map<Id, string>();
 /** Bound the body cache so a huge notebook cannot grow it without limit (D05). */
 const PLAIN_CACHE_LIMIT = 400;

@@ -1,6 +1,5 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import {
-  allTags,
   childFolders,
   collapseFolder,
   deleteFolder,
@@ -23,12 +22,14 @@ import {
   treeFilterFor,
   setStarred,
   starredNotes,
+  tagTree,
   trashNote,
   type LibraryState,
+  type TagTreeNode,
 } from "../data/library";
 import type { EntryOptions } from "../data/entryOptions";
 import type { Folder, Id, Note, UiSettings } from "../data/types";
-import { themeKind } from "../data/ui";
+import { getUi, patchUi, themeKind } from "../data/ui";
 import type { WorkspaceRecord } from "../data/workspaces";
 import { isCapacitorNative } from "../fs";
 import { askConfirm, askFolder, askText } from "../lib/dialogs";
@@ -103,6 +104,7 @@ export function Sidebar(props: SidebarProps): ReactNode {
   const { library, ui, scope, tab, activeId } = props;
   const [filter, setFilter] = useState("");
   const [query, setQuery] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -114,8 +116,6 @@ export function Sidebar(props: SidebarProps): ReactNode {
       trash: Object.keys(library.trash).length,
     };
   }, [library.notes, library.trash]);
-
-  const tags = useMemo(() => allTags(library), [library]);
 
   /*
    * 「新建到哪儿」= 文件夹行那枚 `is-current` 记号的**唯一**含义。那枚记号是故意做弱的
@@ -399,7 +399,25 @@ export function Sidebar(props: SidebarProps): ReactNode {
         ) : null}
 
         {tab === "tags" ? (
-          <TagsBody library={library} tags={tags} scope={scope} activeId={activeId} onScope={props.onScope} onOpen={props.onOpenNote} />
+          <>
+            <div className="sidebar__filter">
+              <input
+                className="field field--search"
+                value={tagFilter}
+                placeholder="筛选标签…"
+                onChange={(event) => setTagFilter(event.target.value)}
+              />
+            </div>
+            <TagsBody
+              library={library}
+              ui={ui}
+              scope={scope}
+              activeId={activeId}
+              filter={tagFilter}
+              onScope={props.onScope}
+              onOpen={props.onOpenNote}
+            />
+          </>
         ) : null}
 
         {tab === "starred" ? (
@@ -884,6 +902,11 @@ interface NoteRowProps {
   active: boolean;
   dirty?: boolean;
   variant?: "tree" | "list";
+  /**
+   * 关掉拖放（默认开）。标签树里的行会跨标签重复出现，「拖到另一篇笔记上 =
+   * 移到它所在的文件夹」在那个语境里说不通，所以那里传 `false`。
+   */
+  dnd?: boolean;
   onOpen: (id: Id) => void;
   dropTarget?: string | null;
   setDropTarget?: (key: string | null) => void;
@@ -895,6 +918,7 @@ function NoteRow({
   active,
   dirty = false,
   variant = "tree",
+  dnd = true,
   onOpen,
   dropTarget,
   setDropTarget,
@@ -955,7 +979,6 @@ function NoteRow({
       role="treeitem"
       tabIndex={0}
       aria-selected={active}
-      draggable
       className={cn("tree__row", active && "is-active", dropTarget === key && "is-drop", variant === "list" && "tree__row--stacked")}
       style={{ paddingLeft: 6 + depth * 13 }}
       onClick={() => onOpen(note.id)}
@@ -970,28 +993,33 @@ function NoteRow({
         event.preventDefault();
         menu(event.clientX, event.clientY);
       }}
-      onDragStart={() => {
-        dragPayload = { kind: "note", id: note.id };
-      }}
-      onDragEnd={() => {
-        dragPayload = null;
-        setDropTarget?.(null);
-      }}
-      onDragOver={(event) => {
-        if (!dragPayload) return;
-        event.preventDefault();
-      }}
-      onDrop={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        // 拖到另一篇笔记上 = 拖进它所在的那个目录。走**同一个**带反馈的入口，
-        // 否则同一次移动从菜单走会报「图没跟上」、从拖放走就静默丢图。
-        if (dragPayload?.kind === "note" && dragPayload.id !== note.id) {
-          void moveNoteWithFeedback(dragPayload.id, note.folderId);
-        }
-        dragPayload = null;
-        setDropTarget?.(null);
-      }}
+      {...(dnd
+        ? {
+            draggable: true,
+            onDragStart: () => {
+              dragPayload = { kind: "note", id: note.id };
+            },
+            onDragEnd: () => {
+              dragPayload = null;
+              setDropTarget?.(null);
+            },
+            onDragOver: (event: React.DragEvent) => {
+              if (!dragPayload) return;
+              event.preventDefault();
+            },
+            onDrop: (event: React.DragEvent) => {
+              event.preventDefault();
+              event.stopPropagation();
+              // 拖到另一篇笔记上 = 拖进它所在的那个目录。走**同一个**带反馈的入口，
+              // 否则同一次移动从菜单走会报「图没跟上」、从拖放走就静默丢图。
+              if (dragPayload?.kind === "note" && dragPayload.id !== note.id) {
+                void moveNoteWithFeedback(dragPayload.id, note.folderId);
+              }
+              dragPayload = null;
+              setDropTarget?.(null);
+            },
+          }
+        : {})}
     >
       <span className="tree__caret" />
       <span className="tree__icon">
@@ -1324,29 +1352,96 @@ function SearchBody({
   );
 }
 
+/* ================================ tags body =============================== */
+
+/*
+ * 「标签」页与「文件」页用同一套树的语言：分支 = 标签（`/` 切层级，见 `tagTree()`），
+ * 叶子 = 笔记。展开/收起、过滤时命中分支默认展开、点行改 scope（`is-current` 记号）——
+ * 行为与 `FolderBranch` 一一对应；标签不是文件，所以不挂拖放与右键菜单。
+ */
+
+/** 展开一个标签分支：同时从「过滤时的收起名单」里摘掉 —— 两个名单不能同时记它。 */
+function expandTag(path: string): void {
+  const ui = getUi();
+  patchUi({
+    expandedTags: ui.expandedTags.includes(path) ? ui.expandedTags : [...ui.expandedTags, path],
+    collapsedTags: ui.collapsedTags.filter((entry) => entry !== path),
+  });
+}
+
+/** 收起一个标签分支（`expandTag` 的另一半，与 `collapseFolder` 同构）。 */
+function collapseTag(path: string): void {
+  const ui = getUi();
+  patchUi({
+    expandedTags: ui.expandedTags.filter((entry) => entry !== path),
+    collapsedTags: ui.collapsedTags.includes(path) ? ui.collapsedTags : [...ui.collapsedTags, path],
+  });
+}
+
+/**
+ * 把一个标签的祖先链（含自身）全部展开 —— 命令面板跳进「标签」页时调用，与文件树的
+ * `revealNoteInTree()` 同一职责：scope 记号不能落在一个收着的分支里。
+ *
+ * 只在**跳转入口**调用；树上的点击不经过它 —— 点行本身就在切换展开态，再补一次
+ * 展开会把「点一下收起」原样弹回去（尤其 scope 原本不在这一行上时）。
+ */
+export function revealTag(path: string): void {
+  const current = getUi().expandedTags;
+  const missing: string[] = [];
+  let rest = path;
+  while (rest) {
+    if (!current.includes(rest)) missing.push(rest);
+    rest = rest.includes("/") ? rest.slice(0, rest.lastIndexOf("/")) : "";
+  }
+  if (!missing.length) return;
+  patchUi({ expandedTags: [...current, ...missing] });
+}
+
+/** 过滤后的可见子树：只保留「标签路径命中」或「子树里有命中」的节点。 */
+interface VisibleTagNode {
+  node: TagTreeNode;
+  /** 这个节点下要画的笔记：标签自身命中时是全部（文件夹名命中的同款语义），否则只剩标题命中的。 */
+  notes: Note[];
+  children: VisibleTagNode[];
+}
+
+/** 多关键词 AND（与 `treeFilterFor()` 同一口径）：标签按完整路径、笔记按标题参与匹配。 */
+function filterTagTree(nodes: TagTreeNode[], terms: string[]): VisibleTagNode[] {
+  const result: VisibleTagNode[] = [];
+  for (const node of nodes) {
+    const children = filterTagTree(node.children, terms);
+    const pathHit = terms.length > 0 && terms.every((term) => node.path.toLowerCase().includes(term));
+    const notes = pathHit
+      ? node.notes
+      : node.notes.filter((note) => terms.every((term) => note.title.toLowerCase().includes(term)));
+    if (!pathHit && !notes.length && !children.length) continue;
+    result.push({ node, notes, children });
+  }
+  return result;
+}
+
 function TagsBody({
   library,
-  tags,
+  ui,
   scope,
   activeId,
+  filter,
   onScope,
   onOpen,
 }: {
   library: LibraryState;
-  tags: { tag: string; count: number }[];
+  ui: UiSettings;
   scope: Scope;
   activeId: Id | null;
+  filter: string;
   onScope: (scope: Scope) => void;
   onOpen: (id: Id) => void;
 }): ReactNode {
-  const activeTag = scope.kind === "tag" ? scope.tag : null;
-  const notes = activeTag
-    ? Object.values(library.notes)
-        .filter((note) => !note.trashed && note.tags.includes(activeTag))
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-    : [];
+  const roots = useMemo(() => tagTree(library, { sort: ui.sort }), [library, ui.sort]);
+  const terms = useMemo(() => filter.trim().toLowerCase().split(/\s+/).filter(Boolean), [filter]);
+  const visible = useMemo(() => filterTagTree(roots, terms), [roots, terms]);
 
-  if (!tags.length) {
+  if (!roots.length) {
     return (
       <p className="tree__empty">
         还没有标签。
@@ -1357,43 +1452,116 @@ function TagsBody({
   }
 
   return (
+    <div className="tree">
+      <div className="tree__group">全部标签</div>
+      {visible.length ? (
+        visible.map((entry) => (
+          <TagBranch
+            key={entry.node.path}
+            entry={entry}
+            depth={0}
+            filtered={terms.length > 0}
+            library={library}
+            ui={ui}
+            scope={scope}
+            activeId={activeId}
+            onScope={onScope}
+            onOpen={onOpen}
+          />
+        ))
+      ) : (
+        <p className="tree__empty">没有匹配「{filter.trim()}」的标签或笔记。</p>
+      )}
+    </div>
+  );
+}
+
+interface TagBranchProps {
+  entry: VisibleTagNode;
+  depth: number;
+  /** 过滤中（筛选框有词）：命中路径默认全展开，`collapsedTags` 是用户手动收下的例外。 */
+  filtered: boolean;
+  library: LibraryState;
+  ui: UiSettings;
+  scope: Scope;
+  activeId: Id | null;
+  onScope: (scope: Scope) => void;
+  onOpen: (id: Id) => void;
+}
+
+function TagBranch({ entry, depth, filtered, library, ui, scope, activeId, onScope, onOpen }: TagBranchProps): ReactNode {
+  const { node, notes, children } = entry;
+  const hasChildren = children.length > 0 || notes.length > 0;
+  // 与 `FolderBranch` 同一条规则：平时看 `expandedTags`；过滤时默认全展开（命中要一眼看得见）。
+  const open = filtered ? !ui.collapsedTags.includes(node.path) : ui.expandedTags.includes(node.path);
+  const current = scope.kind === "tag" && scope.tag === node.path;
+
+  return (
     <>
-      <div className="tree">
-        <div className="tree__group">全部标签</div>
-        {tags.map(({ tag, count }) => (
-          <button
-            key={tag}
-            type="button"
-            aria-current={activeTag === tag ? "true" : undefined}
-            className={cn("tree__row", activeTag === tag && "is-current")}
-            onClick={() => onScope({ kind: "tag", tag })}
-          >
-            <span className="tree__icon">
-              <Icon name="hash" size={13} />
-            </span>
-            <span className="tree__label">{tag}</span>
-            <span className="tree__meta">{count}</span>
-          </button>
-        ))}
+      <div
+        role="treeitem"
+        tabIndex={0}
+        aria-expanded={hasChildren ? open : undefined}
+        aria-selected={false}
+        aria-current={current ? "true" : undefined}
+        className={cn("tree__row", current && "is-current")}
+        style={{ paddingLeft: 6 + depth * 13 }}
+        onClick={() => {
+          onScope({ kind: "tag", tag: node.path });
+          if (open) collapseTag(node.path);
+          else expandTag(node.path);
+        }}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          onScope({ kind: "tag", tag: node.path });
+          if (open) collapseTag(node.path);
+          else expandTag(node.path);
+        }}
+      >
+        <span className={cn("tree__caret", open && "is-open")}>
+          {hasChildren ? <Icon name="chevronRight" size={13} /> : null}
+        </span>
+        <span className="tree__icon">
+          <Icon name="hash" size={13} />
+        </span>
+        {/* 子标签只显示最后一段；完整路径放悬浮提示里，重名时靠它分辨。 */}
+        <span className="tree__label truncate" title={node.path === node.name ? undefined : `#${node.path}`}>
+          {node.name}
+        </span>
+        {/* 收起时才显示计数：展开后子项自己会说话（与文件夹行的写法一致）。 */}
+        {!open && node.total ? <span className="tree__meta">{node.total}</span> : null}
       </div>
-      {activeTag ? (
-        <div className="tree" style={{ marginTop: 10 }}>
-          <div className="tree__group">#{activeTag}</div>
-          {notes.length ? (
-            notes.map((note) => (
-              <NoteRow
-                key={note.id}
-                note={note}
-                depth={0}
-                variant="list"
-                active={activeId === note.id}
-                onOpen={onOpen}
-              />
-            ))
-          ) : (
-            <p className="tree__empty">没有笔记使用这个标签。</p>
-          )}
-        </div>
+
+      {open ? (
+        <>
+          {children.map((child) => (
+            <TagBranch
+              key={child.node.path}
+              entry={child}
+              depth={depth + 1}
+              filtered={filtered}
+              library={library}
+              ui={ui}
+              scope={scope}
+              activeId={activeId}
+              onScope={onScope}
+              onOpen={onOpen}
+            />
+          ))}
+          {notes.map((note) => (
+            <NoteRow
+              key={note.id}
+              note={note}
+              depth={depth + 1}
+              dirty={Boolean(library.dirty[note.id])}
+              active={activeId === note.id}
+              onOpen={onOpen}
+              dnd={false}
+            />
+          ))}
+        </>
       ) : null}
     </>
   );

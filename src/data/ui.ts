@@ -57,6 +57,13 @@ function load(): UiSettings {
     if (!Array.isArray(ui.lockedNotes) || !ui.lockedNotes.every((id) => typeof id === "string")) {
       ui.lockedNotes = [];
     }
+    // 标签树的展开 / 收起（键 = 完整标签路径）：同样兜底，坏值一律回「全部收起」。
+    if (!Array.isArray(ui.expandedTags) || !ui.expandedTags.every((tag) => typeof tag === "string")) {
+      ui.expandedTags = [];
+    }
+    if (!Array.isArray(ui.collapsedTags) || !ui.collapsedTags.every((tag) => typeof tag === "string")) {
+      ui.collapsedTags = [];
+    }
     // 宽度是**用户拖出来的**：旧版本没有这个键、手改过 localStorage、拖到窗口外
     // 都会留下越界值，所以读取时统一夹一次，别让坏值把布局撑坏。
     ui.sidebarWidth = clampSidebarWidth(ui.sidebarWidth);

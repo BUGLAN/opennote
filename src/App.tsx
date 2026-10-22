@@ -102,7 +102,7 @@ import { ConflictDialogHost, installImportConflictDialog, uninstallImportConflic
 import { DialogHost, MenuHost, Toasts, openMenu } from "./components/Overlays";
 import { Outline } from "./components/Outline";
 import { ReadingView } from "./components/ReadingView";
-import { Sidebar, currentFolderId, type Scope } from "./components/Sidebar";
+import { Sidebar, currentFolderId, revealTag, type Scope } from "./components/Sidebar";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { StatusBar } from "./components/StatusBar";
 import { SyncDialog } from "./components/SyncDialog";
@@ -1227,6 +1227,8 @@ export default function App(): ReactNode {
       run: () => {
         patchUi({ sidebarOpen: true });
         setTab("tags");
+        // 跳进来先把祖先链展开（revealNoteInTree 的标签版），不然记号落在收着的分支里。
+        revealTag(tag);
         setScope({ kind: "tag", tag });
       },
     }));

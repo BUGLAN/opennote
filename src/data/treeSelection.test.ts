@@ -69,7 +69,8 @@ function rule(css: string, selector: string): string {
 
 describe("侧栏文件树：同一时刻只有一行是选中态", () => {
   it("文件夹行 / 集合行 / 标签行不再是选中态（`is-active` → `is-current`）", () => {
-    for (const name of ["FolderBranch", "ScopeRow", "TagsBody"]) {
+    // 标签行由 `TagBranch` 渲染（「标签」页树形化：TagsBody 只出树，行在 TagBranch）。
+    for (const name of ["FolderBranch", "ScopeRow", "TagBranch"]) {
       const body = bodyOf(sidebar, name);
       expect(body, `${name} 应当挂 is-current`).toContain("is-current");
       expect(body, `${name} 不许再挂 is-active（那是笔记行的选中态）`).not.toContain("is-active");
