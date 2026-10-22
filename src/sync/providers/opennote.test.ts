@@ -23,12 +23,21 @@
  * （`server/src/routes/v1.test.ts` 另有一组用例保证真实服务端也满足同一份 schema。）
  */
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { changesResponseSchema, treeResponseSchema } from "../../../shared/contract";
 import { OpenNoteProvider } from "./opennote";
 import { createMemoryProvider } from "./memory";
-import { codeForStatus, isRetryable, type HttpResponse, type HttpSend } from "../http";
+import { codeForStatus, isRetryable, resetSharedPacersForTests, type HttpResponse, type HttpSend } from "../http";
 import { SyncProviderError, type SyncProvider } from "../provider-types";
+
+/*
+ * 令牌桶按「服务地址 + 账号」在**进程内共享**（L9）。这个文件里每个用例都造一个新的
+ * provider，但 baseUrl / token 往往一样 —— 共享表在用例之间会互相污染（上一个用例
+ * 撞了 429，下一个还在冷却里）。每个用例开始前清空，测试才是彼此独立的。
+ */
+beforeEach(() => {
+  resetSharedPacersForTests();
+});
 
 const enc = (text: string): Uint8Array => new TextEncoder().encode(text);
 

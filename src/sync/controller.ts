@@ -130,7 +130,13 @@ export function createSyncController(options: SyncControllerOptions): SyncContro
       openFallback = setTimer(() => {
         openFallback = null;
         if (!running) return;
-        if (stream !== null && stream.phase() === "open") return;
+        /*
+         * ★ 判据是「**游标核对完成了吗**」，不是「流 open 了吗」（M3）。
+         *
+         * 流 open 但 `ready` 没给游标（或 `ready` 根本没来）时，旧判据以为
+         * 「已经核对过、不用补」，于是启动同步被整段跳过。核对完成才算数。
+         */
+        if (stream !== null && stream.cursorChecked()) return;
         options.log?.("[sync] 实时流没连上，退回「启动先同步一轮」");
         void options.runner.request("startup");
       }, options.streamOpenTimeoutMs ?? DEFAULT_STREAM_OPEN_TIMEOUT_MS);

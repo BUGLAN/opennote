@@ -97,6 +97,13 @@ export interface SyncStream {
    * 不能比对就必须无条件拉，否则离线期间的变更永远补不上。
    */
   reconcilesCursor(): boolean;
+  /**
+   * 这一次连接**是否已经完成过游标核对**（`ready` 处理完）。
+   *
+   * `controller` 的兜底定时器据此判断「还要不要补一轮启动同步」——
+   * 判据必须是「核对过」，而不是「流 open 了」（M3：open 但 ready 没给游标 = 没核对）。
+   */
+  cursorChecked(): boolean;
 }
 
 /** 服务端心跳的默认间隔（`SSE_HEARTBEAT_MS`），用来推默认超时。 */
@@ -116,6 +123,8 @@ export function createSyncStream(options: SyncStreamOptions): SyncStream {
   let retryTimer: unknown = null;
   let attempt = 0;
   let stopped = true;
+  /** 本次连接是否已经处理过 `ready`（= 完成了一次游标核对）。 */
+  let cursorChecked = false;
 
   const publish = (next: StreamPhase): void => {
     phase = next;
@@ -171,6 +180,8 @@ export function createSyncStream(options: SyncStreamOptions): SyncStream {
 
   const connect = (): void => {
     if (stopped) return;
+    // 新连接 = 还没核对过；`ready` 到达时才算数。
+    cursorChecked = false;
     publish(attempt === 0 ? "connecting" : "reconnecting");
     try {
       stream = options.open(options.url);
@@ -206,8 +217,16 @@ export function createSyncStream(options: SyncStreamOptions): SyncStream {
           remote = null;
         }
         const local = options.knownCursor();
+        cursorChecked = true;
         if (remote === null) {
-          // 服务端没给游标：无从判断，交给上层按旧规矩处理（宁可多拉一次）。
+          /*
+           * ★ 服务端没给游标 ⇒ **无从判断**落后没落后（M3）。
+           * 以前这里什么都不做（注释说「交给上层」，但上层根本没收到任何回调），
+           * 结果是：既不补同步、也不报「已是最新」，界面就一直停在「尚未同步」。
+           * 现在按保守方向处理：**补一轮**。宁可多跑一次，不可静默不动。
+           */
+          options.log?.("[stream] ready 没带游标，保守补一轮");
+          options.onSignal(null);
         } else if (remote !== local) {
           options.log?.(`[stream] 连上后发现落后（本地 ${local ?? "无"}，远端 ${remote}），补一轮`);
           options.onSignal(remote);
@@ -250,6 +269,7 @@ export function createSyncStream(options: SyncStreamOptions): SyncStream {
 
   return {
     reconcilesCursor: () => typeof options.knownCursor === "function",
+    cursorChecked: () => cursorChecked,
 
     start() {
       if (!stopped) return;

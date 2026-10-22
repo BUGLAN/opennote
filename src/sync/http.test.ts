@@ -8,7 +8,7 @@
  *    醒来又一起冲（那正是「每 60 秒一波 429」的成因）。
  */
 import { describe, expect, it } from "vitest";
-import { HttpTransport, Pacer, type HttpSend } from "./http";
+import { fetchSend, HttpTransport, Pacer, resetSharedPacersForTests, sharedPacerCount, type HttpSend } from "./http";
 
 /** 假时钟：`sleep` 直接把时间推过去（于是用例可以断言「等了多久」）。 */
 function clocked() {
@@ -148,5 +148,56 @@ describe("★ HttpTransport：429 的处理", () => {
     for (let index = 0; index < 5; index += 1) await transport.send({ method: "GET", path: "/v1/tree" });
     // 默认桶容量 24 ⇒ 前 5 个不该等。
     expect(time.slept).toHaveLength(0);
+  });
+});
+
+describe("★ L6 · 网页/移动端的发送必须有超时", () => {
+  it("到点必须失败（而不是永远挂住）", async () => {
+    const send = fetchSend({
+      timeoutMs: 10,
+      fetchImpl: (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init.signal;
+          const abort = (): void => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          if (signal?.aborted) abort();
+          signal?.addEventListener("abort", abort);
+        }),
+    });
+
+    await expect(send({ method: "GET", url: "https://notes.example.com/v1/tree", headers: {} })).rejects.toThrow(/abort/i);
+  });
+
+  it("正常响应不受影响（超时只是兜底）", async () => {
+    const send = fetchSend({
+      timeoutMs: 50,
+      fetchImpl: async () => new Response(new Uint8Array([1, 2, 3]), { status: 200 }),
+    });
+    const response = await send({ method: "GET", url: "https://notes.example.com/v1/tree", headers: {} });
+    expect(response.status).toBe(200);
+    expect([...response.bytes]).toEqual([1, 2, 3]);
+  });
+});
+
+describe("★ L9 · 同一账号的多个工作区共用令牌桶", () => {
+  it("服务地址 + 令牌相同 ⇒ 共用一个桶；不同账号 / 不同服务各一个", () => {
+    resetSharedPacersForTests();
+    // 生产路径：不注入时钟 ⇒ 共享。
+    new HttpTransport({ baseUrl: "https://notes.example.com", authToken: "token-a", notebookId: "nb-1" });
+    new HttpTransport({ baseUrl: "https://notes.example.com", authToken: "token-a", notebookId: "nb-2" });
+    expect(sharedPacerCount()).toBe(1);
+
+    new HttpTransport({ baseUrl: "https://notes.example.com", authToken: "token-b", notebookId: "nb-3" });
+    new HttpTransport({ baseUrl: "https://other.example.com", authToken: "token-a", notebookId: "nb-4" });
+    expect(sharedPacerCount()).toBe(3);
+    resetSharedPacersForTests();
+  });
+
+  it("注入了虚拟时钟 ⇒ **不**共享（否则单测会互相干扰）", () => {
+    resetSharedPacersForTests();
+    const now = () => 0;
+    const sleep = async () => undefined;
+    new HttpTransport({ baseUrl: "https://notes.example.com", authToken: "token-a", notebookId: "nb-1", now, sleep });
+    new HttpTransport({ baseUrl: "https://notes.example.com", authToken: "token-a", notebookId: "nb-2", now, sleep });
+    expect(sharedPacerCount()).toBe(0);
   });
 });

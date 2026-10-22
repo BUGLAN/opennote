@@ -282,3 +282,18 @@ describe("连上时比对游标：落后才补，一样就什么都不做", () =
     local = "47";
   });
 });
+
+describe("★ M3 · ready 没带游标时不能「静默不动」", () => {
+  it("ready 的 cursor 为 null ⇒ 保守补一轮（onSignal），并标记「已核对」", () => {
+    const { stream, opened, signals } = make({ knownCursor: () => "42" });
+    stream.start();
+    expect(stream.cursorChecked()).toBe(false);
+    opened[0]!.emit("ready", JSON.stringify({ cursor: null, heartbeatMs: 25000 }));
+    /*
+     * 以前这里什么都不做（注释说「交给上层」，但上层根本没收到回调）——
+     * 症状是「打开应用什么都不发生」。
+     */
+    expect(signals).toEqual([null]);
+    expect(stream.cursorChecked()).toBe(true);
+  });
+});

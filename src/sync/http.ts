@@ -94,18 +94,56 @@ export interface HttpTransportOptions {
  *
  * 桌面端**不该**用它 —— 那里的 CSP 不允许直连外部 https（§5.3）。
  */
-export function fetchSend(): HttpSend {
+export interface FetchSendOptions {
+  /**
+   * 单次请求的超时（毫秒）。默认 30000，**与桌面代理对齐**（`electron/sync.cjs` 的默认值）。
+   *
+   * 没有它的时候：一条挂起却不失败的连接（中间设备静默丢包）会让这个 worker **永远等下去** ——
+   * 同步状态停在「同步中」，不进重试、也不报离线（L6）。
+   */
+  timeoutMs?: number;
+  /** 测试注入（默认 `globalThis.fetch`）。 */
+  fetchImpl?: (url: string, init: RequestInit) => Promise<Response>;
+}
+
+/**
+ * 造一个「到点必失败」的 signal。
+ *
+ * 优先用 `AbortSignal.timeout`（现代浏览器 / Node 18+）；没有它就退回
+ * `AbortController` + `setTimeout`，并在 `finally` 里清掉定时器
+ * （否则 Node 侧的测试进程会被一个挂着的定时器拖住）。
+ */
+function timeoutSignal(ms: number): { signal: AbortSignal; cancel: () => void } {
+  const anyAbort = AbortSignal as unknown as { timeout?: (value: number) => AbortSignal };
+  if (typeof anyAbort.timeout === "function") {
+    return { signal: anyAbort.timeout(ms), cancel: () => undefined };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, cancel: () => clearTimeout(timer) };
+}
+
+export function fetchSend(options: FetchSendOptions = {}): HttpSend {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const call: (url: string, init: RequestInit) => Promise<Response> =
+    options.fetchImpl ?? ((url, init) => globalThis.fetch(url, init));
   return async (request) => {
-    const response = await fetch(request.url, {
-      method: request.method,
-      headers: request.headers,
-      ...(request.body === undefined ? {} : { body: request.body as BodyInit }),
-    });
-    const headers: Record<string, string> = {};
-    response.headers.forEach((value, key) => {
-      headers[key.toLowerCase()] = value;
-    });
-    return { status: response.status, headers, bytes: new Uint8Array(await response.arrayBuffer()) };
+    const { signal, cancel } = timeoutSignal(timeoutMs);
+    try {
+      const response = await call(request.url, {
+        method: request.method,
+        headers: request.headers,
+        signal,
+        ...(request.body === undefined ? {} : { body: request.body as BodyInit }),
+      });
+      const headers: Record<string, string> = {};
+      response.headers.forEach((value, key) => {
+        headers[key.toLowerCase()] = value;
+      });
+      return { status: response.status, headers, bytes: new Uint8Array(await response.arrayBuffer()) };
+    } finally {
+      cancel();
+    }
   };
 }
 
@@ -352,6 +390,50 @@ export class Pacer {
  * 退避用**指数 + 抖动**：多个客户端同时被限流时，固定退避会让它们同步重试、再一起撞上来。
  * 抖动让它们错开（这是限流场景下唯一有效的做法）。
  */
+/* ============================================================================
+   ★ 账号级的共享令牌桶（L9）
+   ============================================================================ */
+
+/**
+ * 进程内的「服务地址 + 账号」→ 令牌桶表。
+ *
+ * ## 为什么必须共享
+ *
+ * 服务端的限流键是 **账号**（`server/src/ratelimit.ts` 用 `sha256(authToken)` 分桶），
+ * 而客户端以前每个 `HttpTransport` 各建一个 Pacer —— 同一账号挂两个工作区，
+ * 合计就是 2×12 req/s，集中撞 429；撞了之后两个桶还各自冷却、各自减半，互相不知道。
+ *
+ * ## 为什么键里不带明文令牌
+ *
+ * 与 `ratelimit.ts` 同一手法：只存一个**短哈希**（FNV-1a）。它不是凭据，也不进日志。
+ *
+ * ## 为什么注入了时钟就不共享
+ *
+ * 单测给每个 transport 各注入一套虚拟时钟（`now` / `sleep`）；共享会让它们互相干扰，
+ * 测出来的就不是自己的行为了。生产环境永远用默认时钟 ⇒ 永远共享。
+ */
+const sharedPacers = new Map<string, Pacer>();
+
+/** FNV-1a（32 位）—— 只用来做**桶键**，不做任何安全判断。 */
+function bucketHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+/** 诊断/测试用：当前共享了几个桶。 */
+export function sharedPacerCount(): number {
+  return sharedPacers.size;
+}
+
+/** 测试用：清空共享表（避免用例互相污染）。 */
+export function resetSharedPacersForTests(): void {
+  sharedPacers.clear();
+}
+
 export class HttpTransport {
   private readonly options: Required<Pick<HttpTransportOptions, "maxRetries" | "baseDelayMs" | "requestsPerSecond" | "burst">> &
     HttpTransportOptions;
@@ -360,13 +442,24 @@ export class HttpTransport {
   constructor(options: HttpTransportOptions) {
     this.options = { maxRetries: 3, baseDelayMs: 500, requestsPerSecond: 12, burst: 24, ...options };
     const rate = this.options.requestsPerSecond;
-    this.pacer = new Pacer(
-      rate,
-      Math.max(1, this.options.burst),
-      options.now ?? (() => Date.now()),
-      // 与 `send()` 用同一个 sleep（测试注入的那一个），否则冷却在测试里不生效。
-      options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
-    );
+    const capacity = Math.max(1, this.options.burst);
+    const clock = options.now ?? (() => Date.now());
+    // 与 `send()` 用同一个 sleep（测试注入的那一个），否则冷却在测试里不生效。
+    const sleeper = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    const shareable = options.now === undefined && options.sleep === undefined;
+    const key = shareable ? `${this.options.baseUrl}|${bucketHash(this.options.authToken)}` : null;
+    if (key === null) {
+      this.pacer = new Pacer(rate, capacity, clock, sleeper);
+    } else {
+      const existing = sharedPacers.get(key);
+      if (existing !== undefined) {
+        this.pacer = existing;
+      } else {
+        const created = new Pacer(rate, capacity, clock, sleeper);
+        sharedPacers.set(key, created);
+        this.pacer = created;
+      }
+    }
   }
 
   /** 笔记本相关的 URL 前缀（`?nb=` 是笔记本维度，§4.7）。 */

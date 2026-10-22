@@ -37,6 +37,7 @@ import { createSyncSession, type SyncSession } from "./session";
 import type { SyncOnceResult } from "./engine";
 import { createSyncStream, type EventStreamLike } from "./stream";
 import { createBackendSyncFiles } from "./backendFiles";
+import { getDeviceId } from "./device";
 import type { SyncLedger } from "./state";
 import type { HashCache } from "./hashCache";
 import type { CursorStore } from "./cursor";
@@ -121,6 +122,13 @@ export interface AttachWorkspaceSyncOptions {
   notebookKeyForNotebook?: (notebookId: string) => Uint8Array | undefined;
   /** 测试注入 provider（跳过真实网络）。 */
   provider?: ReturnType<typeof createOpenNoteProvider>;
+  /**
+   * 设备标识（检查点 `_local/device-<id>` 的键）。
+   *
+   * 默认取 `getDeviceId()`（站点存储里的稳定值）；测试里注入固定值，
+   * 免得依赖 `localStorage`（它在 Node 环境下不存在，会退回一个临时值）。
+   */
+  deviceId?: string;
 }
 
 /**
@@ -179,6 +187,12 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
       notebookId: config.notebookId,
       authToken,
       cryptoMode: config.cryptoMode,
+      /*
+       * ★ 必须把设备标识传下去（M9）：不传 `deviceId` 时 provider 的 `checkpoint()` 会
+       * **直接 return**（`_local/device-` 是畸形 id，宁可不写），于是 `PUT /v1/checkpoint`
+       * 从不发生、服务端的设备清单/断点诊断永远为空 —— 而且不会有任何报错。
+       */
+      deviceId: options.deviceId ?? getDeviceId(),
       send: await resolveSend({ baseUrl: config.baseUrl, authToken }),
       ...(options.log === undefined ? {} : { log: options.log }),
     });

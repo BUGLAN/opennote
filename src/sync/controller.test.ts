@@ -31,15 +31,18 @@ function fakeRunner() {
  * `reconciles` 决定它会不会在连上时比对游标 —— 那正是「启动要不要无条件拉一轮」的分水岭，
  * 所以它必须是**可配的**，而不是写死一个值。
  */
-function fakeStream(options: { reconciles?: boolean; phase?: StreamPhase } = {}) {
+function fakeStream(options: { reconciles?: boolean; phase?: StreamPhase; checked?: boolean } = {}) {
   const reconciles = options.reconciles === true;
   const stop = vi.fn();
   let phase: StreamPhase = options.phase ?? "open";
+  /** 是否已经完成过一次游标核对（M3：兜底定时器看的是它，不是 `phase`）。 */
+  let checked = options.checked === true;
   const stream: SyncStream = {
     start: vi.fn(),
     stop,
     phase: () => phase,
     reconcilesCursor: () => reconciles,
+    cursorChecked: () => checked,
   };
   return { stream, stop, setPhase: (next: StreamPhase) => void (phase = next) };
 }
@@ -50,6 +53,7 @@ function make(
     syncOnStart?: boolean;
     reconciles?: boolean;
     phase?: StreamPhase;
+    checked?: boolean;
   } = {},
 ) {
   /** 手动定时器：用例自己决定「兜底超时」什么时候到点。 */
@@ -68,6 +72,7 @@ function make(
       const made = fakeStream({
         reconciles: overrides.reconciles === true,
         ...(overrides.phase === undefined ? {} : { phase: overrides.phase }),
+        ...(overrides.checked === undefined ? {} : { checked: overrides.checked }),
       });
       created.push(made);
       return made.stream;
@@ -223,8 +228,19 @@ describe("兜底：流连不上时不能干等着", () => {
     expect(world.triggers).toEqual(["startup"]);
   });
 
-  it("流已经连上 ⇒ 超时什么都不做（不白跑一轮）", () => {
-    const world = make({ reconciles: true, phase: "open" });
+  it("★ 流已经连上、但**还没完成游标核对** ⇒ 超时后仍要补一轮（M3）", () => {
+    /*
+     * 「open」不等于「核对过」：`ready` 没给游标（旧服务端 / 回显 null）时什么都没比成。
+     * 旧判据看的是 `phase === "open"`，于是这种情况被误判成「已经核对过」，启动同步被跳过。
+     */
+    const world = make({ reconciles: true, phase: "open", checked: false });
+    world.controller.start();
+    world.fireTimers();
+    expect(world.triggers).toEqual(["startup"]);
+  });
+
+  it("流已经连上**并且核对过** ⇒ 超时什么都不做（不白跑一轮）", () => {
+    const world = make({ reconciles: true, phase: "open", checked: true });
     world.controller.start();
     world.fireTimers();
     expect(world.triggers).toEqual([]);
