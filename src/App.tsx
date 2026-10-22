@@ -1491,7 +1491,6 @@ export default function App(): ReactNode {
                     tone: info?.tone ?? null,
                     label: info?.label ?? null,
                     title: info?.title ?? "同步",
-                    progress: info?.progress ?? null,
                     onOpen: () => setSyncOpen(true),
                   };
                 })()

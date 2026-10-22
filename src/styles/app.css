@@ -1141,23 +1141,43 @@ mark.hit {
   overflow: hidden;
   /* 降级基准 = 底栏自己的内容盒宽度（`:has()` 已在用，容器查询同支持档） */
   container: statusbar / inline-size;
-  /* 同步进度条贴着顶边绝对定位（不占行、不参与降级） */
-  position: relative;
 }
-
 
 /* ---- 同步：只在「正在跑 / 要你动手 / 出问题」时出现 ----------------------
    一切正常时这一位**整个不存在**（syncStatusBarInfo 返回 null）——
-   永远为真的「已同步」播报没有信息量，只是占位。 */
+   永远为真的「已同步」播报没有信息量，只是占位。
+
+   ★ 正在跑时**只转一个 13px 的小环**，不写字、更不画横线。
+   底栏贴着屏幕底部，是写作时一直在余光里的东西：一条横穿整幅宽度的进度线
+   每推进一格都会把注意力拽走一次；而「同步中 12 / 558」这行字一出现，
+   右侧按钮组就变宽、整条底栏跟着重排。
+   安静态（图标）与「正在跑」（小环）占的是**同一个 13px 槽位** ⇒ 布局不跳。 */
+.statusbar__sync-icon {
+  flex: none;
+}
+/*
+ * 小型环形指示器：旋转只是「在动」这一层信息，**缺口本身是静态形状** ——
+ * prefers-reduced-motion 把动画降到 0.01ms 之后，它仍是一个一眼可辨的加载环
+ * （DESIGN.md §Motion · 降级：靠动画表达的状态必须同时有静态形状）。
+ */
+.statusbar__sync-spinner {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+.statusbar__sync.is-busy {
+  color: var(--ink-2);
+}
 .statusbar__sync-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--ok);
   flex: none;
-}
-.statusbar__sync.is-busy .statusbar__sync-dot {
-  background: var(--ink-3);
 }
 .statusbar__sync.is-warn {
   color: var(--warn);
@@ -1172,20 +1192,6 @@ mark.hit {
   background: var(--danger);
 }
 
-/* 进度：压在底栏顶边上的一条 2px 线，不占行、不换行、不参与降级 */
-.statusbar__track {
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 2px;
-  background: transparent;
-  pointer-events: none;
-}
-.statusbar__track > span {
-  display: block;
-  height: 100%;
-  background: var(--ink-3);
-  transition: width var(--dur) var(--ease);
-}
 /* 信息段：唯一会被压缩的一段。`min-width: 0` 让它能缩到 0，`overflow: hidden` 让
    溢出发生在**它内部**（被啃掉的只会是右侧那两颗度量），而不是把按钮顶出去。 */
 .statusbar__info {

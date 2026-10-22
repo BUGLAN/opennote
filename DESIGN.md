@@ -1231,7 +1231,7 @@ tokens.css  →  base.css  →  prose.css  →  editor.css  →  app.css
 | `fade` | 从 `opacity: 0` 到 1 | `.scrim`、`.scrim--menu` |
 | `pop` | 从 `opacity: 0; translate: 0 -6px; scale: .985` 到 1 | `.dialog`、`.palette`、`.menu`、`.workspace__menu` |
 | `pulse` | `opacity` 1 ↔ .35 | `.statusbar__dot.is-dirty`（1.8s）、`.status-chip.is-busy` 的圆点 |
-| `spin` | `rotate(360deg)` | `.busy__spinner`（0.8s linear infinite） |
+| `spin` | `rotate(360deg)` | `.busy__spinner`（0.8s linear infinite）、`.statusbar__sync-spinner`（0.9s，状态栏同步中） |
 | `sheen` | 背景位置扫光 | **存在但禁止使用** —— 扫光属于「SaaS 仪表盘」语言 |
 
 > `pop` **故意用独立的 `translate` / `scale` 属性**而不是 `transform` —— 因为对话框靠 `transform: translate(-50%,-50%)` 居中，若 `pop` 动 `transform` 会把居中覆盖掉。改这个动画时不要退回去用 `transform`。
@@ -1259,7 +1259,7 @@ tokens.css  →  base.css  →  prose.css  →  editor.css  →  app.css
 }
 ```
 
-**降级后必须仍然可用**：凡是靠动画表达的状态，必须同时有文字或静态形状。例：`.statusbar__dot.is-dirty` 除了脉冲还有 `--accent` 的实心填充；「正在启动」除了 spinner 还有文字。
+**降级后必须仍然可用**：凡是靠动画表达的状态，必须同时有文字或静态形状。例：`.statusbar__dot.is-dirty` 除了脉冲还有 `--accent` 的实心填充；「正在启动」除了 spinner 还有文字；状态栏同步中的 `.statusbar__sync-spinner` 停转后仍是一个带缺口的环。
 
 > 插件 popup 与内容脚本的 Shadow DOM 是独立文档，**拿不到应用的 CSS**，各自内联同一段降级规则。
 

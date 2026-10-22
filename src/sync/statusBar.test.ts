@@ -42,20 +42,28 @@ describe("状态栏同步位", () => {
     expect(syncStatusBarInfo(state({ reason: "disabled" }), true)).toBeNull();
   });
 
-  it("正在同步 ⇒ busy + 进度；知道总数时写「12 / 558」", () => {
+  it("★ 正在同步 ⇒ busy，但**不写字**（写字会撑宽按钮组、底栏重排）", () => {
     const info = syncStatusBarInfo(
       state({ status: { phase: "syncing", startedAt: 1, progress: { done: 12, total: 558 } } }),
       true,
     );
     expect(info?.tone).toBe("busy");
-    expect(info?.label).toBe("同步中 12 / 558");
-    expect(info?.progress).toBeCloseTo(12 / 558);
+    expect(info?.label).toBeNull();
+    // 进度没有丢：退到悬浮说明里，悬停仍能看到「12 / 558」。
+    expect(info?.title).toBe("正在同步：12 / 558 个文件");
   });
 
-  it("还在规划（没有总数）⇒ 只说「同步中…」，不编造进度", () => {
+  it("还在规划（没有总数）⇒ 只转图标，说明里不编造进度", () => {
     const info = syncStatusBarInfo(state({ status: { phase: "syncing", startedAt: 1, progress: null } }), true);
-    expect(info?.label).toBe("同步中…");
-    expect(info?.progress).toBeNull();
+    expect(info?.tone).toBe("busy");
+    expect(info?.label).toBeNull();
+    expect(info?.title).toBe("正在同步…");
+  });
+
+  it("正在接上 ⇒ 同样是 busy 且不写字（接上的一瞬间不该让底栏变宽）", () => {
+    const info = syncStatusBarInfo(state({ phase: "attaching", status: null }), true);
+    expect(info?.tone).toBe("busy");
+    expect(info?.label).toBeNull();
   });
 
   it("有冲突 ⇒ warn，并且写清「只有你能解决」", () => {

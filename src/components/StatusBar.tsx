@@ -30,6 +30,10 @@ interface StatusBarProps {
    * `tone === null` = **一切正常**：只留一颗看不出状态的图标当入口，
    * 既不写字也不变色 —— 「同步 · 已同步」这种永远为真的播报没有信息量。
    *
+   * `tone === "busy"` = **正在同步 / 正在接上**：同一个 13px 槽位换成旋转的小环，**不写字**。
+   * 底栏顶边**不再**画那条横穿整幅宽度的进度线 —— 它在写作时一直拽余光，
+   * 而且写字会让按钮组变宽、底栏重排。进度数字在 `title` 里，悬停可见。
+   *
    * ★ 但**不能整颗藏掉**：底栏这一位是同步设置对话框**唯一**的入口。
    * 藏了它就等于「同步正常的时候，用户找不到同步设置了」。
    */
@@ -37,8 +41,6 @@ interface StatusBarProps {
     tone: "busy" | "warn" | "error" | null;
     label: string | null;
     title: string;
-    /** 0–1，只有正在同步时才有；会给底栏顶部画一条 2px 进度。 */
-    progress: number | null;
     onOpen(): void;
   } | null;
 }
@@ -65,12 +67,6 @@ export function StatusBar(props: StatusBarProps): ReactNode {
 
   return (
     <footer className="statusbar">
-      {/* 同步进度：2px，只画在底栏顶边上 —— 不占一行字，也不进滚动区。 */}
-      {props.sync?.progress != null ? (
-        <span className="statusbar__track" aria-hidden="true">
-          <span style={{ width: `${Math.round(Math.min(1, Math.max(0, props.sync.progress)) * 100)}%` }} />
-        </span>
-      ) : null}
       <div className="statusbar__info">
         <span className="statusbar__item statusbar__item--path" title={`笔记存放位置：${props.storageLabel}`}>
           <Icon name="layers" size={12} />
@@ -150,14 +146,24 @@ export function StatusBar(props: StatusBarProps): ReactNode {
               "statusbar__sync",
               props.sync.tone === null ? "is-quiet" : `is-${props.sync.tone}`,
             )}
-            aria-label={props.sync.label === null ? "同步" : `同步：${props.sync.label}`}
+            aria-label={props.sync.label === null ? props.sync.title : `同步：${props.sync.label}`}
             title={props.sync.title}
             onClick={props.sync.onOpen}
           >
-            {/* 安静态只有图标：不写字、不显示圆点，但仍然点得到。 */}
-            {props.sync.tone === null ? null : <span className="statusbar__sync-dot" aria-hidden="true" />}
+            {/*
+              三种状态共用同一个 13px 的槽位，宽度不变 —— 同步开始/结束底栏不会跳：
+              · 安静态：同步图标（入口本身）；
+              · 正在跑：小型环形指示器（旋转；停转时也是一个带缺口的圆，静态可辨）；
+              · 要你动手 / 出问题：圆点 + 文字。
+            */}
+            {props.sync.tone === "busy" ? (
+              <span className="statusbar__sync-spinner" aria-hidden="true" />
+            ) : props.sync.tone === null ? (
+              <Icon name="rotate" size={13} className="statusbar__sync-icon" />
+            ) : (
+              <span className="statusbar__sync-dot" aria-hidden="true" />
+            )}
             {props.sync.label === null ? null : <span className="statusbar__label">{props.sync.label}</span>}
-            {props.sync.label === null ? <Icon name="rotate" size={13} /> : null}
           </button>
         ) : null}
         {props.github ? (

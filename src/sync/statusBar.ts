@@ -14,12 +14,16 @@ export type SyncBarTone = "busy" | "warn" | "error";
 /** 状态栏同步位要显示的东西。*/
 export interface SyncBarInfo {
   tone: SyncBarTone;
-  /** 逐字显示的那一小段。**不带「同步 · 」前缀** —— 前缀本身就是噪音。 */
-  label: string;
-  /** 悬浮说明（说清「点它之后会怎样」或「这条为什么出现」）。 */
+  /**
+   * 逐字显示的那一小段。**不带「同步 · 」前缀** —— 前缀本身就是噪音。
+   *
+   * `null` = 不写字，只留图标：
+   * - 安静态（一切正常）；
+   * - **正在同步** —— 只显示一个旋转的小环。写字会让右侧按钮组变宽、整条底栏重排。
+   */
+  label: string | null;
+  /** 悬浮说明。进度数字只在这里出现（不再画那条横穿的进度线）。 */
   title: string;
-  /** 0–1；只有「正在同步且知道总数」时才有，其余一律 `null`。 */
-  progress: number | null;
 }
 
 /**
@@ -35,9 +39,18 @@ export interface SyncBarInfo {
  *
  * | 何时 | 说什么 | 为什么值得说 |
  * | --- | --- | --- |
- * | 正在同步 | 同步中 12 / 558 + 2px 进度 | 有东西在动，用户需要知道「还要多久」 |
+ * | 正在同步 | **只转一个 13px 小环**（不写字、不画线） | 有东西在动；底栏是写作时的余光区域 |
  * | 需要他动手 | N 处冲突 / 密钥失效 / 未导入密钥 | 只有他能解决，不说就是死锁 |
  * | 出了状况 | 离线 / 失败 / 远端列表不完整 | 沉默会被误读成「同步好了」 |
+ *
+ * ## ★ 不许再画底部进度横线
+ *
+ * 以前「正在同步」会在底栏顶边拉一条 2px 横线（`.statusbar__track`），从 0 扫到 100%。
+ * 它贴着屏幕底部横穿整幅宽度，而写文档时人眼对余光里的**横向移动**最敏感：
+ * 每推进一格就把注意力拽走一次，「进度条没到头」本身还在持续制造未完成感。
+ *
+ * 现在只转一颗 13px 的小环（与安静态图标同一个槽位 ⇒ 底栏不重排），
+ * 进度数字退到悬浮说明里；想看清就去悬停 / 打开同步对话框。
  *
  * 「没开同步」也返回 `null`：同步是逐笔记本的开关，关着就是一个普通笔记本，
  * 不该常驻一句「同步 · 关」提醒他去开。
@@ -47,10 +60,10 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean): Sy
 
   // ① 前置：没有密钥就谈不上同步，而这条**只有用户能解决**。
   if (!state.hasKey) {
-    return { tone: "warn", label: "未导入密钥", title: "这台设备还没有账号密钥；导入之后才能同步", progress: null };
+    return { tone: "warn", label: "未导入密钥", title: "这台设备还没有账号密钥；导入之后才能同步" };
   }
   if (state.reason === "incomplete") {
-    return { tone: "warn", label: "同步未配置完", title: "还差服务地址或远端笔记本；点击补全", progress: null };
+    return { tone: "warn", label: "同步未配置完", title: "还差服务地址或远端笔记本；点击补全" };
   }
   // ② 没开同步：不是异常，别常驻。
   if (state.reason === "disabled") return null;
@@ -63,9 +76,10 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean): Sy
       const known = progress !== null && progress.total > 0;
       return {
         tone: "busy",
-        label: known ? `同步中 ${progress.done} / ${progress.total}` : "同步中…",
-        title: "正在把这台设备和远端对齐",
-        progress: known ? progress.done / progress.total : null,
+        // 不写字：小环转起来就够了，而文字一出现按钮组就变宽、底栏会跳一下。
+        label: null,
+        // 进度没有消失，只是退到悬浮说明里 —— 想看得细的人自己去拿。
+        title: known ? `正在同步：${progress.done} / ${progress.total} 个文件` : "正在同步…",
       };
     }
     if (state.status.phase === "idle") {
@@ -79,7 +93,6 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean): Sy
           tone: "warn",
           label: `${state.status.conflicts} 处冲突待处理`,
           title: text.detail ?? "两边都改过同一篇，需要你决定保留哪一份",
-          progress: null,
         };
       }
       const suspended = state.last?.suspendedDeletes ?? 0;
@@ -88,7 +101,6 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean): Sy
           tone: "warn",
           label: `${suspended} 条删除已暂缓`,
           title: "远端说这些笔记没了，但它上次没把列表给全，所以先不删本机文件",
-          progress: null,
         };
       }
       if (state.last?.treeTruncated) {
@@ -96,7 +108,6 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean): Sy
           tone: "warn",
           label: "远端列表不完整",
           title: "这一轮没拿到完整的远端文件列表，删除判断被暂停了",
-          progress: null,
         };
       }
       return null;
@@ -106,13 +117,13 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean): Sy
       tone: text.tone === "error" ? "error" : "warn",
       label: text.label,
       title: text.detail === null ? text.label : `${text.label} — ${text.detail}`,
-      progress: null,
     };
   }
 
   // ④ 正在接上（正常是一瞬间；真卡住时用户至少看得见，而不是一片空白）
   if (state.phase === "attaching") {
-    return { tone: "busy", label: "正在接上…", title: "正在接上同步服务", progress: null };
+    // 同样只转图标：接上的过程不该在底栏里换来换去。
+    return { tone: "busy", label: null, title: "正在接上同步服务…" };
   }
   return null;
 }
