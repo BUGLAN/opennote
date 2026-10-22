@@ -218,7 +218,10 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
       if (!realtime || !options.openEventStream) return null;
       const stream = createSyncStream({
         // ★ 令牌走**查询串** —— `EventSource` 不能设置请求头（§4.7 第 529 行）。
-        url: `${config.baseUrl}/v1/events?nb=${encodeURIComponent(config.notebookId)}&authToken=${encodeURIComponent(authToken)}`,
+        //   基址先剥尾斜杠：`http://host/` + `/v1/events` 会拼出 `//v1/events`，
+        //   桌面端主进程的 assertSafeRelPath 直接拒绝（症状：实时流永远连不上、
+        //   日志刷「relPath 不能以 // 开头」）。HttpTransport 拼请求早有同款处理。
+        url: `${config.baseUrl.replace(/\/+$/, "")}/v1/events?nb=${encodeURIComponent(config.notebookId)}&authToken=${encodeURIComponent(authToken)}`,
         onSignal,
         onUpToDate,
         open: options.openEventStream,
