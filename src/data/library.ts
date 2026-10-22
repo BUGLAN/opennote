@@ -176,6 +176,22 @@ export function activeBackend(): FileSystemBackend | null {
  * （`src/sync/mode.ts` 的模块头），所以只留一个无类型约束的事件口。
  */
 const localFlushListeners = new Set<() => void>();
+
+/**
+ * 通知同步层「本地刚写过盘」。
+ *
+ * ★ 落盘有**两条**路，两条都得通知：
+ * - `flushAll()`：关工作区 / 退出 / 重扫之前（会一次写很多条）；
+ * - `flushNote()`：**平时打字自动保存走的就是它**。
+ *
+ * 第二条以前漏了 —— 只通知 `flushAll()`。后果很具体：在编辑器里改完一篇，
+ * 文件确实落盘了，但同步层**从没收到通知**，于是推送要等到关工作区或退出才发生；
+ * 另一台设备自然一直看不到。
+ */
+function notifyLocalFlush(): void {
+  for (const listener of [...localFlushListeners]) listener();
+}
+
 export function onLocalFlush(listener: () => void): () => void {
   localFlushListeners.add(listener);
   return () => localFlushListeners.delete(listener);
@@ -1335,6 +1351,8 @@ async function flushNote(id: Id): Promise<void> {
     return;
   }
   const prior = pendingWrites.get(id);
+  /** 这一串写里有没有**真的**动过磁盘（早退的分支一个字节都没写）。 */
+  let wroteToDisk = false;
   const write = (prior?.catch(() => undefined) ?? Promise.resolve()).then(async () => {
     const record = fileStates.get(id);
     const current = await target.stat(id).catch(() => null);
@@ -1366,6 +1384,8 @@ async function flushNote(id: Id): Promise<void> {
     // 好几次击键，写完之后再取会把「写完那一版」错记成「用户后来敲的」。
     beginWrite(id);
     await target.writeText(id, note.content);
+    // 真有字节落了盘才需要通知同步层（上面那些「磁盘赢 / 没变」的早退都不算）。
+    wroteToDisk = true;
     const after = await target.stat(id).catch(() => null);
     if (after) fileStates.commitWrite(id, note.content, after);
     else {
@@ -1377,6 +1397,8 @@ async function flushNote(id: Id): Promise<void> {
   try {
     await write;
     if (backend === target && (libraryStore.get().notes[id] ?? libraryStore.get().trash[id])?.content === note.content) markClean(id);
+    // ★ 平时打字保存走的就是这条路：写完要告诉同步层「可以推了」。
+    if (wroteToDisk) notifyLocalFlush();
   } catch (error) {
     reportError(error, "写入笔记失败");
     throw error;
@@ -1408,9 +1430,7 @@ export async function flushAll(): Promise<void> {
   // left behind by a close, and a rename must not move the directory it writes into (D22).
   if (pendingSnapshots.size) await Promise.allSettled([...pendingSnapshots.values()]);
   // 只在真有落盘时通知同步层 —— 打开/关闭笔记本时的例行 flush 不该触发一轮推送。
-  if (ids.size > 0 || pendingWrites.size > 0) {
-    for (const listener of [...localFlushListeners]) listener();
-  }
+  if (ids.size > 0 || pendingWrites.size > 0) notifyLocalFlush();
 }
 
 function scheduleMeta(delay = 700): void {

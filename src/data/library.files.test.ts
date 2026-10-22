@@ -25,6 +25,7 @@ import {
   getLibrary,
   hasPendingAutoRename,
   moveNote,
+  onLocalFlush,
   openWorkspace,
   purgeNote,
   renameNote,
@@ -1307,5 +1308,34 @@ describe("编辑器宿主的 IME composition 接线（DOM 层，R7）", () => {
     detach();
     updateNoteContent("无标题.md", "## 修改提示词\n\n正文\n");
     await waitFor(() => testBackend.files.has("修改提示词.md"));
+  });
+});
+
+/* ============================================================================
+   本地落盘 → 通知同步层
+   ============================================================================ */
+
+describe("本地落盘要通知同步层", () => {
+  it("★ 编辑器里改一篇、自动保存落盘 ⇒ 发一次 localFlush（以前只有关工作区才发）", async () => {
+    /*
+     * 这条是用户实测出来的：「在 A 上改了一句，B 那边一直不出现」。
+     *
+     * 根因不在传输，而在**没人通知**：平时的自动保存走 `flushNote()`，
+     * 而只有 `flushAll()`（关工作区 / 退出 / 重扫）才会通知 `onLocalFlush` 的订阅者。
+     * 于是文件老老实实落在盘上，同步层却一直不知道可以推 —— 要等到关工作区才发。
+     */
+    patchUi({ autoSaveDelay: 300 });
+    const flushes: number[] = [];
+    const off = onLocalFlush(() => flushes.push(1));
+    try {
+      updateNoteContent("故事/第一章.md", "# 第一章\n改了一句");
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    } finally {
+      off();
+      patchUi({ autoSaveDelay: DEFAULT_UI.autoSaveDelay });
+    }
+
+    expect(testBackend.files.get("故事/第一章.md")).toBe("# 第一章\n改了一句");
+    expect(flushes.length).toBeGreaterThanOrEqual(1);
   });
 });
