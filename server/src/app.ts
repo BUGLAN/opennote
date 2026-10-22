@@ -31,7 +31,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import type { DatabaseSync } from "node:sqlite";
 import type { ServerConfig } from "./config";
 import { clientIpFrom } from "./config";
@@ -72,6 +73,30 @@ function shortHash(value: string): string {
 }
 
 /**
+ * 对端 socket 地址 —— **可信代理头不存在时的兜底**。
+ *
+ * ## 为什么必须兜这一层（这是一次真实事故的修复）
+ *
+ * 全局兜底限流的键以前只有一条来源：`cf-connecting-ip`。而直连 `http://<host>:8787`
+ * 的客户端（桌面端默认就是这么连的）**不会**带这个头 —— 于是所有这样的客户端
+ * 都落进同一个 `ip:unknown` 桶，共享一份「600 请求/分钟」。两台设备一起同步时
+ * 互相把对方挤掉，症状是满屏 `429`，而带宽根本没用上。
+ *
+ * socket 地址对**直连**是真的（NAT 之后是出口 IP），对「宿主上的隧道」是 `127.0.0.1` ——
+ * 后者配了可信头之后就走可信头，不会走到这里。
+ *
+ * `getConnInfo` 在测试的 `app.request()` 下会抛（没有真实 socket），所以包一层。
+ */
+function socketAddress(c: Context): string | null {
+  try {
+    const info = getConnInfo(c);
+    return info.remote.address ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 装配应用。**不监听端口** —— 那由 `index.ts` 或测试来做，
  * 这样用例可以拿 `app.request()` 直接打，不需要真起服务器。
  */
@@ -85,17 +110,21 @@ export function createApp(options: AppOptions): BuiltApp {
   const app = new Hono();
 
   /*
-   * 全局兜底限流：**只信任配置里声明过的代理头**（默认空 = 谁都不信 ⇒ 全部落进
-   * 同一个 `unknown` 桶）。按一个可伪造的头分桶等于给攻击者一个「换头就换桶」的开关（U19）。
+   * 全局兜底限流（令牌桶）：**可信头优先，socket 地址兜底**。
+   *
+   * 只信配置里声明过的代理头（默认空 = 谁都不信），按一个可伪造的头分桶等于给
+   * 攻击者一个「换头就换桶」的开关（U19）。但**没有可信头 ≠ 没有身份**：
+   * 直连的客户端有真实的 socket 地址，拿它兜底才不会退化成「全体共用一个桶」。
    */
   app.use(
     "*",
     rateLimit({
-      limit: config.globalRequestsPerMinute,
+      perMinute: config.globalRequestsPerMinute,
+      burst: config.globalBurst,
       keyOf: (c) => {
         // 健康检查不记账：它要能被监控高频打，而且它不查库。
         if (c.req.path === "/v1/health") return null;
-        return globalRateLimitKey(clientIpFrom(c.req.raw.headers, config));
+        return globalRateLimitKey(clientIpFrom(c.req.raw.headers, config) ?? socketAddress(c));
       },
     }),
   );
@@ -104,7 +133,8 @@ export function createApp(options: AppOptions): BuiltApp {
   app.use(
     "/v1/*",
     rateLimit({
-      limit: config.accountRequestsPerMinute,
+      perMinute: config.accountRequestsPerMinute,
+      burst: config.accountBurst,
       keyOf: (c) => rateLimitKeyFromHeader(c, shortHash),
     }),
   );

@@ -79,7 +79,7 @@ export interface SyncSessionOptions {
   now?: () => number;
   /** 每页列树的条数（引擎会翻页取完，直到 `truncated === false`）。 */
   maxFiles?: number;
-  /** 同时在飞的请求数（默认 8）。见 `SyncOnceInput.concurrency`。 */
+  /** 同时在飞的请求数（默认 4）。速率由传输层的限速器控制，见 `SyncOnceInput.concurrency`。 */
   concurrency?: number;
   log?: (line: string) => void;
   localWriteDebounceMs?: number;

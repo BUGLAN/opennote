@@ -52,7 +52,7 @@ export type SyncStatus =
   | { phase: "error"; error: string; code: string; lastSyncedAt: number | null };
 
 /** 触发这次同步的原因（日志与诊断用；也便于用例断言「谁触发的」）。 */
-export type SyncTrigger = "manual" | "local-write" | "signal" | "focus" | "startup";
+export type SyncTrigger = "manual" | "local-write" | "signal" | "focus" | "startup" | "retry";
 
 export interface SyncRunnerDeps {
   /** 跑一次同步（`engine.syncOnce` 的包装）。 */
@@ -77,6 +77,21 @@ export interface SyncRunnerDeps {
   onApplied?: (paths: string[]) => void;
   /** 本地写之后等多久才推（去抖）。默认 1200ms。 */
   localWriteDebounceMs?: number;
+  /**
+   * 一轮失败之后**多久自动重试**（指数增长，带上限）。默认 5000ms 起、120000ms 封顶。
+   *
+   * ## 为什么必须有这条（而不是「等下一个信号」）
+   *
+   * 触发源本来只有四个：启动 / 远端信号 / 本地写 / 手点。它们在**失败之后都不会再来**
+   * —— 远端没人在改、用户也没在编辑时，一次 429 或断网就让这台设备**永远停在那里**。
+   * 状态栏还写着「网络恢复后会自动重试」，而代码里根本没有重试 —— 那是一句谎话。
+   *
+   * 只对**可重试**的失败重试（`network` / `server`）：密钥被轮换、配额满、
+   * 协议不兼容这些重试一万次也不会好，重试只会刷屏。
+   */
+  retryBaseDelayMs?: number;
+  /** 自动重试的延迟上限。默认 120000ms（2 分钟）。 */
+  retryMaxDelayMs?: number;
   /** 现在几点（测试注入）。 */
   now?: () => number;
   /** 定时器（测试注入）。 */
@@ -114,6 +129,10 @@ export interface SyncRunner {
 /** 默认去抖：1200ms。比自动保存的 450ms 长一些，让一次连续编辑只推一次。 */
 const DEFAULT_DEBOUNCE_MS = 1200;
 
+/** 自动重试：首次 5 秒，之后翻倍，2 分钟封顶（见 `retryBaseDelayMs`）。 */
+const DEFAULT_RETRY_BASE_MS = 5000;
+const DEFAULT_RETRY_MAX_MS = 120_000;
+
 /** 把一次失败翻成状态。**401 单独成一种状态**，见模块头 ②。 */
 export function statusForError(error: unknown, lastSyncedAt: number | null): SyncStatus {
   if (error instanceof SyncProviderError) {
@@ -127,11 +146,18 @@ export function statusForError(error: unknown, lastSyncedAt: number | null): Syn
   return { phase: "error", error: message, code: "unknown", lastSyncedAt };
 }
 
+/** 这类失败值不值得自动重试（见 `retryBaseDelayMs`）。 */
+export function isRetryableFailure(error: unknown): boolean {
+  return error instanceof SyncProviderError && (error.code === "network" || error.code === "server");
+}
+
 export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
   const now = deps.now ?? (() => Date.now());
   const setTimer = deps.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimeoutFn ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   const debounceMs = deps.localWriteDebounceMs ?? DEFAULT_DEBOUNCE_MS;
+  const retryBase = deps.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_MS;
+  const retryMax = deps.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_MS;
 
   let lastSyncedAt: number | null = null;
   let conflicts = 0;
@@ -143,11 +169,42 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
   /** 进行中时又来了请求 ⇒ 跑完再来一次（**只记一次**，不排队）。 */
   let pendingAgain = false;
   let debounceHandle: unknown = null;
+  /** 自动重试的定时器（`retryHandle`）与已经重试过几次（决定退避长度）。 */
+  let retryHandle: unknown = null;
+  let retryAttempt = 0;
+  /** 对象自引用（定时器要回调 `request`，而它在对象字面量里）。 */
+  let runner: SyncRunner | null = null;
   let disposed = false;
 
   const publish = (status: SyncStatus): void => {
     current = status;
     deps.onStatus?.(status);
+  };
+
+  /** 取消挂着的自动重试（成功之后 / 用户手动同步 / dispose 都要调）。 */
+  const clearRetry = (): void => {
+    if (retryHandle === null) return;
+    clearTimer(retryHandle);
+    retryHandle = null;
+  };
+
+  /**
+   * 失败之后排一次自动重试（指数退避，2 分钟封顶）。
+   *
+   * 只对可重试的失败排（见 `isRetryableFailure`）：密钥被轮换、配额满这些
+   * 重试一万次也不会好，反倒会把状态栏刷成一片「同步失败」。
+   */
+  const scheduleRetry = (error: unknown): void => {
+    if (disposed || !isRetryableFailure(error)) return;
+    clearRetry();
+    const delay = Math.min(retryBase * 2 ** retryAttempt, retryMax);
+    retryAttempt += 1;
+    deps.log?.(`[sync] ${delay}ms 后自动重试（第 ${retryAttempt} 次）`);
+    retryHandle = setTimer(() => {
+      retryHandle = null;
+      if (disposed) return;
+      void runner?.request("retry");
+    }, delay);
   };
 
   /** 跑一次（内部；调用方保证没有别的在跑）。 */
@@ -165,17 +222,21 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
       if (result.appliedPaths.length > 0) deps.onApplied?.(result.appliedPaths);
       // 每一轮成功都通知（见 deps.onSynced 的说明：账本落盘不能只盯「有落地」的那几轮）。
       deps.onSynced?.(result);
+      // 成功 ⇒ 退避计数归零，挂着的重试也没必要了。
+      retryAttempt = 0;
+      clearRetry();
       publish({ phase: "idle", lastSyncedAt, conflicts });
       return result;
     } catch (error) {
       const status = statusForError(error, lastSyncedAt);
       deps.log?.(`[sync] 失败：${JSON.stringify(status)}`);
       publish(status);
+      scheduleRetry(error);
       return null;
     }
   };
 
-  return {
+  const api: SyncRunner = {
     status: () => current,
 
     noteUpToDate(): void {
@@ -192,6 +253,12 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
 
     async request(trigger) {
       if (disposed) return null;
+      /*
+       * 任何一次显式请求都作废「挂着的自动重试」：我们**现在**就在跑，
+       * 跑完之后要么成功（清计数）要么失败（重新排）。
+       */
+      clearRetry();
+      if (trigger === "manual") retryAttempt = 0;
       if (inFlight) {
         /*
          * ★ **合并，不排队**：这次请求要的是「把最新状态同步出去」，
@@ -235,8 +302,11 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
         clearTimer(debounceHandle);
         debounceHandle = null;
       }
+      clearRetry();
     },
   };
+  runner = api;
+  return api;
 }
 
 /* ============================================================================

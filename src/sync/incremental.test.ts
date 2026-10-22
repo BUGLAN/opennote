@@ -17,7 +17,7 @@ import { createIgnoreRules } from "./ignore";
 import { createHashCache, readHashCache, writeHashCache } from "./hashCache";
 import { createMemoryCursorStore, createWebCursorStore } from "./cursor";
 import type { FileSystemBackend } from "../fs/types";
-import type { SyncProvider } from "./provider-types";
+import { SyncProviderError, type SyncProvider } from "./provider-types";
 
 /* ============================================================================
    ① 哈希缓存：没变的文件**不重读**
@@ -455,9 +455,9 @@ describe("批量取（/v1/files）：一个请求拿多条", () => {
         singleReads += 1;
         return remote.read(did);
       },
-      // 模拟老服务端：没有这个端点。
+      // 模拟老服务端：没有这个端点（真的 404 —— 传输层会把它映射成 `not-found`）。
       readMany: async () => {
-        throw new Error("404 not found");
+        throw new SyncProviderError("not-found", "404 not found", 404);
       },
       put: (input) => remote.put(input),
       delete: (input) => remote.delete(input),
@@ -469,6 +469,42 @@ describe("批量取（/v1/files）：一个请求拿多条", () => {
     expect(result.pulled).toBe(3);
     expect(local.size).toBe(3);
     expect(singleReads).toBe(3);
+  });
+
+  it("★ 批量接口撞 429 时**绝不**退化成逐条（1 次限流会被放大成 N 个请求）", async () => {
+    /*
+     * 这是真机踩到的放大路径：批量取 50 篇撞一次 429 → 原来的「失败就逐条退回」
+     * 把它变成 50 个单条请求，每个又各自撞 429、各自退避 —— 限流从「等 30 秒」
+     * 变成「整轮打死」。所以只有 404/413（端点不可用）才退，其余如实抛给调度器。
+     */
+    const remote = createMemoryProvider({ cryptoMode: "none" });
+    const ledger = createSyncLedger({ baseUrl: "https://x", notebookId: "nb", cryptoMode: "none", protocolVersion: 1 });
+    // 得有两条以上要下载，才会走批量接口。
+    for (const name of ["a", "b"]) {
+      remote.seed(idForPath("notes/" + name + ".md"), "hash-" + name, new TextEncoder().encode("# " + name));
+    }
+    let singleReads = 0;
+    const provider: SyncProvider = {
+      name: "limited",
+      cryptoMode: "none",
+      tree: (options) => remote.tree(options),
+      changes: (options) => remote.changes(options),
+      read: async (did) => {
+        singleReads += 1;
+        return remote.read(did);
+      },
+      readMany: async () => {
+        throw new SyncProviderError("network", "远端 429", 429);
+      },
+      put: (input) => remote.put(input),
+      delete: (input) => remote.delete(input),
+      checkpoint: (cursor) => remote.checkpoint(cursor),
+    };
+
+    const local = new Map<string, Uint8Array>();
+    await expect(syncOnceIncremental({ provider, ledger, deps: makeDeps(local), since: null })).rejects.toMatchObject({ status: 429 });
+    // 一个单条请求都没发 —— 这才是「不放大」。
+    expect(singleReads).toBe(0);
   });
 });
 

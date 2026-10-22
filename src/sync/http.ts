@@ -65,6 +65,22 @@ export interface HttpTransportOptions {
   maxRetries?: number;
   /** 基础退避毫秒（指数增长）。默认 500。 */
   baseDelayMs?: number;
+  /**
+   * **客户端限速**：每秒最多发多少个请求。默认 12（0 或负数 = 不限速）。
+   *
+   * ## 为什么客户端必须自己限速（而不是「撞了 429 再说」）
+   *
+   * 服务端的桶是按**分钟**给的，而这个协议是「**一篇笔记 = 一个请求**」。
+   * 客户端只要有 8 个请求在飞（RTT≈190ms 时就是 28~43 请求/秒），就会在十几秒内
+   * 把服务端的桶打空 —— 然后**所有** worker 一起被 429，一起按 `Retry-After`
+   * 干等 30+ 秒。用户看到的是「同步卡死」，而带宽一点没用上。
+   *
+   * 12/秒 是实测的折中：500 篇 ≈ 40 秒（比 2 篇/秒的旧限流快 20 倍），
+   * 而它低于服务端账号桶（默认 1200/分钟 = 20/秒），所以正常同步**不会**撞 429。
+   */
+  requestsPerSecond?: number;
+  /** 允许的突发（初始令牌数）。默认 = 2 秒的量（至少 4）。 */
+  burst?: number;
   /** 睡多久（测试注入；默认 `setTimeout`）。 */
   sleep?: (ms: number) => Promise<void>;
   /** 日志（默认静默 —— 客户端不该在控制台刷屏）。 */
@@ -232,16 +248,125 @@ export function isRetryable(status: number): boolean {
 }
 
 /**
- * 一次请求 + 退避重试 + 错误映射。
+ * **客户端限速器 + 429 全局冷却**（令牌桶）。
+ *
+ * ## 它解决的两个具体问题
+ *
+ * ### ① 不要在「没撞之前」把桶打空
+ *
+ * 没有它的时候，8 个 worker 会在十几秒内把服务端的分钟桶吃光；有了它，
+ * 请求是被**平滑**放出去的（默认 12/秒），服务端那边永远有余额。
+ *
+ * ### ② 429 是**全局**事件，不是「这一个请求难受」
+ *
+ * 以前的退避是「谁被 429 谁自己 `sleep(Retry-After)`」：8 个 worker 各睡一份，
+ * 醒来又同时冲（没有协调、没有降速），下个窗口继续撞 —— 这就是「429 很频繁」的来源。
+ * 现在 429 把**整个 pacer** 打进冷却：所有 worker 一起停到 `Retry-After` 结束，
+ * 恢复时速率**减半**（说明我们比服务端的桶快），之后每成功一次慢慢加回去。
+ */
+export class Pacer {
+  private tokens: number;
+  /** 上次补充令牌的时刻（pacer 自己的时钟，见 `currentTime()`）。 */
+  private updatedAt: number;
+  private cooldownUntil = 0;
+  /** 当前速率（429 之后会被减半，成功后慢慢回到配置值）。 */
+  private rate: number;
+  /**
+   * 注入的 `sleep` 没睡够时补上的时间（测试里 `sleep: async () => {}` 很常见）。
+   *
+   * 不补的话，冷却循环会因为「睡完了时钟没动」而**永远转下去**（一个真实的踩坑）。
+   */
+  private virtualElapsed = 0;
+
+  constructor(
+    private readonly configuredRate: number,
+    private readonly capacity: number,
+    private readonly now: () => number,
+    private readonly sleep: (ms: number) => Promise<void>,
+  ) {
+    this.rate = configuredRate;
+    this.tokens = capacity;
+    this.updatedAt = now();
+  }
+
+  /** 此刻（真实时钟 + 补偿量）。 */
+  private currentTime(): number {
+    return this.now() + this.virtualElapsed;
+  }
+
+  /** 睡到 `currentTime()` 至少前进 `ms` —— 注入的 sleep 偷懒时由虚拟时间补齐。 */
+  private async waitAtLeast(ms: number): Promise<void> {
+    const before = this.now();
+    await this.sleep(ms);
+    const slept = this.now() - before;
+    if (slept < ms) this.virtualElapsed += ms - slept;
+  }
+
+  /** 取一个令牌（必要时等）。`configuredRate <= 0` 时不限速。 */
+  async acquire(): Promise<void> {
+    if (this.configuredRate <= 0) return;
+    for (;;) {
+      const at = this.currentTime();
+      if (at < this.cooldownUntil) {
+        await this.waitAtLeast(this.cooldownUntil - at);
+        continue;
+      }
+      const elapsed = Math.max(0, at - this.updatedAt);
+      this.tokens = Math.min(this.capacity, this.tokens + (elapsed / 1000) * this.rate);
+      this.updatedAt = at;
+      if (this.tokens >= 1) {
+        this.tokens -= 1;
+        return;
+      }
+      await this.waitAtLeast(Math.max(5, Math.ceil(((1 - this.tokens) / this.rate) * 1000)));
+    }
+  }
+
+  /**
+   * 被 429 打回：全局冷却 `delayMs`，并把速率减半（不低于 2/秒）。
+   *
+   * 冷却结束时**发一个令牌**：`Retry-After` 的语义就是「到那时候可以重试」，
+   * 让重试再多等一个令牌间隔是没必要的（那会白等 100~500ms）。
+   * 冷却期间**不攒令牌**（`updatedAt` 推到冷却结束）—— 否则冷却一过就是满桶齐发，
+   * 下一个窗口再撞一次。
+   */
+  penalize(delayMs: number): void {
+    const at = this.currentTime();
+    this.cooldownUntil = Math.max(this.cooldownUntil, at + Math.max(1000, delayMs));
+    this.updatedAt = Math.max(this.updatedAt, this.cooldownUntil);
+    this.tokens = 1;
+    this.rate = Math.max(2, this.rate / 2);
+  }
+
+  /** 成功一次就慢慢把速率加回去（每 50 次回到配置值的等量）。 */
+  reward(): void {
+    if (this.rate < this.configuredRate) {
+      this.rate = Math.min(this.configuredRate, this.rate + this.configuredRate / 50);
+    }
+  }
+}
+
+/**
+ * 一次请求 + 限速 + 退避重试 + 错误映射。
  *
  * 退避用**指数 + 抖动**：多个客户端同时被限流时，固定退避会让它们同步重试、再一起撞上来。
  * 抖动让它们错开（这是限流场景下唯一有效的做法）。
  */
 export class HttpTransport {
-  private readonly options: Required<Pick<HttpTransportOptions, "maxRetries" | "baseDelayMs">> & HttpTransportOptions;
+  private readonly options: Required<Pick<HttpTransportOptions, "maxRetries" | "baseDelayMs" | "requestsPerSecond" | "burst">> &
+    HttpTransportOptions;
+  private readonly pacer: Pacer;
 
   constructor(options: HttpTransportOptions) {
-    this.options = { maxRetries: 3, baseDelayMs: 500, ...options };
+    this.options = { maxRetries: 3, baseDelayMs: 500, requestsPerSecond: 12, burst: 24, ...options };
+    const rate = this.options.requestsPerSecond;
+    this.pacer = new Pacer(
+      rate,
+      Math.max(1, this.options.burst),
+      options.now ?? (() => Date.now()),
+      // 与 `send()` 用同一个 sleep（测试注入的那一个），否则冷却在测试里不生效。
+      options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+    );
   }
 
   /** 笔记本相关的 URL 前缀（`?nb=` 是笔记本维度，§4.7）。 */
@@ -256,18 +381,24 @@ export class HttpTransport {
     return `${base}${path}?${params.toString()}`;
   }
 
-  /** 发一次请求（**含**重试）。返回原始响应；非 2xx 由调用方决定是「业务结果」还是错误。 */
+  /** 发一次请求（**含**限速与重试）。返回原始响应；非 2xx 由调用方决定是「业务结果」还是错误。 */
   async send(
     request: Omit<HttpRequest, "url" | "headers"> & { path: string; query?: Record<string, string | number | undefined>; headers?: Record<string, string> },
   ): Promise<HttpResponse> {
     const send = this.options.send ?? fetchSend();
     const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const url = this.url(request.path, request.query);
+    const label = `${request.method} ${request.path}`;
     let attempt = 0;
     let lastError: unknown = null;
 
     for (;;) {
       attempt += 1;
+      /*
+       * ★ 先过限速器：正常同步在这里被**平滑**放出去；
+       *   上一次 429 留下的冷却也在这里生效（所有 worker 一起等）。
+       */
+      await this.pacer.acquire();
       try {
         const response = await send({
           method: request.method,
@@ -279,18 +410,42 @@ export class HttpTransport {
           },
           ...(request.body === undefined ? {} : { body: request.body }),
         });
-        if (!isRetryable(response.status) || attempt > this.options.maxRetries) return response;
-        // 服务端给了 `Retry-After` 就听它的（秒）。
+
+        if (response.status === 429) {
+          /*
+           * ★ 限流要**全局**处理：把 pacer 打进冷却（不是自己睡一觉），
+           *   冷却结束前所有 worker 都不再发请求。
+           */
+          const retryAfter = Number.parseInt(response.headers["retry-after"] ?? "", 10);
+          const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : this.backoff(attempt);
+          this.pacer.penalize(delay);
+          // 把服务端的「哪一档」带进日志：撞的是账号桶还是全局桶，一眼能分。
+          const limit = response.headers["x-ratelimit-limit"];
+          this.options.log?.(
+            `[sync] 远端 429${limit === undefined ? "" : `（限额 ${limit}/分钟）`}，${delay}ms 后重试（第 ${attempt} 次）：${label}`,
+          );
+          if (attempt > this.options.maxRetries) return response;
+          continue;
+        }
+
+        if (!isRetryable(response.status) || attempt > this.options.maxRetries) {
+          // 服务端有正常应答 ⇒ 速率可以慢慢回到配置值。
+          this.pacer.reward();
+          return response;
+        }
+        // 服务端给了 `Retry-After` 就听它的（秒）；5xx 用指数退避。
         const retryAfter = Number.parseInt(response.headers["retry-after"] ?? "", 10);
         const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : this.backoff(attempt);
-        this.options.log?.(`[sync] 远端 ${response.status}，${delay}ms 后重试（第 ${attempt} 次）`);
+        this.options.log?.(`[sync] 远端 ${response.status}，${delay}ms 后重试（第 ${attempt} 次）：${label}`);
         await sleep(delay);
       } catch (error) {
         lastError = error;
         if (attempt > this.options.maxRetries) {
           throw new SyncProviderError("network", `连不上同步服务：${error instanceof Error ? error.message : String(error)}`, null);
         }
-        await sleep(this.backoff(attempt));
+        const delay = this.backoff(attempt);
+        this.options.log?.(`[sync] 请求失败（${error instanceof Error ? error.message : String(error)}），${delay}ms 后重试（第 ${attempt} 次）：${label}`);
+        await sleep(delay);
       }
     }
     // 不可达（上面的 for(;;) 只通过 return / throw 退出）——留着是为了让类型收敛。

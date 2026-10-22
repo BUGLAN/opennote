@@ -162,12 +162,12 @@ export interface SyncOnceInput {
    */
   maxFiles?: number;
   /**
-   * 同时在飞的请求数。默认 8。
+   * 同时在飞的请求数。默认 4。
    *
    * 每篇笔记是一个独立 HTTP 请求，串行下一次往返（实测本机到远端 p50 ≈ 190ms）
-   * 就是吞吐上限；并发 8 实测快 5.4 倍。但**不能无限开**：
-   * 服务端按账号限流（`ACCOUNT_REQUESTS_PER_MINUTE`，默认 120/分钟），
-   * 并发太高只会把请求堆成 429。
+   * 就是吞吐上限；所以并发要能盖住往返延迟。但**不能无限开**：
+   * 速率由 `HttpTransport` 的令牌桶控制（默认 12 请求/秒），并发只是让
+   * 「在飞的请求」填满这个速率 —— 开太大只会把请求堆在限速器前面空等。
    */
   concurrency?: number;
   /**
@@ -609,6 +609,18 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       try {
         results = await provider.readMany!(dids);
       } catch (error) {
+        /*
+         * ★ **429 / 网络错误不能退化成逐条读**。
+         *
+         * 批量只是优化，退路原来是「老服务端没这个端点（404）或单条超限（413）」。
+         * 但 429 也被吞进这条路时，一次「等 30 秒就好」会被放大成 **50 个请求**，
+         * 每一个又各自撞 429 —— 限流从「等一下」变成「打死」。
+         *
+         * 所以只有「这个端点不可用」才退回逐条；其余（限流、5xx、网络）如实抛，
+         * 交给调度器按退避重试整轮。
+         */
+        const status = error instanceof SyncProviderError ? error.status : null;
+        if (status !== 404 && status !== 413) throw error;
         log("pull", { batchFailed: true, reason: error instanceof Error ? error.message : String(error) });
         results = new Map();
         for (const did of dids) {
@@ -860,8 +872,15 @@ export async function fetchWholeTree(
   return { entries: [...byDid.values()], truncated: true, cursor };
 }
 
-/** 默认并发度（见 `SyncOnceInput.concurrency` 的说明：8 是实测的性价比点）。 */
-export const DEFAULT_SYNC_CONCURRENCY = 8;
+/**
+ * 默认并发度。
+ *
+ * 8 → **4**（2026-10-22）：并发 8 在 RTT≈190ms 时能打出 **28~43 请求/秒**，
+ * 而服务端的账号桶是「每分钟」给的 —— 客户端自己就把桶打空了，然后整批 429、
+ * 整批停在 `Retry-After` 上。真正的速率控制现在在 `http.ts` 的限速器里
+ * （默认 12/秒），并发只需要**盖住往返延迟**：12 × 0.19s ≈ 2.3，取 4 有富余。
+ */
+export const DEFAULT_SYNC_CONCURRENCY = 4;
 
 /**
  * 一次批量取多少条正文（见 `/v1/files`）。

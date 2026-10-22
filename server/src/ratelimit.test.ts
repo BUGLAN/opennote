@@ -1,13 +1,13 @@
 /**
- * 限流与应用装配的用例（`docs/执行-三端同步…` §4.11、§2.4、§10.1 M12）。
+ * 限流与装配的用例（`docs/执行-三端同步…` §4.11、§2.4、§10.1 M12）。
  *
- * 限流这件事的用例要钉住的**不是「能不能限」**，而是两条容易被写错的纪律：
+ * 限流的用例要钉住的**不是「能不能限」**，而是几条容易被写错的纪律：
  *
  * 1. **按账号限流，不按 IP** —— 隧道下所有请求的来源地址都是**边缘的地址**，
  *    按 IP 限流等于「第一个活跃用户把其他人全挡在外面」；
- * 2. **取不到键时放行**（fail-open）—— 一个取键失败不该把整个服务锁死。
- *
- * 另外还验：桶会**定期清理**（否则就是一条内存泄漏路径）。
+ * 2. **取不到键时放行**（fail-open）—— 一个取键失败不该把整个服务锁死；
+ * 3. **令牌桶要吸收突发**（`burst`），而不是「前 20 秒吃满、后 40 秒全员罚站」；
+ * 4. **桶会定期清理**（否则就是一条内存泄漏路径）。
  */
 import { describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
@@ -23,28 +23,56 @@ function makeApp(options: Parameters<typeof rateLimit>[0]): Hono {
   return app;
 }
 
-describe("固定窗口限流", () => {
-  it("窗口内放行到 limit，第 limit+1 次 → 429 且带 `Retry-After`", async () => {
+describe("令牌桶限流", () => {
+  it("突发容量内全放行，超出 → 429 且 `Retry-After` = **再攒一个**的时间", async () => {
     let clock = 1_000_000;
-    const app = makeApp({ limit: 3, windowMs: 60_000, keyOf: () => "k", now: () => clock });
+    // 每分钟 60 个 = 每秒 1 个；桶容量 3。
+    const app = makeApp({ perMinute: 60, burst: 3, keyOf: () => "k", now: () => clock });
 
     for (let index = 1; index <= 3; index += 1) {
       const response = await app.request("http://localhost/ok");
-      expect(response.status, `第 ${index} 次应当放行`).toBe(200);
+      expect(response.status, `第 ${index} 次应当放行（在突发容量内）`).toBe(200);
     }
     const blocked = await app.request("http://localhost/ok");
     expect(blocked.status).toBe(429);
-    expect(blocked.headers.get("retry-after")).toBe("60");
+    // ★ 不是「等到下一分钟」（那会把一次小突发放大成几十秒空转），而是「再攒 1 个」。
+    expect(blocked.headers.get("retry-after")).toBe("1");
+    // 客户端据此知道撞的是哪一档。
+    expect(blocked.headers.get("x-ratelimit-limit")).toBe("60");
+    expect(blocked.headers.get("x-ratelimit-burst")).toBe("3");
     expect(((await blocked.json()) as { code: string }).code).toBe("too-many");
 
-    // 窗口一过就恢复。
-    clock += 60_001;
+    // 一秒后攒出一个令牌。
+    clock += 1_000;
     expect((await app.request("http://localhost/ok")).status).toBe(200);
+  });
+
+  it("补充是**按流逝时间连续**的，不是整秒跳变", async () => {
+    let clock = 1_000_000;
+    const app = makeApp({ perMinute: 60, burst: 5, keyOf: () => "k", now: () => clock });
+    for (let index = 0; index < 5; index += 1) await app.request("http://localhost/ok");
+    expect((await app.request("http://localhost/ok")).status).toBe(429);
+
+    clock += 2_000; // 2 秒 = 2 个令牌
+    expect((await app.request("http://localhost/ok")).status).toBe(200);
+    expect((await app.request("http://localhost/ok")).status).toBe(200);
+    expect((await app.request("http://localhost/ok")).status).toBe(429);
+  });
+
+  it("空闲足够久之后桶回满（不会永久降级）", async () => {
+    let clock = 1_000_000;
+    const app = makeApp({ perMinute: 60, burst: 4, keyOf: () => "k", now: () => clock });
+    for (let index = 0; index < 6; index += 1) await app.request("http://localhost/ok");
+    clock += 10_000;
+    for (let index = 0; index < 4; index += 1) {
+      expect((await app.request("http://localhost/ok")).status, "回满后应当放行满 burst").toBe(200);
+    }
+    expect((await app.request("http://localhost/ok")).status).toBe(429);
   });
 
   it("不同键各自计数（一个账号超限不影响另一个）", async () => {
     let key = "a";
-    const app = makeApp({ limit: 1, keyOf: () => key });
+    const app = makeApp({ perMinute: 60, burst: 1, keyOf: () => key });
     expect((await app.request("http://localhost/ok")).status).toBe(200);
     expect((await app.request("http://localhost/ok")).status).toBe(429);
     // 换个人：照样能用 —— 这正是「按账号限流」的意义。
@@ -53,7 +81,7 @@ describe("固定窗口限流", () => {
   });
 
   it("`keyOf` 返回 `null` ⇒ **放行且不记账**（fail-open）", async () => {
-    const app = makeApp({ limit: 1, keyOf: () => null });
+    const app = makeApp({ perMinute: 1, burst: 1, keyOf: () => null });
     for (let index = 0; index < 5; index += 1) {
       expect((await app.request("http://localhost/ok")).status).toBe(200);
     }
@@ -62,24 +90,37 @@ describe("固定窗口限流", () => {
   it("**桶会定期清理**（否则随机 key 就能把内存撑大）", async () => {
     let clock = 1_000_000;
     let counter = 0;
-    const limiter = rateLimit({ limit: 100, windowMs: 60_000, keyOf: () => `k${(counter += 1)}`, now: () => clock });
+    const limiter = rateLimit({ perMinute: 60, burst: 5, keyOf: () => `k${(counter += 1)}`, now: () => clock });
     const app = new Hono();
     app.use("*", limiter);
     app.get("/ok", (c) => c.text("ok"));
 
     for (let index = 0; index < 10; index += 1) await app.request("http://localhost/ok");
     expect(limiter.size()).toBe(10);
-    // 推进两个窗口，下一次请求触发清理。
-    clock += 120_001;
+    // 推进得足够久：空桶也早该回满了，与新桶没有区别。
+    clock += 200_000;
     await app.request("http://localhost/ok");
-    // 只剩刚建的那一个桶。
     expect(limiter.size()).toBe(1);
   });
 
-  it("`limit` 非正数被夹到 1（别让它变成「谁都不能用」或「谁都能用」）", async () => {
-    const app = makeApp({ limit: 0, keyOf: () => "k" });
+  it("`perMinute` / `burst` 非正数被夹到 1（别让它变成「谁都能用」）", async () => {
+    const app = makeApp({ perMinute: 0, burst: 0, keyOf: () => "k" });
     expect((await app.request("http://localhost/ok")).status).toBe(200);
     expect((await app.request("http://localhost/ok")).status).toBe(429);
+  });
+
+  it("默认突发容量 = 每分钟速率的 1/10（至少 20）", async () => {
+    let clock = 1_000_000;
+    // 600/分钟 ⇒ 默认 burst = 60。
+    const limiter = rateLimit({ perMinute: 600, keyOf: () => "k", now: () => clock });
+    const app = new Hono();
+    app.use("*", limiter);
+    app.get("/ok", (c) => c.text("ok"));
+    let allowed = 0;
+    for (let index = 0; index < 80; index += 1) {
+      if ((await app.request("http://localhost/ok")).status === 200) allowed += 1;
+    }
+    expect(allowed).toBe(60);
   });
 });
 
@@ -103,10 +144,13 @@ describe("§4.11 · 限流键的取法", () => {
     }
   });
 
-  it("全局兜底键：拿不到可信 IP 时**所有请求共用 `unknown` 桶**", () => {
-    // 比按一个可伪造的头分桶安全：后者等于给攻击者一个「换头就换桶」的开关。
-    expect(globalRateLimitKey(null)).toBe("ip:unknown");
+  it("全局兜底键：**可信头 → socket 地址 → unknown** 三级退化", () => {
+    // 可信头（真机是 cf-connecting-ip）优先。
     expect(globalRateLimitKey("1.2.3.4")).toBe("ip:1.2.3.4");
+    // 直连 `:8787` 的客户端没有可信头 —— 调用方传 socket 地址，于是它仍按自己分桶。
+    expect(globalRateLimitKey("203.0.113.9")).toBe("ip:203.0.113.9");
+    // 两者都没有（测试里的 `app.request()`、或拿不到 socket）：才退回共用桶。
+    expect(globalRateLimitKey(null)).toBe("ip:unknown");
   });
 });
 

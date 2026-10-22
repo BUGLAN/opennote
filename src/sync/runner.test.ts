@@ -365,3 +365,139 @@ describe("§5.3 · 状态栏文案：三种「说准」", () => {
     }
   });
 });
+
+/* ============================================================================
+   ★ 失败之后**自动重试**（2026-10-22）
+
+   以前失败之后没有任何重试：触发源只有「启动 / 远端信号 / 本地写 / 手点」，
+   它们在失败之后**都不会再来** —— 远端没人在改、用户也没在编辑时，一次 429
+   或断网就让这台设备永远停在那里，而状态栏还写着「网络恢复后会自动重试」。
+   ============================================================================ */
+
+describe("★ 失败之后自动重试（指数退避）", () => {
+  /** 只排一个定时器的假计时器（记录延迟，用例自己放行）。 */
+  function retryTimers() {
+    let next: (() => void) | null = null;
+    const delays: number[] = [];
+    return {
+      setTimeoutFn: (fn: () => void, ms: number) => {
+        next = fn;
+        delays.push(ms);
+        return { id: delays.length };
+      },
+      clearTimeoutFn: () => {
+        next = null;
+      },
+      get delays() {
+        return delays;
+      },
+      get pending() {
+        return next !== null;
+      },
+      /** 让排着的那个到点。 */
+      fire() {
+        const fn = next;
+        next = null;
+        fn?.();
+      },
+    };
+  }
+
+  it("★ 网络失败 ⇒ 5 秒后自动再来一次（不是等人点）", async () => {
+    const timers = retryTimers();
+    let calls = 0;
+    const runner = createSyncRunner({
+      syncOnce: async () => {
+        calls += 1;
+        if (calls === 1) throw new SyncProviderError("network", "连不上", null);
+        return result();
+      },
+      ...timers,
+    });
+
+    await runner.request("manual");
+    expect(calls).toBe(1);
+    expect(timers.pending).toBe(true);
+    expect(timers.delays).toEqual([5000]);
+
+    timers.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toBe(2);
+    // 成功之后不该再排。
+    expect(timers.pending).toBe(false);
+  });
+
+  it("连续失败 ⇒ 退避翻倍，且封顶在 2 分钟", async () => {
+    const timers = retryTimers();
+    let calls = 0;
+    const runner = createSyncRunner({
+      syncOnce: async () => {
+        calls += 1;
+        throw new SyncProviderError("server", "500", 500);
+      },
+      ...timers,
+      retryBaseDelayMs: 1000,
+      retryMaxDelayMs: 8000,
+    });
+
+    await runner.request("manual");
+    for (let index = 0; index < 5; index += 1) {
+      timers.fire();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    // 1000 → 2000 → 4000 → 8000 → 8000（封顶）。
+    expect(timers.delays).toEqual([1000, 2000, 4000, 8000, 8000, 8000]);
+    expect(calls).toBe(6);
+  });
+
+  it("**不可重试**的失败不排**（密钥被轮换重试一万次也不会好）", async () => {
+    const timers = retryTimers();
+    const runner = createSyncRunner({
+      syncOnce: async () => {
+        throw new SyncProviderError("rotated", "令牌无效", 401);
+      },
+      ...timers,
+    });
+    await runner.request("manual");
+    expect(timers.pending).toBe(false);
+  });
+
+  it("`dispose()` 取消挂着的重试（关工作区之后不该偷偷再同步）", async () => {
+    const timers = retryTimers();
+    let calls = 0;
+    const runner = createSyncRunner({
+      syncOnce: async () => {
+        calls += 1;
+        throw new SyncProviderError("network", "断网", null);
+      },
+      ...timers,
+    });
+    await runner.request("manual");
+    expect(timers.pending).toBe(true);
+    runner.dispose();
+    expect(timers.pending).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it("成功一次之后退避计数归零（不会带着上次的长延迟）", async () => {
+    const timers = retryTimers();
+    let calls = 0;
+    const runner = createSyncRunner({
+      syncOnce: async () => {
+        calls += 1;
+        // 第 1 次失败、第 2 次成功；之后再失败应当**从头**退避（1000，而不是 4000）。
+        if (calls === 2) return result();
+        throw new SyncProviderError("network", "断网", null);
+      },
+      ...timers,
+      retryBaseDelayMs: 1000,
+    });
+
+    await runner.request("manual"); // 第 1 次：失败 ⇒ 排 1000
+    timers.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0)); // 第 2 次：成功
+    await runner.request("manual"); // 第 3 次：失败 ⇒ 又是 1000
+    expect(timers.delays).toEqual([1000, 1000]);
+  });
+});
+

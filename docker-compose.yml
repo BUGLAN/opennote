@@ -112,9 +112,13 @@ services:
       # 默认空 = 谁都不信。用 CF 命名隧道时填 `cf-connecting-ip`。
       TRUSTED_PROXY_HEADERS: ${TRUSTED_PROXY_HEADERS:-}
 
-      ACCOUNT_REQUESTS_PER_MINUTE: ${ACCOUNT_REQUESTS_PER_MINUTE:-120}
+      # 限流（令牌桶）：perMinute = 长期平均，BURST = 允许的突发。
+      # 协议是「一篇笔记 = 一个请求」，所以 perMinute 必须按「篇/分钟」来理解。
+      ACCOUNT_REQUESTS_PER_MINUTE: ${ACCOUNT_REQUESTS_PER_MINUTE:-1200}
+      ACCOUNT_BURST: ${ACCOUNT_BURST:-120}
       ACCOUNT_SSE_CONNECTIONS: ${ACCOUNT_SSE_CONNECTIONS:-4}
-      GLOBAL_REQUESTS_PER_MINUTE: ${GLOBAL_REQUESTS_PER_MINUTE:-600}
+      GLOBAL_REQUESTS_PER_MINUTE: ${GLOBAL_REQUESTS_PER_MINUTE:-6000}
+      GLOBAL_BURST: ${GLOBAL_BURST:-600}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       # SQLite 控制面库（账号 / 笔记本 / 成员 / 邀请码 / 审计）。**这个要备份**（§8.3）。
