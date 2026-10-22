@@ -110,6 +110,17 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean): Sy
           title: "这一轮没拿到完整的远端文件列表，删除判断被暂停了",
         };
       }
+      /*
+       * ★ 本地扫描不全（H3）：某个目录读不到（被占用 / 没权限）时，**推送侧的删除**会被挂起。
+       * 必须说出来 —— 否则用户看到的是「我删了东西但远端没变」，以为同步坏了。
+       */
+      if (state.last?.scanIncomplete === true || (state.last?.suspendedPushDeletes ?? 0) > 0) {
+        return {
+          tone: "warn",
+          label: "本地目录没读全",
+          title: "有目录这一轮没读出来，所以没有推断删除（新增与修改照常同步）",
+        };
+      }
       return null;
     }
     // offline / error / key-rotated：都要让人看见。

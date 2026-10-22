@@ -46,7 +46,7 @@ import { desktopBridge, type WorkspaceFileChange } from "../desktop/bridge";
 import { sha256Hex } from "../lib/clip/hash";
 // 同步层（P0）：冲突账本与「有没有开同步」这个开关。**方向永远是 data/ → sync/**，
 // 不许反过来（`src/sync/*` 不 import `data/*`），否则两边互相 import 成环。
-import { clearConflictIfIdentical, clearConflicts, recordConflict, remapConflict, resolveConflict } from "../sync/conflicts";
+import { clearConflicts, recordConflict, remapConflict, resolveConflict } from "../sync/conflicts";
 import { isSyncActive } from "../sync/mode";
 import { beginWrite, fileStates, type FileRecord, type FileStamp } from "./fileStates";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
@@ -1312,8 +1312,14 @@ async function reconcileExternalChange(
     fileStates.adoptFromDisk(id, disk.content, disk.stat);
     markClean(id);
     invalidateSearchCache(id);
-    // 两边恰好一样 ⇒ 这不是冲突（false conflict，Unison）。之前误报的要撤掉。
-    clearConflictIfIdentical(id, null, null);
+    /*
+     * 两边恰好一样 ⇒ 这不是冲突（false conflict，Unison）。**之前误报的要撤掉**。
+     *
+     * ⚠️ 这里原来写的是 `clearConflictIfIdentical(id, null, null)`，而那个函数在任一标识为
+     * `null` 时**恒返回 false** —— 调用看着像"撤销"，实际上是死代码，陈旧冲突永远留着（L4）。
+     * 这一支已经证明两边内容相同，直接按路径撤销即可。
+     */
+    resolveConflict(id);
     return { outcome: "unchanged", path: id };
   }
   if (record && diskNorm === normalizeEol(record.content)) return { outcome: "mine-wins", path: id };

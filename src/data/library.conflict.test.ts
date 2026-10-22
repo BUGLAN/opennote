@@ -250,3 +250,27 @@ describe("账本自身的行为", () => {
     expect(conflictCount()).toBe(0);
   });
 });
+
+describe("★ L4 · 「两边已经一样」要把之前误报的冲突撤掉", () => {
+  it("先记一条冲突，再让磁盘与 buffer 变成同一份 ⇒ 冲突被撤销", async () => {
+    /*
+     * 以前这一支调的是 `clearConflictIfIdentical(id, null, null)`，而它在任一标识为 `null` 时
+     * **恒返回 false** —— 调用看着像"撤销"，实际上什么都没做，陈旧冲突永远留在面板里。
+     */
+    setSyncActive(true);
+    const backend = harness.scenario("A", (b) => b.seed("a.md", "# 起点"));
+    await openWorkspace(records.get("A")!, { silent: true });
+    patchUi({ autoSave: "onFocusChange" });
+
+    // 模拟「之前误报过一次」。
+    recordConflict({ path: "a.md", kind: "both-modified", localId: "L1", remoteId: "R1" });
+    expect(conflictCount()).toBe(1);
+
+    // 现在磁盘与 buffer 恰好相同 ⇒ 走「两边一致」分支。
+    updateNoteContent("a.md", "# 现在一样了");
+    backend.seed("a.md", "# 现在一样了");
+    await flushAll();
+
+    expect(conflictCount()).toBe(0);
+  });
+});

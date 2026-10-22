@@ -73,6 +73,14 @@ export interface LastSyncSummary {
   suspendedDeletes: number;
   /** 远端树**仍然没取全**（翻页到头也没拿到完整树）。正常应为 `false`。 */
   treeTruncated: boolean;
+  /**
+   * 这一轮**本地扫描**没扫全（有目录读不到）⇒ 推送侧的删除推断被挂起（H3）。
+   *
+   * 与 `treeTruncated` 对称：一个是远端列表不全，一个是本机列表不全。
+   */
+  scanIncomplete?: boolean;
+  /** 因本地扫描不完整而挂起的**推送删除**条数。 */
+  suspendedPushDeletes?: number;
 }
 
 export interface SyncUiState {
@@ -254,6 +262,8 @@ function handleSynced(
       unknownDids: result.unknownDids.length,
       suspendedDeletes: result.suspendedDeletes.length,
       treeTruncated: result.treeTruncated,
+      scanIncomplete: result.scanIncomplete,
+      suspendedPushDeletes: result.suspendedPushDeletes.length,
     },
   }));
 }
@@ -283,8 +293,21 @@ async function attachCurrent(): Promise<AttachResult> {
    * 空缓存 = 这一轮把每个文件读一遍（正确），之后就是增量的。
    */
   const hashCache: HashCache = (await readHashCache(backend, config.cryptoMode)) ?? createHashCache(config.cryptoMode);
-  /** 上一次把账本落盘的时间（见下面 `onProgress` 的说明：心跳式落盘）。 */
+  /** 上一次把账本落盘的时间（见下面 `heartbeat` 的说明：心跳式落盘）。 */
   let lastLedgerWriteAt = 0;
+  /**
+   * 账本「心跳式落盘」：**与进度回调解耦**（L3）。
+   *
+   * 以前只有 `onProgress` 会触发它，而进度只在"真的写成功了"时才推进 ——
+   * 冲突多的一轮心跳次数就被压低，长轮次中途失败时可恢复的断点变粗。
+   * 现在进度、落地、轮次成功三处都会调它，2 秒节流仍然负责压住写盘频率。
+   */
+  const heartbeat = (): void => {
+    const at = Date.now();
+    if (at - lastLedgerWriteAt < LEDGER_HEARTBEAT_MS) return;
+    lastLedgerWriteAt = at;
+    void writeSyncLedger(backend, ledger).catch(() => undefined);
+  };
   const gitignoreText = await backend.readText(".gitignore").catch(() => "");
   /*
    * 实时推送：网页/移动用 `EventSource`；桌面端由主进程建流、经 IPC 推事件
@@ -308,8 +331,20 @@ async function attachCurrent(): Promise<AttachResult> {
     gitignoreText,
     hashCache,
     cursorStore,
-    notebookKeyForNotebook: (notebookId) =>
-      config.cryptoMode === "user-key" ? deriveNotebookKey(encRootCache?.encRoot ?? new Uint8Array(), notebookId) : undefined,
+    notebookKeyForNotebook: (notebookId) => {
+      if (config.cryptoMode !== "user-key") return undefined;
+      /*
+       * ★★ 拿不到 `encRoot` 时**必须返回 undefined**（让 attach 抛「还没有它的密钥」），
+       * **绝不能**退化成 `new Uint8Array()`：HKDF 对空输入**不报错**，会派生出一把
+       * 「错误但形状正确」的密钥 —— 推上去的密文其它设备全都解不开，而服务端不会拒绝
+       * （它只有密文）。这正是 L7 里那个极端时序的窗口。
+       *
+       * 顺带核对账号：`.opennote` 里没有 `encRoot`，但内存缓存可能还留着**上一个账号**的。
+       */
+      const cached = encRootCache;
+      if (cached === null || cached.accountId !== material.accountId) return undefined;
+      return deriveNotebookKey(cached.encRoot, notebookId);
+    },
     onSynced: (synced) => handleSynced(backend, ledger, synced, hashCache),
     /**
      * ★ **拉取落地后按路径刷新界面**。
@@ -321,6 +356,7 @@ async function attachCurrent(): Promise<AttachResult> {
      * 而拉取落盘走的正是同一条 IPC（见 `library.applyExternalPaths` 的注释）。
      */
     onApplied: (paths) => {
+      heartbeat();
       void (async () => {
         try {
           const { applyExternalPaths } = await import("../data/library");
@@ -339,12 +375,7 @@ async function attachCurrent(): Promise<AttachResult> {
      * 下一轮**从第 1 篇重新拉**，永远同步不完（实测：拉到 65 篇被中断，账本目录都不存在）。
      * 这里每 2 秒落一次盘，让「已经拉下来的那些」算数。
      */
-    onProgress: () => {
-      const at = Date.now();
-      if (at - lastLedgerWriteAt < LEDGER_HEARTBEAT_MS) return;
-      lastLedgerWriteAt = at;
-      void writeSyncLedger(backend, ledger).catch(() => undefined);
-    },
+    onProgress: () => heartbeat(),
     // 实时状态（含进度）进 store —— 对话框与状态栏都从这里读。
     onStatus: (status) => syncUiStore.set((prev) => ({ ...prev, status })),
     openEventStream,
@@ -375,8 +406,13 @@ async function attachCurrent(): Promise<AttachResult> {
 
 /** 工作区打开（或同步配置变更）时调用；内部自会处理「关掉旧的、接上新的」。 */
 export async function openWorkspaceSync(record: WorkspaceRecord, backend: FileSystemBackend): Promise<void> {
+  const previous = currentRecord;
   currentRecord = record;
   currentBackend = backend;
+  // 换了一个工作区（不是同一个重开）⇒ 上一份同步概要不再属于这里（L8，见 closeWorkspaceSync 的说明）。
+  if (previous === null || previous.id !== record.id) {
+    syncUiStore.set((prev) => ({ ...prev, last: null }));
+  }
   if (!flushUnsubscribed) {
     // 懒订阅：让 library 的落盘事件在这里转成「去抖推一次」。
     const { onLocalFlush } = await import("../data/library");
@@ -393,7 +429,13 @@ export function closeWorkspaceSync(): void {
   activeSession = null;
   binding.stop();
   setSyncActive(false);
-  syncUiStore.set((prev) => ({ ...prev, status: null, last: prev.last }));
+  /*
+   * ★ `last` 必须一起清掉（L8）：它是「最近一次成功同步的概要」，带着冲突清单、
+   * 增删计数与 `treeTruncated` —— 但这些事实都属于**上一个工作区**。
+   * 留着它，新工作区在第一轮同步完成前会显示别人的统计（状态栏「N 条删除已暂缓」、
+   * 对话框里一串不属于它的冲突），用户可能据此做错误操作。
+   */
+  syncUiStore.set((prev) => ({ ...prev, status: null, last: null }));
 }
 
 /** 本地写盘之后（library 的 onLocalFlush）→ 去抖推一次。 */

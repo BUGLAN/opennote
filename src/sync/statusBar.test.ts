@@ -104,3 +104,29 @@ describe("状态栏同步位", () => {
     expect(syncStatusBarInfo(state({ status: { phase: "error", error: "500", code: "unknown", lastSyncedAt: null } }), true)?.tone).toBe("error");
   });
 });
+
+describe("★ H3 · 本地扫描没扫全也要说出来", () => {
+  it("scanIncomplete ⇒ warn（否则「我删了但远端没变」看起来像同步坏了）", () => {
+    const info = syncStatusBarInfo(
+      state({
+        status: idle,
+        last: {
+          at: 1,
+          pushed: 0,
+          pulled: 0,
+          deleted: 0,
+          remoteDeleted: 0,
+          conflicts: [],
+          unknownDids: 0,
+          suspendedDeletes: 0,
+          treeTruncated: false,
+          scanIncomplete: true,
+          suspendedPushDeletes: 2,
+        },
+      }),
+      true,
+    );
+    expect(info?.tone).toBe("warn");
+    expect(info?.label).toBe("本地目录没读全");
+  });
+});
