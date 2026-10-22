@@ -299,6 +299,17 @@ export type TreeEntry = z.infer<typeof treeEntrySchema>;
 export const treeResponseSchema = z.object({
   cursor: cursorSchema.nullable(),
   truncated: z.boolean(),
+  /**
+   * 下一页的 `startkey`（**原始行的最后一条**，不是过滤后可见条目的最后一条）。
+   *
+   * 为什么需要它：服务端按**原始行**分页，而客户端看到的 `files` 已经过滤掉了
+   * `_design/`、`_local/`、`syncinfo`、墓碑与坏条目。若客户端拿「可见条目的最后一条」
+   * 当锚点，一旦整页都被过滤掉就**无锚可前进** —— 只能放弃翻页（删除永久挂起、后面的页
+   * 也永远拉不到）。服务端把真实锚点带回来，这条路就不存在了。
+   *
+   * 老服务端没有这个字段 ⇒ 客户端回退到旧行为（可见条目锚点）。
+   */
+  nextStartKey: z.string().min(1).optional(),
   files: z.array(treeEntrySchema),
 });
 export type TreeResponse = z.infer<typeof treeResponseSchema>;

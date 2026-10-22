@@ -80,7 +80,12 @@ function treeEntryFromDoc(doc: CouchDocument, cryptoMode: CryptoMode): {
   if (typeof doc.ehash === "string") entry.ehash = doc.ehash;
   if (typeof doc.size === "number") entry.size = doc.size;
   if (typeof doc.esize === "number") entry.esize = doc.esize;
-  if (doc.deleted === true) entry.deleted = true;
+  /*
+   * CouchDB 的删除标记是 `_deleted`（带下划线）；`deleted` 是**我们自己的**字段形状
+   * （§3.4 的文档形状里有它）。两个都认，否则一个带 hash 的墓碑会被当成活文档列进树里
+   * （当前被 `validTreeEntry` 的「必须有 hash」兜住，但那是巧合，不该依赖）。
+   */
+  if (doc._deleted === true || doc.deleted === true) entry.deleted = true;
   /*
    * ★ `path` **只在明文模式下**带回去。
    * 模式 B 的文档里根本没有 `path` 字段（只有 `epath` 密文），所以这一条也是
@@ -222,7 +227,12 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     if (resolved instanceof Response) return resolved;
     const { notebook } = resolved;
     const cryptoMode = cryptoModeOf(notebook);
-    const limit = clampLimit(c.req.query("limit"), deps.config.maxFileBytes > 0 ? 500 : 500);
+    /*
+     * 页大小与 `maxFileBytes` **无关**（以前这里写的是 `maxFileBytes > 0 ? 500 : 500`，
+     * 两个分支一模一样 —— 死代码，且误导读者以为它们有关系）。
+     * 客户端会自己带 `limit`（引擎默认 1000），这里只是"没带时的默认值"。
+     */
+    const limit = clampLimit(c.req.query("limit"), DEFAULT_TREE_PAGE_SIZE);
     const startKey = c.req.query("startkey") ?? undefined;
 
     try {
@@ -253,7 +263,20 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
           .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
           .filter((entry) => entry.deleted !== true)
           .filter((entry) => validTreeEntry(entry));
-        return json(parseContract(treeResponseSchema, { cursor, truncated: page.rows.length >= limit, files }, "GET /v1/tree"), 200);
+        const truncated = page.rows.length >= limit;
+        /*
+         * ★ 翻页锚点取**原始行**的最后一条（`page.rows` 是过滤之前的）。
+         * 用可见条目的最后一条会在「整页都被过滤掉」时无锚可走（M2）。
+         */
+        const nextStartKey = truncated ? page.rows.at(-1)?.id : undefined;
+        return json(
+          parseContract(
+            treeResponseSchema,
+            { cursor, truncated, ...(nextStartKey === undefined ? {} : { nextStartKey }), files },
+            "GET /v1/tree",
+          ),
+          200,
+        );
       }
 
       // 模式 B：`_all_docs?include_docs=true`（加密路径 ⇒ view 的 key 用不上，§3.3）。
@@ -268,7 +291,16 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
         .filter((entry) => entry.deleted !== true)
         .filter((entry) => validTreeEntry(entry));
-      return json(parseContract(treeResponseSchema, { cursor, truncated: page.rows.length >= limit, files }, "GET /v1/tree"), 200);
+      const truncated = page.rows.length >= limit;
+      const nextStartKey = truncated ? page.rows.at(-1)?.id : undefined;
+      return json(
+        parseContract(
+          treeResponseSchema,
+          { cursor, truncated, ...(nextStartKey === undefined ? {} : { nextStartKey }), files },
+          "GET /v1/tree",
+        ),
+        200,
+      );
     } catch (error) {
       return couchError(error);
     }
@@ -520,27 +552,38 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
           // ★ **这一版**的内容标识（不是 `If-Match` 那个「我以为远端是哪一版」）。
           ...(cryptoMode === "none" ? { hash: newHash } : { ehash: newHash }),
           size: bytes.byteLength,
+          /*
+           * ★★ **正文与元数据必须在同一次写入里**（M1）。
+           *
+           * 以前是两步：`putDoc`（写 hash/size）→ `putAttachment`（写正文）。
+           * 中间这个窗口里，文档已经**声明了新 hash**，而正文要么还是旧的、要么（因为新
+           * revision 只带请求体里给出的 `_attachments`）干脆**没有**。任何一方在窗口里
+           * 崩溃或撞 409，库里就留下一条「声明与字节不符」的文档：CAS 基于声明 hash、
+           * 读正文 404/`vanished` —— 而两边**都不会报错**，只是那一条永远同步不动。
+           *
+           * 现在把正文作为**内联附件**（`data` = base64）跟元数据一起提交：
+           * CouchDB 在**同一个 revision** 里落盘解码后的二进制（存储不膨胀），
+           * 冲突只有一个来源，读回来的 rev/hash/字节永远自洽。
+           *
+           * ⚠️ 体积：内联 base64 会计入 CouchDB 的 `max_document_size`
+           * （本仓 `etc/couchdb/local.ini` 设成 48 MB，够放 32 MB 的文件 ×4/3）。
+           * 换了部署而没跟着调的话，CouchDB 会回 413 —— 这里如实转成 413，不静默截断。
+           */
+          _attachments: {
+            blob: {
+              content_type: "application/octet-stream",
+              data: Buffer.from(bytes).toString("base64"),
+            },
+          },
         },
         { baseRev: existing?._rev ?? null },
       );
       if ("conflict" in written) {
         return json({ error: "写入冲突（远端在我们读取之后又变了）", code: "conflict", current: written.current ? { hash: contentIdOf(written.current), rev: written.current._rev ?? null } : null }, 409);
       }
-      /*
-       * 正文以**附件**提交，而且传的是**原始字节**（不是 base64）。
-       * 第一版传 base64，CouchDB 把它当字面内容存了下来 —— 读回来是乱码。
-       * 见 `CouchClient.putAttachment` 的说明。
-       */
-      const attachment = await deps.couch.putAttachment(notebook.db_name, did, bytes, {
-        rev: written.rev,
-        contentType: "application/octet-stream",
-      });
-      if ("conflict" in attachment) {
-        return json({ error: "写附件冲突", code: "conflict", current: null }, 409);
-      }
       // 响应里回**这一版**的标识与 rev（客户端据此更新基线，§4.7: `-> 200/201 { hash?, ehash?, rev }`）。
       return json(
-        { rev: attachment.rev, ...(cryptoMode === "none" ? { hash: newHash } : { ehash: newHash }) },
+        { rev: written.rev, ...(cryptoMode === "none" ? { hash: newHash } : { ehash: newHash }) },
         existing ? 200 : 201,
       );
     } catch (error) {
@@ -733,30 +776,68 @@ function sseRoutes(deps: V1RoutesDeps, routes: Hono, json: (body: unknown, statu
 
     const heartbeatMs = sseHeartbeatMsOf(deps);
     const encoder = new TextEncoder();
-    let cursor: string | null = c.req.query("since") ?? null;
-    let closed = false;
+    /** 客户端的期望起点（可作为「服务端当前游标取不到」时的退路）。 */
+    const since = c.req.query("since") ?? null;
+    let cursor: string | null = since;
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
+        /*
+         * ★★ **收尾只有这一个入口**（M4）。
+         *
+         * 以前 `send` 失败时只把 `closed` 置真，而 `cleanup` 第一行就是
+         * `if (closed) return` —— 于是 abort 到达时**直接返回、计数永不递减**。
+         * 泄漏几次之后，这个账号的所有实时连接都会被判成「太多了」并 429
+         * （直到进程重启）。计数、定时器、关流现在都收敛在 `release()` 里，且只做一次。
+         */
+        let released = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const release = (): void => {
+          if (released) return;
+          released = true;
+          if (timer !== null) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          const left = (sseConnections.get(account.id) ?? 1) - 1;
+          if (left <= 0) sseConnections.delete(account.id);
+          else sseConnections.set(account.id, left);
+          try {
+            controller.close();
+          } catch {
+            /* 已经关了 */
+          }
+        };
         const send = (chunk: string): void => {
-          if (closed) return;
+          if (released) return;
           try {
             controller.enqueue(encoder.encode(chunk));
           } catch {
-            closed = true;
+            release();
           }
         };
-        /** 先把当前游标告诉客户端，它才知道从哪儿开始。 */
+        /*
+         * ★★ `ready` 必须带**服务端当前**游标（M3）。
+         *
+         * 以前这里回显客户端传来的 `since`（而客户端根本不传）⇒ 恒为 null ⇒
+         * 客户端既不会「核对为最新」，也没有任何信号去补一轮 —— 启动同步被整段跳过
+         * （空笔记本 + 本地有待推文件时，首轮同步永远不会发生）。
+         */
+        const readyCursor = await currentCursor(deps, notebook.db_name);
         send(`event: ready
-data: ${JSON.stringify({ cursor, heartbeatMs })}
+data: ${JSON.stringify({ cursor: readyCursor, heartbeatMs })}
 
 `);
+        /*
+         * 轮询起点 = **连接那一刻的服务端游标**（不是客户端的 `since`、更不是 0）。
+         * 用 0 起步会让每条连接都把整个变更日志扫一遍（M3 里说的「退化为全量轮询」）。
+         */
+        cursor = readyCursor ?? since;
 
-        let timer: ReturnType<typeof setTimeout> | null = null;
         let lastBeat = Date.now();
 
         const tick = async (): Promise<void> => {
-          if (closed) return;
+          if (released) return;
           try {
             const result = await deps.couch.changes(notebook.db_name, { since: cursor, limit: 100, timeoutMs: 10_000 });
             const lastSeq = result.last_seq === undefined || result.last_seq === null ? null : String(result.last_seq);
@@ -788,26 +869,13 @@ data: ${JSON.stringify({ at: Date.now() })}
 `);
             lastBeat = Date.now();
           }
+          if (released) return;
           timer = setTimeout(() => void tick(), 2000);
         };
         void tick();
 
         // 客户端断开 ⇒ 收尾（**一定要减计数**，否则连接数会只增不减）。
-        const abort = c.req.raw.signal;
-        const cleanup = (): void => {
-          if (closed) return;
-          closed = true;
-          if (timer !== null) clearTimeout(timer);
-          const left = (sseConnections.get(account.id) ?? 1) - 1;
-          if (left <= 0) sseConnections.delete(account.id);
-          else sseConnections.set(account.id, left);
-          try {
-            controller.close();
-          } catch {
-            /* 已经关了 */
-          }
-        };
-        abort.addEventListener("abort", cleanup);
+        c.req.raw.signal.addEventListener("abort", release);
       },
     });
 
@@ -841,6 +909,9 @@ async function currentCursor(deps: V1RoutesDeps, dbName: string): Promise<string
     return null;
   }
 }
+
+/** `/v1/tree` 在没有 `limit` 时的默认页大小（与 `maxFileBytes` 无关）。 */
+const DEFAULT_TREE_PAGE_SIZE = 500;
 
 /** 把 `limit` 夹到合理区间（默认 500，最大 2000）。 */
 function clampLimit(raw: string | undefined, fallback: number): number {

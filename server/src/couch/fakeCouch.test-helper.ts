@@ -209,6 +209,24 @@ export class FakeCouch {
       if (existing && baseRev !== existing._rev) return json(409, { error: "conflict" });
       if (!existing && baseRev !== null) return json(409, { error: "conflict" });
       const written = { ...payload, _id: docId, _rev: this.rev() };
+      /*
+       * ★ 附件与文档是**同一个 revision** 的一部分（真实 CouchDB 语义，与 M1 的单次写对应）：
+       *   - 请求体里带 `_attachments[name].data`（base64）⇒ 解码后落盘；
+       *   - 带 `stub: true` ⇒ 复用同名旧附件；
+       *   - **没带的旧附件会被丢掉**（这就是「两步写」窗口里会读到 404 的原因）。
+       */
+      const prefix = `${dbName}/${docId}/`;
+      const previous = new Map([...this.attachments].filter(([key]) => key.startsWith(prefix)));
+      for (const key of previous.keys()) this.attachments.delete(key);
+      const inline = (payload._attachments ?? {}) as Record<string, { data?: unknown; stub?: unknown }>;
+      for (const [name, attachment] of Object.entries(inline)) {
+        const key = `${prefix}${name}`;
+        if (typeof attachment.data === "string") {
+          this.attachments.set(key, Uint8Array.from(Buffer.from(attachment.data, "base64")));
+        } else if (attachment.stub === true && previous.has(key)) {
+          this.attachments.set(key, previous.get(key)!);
+        }
+      }
       docs.set(docId, written);
       return json(201, { ok: true, rev: written._rev });
     }

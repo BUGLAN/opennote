@@ -824,14 +824,59 @@ describe("§4.7 · `/v1/events`（SSE 中继）", () => {
     await firstChunk(response);
   });
 
-  it("★ 首帧就把游标与心跳间隔告诉客户端（它才知道从哪儿开始、多久算掉线）", async () => {
+  it("★ 首帧带**服务端当前**游标（不是回显客户端传的 since）—— 客户端靠它判断落后没落后（M3）", async () => {
+    /*
+     * 以前 `ready` 回显的是客户端传来的 `since`，而客户端**从不传** ⇒ 恒为 null ⇒
+     * 客户端既不会「核对为最新」也没有任何信号补一轮（启动同步被整段跳过）。
+     */
     const world = makeWorld();
     const account = world.account();
     const notebook = world.notebook(account.id);
+
     const response = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}&since=5`);
     const chunk = await firstChunk(response);
-    expect(chunk).toContain('"cursor":"5"');
+
+    expect(chunk).toContain('"cursor":"');
+    // 越是「回显」就越会等于 5；这里是服务端自己的 update_seq（假库的形状是 `N-fake`）。
+    expect(chunk).not.toContain('"cursor":"5"');
+    expect(chunk).toMatch(/"cursor":"[^"]*-fake"/);
     expect(chunk).toContain("heartbeatMs");
+  });
+
+  it("★ 连接被中途掐断（enqueue 抛错、没有 abort）⇒ 计数必须释放（M4）", async () => {
+    /*
+     * 旧实现里 `send` 失败只置 `closed = true`，而 `cleanup` 第一行是 `if (closed) return` ——
+     * 于是 abort 到达时直接返回、计数永不递减。泄漏 4 次之后，这个账号的实时连接
+     * 全被 429 拒绝，直到进程重启。
+     */
+    vi.useFakeTimers();
+    try {
+      const world = makeWorld();
+      const account = world.account();
+      const notebook = world.notebook(account.id);
+
+      for (let index = 0; index < 4; index += 1) {
+        const response = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`);
+        const reader = response.body!.getReader();
+        const first = await reader.read();
+        expect(new TextDecoder().decode(first.value)).toContain("event: ready");
+        // 客户端「悄悄走了」：取消 body，但**不**触发请求的 abort。
+        await reader.cancel();
+      }
+
+      // 4 条都还挂在计数上 ⇒ 第 5 条被拒。
+      const rejected = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`);
+      expect(rejected.status).toBe(429);
+
+      // 推进到心跳：下一次 send 的 enqueue 会抛 ⇒ release() ⇒ 计数递减。
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const accepted = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`);
+      expect(accepted.status).toBe(200);
+      await accepted.body!.cancel();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("★ 连接数超上限 ⇒ 429（明确拒绝，不是静默把旧的踢掉）", async () => {
@@ -924,5 +969,111 @@ describe("列树的游标 · 增量同步的起点", () => {
     };
     expect(typeof body.cursor).toBe("string");
     expect(body.cursor).not.toBe("");
+  });
+});
+
+describe("★ M1 · 一次写入：hash 与正文永远同属一个 revision", () => {
+  const HASH = "a".repeat(64);
+
+  it("写入后：声明的 hash 与读回的字节一致（没有再拆成两步）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const bytes = new TextEncoder().encode("# 你好");
+
+    const put = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "x-opennote-hash": HASH },
+      body: bytes,
+    });
+    expect(put.status).toBe(201);
+    const putBody = (await put.json()) as { rev: string; hash: string };
+    expect(putBody.hash).toBe(HASH);
+
+    const get = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { headers: auth(alice.token) });
+    expect(get.status).toBe(200);
+    // 三个东西必须来自**同一个** revision：hash 头、rev 头、正文。
+    expect(get.headers.get("x-opennote-hash")).toBe(HASH);
+    expect(get.headers.get("x-opennote-rev")).toBe(putBody.rev);
+    expect(new Uint8Array(await get.arrayBuffer())).toEqual(bytes);
+  });
+
+  it("CAS 冲突 ⇒ 文档与正文**都不变**（绝不留「新 hash + 旧正文」）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const original = new TextEncoder().encode("原始正文");
+
+    const put = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "x-opennote-hash": HASH },
+      body: original,
+    });
+    const putBody = (await put.json()) as { rev: string };
+
+    const conflict = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "if-match": "S".repeat(64), "x-opennote-hash": "b".repeat(64) },
+      body: new TextEncoder().encode("对方不该被写进来"),
+    });
+    expect(conflict.status).toBe(409);
+    const body = (await conflict.json()) as { current: { hash: string; rev: string } };
+    expect(body.current.hash).toBe(HASH);
+    expect(body.current.rev).toBe(putBody.rev);
+
+    // 冲突之后读回来的仍然是原来那一版（正文与标识都自洽）。
+    const get = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { headers: auth(alice.token) });
+    expect(get.headers.get("x-opennote-hash")).toBe(HASH);
+    expect(get.headers.get("x-opennote-rev")).toBe(putBody.rev);
+    expect(new Uint8Array(await get.arrayBuffer())).toEqual(original);
+  });
+});
+
+describe("★ M2 · /v1/tree 的翻页锚点是**原始行**的最后一条", () => {
+  it("整页被过滤掉一部分时，nextStartKey 仍然指向原始页的边界（不是可见条目的边界）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    // 两条原始行：f:a 正常；f:b 是墓碑（会被过滤掉）。
+    docs.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
+    docs.set("f:b", { _id: "f:b", _rev: "1-b", _deleted: true });
+
+    const response = await call(world, `/v1/tree?nb=${notebook.id}&limit=2`, { headers: auth(alice.token) });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { truncated: boolean; nextStartKey?: string; files: { did: string }[] };
+
+    expect(body.truncated).toBe(true);
+    expect(body.files.map((file) => file.did)).toEqual(["f:a"]);
+    // ★ 锚点是 f:b（原始行最后一条）。取「可见条目的最后一条」会得到 f:a —— 下一页就重叠了。
+    expect(body.nextStartKey).toBe("f:b");
+  });
+
+  it("不 truncated 时**不带** nextStartKey（没有下一页）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.fake.databases.get(notebook.dbName)!.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
+
+    const response = await call(world, `/v1/tree?nb=${notebook.id}&limit=5`, { headers: auth(alice.token) });
+    const body = (await response.json()) as { truncated: boolean; nextStartKey?: string };
+    expect(body.truncated).toBe(false);
+    expect(body.nextStartKey).toBeUndefined();
+  });
+});
+
+describe("★ N4 · CouchDB 的墓碑标记是 `_deleted`", () => {
+  it("带 `_deleted: true` 的文档不进树（即使它居然还带着 hash）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    docs.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
+    // 一条「带 hash 的墓碑」——真实 CouchDB 不会这样，但判据不该依赖这种巧合。
+    docs.set("f:b", { _id: "f:b", _rev: "1-b", path: "b.md", hash: "b".repeat(64), _deleted: true });
+
+    const response = await call(world, `/v1/tree?nb=${notebook.id}&limit=10`, { headers: auth(alice.token) });
+    const body = (await response.json()) as { files: { did: string }[] };
+    expect(body.files.map((file) => file.did)).toEqual(["f:a"]);
   });
 });
