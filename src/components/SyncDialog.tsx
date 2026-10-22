@@ -17,6 +17,7 @@
 
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Modal } from "./Overlays";
+import { ConflictPanel } from "./ConflictPanel";
 import { Icon } from "./Icons";
 import { formatRelativeTime } from "../lib/utils";
 import { askConfirm } from "../lib/dialogs";
@@ -32,7 +33,6 @@ import {
   manualSync,
   openWorkspaceSync,
   prepareRegistration,
-  resolveConflict,
   saveWorkspaceConnection,
   unlockAccount,
   syncUiStore,
@@ -62,7 +62,7 @@ export function SyncDialog({ workspace, onClose }: { workspace: WorkspaceRecord 
         {workspace ? <StatusSection /> : null}
         {workspace ? <ConnectionSection workspace={workspace} /> : <p className="dialog__note">先打开一个笔记本，才能配置同步。</p>}
         {ui.hasKey ? <AccountSection /> : null}
-        <ConflictSection />
+        {ui.last && ui.last.conflicts.length > 0 ? <ConflictPanel conflicts={ui.last.conflicts} /> : null}
       </div>
     </Modal>
   );
@@ -617,64 +617,4 @@ function StatusSection(): ReactNode {
       ) : null}
     </section>
   );
-}
-
-function ConflictSection(): ReactNode {
-  const ui = useStore(syncUiStore);
-  const [busyPath, setBusyPath] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  if (ui.last === null || ui.last.conflicts.length === 0) return null;
-
-  const act = (path: string, direction: "remote" | "local") => {
-    setBusyPath(path);
-    setError(null);
-    resolveConflict(path, direction)
-      .then((outcome) => {
-        if (!outcome.ok && outcome.error) setError(`${path}：${outcome.error}`);
-      })
-      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
-      .finally(() => setBusyPath(null));
-  };
-
-  return (
-    <section className="sync-dialog__card">
-      <h3 className="sync-dialog__title">
-        <Icon name="edit" size={13} /> 冲突（{ui.last.conflicts.length}）
-      </h3>
-      <p className="dialog__note">两边都改过、引擎绝不替你猜。选定一边之后，另一台设备会在下一轮同步里收敛到同一份。</p>
-      <ul className="sync-dialog__conflicts">
-        {ui.last.conflicts.map((item) => (
-          <li key={item.path} className="sync-dialog__conflict">
-            <span className="sync-dialog__conflict-path" title={item.path}>
-              {item.path}
-            </span>
-            <span className="muted">{kindLabel(item.kind)}</span>
-            <span className="sync-dialog__row">
-              <button type="button" className="btn" disabled={busyPath !== null} onClick={() => act(item.path, "remote")}>
-                采用远端
-              </button>
-              <button type="button" className="btn" disabled={busyPath !== null} onClick={() => act(item.path, "local")}>
-                用我的版本覆盖远端
-              </button>
-            </span>
-          </li>
-        ))}
-      </ul>
-      {busyPath ? <p className="dialog__note">正在处理 {busyPath} …</p> : null}
-      {error ? <p className="dialog__note sync-dialog__error">{error}</p> : null}
-    </section>
-  );
-}
-
-function kindLabel(kind: string): string {
-  switch (kind) {
-    case "both-modified":
-      return "两边都改了";
-    case "deleted-locally-modified-remotely":
-      return "本地已删，远端改过";
-    case "deleted-remotely-modified-locally":
-      return "远端已删，本地改过";
-    default:
-      return kind;
-  }
 }

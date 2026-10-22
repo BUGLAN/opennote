@@ -3253,3 +3253,132 @@ mark.hit {
 .statusbar__sync.is-quiet:hover {
   opacity: 1;
 }
+
+/* ---- 冲突面板 ----------------------------------------------------------
+ * 列表 → 对比 → 裁决。以前只有「路径 + 两个按钮」，109 条只能盲选。 */
+.cf-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s2) 0;
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--rule);
+}
+.cf-bar .spacer { flex: 1; }
+.btn--sm {
+  font-size: var(--fs-xs);
+  padding: 5px 9px;
+}
+.cf-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.cf-item + .cf-item { border-top: 1px dashed var(--rule); }
+.cf-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 7px 4px;
+}
+.cf-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cf-kind {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.cf-acts {
+  flex: none;
+  display: flex;
+  gap: 4px;
+}
+.cf-cmp {
+  margin: 0 0 var(--s2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--paper);
+}
+.cf-cmp-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rule);
+}
+.cf-cmp-head .spacer { flex: 1; }
+.cf-seg {
+  display: inline-flex;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.cf-seg button {
+  font-size: var(--fs-xs);
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--ink-3);
+}
+.cf-seg button.is-on {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+.cf-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--rule);
+}
+.cf-col { background: var(--paper-2); min-width: 0; }
+.cf-col h5 {
+  margin: 0;
+  padding: 5px 10px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--rule);
+}
+.cf-col pre {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 190px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.7;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cf-unified {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 210px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.7;
+  color: var(--ink-2);
+}
+.cf-line { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cf-line.is-add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.cf-line.is-del { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.cf-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 8px 10px;
+  border-top: 1px solid var(--rule);
+}
+.cf-foot .spacer { flex: 1; }

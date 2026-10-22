@@ -32,6 +32,7 @@
 import { assertSafeRelative, isMarkdownPath } from "../fs/paths";
 import { applyTruncationGuard, assertDeletionBudget, planPull, planPush, type BaselineLike } from "./diff";
 import type { ConflictKind } from "./conflicts";
+import { isSameUpToFormatting } from "./textDiff";
 import type { SyncLedger } from "./state";
 import {
   SyncProviderError,
@@ -358,7 +359,30 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    * 而「两边都改」的正确处置是**列出、不推**（§6.2）。所以先把 `planPull` 判出的冲突路径
    * 从推送清单里摘掉 —— 否则引擎会把用户还没裁决的本地版本**直接覆盖到远端**。
    */
-  const conflictedPaths = new Set(pullPlan.conflicts.map((item) => item.path));
+  /*
+   * ★ **仅格式不同 ⇒ 按「已同步」处理**（BOM / 换行符 / 末尾空行）。
+   *
+   * 两台设备各自保存时行尾可能不同（Windows 记事本写 CRLF、编辑器写 LF），
+   * 于是同一篇会字节不同、被判成「两边都改了」。用户看到的是一条冲突，
+   * 点开对比**完全一样** —— 判宽了会吞真改动，判窄了就永远是噪音。
+   *
+   * 处置方式不是「忽略」而是**收敛**：把它转成一次普通的下载（采用远端字节），
+   * 下一轮两边字节就一致了。只忽略不收敛的话，下一轮还会再撞一次。
+   *
+   * 代价是每条冲突多一次 `provider.read`；只在**有冲突**时才发生，可以接受。
+   */
+  const effectiveConflicts = await filterFormattingOnly(pullPlan.conflicts, {
+    provider,
+    deps,
+    treeEntryByPath,
+    onFormattingOnly: (path) => {
+      const entry = treeEntryByPath.get(path);
+      if (entry !== undefined) pullPlan.download.push({ path, sha: entry.hash });
+    },
+    log,
+  });
+
+  const conflictedPaths = new Set(effectiveConflicts.map((item) => item.path));
   const pushAdded = pushPlan.added.filter((file) => !conflictedPaths.has(file.path));
   const pushModified = pushPlan.modified.filter((file) => !conflictedPaths.has(file.path));
 
@@ -377,7 +401,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   const tick = (): void => onProgress?.({ done: progressDone, total: progressTotal });
   tick();
 
-  for (const item of pullPlan.conflicts) {
+  for (const item of effectiveConflicts) {
     const local = localByPath.get(item.path);
     const remote = treeEntryByPath.get(item.path);
     conflicts.push({
@@ -416,6 +440,28 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
        */
       const remoteEntry = result.conflict.current;
       const existing = ledger.files[file.path];
+      /*
+       * ★ **false conflict（伪冲突）**：两边都改了，但**改成了同一份内容**。
+       *
+       * 这在一台设备上改、另一台把它原样抄了一遍，或者两台设备同时把同一个开关
+       * 拨到同一边时**真的会发生**。站在用户角度这就是「已经同步好了」，
+       * 报一个冲突然后等他去裁决，只会让他白点一次「保留本地」。
+       *
+       * 拉取那一侧早就有这条判定（`diff.ts` 的 `planPull`），推这一侧一直没有 ——
+       * 于是「同内容」在推的时候仍然会进冲突账本。这里补上。
+       */
+      if (remoteEntry !== null && remoteEntry.hash === file.hash) {
+        ledger.files[file.path] = {
+          bid: ledger.bids[file.path] ?? allocateBid(ledger, file.path),
+          localHash: file.hash,
+          remoteHash: remoteEntry.hash,
+          rev: remoteEntry.rev,
+          imported: true,
+          syncedAt: now(),
+        };
+        log("push", { path: file.path, redundant: true });
+        return;
+      }
       ledger.files[file.path] = {
         bid: ledger.bids[file.path] ?? allocateBid(ledger, file.path),
         localHash: existing?.localHash ?? null,
@@ -888,6 +934,63 @@ export async function resolveChangedPaths(
     seen.set(path, value);
   }
   return [...seen.entries()].map(([path, hash]) => ({ path, hash }));
+}
+
+/** 冲突原因（与 `planPull` 的判定一一对应）。 */
+type ConflictReason = "both-modified" | "deleted-locally-modified-remotely" | "deleted-remotely-modified-locally";
+
+interface ConflictRow {
+  path: string;
+  reason: ConflictReason;
+}
+
+/** 严格解码 UTF-8；不是合法文本（图片等）就返回 `null`。 */
+function decodeText(bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 把「仅格式不同」的冲突挑出来（它们会被转成一次下载，不进冲突列表）。
+ *
+ * 只处理 `both-modified`：另外两种是「一边删了、一边改了」，
+ * 那根本没有「两份文本」可比 —— 必须由人裁决。
+ */
+async function filterFormattingOnly(
+  conflicts: ConflictRow[],
+  context: {
+    provider: SyncProvider;
+    deps: SyncEngineDeps;
+    treeEntryByPath: Map<string, { hash: string }>;
+    onFormattingOnly: (path: string) => void;
+    log: (kind: "conflict", detail: { path: string; formattingOnly: true }) => void;
+  },
+): Promise<ConflictRow[]> {
+  if (conflicts.length === 0) return [];
+  const kept: ConflictRow[] = [];
+  await runBounded(conflicts, 4, async (item) => {
+    if (item.reason !== "both-modified") {
+      kept.push(item);
+      return;
+    }
+    const [localBytes, remote] = await Promise.all([
+      context.deps.readLocal(item.path).catch(() => null),
+      context.provider.read(context.deps.didOf(item.path)).catch(() => null),
+    ]);
+    const left = localBytes === null ? null : decodeText(localBytes);
+    const right = remote === null ? null : decodeText(remote.bytes);
+    if (left === null || right === null || !isSameUpToFormatting(left, right)) {
+      kept.push(item);
+      return;
+    }
+    context.onFormattingOnly(item.path);
+    context.log("conflict", { path: item.path, formattingOnly: true });
+  });
+  // 并发下顺序不定；排一下让界面稳定。
+  return kept.sort((a, b) => a.path.localeCompare(b.path));
 }
 export function buildPartialTree(
   changed: { path: string; hash: string | null }[],

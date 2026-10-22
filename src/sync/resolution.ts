@@ -15,6 +15,7 @@
  */
 
 import type { SyncSession } from "./session";
+import { decodeText, isSameUpToFormatting } from "./textDiff";
 
 export interface ResolutionOutcome {
   path: string;
@@ -32,6 +33,40 @@ function allocateBid(session: SyncSession, path: string): number {
   return bid;
 }
 
+
+/** 冲突两边的可读版本（界面画 diff 用）。 */
+export interface ConflictPreview {
+  path: string;
+  /** 本机那一份；不是合法文本（图片等）就是 `null`。 */
+  local: string | null;
+  /** 远端那一份；已是**明文**（E2EE 下由 provider 解密）。 */
+  remote: string | null;
+  /** 两边是否仅格式不同（BOM / 换行符 / 末尾空行）。 */
+  formattingOnly: boolean;
+}
+
+/**
+ * 读出一份冲突的**两边正文**。只读，不改任何状态。
+ *
+ * 为什么要单独一个函数：`resolveConflict*` 是「写」的另一半，而界面在用户**还没决定**
+ * 之前需要先看见两份内容。把「读」与「写」混在一起，就会出现「点一下对比顺手覆盖了」这种事故。
+ */
+export async function previewConflict(session: SyncSession, path: string): Promise<ConflictPreview> {
+  const did = session.deps.didOf(path);
+  const [localBytes, remote] = await Promise.all([
+    session.deps.readLocal(path).catch(() => null),
+    session.provider.read(did).catch(() => null),
+  ]);
+  const local = localBytes === null ? null : decodeText(localBytes);
+  const remoteText = remote === null ? null : decodeText(remote.bytes);
+  return {
+    path,
+    local,
+    remote: remoteText,
+    // 只有两边都是合法文本才谈得上「仅格式不同」。
+    formattingOnly: local !== null && remoteText !== null && isSameUpToFormatting(local, remoteText),
+  };
+}
 /** 「采用远端」：远端那一份覆盖本地，基线对齐远端（与引擎拉取同一形状）。 */
 export async function resolveConflictWithRemote(session: SyncSession, path: string): Promise<ResolutionOutcome> {
   const did = session.deps.didOf(path);

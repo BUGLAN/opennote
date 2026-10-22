@@ -10,10 +10,11 @@
  * 4. 远端已经没有那一条 ⇒ 如实失败，不猜。
  */
 import { describe, expect, it } from "vitest";
+import { idForPath } from "../../shared/paths";
 import { createSyncLedger } from "./state";
 import { createMemoryProvider } from "./providers/memory";
 import { createSyncSession } from "./session";
-import { resolveConflictWithLocal, resolveConflictWithRemote } from "./resolution";
+import { previewConflict, resolveConflictWithLocal, resolveConflictWithRemote } from "./resolution";
 import type { SyncSession } from "./session";
 import type { LocalEntry, SyncFileBackend } from "./workspaceFiles";
 
@@ -135,3 +136,53 @@ async function providerReadText(session: SyncSession, path: string): Promise<str
   expect(remote).not.toBeNull();
   return new TextDecoder().decode(remote!.bytes);
 }
+
+/* ============================================================================
+   预览：读两边的正文（只读，绝不改任何东西）
+   ============================================================================ */
+
+describe("previewConflict", () => {
+  it("★ 读出本机与远端两份正文，且**不改**任何一侧", async () => {
+    /*
+     * 这是「先看见、再决定」的数据来源。把读和写混在一起，就会出现
+     * 「点一下对比顺手把远端覆盖了」这种事故 —— 所以这一条要钉死「只读」。
+     */
+    const provider = createMemoryProvider();
+    const bytes = new TextEncoder().encode("远端的版本\n");
+    const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
+    const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    provider.seed(idForPath("笔记.md"), hash, bytes);
+
+    const backend = memoryBackend({ "笔记.md": "本机的版本\n" });
+    const session = sessionFor(backend, provider);
+
+    const preview = await previewConflict(session, "笔记.md");
+    expect(preview.local).toBe("本机的版本\n");
+    expect(preview.remote).toBe("远端的版本\n");
+    expect(preview.formattingOnly).toBe(false);
+    // 只读：本地与远端都还在。
+    expect(backend.snapshot()["笔记.md"]).toBe("本机的版本\n");
+    expect((await provider.read(idForPath("笔记.md")))?.bytes).toEqual(bytes);
+  });
+
+  it("两边只差换行符 ⇒ 标记 formattingOnly（界面据此说「仅格式不同」）", async () => {
+    const provider = createMemoryProvider();
+    const remoteBytes = new TextEncoder().encode("第一行\n第二行\n");
+    const digest = await crypto.subtle.digest("SHA-256", remoteBytes as unknown as ArrayBuffer);
+    const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    provider.seed(idForPath("笔记.md"), hash, remoteBytes);
+
+    const backend = memoryBackend({ "笔记.md": "第一行\r\n第二行\r\n" });
+    const preview = await previewConflict(sessionFor(backend, provider), "笔记.md");
+    expect(preview.formattingOnly).toBe(true);
+  });
+
+  it("远端已经没有这一条 ⇒ remote 为 null（界面如实说，而不是显示空白）", async () => {
+    const provider = createMemoryProvider();
+    const backend = memoryBackend({ "笔记.md": "还在\n" });
+    const preview = await previewConflict(sessionFor(backend, provider), "笔记.md");
+    expect(preview.local).toBe("还在\n");
+    expect(preview.remote).toBeNull();
+    expect(preview.formattingOnly).toBe(false);
+  });
+});

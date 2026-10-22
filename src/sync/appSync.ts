@@ -50,7 +50,7 @@ import type { SyncStatus } from "./runner";
 import { normalizeSyncConfig, updateWorkspaceSync } from "../data/workspaces";
 import type { SyncOnceResult } from "./engine";
 import type { SyncSession } from "./session";
-import { resolveConflictWithLocal, resolveConflictWithRemote, type ResolutionOutcome } from "./resolution";
+import { previewConflict as readConflictPreview, resolveConflictWithLocal, resolveConflictWithRemote, type ConflictPreview, type ResolutionOutcome } from "./resolution";
 
 /* ============================================================================
    UI 状态（React 经 `useStore(syncUiStore)` 订阅）
@@ -402,6 +402,16 @@ export function manualSync(): Promise<SyncOnceResult | null> {
  * 冲突裁决：用户点「采用远端」或「保留我的版本」之后调用。
  * 裁决成功后**自动再同步一轮**，把另一端也带到收敛状态。
  */
+/**
+ * 读一份冲突的**两边正文**（界面画 diff 用）。只读 —— 在用户还没决定之前，
+ * 绝不能顺手把任何一边写下去。
+ */
+export async function previewConflict(path: string): Promise<ConflictPreview | null> {
+  const session = activeSession;
+  if (!session) return null;
+  return readConflictPreview(session, path);
+}
+
 export async function resolveConflict(path: string, direction: "remote" | "local"): Promise<ResolutionOutcome> {
   const session = activeSession;
   if (!session) return { path, ok: false, error: "同步还没有接上" };

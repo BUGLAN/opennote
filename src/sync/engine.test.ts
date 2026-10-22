@@ -438,3 +438,98 @@ async function harnessText(provider: MemoryProvider, path: string): Promise<stri
   const read = await provider.read(idForPath(path));
   return read === null ? null : new TextDecoder().decode(read.bytes);
 }
+
+/* ============================================================================
+   两台设备**同时**同步：推的那一侧的 CAS 竞态
+   ============================================================================ */
+
+describe("同时同步 · 推的那一侧撞上 CAS", () => {
+  /**
+   * 造一个「B 带着过期基线去推」的场景 —— 也就是真实竞态的那个窗口：
+   * B 列树/查变更时远端还是 v1，等它要推的时候 A 已经把 v2 写上去了。
+   *
+   * `remoteUnchanged: true` 正好等价于那一刻的 B：它**没有**列树（以为远端没动），
+   * 于是只带着账本里的 v1 当 CAS 依据去推。
+   */
+  async function raceWindow(contentA: string, contentB: string) {
+    const provider = createMemoryProvider();
+    const a = await makeHarness({ provider });
+    await a.writeLocalFile("笔记.md", "v1");
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider });
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    await a.writeLocalFile("笔记.md", contentA);
+    await b.writeLocalFile("笔记.md", contentB);
+    // A 先推上去（B 还不知道）。
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+    // B 带着过期的 CAS 依据去推。
+    return syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps, remoteUnchanged: true });
+  }
+
+  it("★ 两边改成**同一份内容** ⇒ 不算冲突（伪冲突）", async () => {
+    /*
+     * 这不是理论情况：两台设备把同一个开关拨到同一边、或者一台改完另一台
+     * 原样抄了一遍，都会落在这里。站在用户角度这就是「已经同步好了」。
+     */
+    const result = await raceWindow("v2 相同", "v2 相同");
+    expect(result.pushConflicts).toHaveLength(0);
+    expect(result.conflicts).toHaveLength(0);
+  });
+
+  it("内容**不同** ⇒ 照常记冲突（别把真冲突也吞了）", async () => {
+    const result = await raceWindow("A 的版本", "B 的版本");
+    expect(result.pushConflicts).toHaveLength(1);
+    expect(result.pushConflicts[0]!.kind).toBe("both-modified");
+    expect(result.pushConflicts[0]!.localId).not.toBe(result.pushConflicts[0]!.remoteId);
+  });
+});
+
+/* ============================================================================
+   「仅格式不同」：不报冲突，但**必须收敛**
+   ============================================================================ */
+
+describe("仅格式不同的冲突", () => {
+  it("★ 只差换行符 ⇒ 不算冲突，并且自动收敛成远端那一份字节", async () => {
+    /*
+     * 只「忽略」不「收敛」的话，下一轮还会再撞一次 —— 冲突会永远挂在列表里。
+     * 所以这里的处置是：把它当成一次普通下载。
+     */
+    const provider = createMemoryProvider();
+    const a = await makeHarness({ provider });
+    await a.writeLocalFile("笔记.md", "第一行\n第二行\n");
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider });
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    // 两边都「改」了：A 改内容，B 只换了换行符（内容其实一样）。
+    await a.writeLocalFile("笔记.md", "第一行\n第二行\n第三行\n");
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+    await b.writeLocalFile("笔记.md", "第一行\r\n第二行\r\n第三行\r\n");
+
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+    expect(result.conflicts).toHaveLength(0);
+    expect(b.local.get("笔记.md")).toBeDefined();
+    // 收敛：本地已变成远端那一份（LF）。
+    expect(new TextDecoder().decode(b.local.get("笔记.md")!)).toBe("第一行\n第二行\n第三行\n");
+  });
+
+  it("内容真的不同 ⇒ 仍然记冲突（别把真冲突也当成格式问题）", async () => {
+    const provider = createMemoryProvider();
+    const a = await makeHarness({ provider });
+    await a.writeLocalFile("笔记.md", "v1\n");
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider });
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    await a.writeLocalFile("笔记.md", "A 的版本\n");
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+    await b.writeLocalFile("笔记.md", "B 的版本\r\n");
+
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+    expect(result.conflicts).toHaveLength(1);
+  });
+});
