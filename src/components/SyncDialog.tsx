@@ -15,10 +15,11 @@
  * 触发源是「启动 / 保存 / 回前台 / 手动」四个。
  */
 
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Modal } from "./Overlays";
 import { Icon } from "./Icons";
 import { formatRelativeTime } from "../lib/utils";
+import { askConfirm } from "../lib/dialogs";
 import { useStore } from "../lib/store";
 import {
   closeWorkspaceSync,
@@ -33,7 +34,6 @@ import {
   prepareRegistration,
   resolveConflict,
   saveWorkspaceConnection,
-  syncStatusBarInfo,
   unlockAccount,
   syncUiStore,
 } from "../sync/appSync";
@@ -45,21 +45,25 @@ import type { NotebookSummary } from "../sync/accountApi";
 
 export function SyncDialog({ workspace, onClose }: { workspace: WorkspaceRecord | null; onClose: () => void }): ReactNode {
   const ui = useStore(syncUiStore);
-  const bar = syncStatusBarInfo(ui, workspace !== null);
 
+  /*
+   * ★ 顺序是**状态 → 连接 → 账号**，不是反过来。
+   *
+   * 用户打开这个对话框，多半是想知道「同步好了没 / 卡在哪」——那是高频问题；
+   * 而「服务地址填什么」「密钥怎么导」一辈子只做一两次。
+   * 以前的顺序把配置放在最上面，于是每次都要先划过一大片输入框才看得到状态。
+   *
+   * 例外：**还没有密钥**时账号是第一块 —— 没有它，下面两块都是死的。
+   */
   return (
     <Modal title="同步" onClose={onClose} settings tall>
       <div className="sync-dialog">
-        <AccountSection />
+        {ui.hasKey ? null : <AccountSection />}
+        {workspace ? <StatusSection /> : null}
         {workspace ? <ConnectionSection workspace={workspace} /> : <p className="dialog__note">先打开一个笔记本，才能配置同步。</p>}
-        <StatusSection />
+        {ui.hasKey ? <AccountSection /> : null}
         <ConflictSection />
       </div>
-      <p className="dialog__note" style={{ marginTop: 10 }}>
-        {bar
-          ? `状态栏当前显示「${bar.label}」。同步默认关闭；开启后它也只是一个旁路 —— 关掉就一个请求都不会发。`
-          : "同步以笔记本为单位：打开一个笔记本后，在这里为它配置服务地址与远端笔记本。"}
-      </p>
     </Modal>
   );
 }
@@ -114,9 +118,18 @@ function AccountSection(): ReactNode {
           type="button"
           className="btn btn--danger"
           onClick={() => {
-            if (window.confirm("清除这台设备保存的账号密钥？密钥文本只在你手里，没有它这台设备就连不上同步。")) {
-              void forgetAccountKey();
-            }
+            void askConfirm({
+              title: "删除这台设备上的账号密钥？",
+              message: "删除后，这台设备无法再读取已有的加密笔记，只能用密钥文本重新导入才能恢复。",
+              rows: [
+                { k: "不可撤销", v: "本机没有备份，删除即刻生效" },
+                { k: "文件还在", v: "笔记文件留在原处，但加密内容读不出来" },
+              ],
+              confirmLabel: "删除密钥",
+              danger: true,
+            }).then((ok) => {
+              if (ok) void forgetAccountKey();
+            });
           }}
         >
           清除本机密钥
@@ -290,24 +303,37 @@ function ConnectionSection({ workspace }: { workspace: WorkspaceRecord }): React
   const [newCrypto, setNewCrypto] = useState<"none" | "user-key">("none");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** 地址默认**只读**；点「修改」才变成输入框（一个一辈子只填一次的字段）。 */
+  const [editingAddress, setEditingAddress] = useState(config.baseUrl === "");
 
-  // 列表依赖「有钥匙」：注册/导入成功后（hasKey 翻真）自动拉一次。
-  // 地址输入要**去抖**：每敲一个字符都打一次服务端，既是浪费也是限流桶里的冤枉请求。
+  /**
+   * ★ 读列表**只在显式动作时发生**：打开对话框（地址已经存过），或用户点「读取笔记本」。
+   *
+   * 以前是「地址一变就等 600ms 去打一次服务端」，于是用户输
+   * `https://notes.example.com:8787` 的过程中，界面上会闪过好几次「连接失败」，
+   * 还会白白消耗限流桶。一个一辈子只填一次的字段，不该有这个副作用。
+   */
+  const loadNotebooks = (url: string) => {
+    const trimmed = url.trim();
+    if (trimmed === "") return;
+    setBusy("正在读取笔记本列表…");
+    setError(null);
+    listNotebooksApi(trimmed)
+      .then((body) => setNotebooks(body))
+      .catch((cause: unknown) => {
+        setNotebooks(null);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => setBusy(null));
+  };
+  const loadRef = useRef(loadNotebooks);
+  loadRef.current = loadNotebooks;
+
+  // 已经有地址 ⇒ 打开对话框时读一次（用户不用再点）；没有 ⇒ 等他填完再读。
   useEffect(() => {
-    if (!ui.hasKey || baseUrl.trim() === "") return;
-    const timer = window.setTimeout(() => {
-      setBusy("正在读取笔记本列表…");
-      setError(null);
-      listNotebooksApi(baseUrl.trim())
-        .then((body) => setNotebooks(body))
-        .catch((cause: unknown) => {
-          setNotebooks(null);
-          setError(cause instanceof Error ? cause.message : String(cause));
-        })
-        .finally(() => setBusy(null));
-    }, 600);
-    return () => window.clearTimeout(timer);
-  }, [ui.hasKey, baseUrl]);
+    if (!ui.hasKey || config.baseUrl === "") return;
+    loadRef.current(config.baseUrl);
+  }, [ui.hasKey, config.baseUrl]);
 
   // 保存之后**不需要**在这里重绑：record 是新建的对象，App 的绑定 effect 会因
   // 它变化自动重跑（关旧的、接新的）。这里只负责把配置写进工作区记录。
@@ -366,18 +392,56 @@ function ConnectionSection({ workspace }: { workspace: WorkspaceRecord }): React
       <h3 className="sync-dialog__title">
         <Icon name="layers" size={13} /> 连接（{workspace.name}）
       </h3>
-      <label className="sync-dialog__label">
-        服务地址
-        <input
-          className="field"
-          value={baseUrl}
-          placeholder="https://notes.example.com"
-          onChange={(event) => {
-            setBaseUrl(event.target.value);
-            setNotebooks(null);
-          }}
-        />
-      </label>
+      <div className="sync-dialog__row sync-dialog__addr">
+        <span className="sync-dialog__label">服务地址</span>
+        {editingAddress ? (
+          <>
+            <input
+              className="field"
+              value={baseUrl}
+              autoFocus
+              placeholder="https://notes.example.com"
+              onChange={(event) => setBaseUrl(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                setNotebooks(null);
+                loadNotebooks(baseUrl);
+                if (baseUrl.trim() !== "") setEditingAddress(false);
+              }}
+            />
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setNotebooks(null);
+                loadNotebooks(baseUrl);
+                if (baseUrl.trim() !== "") setEditingAddress(false);
+              }}
+            >
+              读取笔记本
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setBaseUrl(config.baseUrl);
+                setEditingAddress(false);
+                loadNotebooks(config.baseUrl);
+              }}
+            >
+              取消
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="sync-dialog__value">{config.baseUrl}</span>
+            <button type="button" className="btn" onClick={() => setEditingAddress(true)}>
+              修改
+            </button>
+          </>
+        )}
+      </div>
 
       {!ui.hasKey ? (
         <p className="dialog__note">先在上面的「账号」里注册或导入密钥。</p>
@@ -465,8 +529,12 @@ function ConnectionSection({ workspace }: { workspace: WorkspaceRecord }): React
 
 function StatusSection(): ReactNode {
   const ui = useStore(syncUiStore);
-  if (ui.status === null && ui.error === null) return null;
   const text = ui.status ? describeSyncStatus(ui.status) : null;
+  /*
+   * 改动量：**全为零时不说「推 0 · 拉 0 · 删 0」**。
+   * 三个 0 摆在那里没有任何信息量，读起来还像"出问题了"。
+   */
+  const changed = ui.last ? ui.last.pushed + ui.last.pulled + ui.last.deleted + ui.last.remoteDeleted : 0;
 
   return (
     <section className="sync-dialog__card">
@@ -501,7 +569,11 @@ function StatusSection(): ReactNode {
       ) : null}
       {ui.last ? (
         <p className="dialog__note">
-          上次同步 {formatRelativeTime(ui.last.at)}：推 {ui.last.pushed} · 拉 {ui.last.pulled} · 删 {ui.last.deleted + ui.last.remoteDeleted}
+          上次同步 {formatRelativeTime(ui.last.at)}
+          {changed === 0 ? " · 没有需要同步的改动" : ""}
+          {ui.last.pushed > 0 ? ` · 推 ${ui.last.pushed} 篇` : ""}
+          {ui.last.pulled > 0 ? ` · 拉 ${ui.last.pulled} 篇` : ""}
+          {ui.last.deleted + ui.last.remoteDeleted > 0 ? ` · 删 ${ui.last.deleted + ui.last.remoteDeleted} 篇` : ""}
           {ui.last.unknownDids > 0 ? ` · ${ui.last.unknownDids} 条远端记录认不出路径（E2EE 映射未重建）` : ""}
         </p>
       ) : null}
@@ -528,10 +600,21 @@ function StatusSection(): ReactNode {
         </button>
         {ui.phase === "attached" ? null : <span className="muted">同步未接上，无法手动同步。</span>}
       </div>
+      {/*
+       * ★ 这段以前是**错的**，而且错得很具体：还写着「窗口回到前台」和
+       * 「桌面端的实时订阅（SSE）还要走主进程桥，目前未接入」——
+       * 前者早就删了，后者早就接上了。功能改完不回头改文案，界面就会替你说谎。
+       */}
       <p className="dialog__note">
-        触发时机：打开应用、保存笔记、窗口回到前台、手动点击。桌面端的实时订阅（SSE）还要走主进程桥，目前未接入。
+        打开笔记本时会核对一次（没有变化就不发请求）；保存笔记后自动推送；别的设备的改动由实时推送带过来。
       </p>
       {ui.error ? <p className="dialog__note sync-dialog__error">{ui.error}</p> : null}
+      {ui.logs.length > 0 ? (
+        <details className="sync-dialog__diag">
+          <summary>诊断（排查用）</summary>
+          <pre className="sync-dialog__logs">{ui.logs.slice(-12).join("\n")}</pre>
+        </details>
+      ) : null}
     </section>
   );
 }

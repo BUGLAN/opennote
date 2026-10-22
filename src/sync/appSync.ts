@@ -45,7 +45,8 @@ import { createDesktopEventStream, supportsDesktopStream } from "./desktopStream
 import type { EventStreamLike } from "./stream";
 import { createWorkspaceSyncBinding, type BindingPhase } from "./binding";
 import { setSyncActive } from "./mode";
-import { describeSyncStatus, type SyncStatus } from "./runner";
+import type { SyncStatus } from "./runner";
+/* `syncStatusBarInfo` 已移到 `statusBar.ts`（纯函数，可单独测），这里只转发。 */
 import { normalizeSyncConfig, updateWorkspaceSync } from "../data/workspaces";
 import type { SyncOnceResult } from "./engine";
 import type { SyncSession } from "./session";
@@ -83,6 +84,15 @@ export interface SyncUiState {
   last: LastSyncSummary | null;
   /** 绑定/接上过程中的意外错误（可预期的跳过走 `reason`，不进这里）。 */
   error: string | null;
+  /**
+   * 诊断日志（最近的若干行，**只进「诊断」折叠区**）。
+   *
+   * ★ 以前这里没有单独的字段：所有 `log` 输出都写进 `error`，于是
+   * 「[sync] 收到远端信号（游标 1152-g1AAAACR…）」这种例行信息被当成错误，
+   * 以红字长条的形式怼在界面上，还撑出了横向滚动条。
+   * 日志是排查用的，不该占用「出问题了」的位置。
+   */
+  logs: string[];
   hasKey: boolean;
   accountId: string | null;
   storage: { where: string; risk: string | null } | null;
@@ -94,36 +104,14 @@ export const syncUiStore = createStore<SyncUiState>({
   status: null,
   last: null,
   error: null,
+  logs: [],
   hasKey: false,
   accountId: null,
   storage: null,
 });
 
-/** 状态栏那两行字。没有打开笔记本 ⇒ null（那一位整个不渲染）。 */
-export function syncStatusBarInfo(
-  state: SyncUiState,
-  hasWorkspace: boolean,
-): { label: string; title: string } | null {
-  if (!hasWorkspace) return null;
-  if (!state.hasKey) {
-    return { label: "同步 · 未导入密钥", title: "点击打开同步设置，注册或导入账号密钥" };
-  }
-  if (state.reason === "disabled") {
-    return { label: "同步 · 关", title: "这个笔记本还没有开启同步；点击配置" };
-  }
-  if (state.reason === "incomplete") {
-    return { label: "同步 · 未配置", title: "还差服务地址或笔记本；点击补全" };
-  }
-  if (state.status) {
-    const text = describeSyncStatus(state.status);
-    const title = text.detail ? `${text.label} — ${text.detail}` : text.label;
-    return { label: `同步 · ${text.label}`, title };
-  }
-  if (state.phase === "attaching") {
-    return { label: "同步 · 连接中", title: "正在接上同步服务" };
-  }
-  return { label: "同步 · 关", title: "点击配置同步" };
-}
+export { syncStatusBarInfo } from "./statusBar";
+export type { SyncBarInfo, SyncBarTone } from "./statusBar";
 
 /* ============================================================================
    模块状态与内部工具
@@ -168,7 +156,11 @@ function onBindingPhase(phase: BindingPhase): void {
 
 function onBindingLog(line: string): void {
   // 绑定层只把「真的意外」打到这里；可预期的跳过走 reason。
-  syncUiStore.set((prev) => ({ ...prev, error: line.replace(/^\[binding\] /, "") }));
+  syncUiStore.set((prev) => ({
+    ...prev,
+    // 只进诊断区：日志不是错误（见 `logs` 的说明）。
+    logs: [...prev.logs, line.replace(/^\[(binding|sync|stream)\] /, "")].slice(-40),
+  }));
 }
 
 /** 刷新「有没有密钥 / 是谁的」这块事实（注册、导入、清除之后都要调）。 */
@@ -347,7 +339,18 @@ async function attachCurrent(): Promise<AttachResult> {
     // 实时状态（含进度）进 store —— 对话框与状态栏都从这里读。
     onStatus: (status) => syncUiStore.set((prev) => ({ ...prev, status })),
     openEventStream,
-    log: (line) => syncUiStore.set((prev) => ({ ...prev, error: line })),
+    /*
+     * ★ 日志进 `logs`（诊断折叠区），**不进 `error`**。
+     *
+     * 以前这行是 `error: line`，于是「[sync] 收到远端信号（游标 …）」这种例行信息
+     * 被当成错误，以红字长条的形式压在状态卡片里，还把面板撑出了横向滚动条。
+     * 日志是排查用的；`error` 只留给真正要用户看见的失败。
+     */
+    log: (line) =>
+      syncUiStore.set((prev) => ({
+        ...prev,
+        logs: [...prev.logs, line.replace(/^\[(binding|sync|stream)\] /, "")].slice(-40),
+      })),
   });
   if (result.ok) {
     activeSession = result.session;

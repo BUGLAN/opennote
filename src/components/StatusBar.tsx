@@ -25,10 +25,22 @@ interface StatusBarProps {
    */
   github: { label: string; title: string; onOpen(): void; onForgetToken(): void } | null;
   /**
-   * 远端同步的一位（未打开笔记本时 `null`，整个不渲染）。
-   * 文案来自 `syncStatusBarInfo`（与设置对话框同一份状态），点击打开同步设置。
+   * 远端同步的一位。
+   *
+   * `tone === null` = **一切正常**：只留一颗看不出状态的图标当入口，
+   * 既不写字也不变色 —— 「同步 · 已同步」这种永远为真的播报没有信息量。
+   *
+   * ★ 但**不能整颗藏掉**：底栏这一位是同步设置对话框**唯一**的入口。
+   * 藏了它就等于「同步正常的时候，用户找不到同步设置了」。
    */
-  sync: { label: string; title: string; onOpen(): void } | null;
+  sync: {
+    tone: "busy" | "warn" | "error" | null;
+    label: string | null;
+    title: string;
+    /** 0–1，只有正在同步时才有；会给底栏顶部画一条 2px 进度。 */
+    progress: number | null;
+    onOpen(): void;
+  } | null;
 }
 
 /**
@@ -53,6 +65,12 @@ export function StatusBar(props: StatusBarProps): ReactNode {
 
   return (
     <footer className="statusbar">
+      {/* 同步进度：2px，只画在底栏顶边上 —— 不占一行字，也不进滚动区。 */}
+      {props.sync?.progress != null ? (
+        <span className="statusbar__track" aria-hidden="true">
+          <span style={{ width: `${Math.round(Math.min(1, Math.max(0, props.sync.progress)) * 100)}%` }} />
+        </span>
+      ) : null}
       <div className="statusbar__info">
         <span className="statusbar__item statusbar__item--path" title={`笔记存放位置：${props.storageLabel}`}>
           <Icon name="layers" size={12} />
@@ -126,13 +144,20 @@ export function StatusBar(props: StatusBarProps): ReactNode {
         {props.sync ? (
           <button
             type="button"
-            className={cn("statusbar__item", "statusbar__item--button")}
-            aria-label={props.sync.label}
+            className={cn(
+              "statusbar__item",
+              "statusbar__item--button",
+              "statusbar__sync",
+              props.sync.tone === null ? "is-quiet" : `is-${props.sync.tone}`,
+            )}
+            aria-label={props.sync.label === null ? "同步" : `同步：${props.sync.label}`}
             title={props.sync.title}
             onClick={props.sync.onOpen}
           >
-            <Icon name="rotate" size={13} />
-            <span className="statusbar__label">{props.sync.label}</span>
+            {/* 安静态只有图标：不写字、不显示圆点，但仍然点得到。 */}
+            {props.sync.tone === null ? null : <span className="statusbar__sync-dot" aria-hidden="true" />}
+            {props.sync.label === null ? null : <span className="statusbar__label">{props.sync.label}</span>}
+            {props.sync.label === null ? <Icon name="rotate" size={13} /> : null}
           </button>
         ) : null}
         {props.github ? (

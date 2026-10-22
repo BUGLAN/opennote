@@ -1478,10 +1478,24 @@ export default function App(): ReactNode {
                 }
               : null
           }
-          sync={(() => {
-            const info = syncStatusBarInfo(syncUi, library.workspace !== null);
-            return info ? { ...info, onOpen: () => setSyncOpen(true) } : null;
-          })()}
+          sync={
+            library.workspace === null
+              ? null
+              : (() => {
+                  const info = syncStatusBarInfo(syncUi, true);
+                  /*
+                   * `info === null` = 一切正常。这时**不藏掉入口**，只把文字收起来：
+                   * 它同时是同步设置对话框唯一的入口（见 StatusBar 的 sync 说明）。
+                   */
+                  return {
+                    tone: info?.tone ?? null,
+                    label: info?.label ?? null,
+                    title: info?.title ?? "同步",
+                    progress: info?.progress ?? null,
+                    onOpen: () => setSyncOpen(true),
+                  };
+                })()
+          }
         />
       </div>
 

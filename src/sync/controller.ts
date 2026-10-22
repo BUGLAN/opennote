@@ -92,7 +92,10 @@ export function createSyncController(options: SyncControllerOptions): SyncContro
       running = true;
       stream = options.openStream(
         (cursor) => {
-          options.log?.(`[sync] 收到远端信号（游标 ${cursor ?? "未知"}）`);
+          // 游标是**不透明的 base64 长串**：整段打进日志只会把界面撑爆，
+          // 前 12 个字符足够定位（前面那段是序号）。
+          const short = cursor === null ? "未知" : cursor.length > 16 ? `${cursor.slice(0, 12)}…` : cursor;
+          options.log?.(`[sync] 收到远端信号（游标 ${short}）`);
           // 不在这一层判「值不值得」—— 单飞会合并掉重复的触发。
           void options.runner.request("signal");
         },

@@ -1141,8 +1141,51 @@ mark.hit {
   overflow: hidden;
   /* 降级基准 = 底栏自己的内容盒宽度（`:has()` 已在用，容器查询同支持档） */
   container: statusbar / inline-size;
+  /* 同步进度条贴着顶边绝对定位（不占行、不参与降级） */
+  position: relative;
 }
 
+
+/* ---- 同步：只在「正在跑 / 要你动手 / 出问题」时出现 ----------------------
+   一切正常时这一位**整个不存在**（syncStatusBarInfo 返回 null）——
+   永远为真的「已同步」播报没有信息量，只是占位。 */
+.statusbar__sync-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex: none;
+}
+.statusbar__sync.is-busy .statusbar__sync-dot {
+  background: var(--ink-3);
+}
+.statusbar__sync.is-warn {
+  color: var(--warn);
+}
+.statusbar__sync.is-warn .statusbar__sync-dot {
+  background: var(--warn);
+}
+.statusbar__sync.is-error {
+  color: var(--danger);
+}
+.statusbar__sync.is-error .statusbar__sync-dot {
+  background: var(--danger);
+}
+
+/* 进度：压在底栏顶边上的一条 2px 线，不占行、不换行、不参与降级 */
+.statusbar__track {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: transparent;
+  pointer-events: none;
+}
+.statusbar__track > span {
+  display: block;
+  height: 100%;
+  background: var(--ink-3);
+  transition: width var(--dur) var(--ease);
+}
 /* 信息段：唯一会被压缩的一段。`min-width: 0` 让它能缩到 0，`overflow: hidden` 让
    溢出发生在**它内部**（被啃掉的只会是右侧那两颗度量），而不是把按钮顶出去。 */
 .statusbar__info {
@@ -3038,4 +3081,175 @@ mark.hit {
 
 .tree__group--toggle:hover {
   color: var(--ink);
+}
+
+/* ---- 确认框的「后果三行」 ----------------------------------------------
+   确认框的价值全在这一块：一句「确定要这样做吗」等于没问。用户要的是
+   「影响什么 / 不会做什么 / 能不能撤销」，扫一眼就能判断。 */
+.dialog__rows {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--paper) 60%, var(--paper-2));
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.dialog__row {
+  display: flex;
+  gap: 12px;
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.dialog__row dt {
+  flex: none;
+  width: 4.6em;
+  color: var(--ink-3);
+}
+.dialog__row dd {
+  margin: 0;
+  color: var(--ink-2);
+}
+
+/* ------------------------------------------------------------------ 同步对话框
+ * ⚠️ 这一整组类名以前**压根没有样式**（sync-dialog__* 在 CSS 里一次都没出现过）。
+ * 于是「卡片 / 标题 / 行」全靠浏览器默认盒模型 —— 一段 base64 游标就能把整个
+ * 面板撑出横向滚动条。下面补上这套排版；间距一律用既有令牌，不新增设计令牌。 */
+.sync-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.sync-dialog__card {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  padding: var(--s3) var(--s4) var(--s4);
+}
+
+.sync-dialog__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 var(--s2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  color: var(--ink-2);
+}
+
+.sync-dialog__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  margin-top: var(--s2);
+}
+
+.sync-dialog__label {
+  flex: none;
+  min-width: 4.5em;
+  font-size: var(--fs-sm);
+  color: var(--ink-3);
+}
+
+/* 只读的地址：等宽、单行、超长省略 —— 它是一段配置，不该自带横向滚动条 */
+.sync-dialog__value {
+  flex: 1 1 12em;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-dialog__addr .field {
+  flex: 1 1 16em;
+  min-width: 0;
+}
+
+.sync-dialog__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--s2);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.sync-dialog__option {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-md);
+  color: var(--ink-2);
+}
+.sync-dialog__option:hover {
+  background: var(--paper-3);
+}
+
+.sync-dialog__error {
+  color: var(--danger);
+  /* 错误信息里可能有 URL / 令牌这类超长不换行串 —— 让它断行，别撑宽面板 */
+  overflow-wrap: anywhere;
+}
+
+/* 诊断：默认收起。日志是排查用的，不该占「出问题了」的位置。 */
+.sync-dialog__diag {
+  margin-top: var(--s2);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.sync-dialog__diag summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.sync-dialog__logs {
+  margin: var(--s2) 0 0;
+  padding: var(--s2);
+  max-height: 160px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.55;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 进度条（状态区） */
+.sync-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+.sync-progress__bar {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--paper-4);
+  overflow: hidden;
+}
+.sync-progress__fill {
+  height: 100%;
+  background: var(--ink-3);
+  transition: width var(--dur) var(--ease);
+}
+
+/* 安静态：只有一颗图标，颜色比正文更淡 —— 它在，但不抢注意力 */
+.statusbar__sync.is-quiet {
+  color: var(--ink-3);
+  opacity: 0.55;
+}
+.statusbar__sync.is-quiet:hover {
+  opacity: 1;
 }
