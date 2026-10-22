@@ -226,7 +226,7 @@ export function DialogHost(): ReactNode {
       footer={
         <>
           <div className="spacer" />
-          <button type="button" className="btn" onClick={closeDialog}>
+          <button type="button" className="btn" onClick={closeDialog} autoFocus={request.danger === true}>
             {request.cancelLabel ?? "取消"}
           </button>
           <button
@@ -240,6 +240,16 @@ export function DialogHost(): ReactNode {
       }
     >
       {request.message ? <p className="dialog__message">{request.message}</p> : null}
+      {request.rows && request.rows.length > 0 ? (
+        <dl className="dialog__rows">
+          {request.rows.map((row) => (
+            <div className="dialog__row" key={row.k}>
+              <dt>{row.k}</dt>
+              <dd>{row.v}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
       {request.kind === "prompt" ? (
         <div style={{ marginTop: request.message ? 14 : 0 }}>
           {request.label ? (

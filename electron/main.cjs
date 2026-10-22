@@ -1226,6 +1226,52 @@ let syncAuthToken = ''
 /** 当前绑定的代理实例（base 变了就重建）。 */
 let syncProxyInstance = null
 
+/* ---------------------------------------------------------------------------
+   已批准的同步服务（持久化）
+
+   ★ 为什么要有它：`syncProxyBaseUrl` 只在**进程内存**里，于是「同一个 base 不重复弹框」
+   只在本次运行内成立 —— 每次重启应用，第一次接上同步又会弹一次原生确认框。
+   用户看到的就是「每次开应用都要点一下允许」。
+
+   ★ 为什么确认框**仍然是原生**的：它是唯一渲染层伪造不了的界面（网页画得出一样的
+   对话框，但画不出系统窗口的边框与阴影）。而有了持久化之后，它只在**真正新增一台
+   服务器**时出现 —— 一台机器一辈子几次，长得丑也就不那么要紧了。
+
+   键用 **origin**（scheme://host:port）而不是 host：同一台服务器从 https 退回 http
+   意味着令牌会走明文，那必须重新确认一次。
+   --------------------------------------------------------------------------- */
+
+function syncApprovedHostsFile() {
+  return path.join(app.getPath('userData'), 'sync-approved-hosts.json')
+}
+
+async function readApprovedSyncOrigins() {
+  try {
+    const raw = await readFile(syncApprovedHostsFile(), 'utf8')
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((item) => typeof item === 'string' && item.trim() !== '')
+  } catch {
+    return []
+  }
+}
+
+function syncProxyOrigin(baseUrl) {
+  try {
+    return new URL(baseUrl).origin.toLowerCase()
+  } catch {
+    return String(baseUrl).toLowerCase()
+  }
+}
+
+async function rememberApprovedSyncOrigin(origin) {
+  const list = await readApprovedSyncOrigins()
+  if (list.includes(origin)) return
+  const file = syncApprovedHostsFile()
+  await mkdir(path.dirname(file), { recursive: true })
+  // 只留最近 50 个：这是一份「点过同意」的收据，不是配置。
+  await writeFileAtomic(file, JSON.stringify([...list, origin].slice(-50), null, 2))
+}
 /**
  * 确认并设置 base URL。
  *
@@ -1239,12 +1285,18 @@ async function configureSyncProxy(baseUrl, confirmImpl) {
     return { baseUrl: candidate.baseUrl, changed: false }
   }
 
-  const confirm = confirmImpl || defaultSyncProxyConfirm
-  const approved = await confirm(candidate.baseUrl)
-  if (!approved) {
-    const error = new Error('用户取消了同步服务地址的更改')
-    error.code = 'sync-proxy-not-confirmed'
-    throw error
+  const origin = syncProxyOrigin(candidate.baseUrl)
+  // 注入的 confirm（测试 / 自动化）永远走确认；真实路径才认「以前批准过」。
+  const remembered = confirmImpl === undefined && (await readApprovedSyncOrigins()).includes(origin)
+  if (!remembered) {
+    const confirm = confirmImpl || defaultSyncProxyConfirm
+    const approved = await confirm(candidate.baseUrl)
+    if (!approved) {
+      const error = new Error('用户取消了同步服务地址的更改')
+      error.code = 'sync-proxy-not-confirmed'
+      throw error
+    }
+    if (confirmImpl === undefined) await rememberApprovedSyncOrigin(origin).catch(() => undefined)
   }
 
   syncProxyBaseUrl = candidate.baseUrl
@@ -1284,15 +1336,18 @@ async function defaultSyncProxyConfirm(baseUrl) {
   }
   const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
   const result = await dialog.showMessageBox(window, {
-    type: 'warning',
-    buttons: ['取消', '允许'],
+    type: 'question',
+    // 按钮是**动词**：'允许' 得让用户自己翻译成'把我的笔记发过去'。
+    buttons: ['取消', '添加这台服务器'],
     defaultId: 0,
     cancelId: 0,
-    title: '同步服务地址',
-    message: `要把笔记本同步到这个地址吗？
+    title: '添加同步服务器',
+    message: `要把笔记本同步到这台服务器吗？
 
 ${host}`,
-    detail: '笔记（以及你的账号凭证）会发送到这个地址。只有你自己搭建的服务才应该继续。',
+    detail:
+      '笔记（以及你的账号凭证）会发送到这个地址。只有你自己搭建的服务才应该继续。\n' +
+      '批准一次即可 —— 以后启动不会再问。',
   })
   return result.response === 1
 }

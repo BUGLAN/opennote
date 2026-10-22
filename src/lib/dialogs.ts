@@ -13,6 +13,14 @@ interface BaseRequest {
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
+  /**
+   * 「后果三行」：影响什么 / **不会**做什么 / 能不能撤销。
+   *
+   * 为什么单独一块而不是塞进 `message`：确认框的价值全在**这里**。
+   * 一句「确定要这样做吗」等于没问 —— 用户只能靠猜。
+   * 把它列成 k/v 两列，用户能**扫**一眼就判断，而不是读一整段话。
+   */
+  rows?: { k: string; v: string }[];
 }
 
 export interface PromptRequest extends BaseRequest {
@@ -85,10 +93,19 @@ export function askText(options: {
   });
 }
 
+/**
+ * 应用内确认框（**不要用 `window.confirm` / 主进程的系统框**）。
+ *
+ * 三条约定，写调用点时顺手遵守：
+ * 1. `title` 是一个**问题**（「停止同步这个笔记本？」），不是「确认」两个字。
+ * 2. `rows` 说清后果；`confirmLabel` 用**动词**（「停止同步」），不用「确定」。
+ * 3. 危险动作用 `danger: true` —— 红色只给真正的危险，默认焦点落在「取消」。
+ */
 export function askConfirm(options: {
   title: string;
   message?: string;
   note?: string;
+  rows?: { k: string; v: string }[];
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
@@ -100,6 +117,7 @@ export function askConfirm(options: {
       title: options.title,
       message: options.message,
       note: options.note,
+      rows: options.rows,
       confirmLabel: options.confirmLabel ?? "确定",
       cancelLabel: options.cancelLabel ?? "取消",
       danger: options.danger,
