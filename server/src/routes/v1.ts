@@ -242,7 +242,12 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
          * `_design` 就位；如果 `_design` 被手工删了，走 view 会直接 500，
          * 而 `_all_docs` 仍能工作 —— 那样控制台能看到「置备不一致」而不是「同步全挂」。
          */
-        const page = await deps.couch.allDocs(notebook.db_name, { limit, ...(startKey === undefined ? {} : { startKey }), includeDocs: true });
+        // `skip: 1` 把上一页最后那一条排掉 —— CouchDB 的 `startkey` 是闭区间，不排就会页页重叠。
+        const page = await deps.couch.allDocs(notebook.db_name, {
+          limit,
+          ...(startKey === undefined ? {} : { startKey, skip: 1 }),
+          includeDocs: true,
+        });
         const files = page.rows
           .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
           .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
@@ -252,7 +257,12 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       }
 
       // 模式 B：`_all_docs?include_docs=true`（加密路径 ⇒ view 的 key 用不上，§3.3）。
-      const page = await deps.couch.allDocs(notebook.db_name, { limit, ...(startKey === undefined ? {} : { startKey }), includeDocs: true });
+      // `skip: 1` 把上一页最后那一条排掉 —— CouchDB 的 `startkey` 是闭区间，不排就会页页重叠。
+        const page = await deps.couch.allDocs(notebook.db_name, {
+          limit,
+          ...(startKey === undefined ? {} : { startKey, skip: 1 }),
+          includeDocs: true,
+        });
       const files = page.rows
         .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
         .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))

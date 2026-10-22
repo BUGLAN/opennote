@@ -300,14 +300,22 @@ export class CouchClient {
     return doc !== null;
   }
 
-  /** `_all_docs?include_docs=true`（模式 B 的列树，§3.3）。 */
+  /**
+   * `_all_docs?include_docs=true`（模式 B 的列树，§3.3）。
+   *
+   * ⚠️ CouchDB 的 `startkey` 是**闭区间**（包含这一行本身）。分页时如果只传 `startkey = 上一页最后一条`，
+   * 下一页会把同一条再取一次 —— 页与页重叠一行。客户端按 `did` 去重能挡住重复，
+   * 但会白花一次取数，更重要的是让「有没有翻完」变得不精确。
+   * 所以翻页时**同时传 `skip=1`**，把边界那一行排除掉。
+   */
   async allDocs(
     db: string,
-    options: { limit?: number; startKey?: string; includeDocs?: boolean } = {},
+    options: { limit?: number; startKey?: string; skip?: number; includeDocs?: boolean } = {},
   ): Promise<{ rows: { id: string; key: string; value: { rev: string }; doc?: CouchDocument }[]; totalRows: number }> {
     const query = new URLSearchParams();
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     if (options.startKey !== undefined) query.set("startkey", JSON.stringify(options.startKey));
+    if (options.skip !== undefined && options.skip > 0) query.set("skip", String(options.skip));
     if (options.includeDocs) query.set("include_docs", "true");
     return this.request("GET", `/${encodeURIComponent(db)}/_all_docs?${query}`, { idempotent: true });
   }

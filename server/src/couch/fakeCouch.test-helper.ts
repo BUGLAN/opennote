@@ -128,8 +128,15 @@ export class FakeCouch {
       const includeDocs = url.searchParams.get("include_docs") === "true";
       const startKeyRaw = url.searchParams.get("startkey");
       const startKey = startKeyRaw === null ? null : (JSON.parse(startKeyRaw) as string);
+      /*
+       * `skip` 必须真的实现：CouchDB 的 `startkey` 是**闭区间**，服务端翻页时靠 `skip=1`
+       * 把上一页最后一条排掉。夹具不认这个参数的话，用例里看到的永远是「第二页 = 第一页」，
+       * 而真实服务端是好的 —— 那种夹具比没有夹具更糟。
+       */
+      const skipParam = url.searchParams.get("skip");
+      const skip = skipParam === null ? 0 : Math.max(0, Number.parseInt(skipParam, 10));
       const ids = [...docs.keys()].filter((id) => (startKey === null ? true : id >= startKey)).sort();
-      const page = ids.slice(0, Number.isFinite(limit) ? limit : ids.length);
+      const page = ids.slice(skip, skip + (Number.isFinite(limit) ? limit : ids.length));
       const rows = page.map((id) => {
         const doc = docs.get(id)!;
         return {
