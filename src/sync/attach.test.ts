@@ -162,13 +162,12 @@ describe("★★ E2EE 拿不到 notebookKey ⇒ **抛**，绝不退回明文", (
    ============================================================================ */
 
 describe("接上之后", () => {
-  it("正常配置 ⇒ 拿到一个 controller（可以 start/stop/resume）", async () => {
+  it("正常配置 ⇒ 拿到一个 controller（可以 start/stop）", async () => {
     const result = await attach();
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(typeof result.controller.start).toBe("function");
     expect(typeof result.controller.stop).toBe("function");
-    expect(typeof result.controller.resume).toBe("function");
   });
 
   it("`realtime: false` ⇒ 不订阅实时，但仍然能同步", async () => {

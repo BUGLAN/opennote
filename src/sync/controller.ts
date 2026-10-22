@@ -27,11 +27,21 @@ import type { SyncStream } from "./stream";
 export interface SyncControllerOptions {
   runner: SyncRunner;
   /**
-   * 建一条流并把信号交给 `onSignal`。返回 `null` = 这个宿主不订阅实时
-   * （例如用户关了实时、或桌面端主进程代理还没接上）。
+   * 建一条流。两个回调各管一件事：
+   * - `onSignal`：远端**确实前进**了 ⇒ 跑一轮同步；
+   * - `onUpToDate`：连上后核对**已经是最新** ⇒ 不跑同步，只更新状态（见 `runner.noteUpToDate`）。
+   *
+   * 返回 `null` = 这个宿主不订阅实时（用户关了实时 / 宿主没有流）。
    */
-  openStream: (onSignal: (cursor: string | null) => void) => SyncStream | null;
-  /** 启动时先同步一轮（用户打开应用不该等着第一条 SSE 信号）。默认 true。 */
+  openStream: (
+    onSignal: (cursor: string | null) => void,
+    onUpToDate: () => void,
+  ) => SyncStream | null;
+  /**
+   * 没有「能比对游标」的流时，启动要不要先同步一轮。默认 `true`。
+   *
+   * 有那种流时**不需要**它：连上那一刻会自己判断落后没落后（见 `start()`）。
+   */
   syncOnStart?: boolean;
   log?: (line: string) => void;
 }
@@ -41,8 +51,6 @@ export interface SyncController {
   start(): void;
   /** 停止：退订 + 停掉去抖（关工作区 / 登出）。 */
   stop(): void;
-  /** 从后台回前台（第 2032 行）：立刻增量拉取一次，并确保流是活的。 */
-  resume(): void;
   /** 用户手动点「立即同步」。 */
   syncNow(): Promise<SyncOnceResult | null>;
   status(): SyncStatus;
@@ -58,15 +66,29 @@ export function createSyncController(options: SyncControllerOptions): SyncContro
     start() {
       if (running) return;
       running = true;
-      // ① 先拉一轮：用户打开应用不该干等着第一条 SSE 信号（那可能要等很久）。
-      if (options.syncOnStart !== false) void options.runner.request("startup");
-      // ② 再订阅。顺序是刻意的：先拉后订，中间那一段变更不会丢
-      //    （订阅之后到达的会触发新的一轮；订阅之前到达的已经被那一轮拉到了）。
-      stream = options.openStream((cursor) => {
-        options.log?.(`[sync] 收到远端信号（游标 ${cursor ?? "未知"}）`);
-        // 不在这一层判「值不值得」—— 单飞会合并掉重复的触发。
-        void options.runner.request("signal");
-      });
+      stream = options.openStream(
+        (cursor) => {
+          options.log?.(`[sync] 收到远端信号（游标 ${cursor ?? "未知"}）`);
+          // 不在这一层判「值不值得」—— 单飞会合并掉重复的触发。
+          void options.runner.request("signal");
+        },
+        () => {
+          options.log?.("[sync] 连上后核对：已是最新，跳过同步");
+          options.runner.noteUpToDate();
+        },
+      );
+      /*
+       * ★ 「启动先拉一轮」现在**只在流不会比对游标时**才做。
+       *
+       * 会比对时（`stream.reconcilesCursor()`），连上那一刻服务端会先发 `ready`，
+       * 里面带着当前游标；`stream.ts` 拿它和本机记的比一比，落后才发信号。
+       * 于是「什么都没变就打开应用」从 2 个请求变成 **0 个**。
+       *
+       * 不会比对时（宿主没有游标存储 / 没有实时流）**必须**无条件拉：
+       * 否则离线期间别人写的东西永远补不上 —— 流只报告「连上之后」的变化。
+       */
+      const reconciles = stream !== null && stream.reconcilesCursor();
+      if (!reconciles && options.syncOnStart !== false) void options.runner.request("startup");
     },
 
     stop() {
@@ -76,22 +98,6 @@ export function createSyncController(options: SyncControllerOptions): SyncContro
       options.runner.dispose();
     },
 
-    resume() {
-      if (!running) {
-        // 已经停了（例如登出后回来）：当作重新开始。
-        this.start();
-        return;
-      }
-      /*
-       * 第 2032 行：回前台要**立刻增量拉取**。
-       *
-       * `stream.resume()` 自己也会发一次信号，但这里**再发一次**是有意的：
-       * 宿主可能根本没建流（`openStream` 返回 null），那时只有这一次请求
-       * 能把后台期间的变更拉回来。而重复的请求会被单飞合并掉，代价接近零。
-       */
-      stream?.resume();
-      void options.runner.request("focus");
-    },
 
     syncNow: () => options.runner.request("manual"),
     status: () => options.runner.status(),

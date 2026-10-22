@@ -74,7 +74,16 @@ interface TreeResponse {
 interface ChangesResponse {
   cursor: string | null;
   resync: boolean;
-  changes: { did: string; op: "add" | "update" | "delete" }[];
+  truncated?: boolean;
+  changes: { did: string; op: "add" | "update" | "delete"; path?: string; hash?: string; ehash?: string }[];
+}
+
+/** base64（带填充）→ 字节。宿主都有 `atob`，不引依赖。 */
+function base64ToBytes(text: string): Uint8Array {
+  const binary = atob(text);
+  const out = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) out[index] = binary.charCodeAt(index);
+  return out;
 }
 
 export class OpenNoteProvider implements SyncProvider {
@@ -158,10 +167,47 @@ export class OpenNoteProvider implements SyncProvider {
     return {
       cursor: response.cursor ?? null,
       ...(response.resync === true ? { resync: true } : {}),
-      changes: (response.changes ?? []).map((change) => ({ did: change.did, op: change.op })),
+      ...(response.truncated === true ? { truncated: true } : {}),
+      changes: (response.changes ?? []).map((change) => {
+        /*
+         * 内容标识：明文看 `hash`，E2EE 看 `ehash`。两者都只当**不透明串**用
+         * （引擎只比相等，不做任何假设）。
+         */
+        const hash = change.hash ?? change.ehash;
+        return {
+          did: change.did,
+          op: change.op,
+          ...(typeof change.path === "string" ? { path: change.path } : {}),
+          ...(hash === undefined ? {} : { hash }),
+        };
+      }),
     };
   }
 
+  /**
+   * 一次读多条（`POST /v1/files`）。
+   *
+   * 失败时**不在这里兜底**：抛给引擎，让引擎退回逐条 `read()`。
+   * 理由是这个方法只在「一次很多条」时被调用，而那种场景下「批量接口不存在」
+   * （老服务端 404）是**预期之内**的退化路径，不是错误。
+   */
+  async readMany(dids: string[]): Promise<Map<string, ProviderReadResult>> {
+    if (dids.length === 0) return new Map();
+    const response = await this.transport.request<{ files: { did: string; hash: string; rev: string; data: string }[] }>(
+      {
+        method: "POST",
+        path: "/v1/files",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ dids }),
+      },
+      (raw) => HttpTransport.json<{ files: { did: string; hash: string; rev: string; data: string }[] }>(raw),
+    );
+    const out = new Map<string, ProviderReadResult>();
+    for (const file of response.files ?? []) {
+      out.set(file.did, { bytes: base64ToBytes(file.data), hash: file.hash, rev: file.rev });
+    }
+    return out;
+  }
   async read(did: string): Promise<ProviderReadResult | null> {
     const response = await this.transport.send({ method: "GET", path: "/v1/file", query: { did } });
     // `404` = 这一条不在了。**这是正常结果，不是异常**（接口约定返回 `null`）。

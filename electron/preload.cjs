@@ -80,6 +80,17 @@ const IMPORT_REPLY_CHANNEL = 'opennote:import:reply'
 const NET_DOWNLOAD_IMAGES_CHANNEL = 'opennote:net:downloadImages'
 
 /**
+ * 同步的实时推送（SSE 中继）。
+ *
+ * 桌面 CSP 的 `connect-src` 只有 `'self' file:`，渲染层里 `new EventSource(远端)`
+ * 会被**静默**拦掉。所以流建在主进程，事件经下面这个频道推回渲染层。
+ * 渲染层只说要「相对 base 的哪条路径」，主进程负责拼 URL、贴令牌、断流。
+ */
+const SYNC_OPEN_STREAM_CHANNEL = 'opennote:sync:openStream'
+const SYNC_CLOSE_STREAM_CHANNEL = 'opennote:sync:closeStream'
+const SYNC_STREAM_EVENT_CHANNEL = 'opennote:sync:stream-event'
+
+/**
  * 自更新（`electron/update.cjs` 是唯一产地）。
  *
  * 渲染层在这里能做的只有五件事：读状态、检查、下载、取消、重启。**没有**「传 URL」、
@@ -208,6 +219,17 @@ const bridge = {
     setAuthToken: (token) => invoke('opennote:sync:setAuthToken', token),
     /** 发一个**相对**请求。 */
     request: (input) => invoke('opennote:sync:proxyRequest', input),
+    /**
+     * 开一条**实时流**（SSE 中继）。`relPath` 是相对 base 的路径（含查询串）。
+     *
+     * ★ 主进程会把 `relPath` 里的 `authToken` **剥掉**再贴上自己保管的那份 ——
+     * 渲染层从来不需要（也不该）把令牌交给这条通道。
+     */
+    openStream: (relPath) => invoke(SYNC_OPEN_STREAM_CHANNEL, relPath),
+    /** 关掉当前这条流（重复调用没有副作用）。 */
+    closeStream: () => invoke(SYNC_CLOSE_STREAM_CHANNEL),
+    /** 订阅主进程推来的事件（open / ready / change / heartbeat / error）。 */
+    onStreamEvent: (callback) => subscribe(SYNC_STREAM_EVENT_CHANNEL, callback),
   },
 
   app: {

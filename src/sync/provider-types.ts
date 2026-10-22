@@ -94,11 +94,30 @@ export interface ProviderTree {
 export interface ProviderChange {
   did: string;
   op: "add" | "update" | "delete";
+  /**
+   * 这一条在**本机**的工作区相对路径（明文模式下服务端直接给；E2EE 下没有）。
+   *
+   * 有了它，「变更驱动」的同步才不必为每条变更去猜 did ↔ path。
+   */
+  path?: string;
+  /**
+   * 变更后的内容标识（明文 `hash` / E2EE `ehash`）。**删除的条目没有它。**
+   *
+   * 它让引擎能先判断「内容真的变了吗」——没变就只是 rev 变了，不必下载。
+   */
+  hash?: string;
 }
 
 export interface ProviderChanges {
   /** 拉到哪个游标了（**不透明字符串**）。 */
   cursor: string | null;
+  /**
+   * 这一页**没装下**（远端还有更多变更）。
+   *
+   * 为真时调用方**绝不能**只按这一页办事 —— 必须退回整树比对，
+   * 否则后面那些变更会被跳过，而游标已经推过去了，等于**永久漏拉**。
+   */
+  truncated?: boolean;
   /**
    * 游标已经过期（远端日志回溯不到那么早）⇒ 客户端退化成**全树比对**。
    * 这是 Joplin 的 `resyncRequired` 语义（§6.4 规则 2）。
@@ -175,6 +194,20 @@ export interface SyncProvider {
 
   /** 读一条的原始字节。跟不上的标识由 `hash` 回传（调用方用它更新基线）。 */
   read(did: string): Promise<ProviderReadResult | null>;
+
+  /**
+   * **一次读多条**（可选）。
+   *
+   * 为什么要它：只按 `read()` 一条一条取时，请求数 = 文件数，吞吐被往返延迟钉死
+   * （实测 555 篇要 555 次往返、十几秒），限流压力也随文件数线性增长。
+   *
+   * 语义与 `read()` 逐条相同：**取不到的 did 不出现在 Map 里**（= 远端没有这一条）。
+   * 返回的 Map **不保证**包含所有请求的 did —— 调用方按「缺 = 没有」处理。
+   *
+   * 不实现也不会错：引擎会退回逐条 `read()`（只是慢）。所以 `memory` 之类的
+   * 测试 fake 可以不实现它。
+   */
+  readMany?(dids: string[]): Promise<Map<string, ProviderReadResult>>;
 
   /** 写一条（CAS，见 `ProviderPutInput.baseHash`）。 */
   put(input: ProviderPutInput): Promise<ProviderPutResult | { conflict: ProviderConflict }>;

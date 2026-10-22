@@ -10,7 +10,7 @@
  * 所以下面有两条对照用例：一条证明「静默死亡会被发现」，一条证明
  * 「健康连接**不会**被误判」（后者同样重要 —— 误判会让每次心跳都白断一次）。
  */
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createSyncStream, type EventStreamLike, type StreamPhase } from "./stream";
 
 /** 一个可以手动触发事件的假流，并记录它有没有被关掉。 */
@@ -66,7 +66,7 @@ function fakeTimers() {
 
 const HEARTBEAT_TIMEOUT = 55_000; // 默认 = 2×25s + 5s
 
-function make(overrides: { heartbeatTimeoutMs?: number } = {}) {
+function make(overrides: { heartbeatTimeoutMs?: number; knownCursor?: () => string | null } = {}) {
   const timers = fakeTimers();
   const opened: ReturnType<typeof fakeStream>[] = [];
   const signals: (string | null)[] = [];
@@ -83,6 +83,7 @@ function make(overrides: { heartbeatTimeoutMs?: number } = {}) {
     heartbeatTimeoutMs: overrides.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT,
     reconnectDelayMs: 1000,
     maxReconnectDelayMs: 8000,
+    ...(overrides.knownCursor === undefined ? {} : { knownCursor: overrides.knownCursor }),
     ...timers,
   });
   return { stream, timers, opened, signals, phases };
@@ -220,49 +221,64 @@ describe("重连与退避", () => {
     expect(opened).toHaveLength(1);
   });
 });
-
 /* ============================================================================
-   第 2032 行：回前台
+   连上时比对游标（取代「打开就同步一轮」「回前台再同步一轮」）
    ============================================================================ */
 
-describe("第 2032 行 · 移动端从后台回前台要**立刻增量拉取**", () => {
-  it("★ `resume()` 一定触发一次信号（后台期间的变更**不会重放** —— SSE 没有历史）", () => {
+describe("连上时比对游标：落后才补，一样就什么都不做", () => {
+  it("★ 游标一致 ⇒ **不发信号**（打开应用 0 个请求）", () => {
     /*
-     * 只重开流是不够的：重开之后要等服务端**下一次** `_changes` 才有事件，
-     * 而用户在后台期间错过的那些变更不会重放。所以必须主动拉一次。
+     * 这是这一整套改动的收益点：什么都没变时，打开应用**一个请求都不发**。
+     * 以前是「启动先拉一轮」（2 个请求、约 650ms），无论有没有变化。
      */
-    const { stream, signals } = make();
+    const { stream, opened, signals } = make({ knownCursor: () => "42" });
     stream.start();
-    signals.length = 0;
-    stream.resume();
-    expect(signals).toEqual([null]);
+    opened[0]!.emit("ready", JSON.stringify({ cursor: "42", heartbeatMs: 25000 }));
+    expect(signals).toEqual([]);
+    expect(stream.reconcilesCursor()).toBe(true);
   });
 
-  it("流已经断了 ⇒ `resume()` 重开它", () => {
-    const { stream, timers, opened } = make();
+  it("游标不一致 ⇒ 发一次信号（离线期间的变更必须补上）", () => {
+    const { stream, opened, signals } = make({ knownCursor: () => "40" });
     stream.start();
+    opened[0]!.emit("ready", JSON.stringify({ cursor: "42", heartbeatMs: 25000 }));
+    expect(signals).toEqual(["42"]);
+  });
+
+  it("本机还没有游标（这台设备第一次同步）⇒ 一定发信号", () => {
+    const { stream, opened, signals } = make({ knownCursor: () => null });
+    stream.start();
+    opened[0]!.emit("ready", JSON.stringify({ cursor: "42" }));
+    expect(signals).toEqual(["42"]);
+  });
+
+  it("没有 knownCursor（宿主没有游标存储）⇒ 只喂看门狗，不发信号，并如实报「不会比对」", () => {
+    const { stream, opened, signals } = make();
+    stream.start();
+    opened[0]!.emit("ready", JSON.stringify({ cursor: "42" }));
+    expect(signals).toEqual([]);
+    // ★ controller 靠这个值决定「还要不要无条件拉一轮」。
+    expect(stream.reconcilesCursor()).toBe(false);
+  });
+
+  it("重连之后**再比一次**（睡觉/断网醒来靠这条路补缺口）", () => {
+    /*
+     * 连接被 NAT/防火墙静默掐死是常态；醒来后看门狗会重连，
+     * 而重连时服务端会重新发一次 `ready` —— 那一次比对就是「补缺口」的入口。
+     */
+    let local = "40";
+    const { stream, opened, signals, timers } = make({ knownCursor: () => local });
+    stream.start();
+    opened[0]!.emit("ready", JSON.stringify({ cursor: "40" }));
+    expect(signals).toEqual([]);
+
+    // 断线 → 退避重连 → 新连接。期间远端前进了。
     opened[0]!.emit("error");
-    // 退避还没到点（流是断的）。
-    stream.resume();
-    // 立刻重开，不等退避。
+    timers.fireOldest();
     expect(opened).toHaveLength(2);
-    void timers;
-  });
+    opened[1]!.emit("ready", JSON.stringify({ cursor: "47" }));
 
-  it("流还活着 ⇒ `resume()` **不**多开一条（否则每次切前台都多一条连接）", () => {
-    const { stream, opened } = make();
-    stream.start();
-    stream.resume();
-    stream.resume();
-    expect(opened).toHaveLength(1);
-  });
-
-  it("`stop()` 之后 `resume()` 能重新开始（登出再登入的场景）", () => {
-    const { stream, opened } = make();
-    stream.start();
-    stream.stop();
-    stream.resume();
-    expect(opened).toHaveLength(2);
-    void vi;
+    expect(signals).toEqual(["47"]);
+    local = "47";
   });
 });

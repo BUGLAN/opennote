@@ -80,7 +80,19 @@ export class FakeCouch {
         this.databases.delete(dbName);
         return json(200, { ok: true });
       }
-      return json(200, { doc_count: docs?.size ?? 0, sizes: { file: 0 } });
+      /*
+       * `update_seq` 必须给：它是 `/v1/tree` 的游标来源，也是增量同步的起点。
+       * 第一版这里没给，于是「tree 的 cursor 非空」那条用例读到的是 `null` ——
+       * 而真实 CouchDB 一定会给（它是 `_changes` 的 last_seq 那套东西）。
+       *
+       * 形状用 CouchDB 3.x 的「字符串 seq」：真实环境里 `update_seq` 就是
+       * `"1694-g1AAAA..."` 这种带检查点的字符串，客户端只当**不透明串**搬运。
+       */
+      return json(200, {
+        doc_count: docs?.size ?? 0,
+        sizes: { file: 0 },
+        update_seq: `${this.counter}-fake`,
+      });
     }
 
     if (!docs) return json(404, { error: "not_found", reason: "no_db_file" });

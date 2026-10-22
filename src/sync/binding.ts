@@ -35,8 +35,6 @@ export type BindingPhase = "idle" | "attaching" | "attached" | "skipped";
 export interface WorkspaceSyncBindingOptions {
   /** 接上（通常就是 `attachWorkspaceSync`）。 */
   attach: () => Promise<AttachResult>;
-  /** 订阅「回到前台」（`createResumeSource().subscribe`）。 */
-  subscribeResume?: (onResume: () => void) => () => void;
   onPhase?: (phase: BindingPhase) => void;
   onStatus?: (status: ReturnType<SyncController["status"]>) => void;
   log?: (line: string) => void;
@@ -58,7 +56,6 @@ export function createWorkspaceSyncBinding(options: WorkspaceSyncBindingOptions)
   let phase: BindingPhase = "idle";
   let skipReason: AttachSkipReason | null = null;
   let current: SyncController | null = null;
-  let unsubscribeResume: (() => void) | null = null;
   /**
    * ★ **代次**，不是布尔量。
    *
@@ -113,24 +110,11 @@ export function createWorkspaceSyncBinding(options: WorkspaceSyncBindingOptions)
       current.start();
       publish("attached");
 
-      // 订阅「回前台」—— 退订函数留着，`stop()` 时用。
-      if (options.subscribeResume) {
-        unsubscribeResume = options.subscribeResume(() => {
-          // 代次再确认一次：订阅回调可能在 `stop()` 之后才被触发。
-          if (mine !== generation || current === null) return;
-          current.resume();
-          if (options.onStatus) options.onStatus(current.status());
-        });
-      }
     },
 
     stop() {
       // +1 ⇒ 任何在途的 attach 回来时都会看到代次变了。
       generation += 1;
-      if (unsubscribeResume) {
-        unsubscribeResume();
-        unsubscribeResume = null;
-      }
       if (current) {
         current.stop();
         current = null;

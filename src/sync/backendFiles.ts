@@ -72,7 +72,12 @@ async function listAll(options: BackendSyncFilesOptions): Promise<LocalEntry[]> 
     for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
       const path = joinPath(current.path, entry.name);
       const isDir = entry.kind === "directory";
-      out.push({ path, isDir });
+      /*
+       * ★ size / mtime 必须带下去：哈希缓存（`hashCache.ts`）靠它们判「这个文件没变」，
+       * 少了它们就只能每个文件读一遍重算哈希 —— 「改一个字扫全库」的根因之一。
+       * 目录上的这两个值不可靠（见 `FileSystemBackend.stat`），所以只给文件带。
+       */
+      out.push(isDir ? { path, isDir } : { path, isDir, size: entry.size, mtimeMs: entry.mtimeMs });
       if (out.length > maxEntries) {
         throw new Error(`工作区条目太多（超过 ${maxEntries} 个），请检查是否误选了很大的目录`);
       }
@@ -94,6 +99,7 @@ export function createBackendSyncFiles(options: BackendSyncFilesOptions): SyncFi
     list: () => listAll(options),
     read: (path) => options.backend.readBytes(path),
     write: (path, bytes) => options.backend.writeBytes(path, bytes),
+    stat: (path) => options.backend.stat(path),
     remove: async (path) => {
       await options.backend.remove(path, { recursive: true });
     },

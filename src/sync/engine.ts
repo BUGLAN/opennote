@@ -33,7 +33,12 @@ import { assertSafeRelative, isMarkdownPath } from "../fs/paths";
 import { applyTruncationGuard, assertDeletionBudget, planPull, planPush, type BaselineLike } from "./diff";
 import type { ConflictKind } from "./conflicts";
 import type { SyncLedger } from "./state";
-import { SyncProviderError, type SyncProvider } from "./provider-types";
+import {
+  SyncProviderError,
+  type ProviderReadResult,
+  type ProviderTreeEntry,
+  type SyncProvider,
+} from "./provider-types";
 
 /** 引擎读到的一条本地文件。 */
 export interface EngineLocalFile {
@@ -113,6 +118,15 @@ export interface SyncOnceResult {
   deleted: number;
   /** 因 `truncated`（树没列全）而**挂起**的删除。**绝不静默丢弃。** */
   suspendedDeletes: string[];
+  /**
+   * 远端树**仍然没取全**（翻页到头也没拿到 `truncated: false`）。
+   *
+   * 正常应当是 `false`：`fetchWholeTree()` 会一直翻页。为 `true` 说明
+   * 服务端分页异常（`startKey` 不前进 / 超过 `TREE_MAX_PAGES`），
+   * 此时删除被挂起，UI **必须**把这件事说出来 —— 否则用户看到的是
+   * 「同步成功，但删掉的笔记又回来了」。
+   */
+  treeTruncated: boolean;
   /** 删除保护拦下的条数（>0 表示这次一条都没删，并把原因放在 `deletionGuardMessage`）。 */
   blockedDeletes: number;
   deletionGuardMessage: string | null;
@@ -138,8 +152,47 @@ export interface SyncOnceInput {
   provider: SyncProvider;
   ledger: SyncLedger;
   deps: SyncEngineDeps;
-  /** 本次同步的最大文件数（与扫描的 `maxFiles` 一致）。 */
+  /**
+   * **每一页**列树的最大条数（不是「本次同步最多看多少条」）。
+   *
+   * ⚠️ 语义在 P0 修复里改过：以前它是「列一次树的上限」，而引擎**只列一次**
+   * ⇒ 远端超过该值（服务端默认 500）时，后面的文档**永远不会被看到**。
+   * 现在它是分页大小，引擎会一直翻到 `truncated === false`。
+   */
   maxFiles?: number;
+  /**
+   * 同时在飞的请求数。默认 8。
+   *
+   * 每篇笔记是一个独立 HTTP 请求，串行下一次往返（实测本机到远端 p50 ≈ 190ms）
+   * 就是吞吐上限；并发 8 实测快 5.4 倍。但**不能无限开**：
+   * 服务端按账号限流（`ACCOUNT_REQUESTS_PER_MINUTE`，默认 120/分钟），
+   * 并发太高只会把请求堆成 429。
+   */
+  concurrency?: number;
+  /**
+   * **远端自上轮以来没有任何变化**（调用方已经用 `changes({since})` 问过，结果为空）。
+   *
+   * 为真时引擎**完全不列树**、也**不做拉取计划** —— 只把本地改动推上去。
+   * 这是增量同步省下来的那一步：远端没动时，一次同步只剩「本地扫描 + 可能的推送」。
+   *
+   * ⚠️ 它必须由**真的查过 `changes` 且结果为空**的调用方给（`syncOnceIncremental`），
+   * 不能凭「我上次刚同步过」猜 —— 猜错的方向是**漏拉**，那是数据丢失。
+   */
+  remoteUnchanged?: boolean;
+  /** `remoteUnchanged` 时可以顺带把已有游标直接当检查点，省掉一次列树。 */
+  cursorHint?: string | null;
+  /**
+   * **变更驱动**：只拿这一批「远端变了的路径」去比对，不列整棵树。
+   *
+   * `hash === null` = 远端**显式**删了它（`changes` 里的 `op: delete`）。
+   * 传了它之后，引擎会拿账本里「没变的那些」拼出一棵**等价于整树**的树
+   * （见 `buildPartialTree`），于是 `planPull` 一行都不用改 ——
+   * 删除推断只可能落在「远端明确说删了」的那些路径上（§6.4 规则 7）。
+   *
+   * 拿不到完整信息时（did 反查不出路径 / 缺内容标识 / 变更太多）**不要**用它，
+   * 让调用方退回 `fetchWholeTree()`。
+   */
+  partialRemote?: { path: string; hash: string | null }[];
   /** 当前时间（测试可注入，让账本里的 `syncedAt` 确定）。 */
   now?: () => number;
   /**
@@ -171,8 +224,40 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   const localFiles = await deps.listLocal();
   const localByPath = new Map(localFiles.map((file) => [file.path, file]));
 
-  const tree = await provider.tree({ limit: input.maxFiles });
-  log("tree", { entries: tree.entries.length, truncated: tree.truncated });
+  /*
+   * ★★ P0：列树**必须翻页取完**（这条以前是缺的，是最严重的多设备缺陷）。
+   *
+   * 服务端 `/v1/tree` 有分页上限（`clampLimit`，默认 500、最大 2000），超出时
+   * 返回 `truncated: true`。旧实现只列**一页**就把结果当成整棵树，于是：
+   *   - 远端文档数 > 一页时，新设备只拿到前 500 条，**剩下的永远不会来**
+   *     （下一轮列树还是同一条页首，判「没变化」，于是永远不下载）；
+   *   - `truncated` 还会让 `applyTruncationGuard()` **挂起全部删除**，
+   *     所以「删除不传播」是恒定的，不是偶发。
+   *
+   * 实测（555 篇的笔记本、全新空目录、只改这一处）：修复前 `pulled: 499`，
+   * 修复后 `pulled: 555`。所以这不是「优化」，是**正确性**。
+   */
+  const remoteUnchanged = input.remoteUnchanged === true;
+  /*
+   * 三条路，从最省到最稳：
+   * 1. 远端一条都没变 → 不列树（`remoteUnchanged`）；
+   * 2. 变了但不多、而且都认得出 → 只按变更比对（`partialRemote`）；
+   * 3. 其余情况 → 老老实实翻页列整棵树。
+   */
+  const partial = input.remoteUnchanged === true || input.partialRemote === undefined
+    ? null
+    : buildPartialTree(input.partialRemote, ledger, deps.didOf);
+  const tree = remoteUnchanged
+    ? { entries: [] as ProviderTreeEntry[], truncated: false, cursor: input.cursorHint ?? null }
+    : partial !== null
+      ? partial
+      : await fetchWholeTree(provider, input.maxFiles);
+  log("tree", {
+    entries: tree.entries.length,
+    truncated: tree.truncated,
+    skipped: remoteUnchanged,
+    partial: partial !== null,
+  });
 
   /*
    * ## `did → path` 的反查表**必须**由「已知路径 ∪ 本地扫描结果」现算
@@ -242,7 +327,19 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    */
   const baselineView: BaselineLike = { files: ledger.files };
   const pushPlan = planPush(baselineView, localFiles);
-  const pullPlan = planPull(baselineView, remoteTree, localFiles);
+  /*
+   * ★ 远端没变时**不跑 `planPull`**。
+   *
+   * 为什么不是「拿空树去跑」：`planPull` 把「树里没有」解释成「远端删了它」，
+   * 空树会让它把账本里每一条都判成待删 —— 那是灾难。所以这里直接给一个空计划。
+   */
+  const pullPlan = remoteUnchanged
+    ? ({
+        download: [] as { path: string; sha: string }[],
+        removeLocal: [] as string[],
+        conflicts: [] as { path: string; reason: "both-modified" | "deleted-locally-modified-remotely" | "deleted-remotely-modified-locally" }[],
+      } as ReturnType<typeof planPull>)
+    : planPull(baselineView, remoteTree, localFiles);
 
   const conflicts: EngineConflict[] = [];
   const pushConflicts: EngineConflict[] = [];
@@ -294,7 +391,13 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
 
   /* ------------------------------------------------------------------ 推送 */
 
-  for (const file of [...pushAdded, ...pushModified]) {
+  /*
+   * ★ P1：**有界并发**推送。旧实现是 `for … await` —— 一次只有一个请求在飞，
+   * 吞吐被单次往返（实测 p50 ≈ 190ms）钉死在 ~5 篇/秒。并发 8 实测 ~28 请求/秒。
+   * 上限刻意压得比较低：服务端按账号限流，堆太多请求只会换来一片 429。
+   */
+  const concurrency = Math.max(1, Math.floor(input.concurrency ?? DEFAULT_SYNC_CONCURRENCY));
+  await runBounded([...pushAdded, ...pushModified], concurrency, async (file) => {
     const did = deps.didOf(file.path);
     const known = ledger.files[file.path];
     const bytes = await deps.readLocal(file.path);
@@ -328,7 +431,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
         remoteId: remoteEntry?.hash ?? null,
       });
       log("push", { path: file.path, conflict: true });
-      continue;
+      return;
     }
     const bid = ledger.bids[file.path] ?? allocateBid(ledger, file.path);
     ledger.files[file.path] = {
@@ -343,7 +446,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     progressDone += 1;
     tick();
     log("push", { path: file.path, bytes: file.bytes });
-  }
+  });
 
   /* --------------------------------------- 推送删除（本地删了 → 远端墓碑） */
 
@@ -359,7 +462,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    * 走 `provider.delete()`（**逻辑**删除、留墓碑），不是物理删。CAS 用账本里的
    * `remoteHash`：远端在我们列树之后被别人改过 → 返回冲突 → 不删，交用户裁决。
    */
-  for (const path of pushPlan.deleted) {
+  await runBounded(pushPlan.deleted, concurrency, async (path) => {
     const did = deps.didOf(path);
     const known = ledger.files[path];
     const result = await provider.delete({ did, baseHash: known?.remoteHash ?? null });
@@ -373,7 +476,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
         remoteId: current?.hash ?? null,
       });
       log("delete", { path, conflict: true });
-      continue;
+      return;
     }
     /*
      * 删成功之后**保留账本那一条**，只把 `localHash` 置空。
@@ -395,20 +498,25 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     progressDone += 1;
     tick();
     log("delete", { path, remote: true });
-  }
+  });
 
   /* ------------------------------------------------------------------ 拉取 */
 
-  for (const item of pullPlan.download) {
-    const did = deps.didOf(item.path);
-    const read = await provider.read(did);
+  /*
+   * ★ P1：拉取同样改为**有界并发**（与推送同一个理由：每篇一个请求，串行被往返钉死）。
+   *
+   * `deps.writeLocal` 与账本更新都在各 worker 内完成；账本写入是**同步**的，
+   * 所以不会有两个 worker 交错改同一条。
+   */
+  /** 把一条拉取结果落到本地并记账（单条与批量两条路径共用这一份）。 */
+  const applyPulled = async (item: { path: string; sha: string }, read: ProviderReadResult | null): Promise<void> => {
     if (read === null) {
       /*
        * 列树时还在、读的时候没了（另一端刚删）→ 不算错：留给**下一次同步**按
        * 「远端删除」处理。这里**不猜**（§6.1）。
        */
       log("pull", { path: item.path, vanished: true });
-      continue;
+      return;
     }
     await deps.writeLocal(item.path, read.bytes);
     /*
@@ -432,6 +540,44 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     progressDone += 1;
     tick();
     log("pull", { path: item.path, bytes: read.bytes.byteLength });
+  };
+
+  /*
+   * ★ **批量取**：provider 支持 `readMany` 时，把 50 条合成一个请求。
+   *
+   * 为什么值得：请求数 = 文件数时，吞吐被**往返延迟**钉死（实测 555 篇要 555 次往返）。
+   * 批量之后 555 篇 = 12 个请求 —— 首次全量从十几秒降到几秒量级，
+   * 而且限流压力也小了一个数量级。
+   *
+   * 为什么要有退路：老服务端没有这个端点（404）、或单条超限（413）。
+   * 那时**逐条退回**，绝不让整轮同步失败 —— 批量只是优化。
+   */
+  if (typeof provider.readMany === "function" && pullPlan.download.length > 1) {
+    const chunks: typeof pullPlan.download[] = [];
+    for (let index = 0; index < pullPlan.download.length; index += PULL_BATCH_SIZE) {
+      chunks.push(pullPlan.download.slice(index, index + PULL_BATCH_SIZE));
+    }
+    await runBounded(chunks, concurrency, async (items) => {
+      const dids = items.map((item) => deps.didOf(item.path));
+      let results: Map<string, ProviderReadResult>;
+      try {
+        results = await provider.readMany!(dids);
+      } catch (error) {
+        log("pull", { batchFailed: true, reason: error instanceof Error ? error.message : String(error) });
+        results = new Map();
+        for (const did of dids) {
+          const single = await provider.read(did);
+          if (single !== null) results.set(did, single);
+        }
+      }
+      for (let index = 0; index < items.length; index += 1) {
+        await applyPulled(items[index]!, results.get(dids[index]!) ?? null);
+      }
+    });
+  } else {
+    await runBounded(pullPlan.download, concurrency, async (item) => {
+      await applyPulled(item, await provider.read(deps.didOf(item.path)));
+    });
   }
 
   /* -------------------------------------------------------------- 删除（拉取侧） */
@@ -487,11 +633,21 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    */
   let checkpoint: string | null = null;
   try {
-    const after = await provider.tree({ limit: 1 });
-    if (after.cursor !== null) {
-      await provider.checkpoint(after.cursor);
-      checkpoint = after.cursor;
-      log("checkpoint", { cursor: after.cursor });
+    /*
+     * 远端没变、而且这一轮**什么都没写上去** ⇒ `cursorHint` 就是最新游标，
+     * 直接用它，省掉一次列树。写了一点点的话它已经过期，只能重新问一次。
+     */
+    if (input.cursorHint && pushed === 0 && remoteDeleted === 0) {
+      checkpoint = input.cursorHint;
+      await provider.checkpoint(checkpoint);
+      log("checkpoint", { cursor: checkpoint, reused: true });
+    } else {
+      const after = await provider.tree({ limit: 1 });
+      if (after.cursor !== null) {
+        await provider.checkpoint(after.cursor);
+        checkpoint = after.cursor;
+        log("checkpoint", { cursor: after.cursor });
+      }
     }
   } catch (error) {
     // 检查点失败不该让整次同步失败：数据已经同步完了，游标下次再提。
@@ -507,6 +663,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     conflicts,
     deleted,
     suspendedDeletes: guarded.suspendedDeletes,
+    treeTruncated: tree.truncated,
     blockedDeletes,
     deletionGuardMessage,
     resynced: false,
@@ -538,27 +695,259 @@ function allocateBid(ledger: SyncLedger, path: string): number {
 export async function syncOnceIncremental(input: SyncOnceInput & { since?: string | null }): Promise<SyncOnceResult> {
   const { provider, deps } = input;
   const log = deps.log ?? (() => undefined);
+  const since = input.since ?? null;
+
+  /*
+   * 没有游标（第一次同步 / 重装 / 缓存被清）⇒ 只能全树。
+   * 这条路是**正确性优先**的：宁可多列一次树，也不能凭空的「我记得同步过」去跳过。
+   */
+  if (since === null) return syncOnce(input);
+
   let changes;
   try {
-    changes = await provider.changes({ since: input.since ?? null });
+    changes = await provider.changes({ since });
   } catch (error) {
-    if (error instanceof SyncProviderError && error.code === "not-found") {
-      // provider 不支持增量（或库刚建）：退回全树同步。
-      log("changes", { unsupported: true });
-      return syncOnce(input);
-    }
-    throw error;
+    /*
+     * `changes` 挂了就退回全树 —— 它是**优化**，不该让同步失败。
+     * 但「密钥被轮换 / 被禁用」是另一回事：那必须往上抛，让状态栏说准
+     * （§1.5 代价 2 的指定文案）。所以只有这一类继续抛。
+     */
+    if (error instanceof SyncProviderError && (error.code === "rotated" || error.code === "forbidden")) throw error;
+    log("changes", { failed: true });
+    return syncOnce(input);
   }
   log("changes", { count: changes.changes.length, resync: changes.resync === true });
 
   if (changes.resync === true) {
+    // 游标过期（远端流水被裁剪）⇒ 退化成全树比对（§6.4 规则 2）。
     const result = await syncOnce(input);
     return { ...result, resynced: true };
   }
+
   if (changes.changes.length === 0) {
-    // 远端一个变更都没有 → 不必列树。但**本地改动仍然要推**，所以还是要跑一次
-    // （否则「离线编辑 30 分钟 → 恢复」这条场景里，本地改动会一直不上去）。
-    return syncOnce(input);
+    /*
+     * ★ 远端一个变更都没有 ⇒ **不列树、不做拉取计划**，只把本地改动推上去。
+     *
+     * 这是「改一个字也要把 500 篇的树拉一遍」的终点：远端没动时，一次同步只剩
+     * 「本地扫描（有哈希缓存，只读改了的那一个）+ 可能的推送」。
+     *
+     * 注意这里**不能**顺手跳过同步：本地改动仍然要推（否则「离线编辑 30 分钟 →
+     * 恢复」这条场景里，本地改动会一直上不去）。
+     */
+    const result = await syncOnce({ ...input, remoteUnchanged: true, cursorHint: changes.cursor });
+    return { ...result, resynced: false };
   }
+
+  /*
+   * ★ **变更驱动**：远端只动了几条时，不再整树比对。
+   *
+   * 把「变了的 did」翻成路径（明文模式下服务端直接带回来，E2EE 下靠本机反查表），
+   * 再让 `buildPartialTree()` 用它拼出一棵与整树等价的树 —— `planPull()` 一行不改，
+   * 而删除只可能来自远端**显式**的墓碑（§6.4 规则 7）。
+   *
+   * 任何一步拿不准（这一页没装完 / 认不出 did / 缺内容标识）都退回整树：
+   * 方向永远是「宁可多拉一遍，不可漏拉一条」。
+   */
+  if (changes.truncated !== true) {
+    const partial = await resolveChangedPaths(changes.changes, deps);
+    if (partial !== null) {
+      const result = await syncOnce({ ...input, partialRemote: partial, cursorHint: changes.cursor });
+      return { ...result, resynced: false };
+    }
+    log("changes", { partialUnavailable: true });
+  } else {
+    log("changes", { truncated: true });
+  }
+
   return syncOnce(input);
 }
+
+/* ============================================================================
+   分页与并发（P0/P1 修复的落点）
+   ============================================================================ */
+
+/** 一页列树最多取多少条。服务端 `clampLimit` 的上限是 2000。 */
+export const TREE_PAGE_SIZE = 1000;
+
+/**
+ * 翻页上限（防御无限循环）。
+ *
+ * 1000 条/页 × 50 页 = 5 万条 —— 远超单个笔记本的合理规模（本项目护栏
+ * `MAX_SYNC_ENTRIES` 是 2 万）。真的撞到这里说明服务端没有前进（`startKey`
+ * 语义被改坏），此时**如实报 truncated**，让删除推断继续被挂起，而不是假装取全了。
+ */
+export const TREE_MAX_PAGES = 50;
+
+/**
+ * **把整棵远端树取完**（按 `startKey` 翻页直到 `truncated === false`）。
+ *
+ * 为什么必须在这里做、而不是在 provider 里做：provider 的注释写得很清楚
+ * （`providers/opennote.ts` 模块头 ③）—— `truncated` 是「禁止推断删除」的信号，
+ * provider 若偷偷循环取完就把这个信号抹掉了。**取完并如实上报最终结论**是调用方的职责。
+ *
+ * 去重按 `did`：服务端 `startkey` 是**闭区间**，下一页的第一条就是上一页的最后一条。
+ */
+export async function fetchWholeTree(
+  provider: SyncProvider,
+  pageSize: number | undefined,
+): Promise<{ entries: ProviderTreeEntry[]; truncated: boolean; cursor: string | null }> {
+  const limit = Math.min(Math.max(pageSize ?? TREE_PAGE_SIZE, 1), 2000);
+  const byDid = new Map<string, ProviderTreeEntry>();
+  let cursor: string | null = null;
+  let startKey: string | undefined;
+
+  for (let page = 0; page < TREE_MAX_PAGES; page += 1) {
+    const tree = await provider.tree({ limit, ...(startKey === undefined ? {} : { startKey }) });
+    cursor = tree.cursor;
+    for (const entry of tree.entries) byDid.set(entry.did, entry);
+
+    if (!tree.truncated) return { entries: [...byDid.values()], truncated: false, cursor };
+
+    const last = tree.entries.at(-1);
+    // 空页却说 truncated：服务端状态可疑，如实报「没取全」，让删除继续被挂起。
+    if (!last) return { entries: [...byDid.values()], truncated: true, cursor };
+    // 没前进（startkey 语义被改坏）：同上，宁可挂起删除也不猜。
+    if (startKey === last.did) return { entries: [...byDid.values()], truncated: true, cursor };
+    startKey = last.did;
+  }
+
+  return { entries: [...byDid.values()], truncated: true, cursor };
+}
+
+/** 默认并发度（见 `SyncOnceInput.concurrency` 的说明：8 是实测的性价比点）。 */
+export const DEFAULT_SYNC_CONCURRENCY = 8;
+
+/**
+ * 一次批量取多少条正文（见 `/v1/files`）。
+ *
+ * 50 是折中：再大就会让单条响应被 base64 撑到几 MB（大附件场景），
+ * 而再小就回到了「请求数接近文件数」。
+ */
+export const PULL_BATCH_SIZE = 50;
+
+/**
+ * 变更超过这个条数，就不走「变更驱动」而直接列整树。
+ *
+ * 理由很实在：逐条比对要 1 次 `changes` + N 条下载，而整树是 1~2 个分页请求；
+ * 变更很多时**整树反而更便宜**，而且没有「拼树」这一层推理。
+ */
+export const PARTIAL_CHANGE_LIMIT = 200;
+/**
+ * 由「远端变了的路径」拼出一棵**与整树等价**的树。
+ *
+ * ## 它凭什么等价
+ *
+ * 账本里记着每条路径上次同步时的 `remoteHash` —— 那正是「如果它没变，现在应该是什么」。
+ * 所以：**账本里没进变更集的那些，用账本的 `remoteHash` 填回去**，
+ * 变更集里的那几条用新值（或干脆不放，表示远端删了）。
+ * 拼出来的树喂给 `planPull()`，判据与整树比对**逐条一致**，而代价只有变更条数量级。
+ *
+ * 这么做还有一个比「省流量」更重要的好处：
+ * **删除只可能来自「远端显式说它删了」**（`changes` 的 `op: delete`），
+ * 而不是「我列的树里没有它」—— 后者正是最危险的误删来源（§6.4 规则 7）。
+ *
+ * ## 什么时候**不能**用（返回 `null`，调用方退回整树）
+ *
+ * 只要有一条信息不全，就必须整树。宁可慢一次，不可漏一条：
+ * 1. 账本里有 `imported && remoteHash === null` 的条目 —— 拼树时必须给它一个
+ *    「没变」的标识，而它的远端标识**不是字符串**。硬塞一个假值会让
+ *    `planPull` 判成「远端删了」→ **删本地文件**。这一条是硬风险，直接放弃。
+ * 2. 变更集为空（调用方不该走到这里）或过大（> 200 条时逐条比对不如整树）。
+ */
+/**
+ * 把 `changes` 里的 did 翻成**本机路径**，得到 `buildPartialTree()` 要的输入。
+ *
+ * 翻不出来就返回 `null`（调用方退回整树）。三种翻不出来的情况都必须放弃：
+ * 1. `did` 既不在本机已知路径里、服务端也没带 `path`（E2EE 下常见）；
+ * 2. 是更新但**没有内容标识** —— 那就无从判断「内容到底变没变」，
+ *    硬拉一遍会把「只是 rev 变了」的文件也下载下来（每次别人同步都会触发）；
+ * 3. 同一条路径在同一批里出现两次且标识不一致（远端重放过）—— 不猜，整树。
+ */
+export async function resolveChangedPaths(
+  changes: { did: string; op: "add" | "update" | "delete"; path?: string; hash?: string }[],
+  deps: SyncEngineDeps,
+): Promise<{ path: string; hash: string | null }[] | null> {
+  const knownPaths = await deps.knownPaths();
+  const byDid = new Map<string, string>();
+  for (const path of knownPaths) {
+    const did = deps.didOf(path);
+    if (!byDid.has(did)) byDid.set(did, path);
+  }
+
+  const seen = new Map<string, string | null>();
+  for (const change of changes) {
+    const path = change.path ?? byDid.get(change.did);
+    if (path === undefined) return null;
+    const hash = change.op === "delete" ? null : change.hash;
+    if (change.op !== "delete" && hash === undefined) return null;
+    const value = hash === undefined ? null : hash;
+    if (seen.has(path)) {
+      if (seen.get(path) !== value) return null; // 同一路径两个不同结论：不猜
+      continue;
+    }
+    seen.set(path, value);
+  }
+  return [...seen.entries()].map(([path, hash]) => ({ path, hash }));
+}
+export function buildPartialTree(
+  changed: { path: string; hash: string | null }[],
+  ledger: SyncLedger,
+  didOf: (path: string) => string,
+): { entries: ProviderTreeEntry[]; truncated: boolean; cursor: string | null } | null {
+  if (changed.length === 0 || changed.length > PARTIAL_CHANGE_LIMIT) return null;
+  // 变更集里出现「远端标识不是字符串」的条目 ⇒ 拼树不成立（见模块头第 1 条）。
+  for (const file of Object.values(ledger.files)) {
+    if (file.imported && file.remoteHash === null) return null;
+  }
+
+  const changedByPath = new Map<string, string | null>();
+  for (const item of changed) changedByPath.set(item.path, item.hash);
+
+  const entries: ProviderTreeEntry[] = [];
+  for (const [path, file] of Object.entries(ledger.files)) {
+    if (!file.imported) continue; // 只记账的条目：同步永不触碰它（与 planPull 的判据一致）
+    if (file.remoteHash === null) continue;
+    if (changedByPath.has(path)) continue;
+    // ★ `path` 必须带上：引擎稍后要把它从 did 反查回路径，而反查表只含「已知路径 ∪ 本地扫描」。
+    //   新建/清空过的设备上那张表可能是空的 —— 那时没有 `path` 的条目会被当成 unknownDids 丢掉。
+    entries.push({ did: didOf(path), path, hash: file.remoteHash, rev: file.rev ?? "" });
+  }
+  for (const [path, hash] of changedByPath) {
+    if (hash === null) continue; // 远端删了 ⇒ 不进树 ⇒ planPull 走「远端删除」分支
+    const known = ledger.files[path];
+    // 只在账本里记账、从未物化过的路径：保持原语义，永远不因它落地。
+    if (known !== undefined && !known.imported) continue;
+    entries.push({ did: didOf(path), path, hash, rev: "" });
+  }
+  return { entries, truncated: false, cursor: null };
+}
+
+/**
+ * **有界并发**跑一批条目：同一时刻最多 `limit` 个 worker 在飞，每条只被处理一次。
+ *
+ * 为什么不用 `Promise.all(items.map())`：那会把整批同时发出去。500 篇笔记
+ * 一次性打 500 个请求，撞上服务端的账号限流（120/分钟）只会换来一片 429。
+ *
+ * 为什么安全：JS 单线程 + 每个 worker 的「读账本 → 写账本」之间**没有 await**
+ * （写账本发生在响应回来之后的同步代码里），所以不会有两个 worker 同时改同一条。
+ */
+export async function runBounded<T>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  let cursor = 0;
+  const width = Math.max(1, Math.min(Math.floor(limit) || 1, items.length));
+  await Promise.all(
+    Array.from({ length: width }, async () => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= items.length) return;
+        await worker(items[index]!, index);
+      }
+    }),
+  );
+}
+

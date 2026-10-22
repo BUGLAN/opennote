@@ -54,6 +54,31 @@ export interface SyncStreamOptions {
   reconnectDelayMs?: number;
   /** 重连延迟上限。默认 30000ms。 */
   maxReconnectDelayMs?: number;
+  /**
+   * 本机**上一次同步到达的游标**（没有就 `null`）。
+   *
+   * 给了它，这里就在**每次连上**时把服务端的 `ready.cursor` 和它比一比：
+   * 一样 ⇒ 什么都不做（打开应用 0 个请求）；不一样 ⇒ 发一次信号去补。
+   *
+   * ## 为什么这比「打开就同步一轮」「回前台就同步一轮」都好
+   *
+   * 那两条都是**无条件**的：没变化也白跑一轮（实测 2 个请求、约 650ms）。
+   * 而「连上时比游标」恰好是**唯一需要**同步的时刻：
+   * - 冷启动：离线期间别人改过 → 游标不同 → 补；
+   * - 睡觉/断网后重连：连接是被静默掐死的，重连时游标不同 → 补；
+   * - 什么都没发生：游标相同 → 一个请求都不发。
+   *
+   * 不给它（没有游标存储的宿主）就退回旧行为：`ready` 只喂看门狗，由上层
+   * 自己决定要不要无条件拉一轮（见 `controller.ts` 的 `reconcilesCursor()`）。
+   */
+  knownCursor?: () => string | null;
+  /**
+   * 连上之后**核对为最新**（游标一致，没有触发同步）。
+   *
+   * 上层据此把「上次同步时间」推到现在 —— 否则状态栏会停在「尚未同步」，
+   * 而我们其实刚刚确认过他确实是最新的。
+   */
+  onUpToDate?: (cursor: string) => void;
   setTimeoutFn?: (fn: () => void, ms: number) => unknown;
   clearTimeoutFn?: (handle: unknown) => void;
   log?: (line: string) => void;
@@ -63,9 +88,15 @@ export interface SyncStream {
   start(): void;
   /** 主动断开并停止重连（关工作区 / 登出）。 */
   stop(): void;
-  /** 从后台回前台（第 2032 行）：立刻**增量拉取**，并确保流是活的。 */
-  resume(): void;
   phase(): StreamPhase;
+  /**
+   * 它会不会在**连上时比对游标**（`knownCursor` 给了才会）。
+   *
+   * `controller` 据此决定还要不要无条件跑一轮 startup：
+   * 能比对就不必白跑（连上那一刻会自己判断落后没落后）；
+   * 不能比对就必须无条件拉，否则离线期间的变更永远补不上。
+   */
+  reconcilesCursor(): boolean;
 }
 
 /** 服务端心跳的默认间隔（`SSE_HEARTBEAT_MS`），用来推默认超时。 */
@@ -156,7 +187,43 @@ export function createSyncStream(options: SyncStreamOptions): SyncStream {
       publish("open");
       touch();
     });
-    stream.addEventListener("ready", () => touch());
+    stream.addEventListener("ready", (event) => {
+      touch();
+      /*
+       * ★ 连上就**比游标**：落后才补，没落后一个请求都不发。
+       *
+       * 这是「打开应用 / 睡觉醒来 / 断网恢复」三种情况的**统一入口** ——
+       * 它们本质上是同一件事：此刻服务端的位置与本机记的位置是否一致。
+       * 以前靠「启动先拉一轮」和「回前台再拉一轮」兜，那是无条件开销；
+       * 而 `knownCursor` 没给时（没有游标存储）这里什么都不做，由上层自己决定。
+       */
+      if (options.knownCursor) {
+        let remote: string | null = null;
+        try {
+          const parsed = JSON.parse(event.data ?? "{}") as { cursor?: unknown };
+          remote = typeof parsed.cursor === "string" ? parsed.cursor : null;
+        } catch {
+          remote = null;
+        }
+        const local = options.knownCursor();
+        if (remote === null) {
+          // 服务端没给游标：无从判断，交给上层按旧规矩处理（宁可多拉一次）。
+        } else if (remote !== local) {
+          options.log?.(`[stream] 连上后发现落后（本地 ${local ?? "无"}，远端 ${remote}），补一轮`);
+          options.onSignal(remote);
+        } else {
+          options.log?.(`[stream] 连上后核对：已是最新（游标 ${remote}），跳过同步`);
+          options.onUpToDate?.(remote);
+        }
+      }
+    });
+    /*
+     * 心跳（服务端每 `SSE_HEARTBEAT_MS` 发一次）。
+     *
+     * 它只用来**喂看门狗**：安静的笔记本 25 秒没有变更是常态，没有这一条，
+     * 客户端会在 55 秒时把一条健康的连接判死并重连一次（每次都白断一次）。
+     */
+    stream.addEventListener("heartbeat", () => touch());
     stream.addEventListener("change", (event) => {
       touch();
       let cursor: string | null = null;
@@ -182,6 +249,8 @@ export function createSyncStream(options: SyncStreamOptions): SyncStream {
   };
 
   return {
+    reconcilesCursor: () => typeof options.knownCursor === "function",
+
     start() {
       if (!stopped) return;
       stopped = false;
@@ -197,34 +266,6 @@ export function createSyncStream(options: SyncStreamOptions): SyncStream {
       }
       teardown();
       publish("stopped");
-    },
-
-    resume() {
-      /*
-       * 第 2032 行：手机上从后台回前台要**立刻增量拉取**。
-       *
-       * 这里同时做两件事：① 触发一次信号（上层会立刻同步一轮）；
-       * ② 如果流已经断了（后台期间大概率断了），把它重开。
-       *
-       * 为什么不能只靠「重开流」：重开之后要等服务端下一次 `_changes` 才有事件 ——
-       * 而用户在后台期间错过的那些变更**不会重放**（SSE 没有历史）。
-       * 所以必须主动拉一次。
-       */
-      if (stopped) {
-        stopped = false;
-        attempt = 0;
-      }
-      options.onSignal(null);
-      if (stream === null) {
-        if (retryTimer !== null) {
-          clearTimer(retryTimer);
-          retryTimer = null;
-        }
-        attempt = 0;
-        connect();
-      } else {
-        touch();
-      }
     },
 
     phase: () => phase,

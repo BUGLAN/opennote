@@ -505,6 +505,23 @@ function StatusSection(): ReactNode {
           {ui.last.unknownDids > 0 ? ` · ${ui.last.unknownDids} 条远端记录认不出路径（E2EE 映射未重建）` : ""}
         </p>
       ) : null}
+      {/*
+        ★ 这两个数字以前**根本不显示**，而它们恰好对应两种「看起来同步成功了、
+           其实没同步」的状态：远端树没取全时，删除会被全部挂起。
+           不显示 ⇒ 用户只会觉得「我删掉的笔记又回来了」，而且没有任何线索。
+      */}
+      {ui.last && ui.last.treeTruncated ? (
+        <p className="dialog__note sync-dialog__error">
+          远端笔记本太大，这一次**没有把远端列表取全**：这次只做了新增与更新，删除被全部挂起。
+          如果你删过笔记却没同步过去，就是它。请再次同步（通常会继续翻页补全）。
+        </p>
+      ) : null}
+      {ui.last && ui.last.suspendedDeletes > 0 ? (
+        <p className="dialog__note sync-dialog__error">
+          有 {ui.last.suspendedDeletes} 条删除被**挂起**了（远端列表不完整时不敢推断「远端删了它」）。
+          这是防误删的保护，不是错误；列表取全之后它们会自动生效。
+        </p>
+      ) : null}
       <div className="sync-dialog__row">
         <button type="button" className="btn" disabled={ui.phase !== "attached"} onClick={() => void manualSync()}>
           立即同步

@@ -38,6 +38,8 @@ import type { SyncOnceResult } from "./engine";
 import { createSyncStream, type EventStreamLike } from "./stream";
 import { createBackendSyncFiles } from "./backendFiles";
 import type { SyncLedger } from "./state";
+import type { HashCache } from "./hashCache";
+import type { CursorStore } from "./cursor";
 
 /** 接不上的原因（返回给 UI 显示 —— 不要只返回 `null` 让界面自己猜）。 */
 export type AttachSkipReason =
@@ -61,10 +63,25 @@ export interface AttachWorkspaceSyncOptions {
   accountKeyText: string | null;
   /** 工作区根目录的 `.gitignore` 文本。 */
   gitignoreText?: string;
+  /**
+   * 本地哈希缓存（见 `hashCache.ts`）。给了之后「没变的文件」不再重读重算哈希。
+   * 传入同一个对象，引擎原地更新它，由调用方负责落盘。
+   */
+  hashCache?: HashCache;
+  /** 增量同步游标（见 `cursor.ts`）；不给就每轮全树比对。 */
+  cursorStore?: CursorStore;
   /** 开一条 SSE 流（注入：网页/移动用 `EventSource`，桌面走主进程）。 */
   openEventStream?: (url: string) => EventStreamLike;
   /** 建流的开关（用户可能在设置里关掉实时）。默认开。 */
   realtime?: boolean;
+  /**
+   * 拉取落地之后要刷新的**路径**（§5.4 第 2 条：按路径刷新，不要整库重扫）。
+   *
+   * ⚠️ 这个口子**必须接**：桌面端主进程的 watcher 会把「应用自己经 IPC 写过的路径」
+   * 在 1.5 秒窗口内过滤掉（`SELF_WRITE_WINDOW_MS`），而远端拉取落盘走的正是同一条 IPC
+   * —— 不接它，拉下来的笔记在界面上**永远不会出现**（实测：磁盘 500 篇、侧栏 1 篇）。
+   */
+  onApplied?: (paths: string[]) => void;
   /** 每一轮同步成功都回调（账本落盘的挂点，见 runner.onSynced 的说明）。 */
   onSynced?: (result: SyncOnceResult) => void;
   /** 实时状态（含 syncing 阶段的逐文件进度）。不接的话 UI 看到的永远是接上那一刻的快照。 */
@@ -152,24 +169,39 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
     backend: createBackendSyncFiles({ backend: options.backend }),
     notebookId: config.notebookId,
     ...(options.gitignoreText === undefined ? {} : { gitignoreText: options.gitignoreText }),
+    ...(options.hashCache === undefined ? {} : { hashCache: options.hashCache }),
+    ...(options.cursorStore === undefined ? {} : { cursorStore: options.cursorStore }),
     ...(notebookKey === undefined ? {} : { notebookKey }),
     ...(options.onSynced === undefined ? {} : { onSynced: options.onSynced }),
     ...(options.onStatus === undefined ? {} : { onStatus: options.onStatus }),
+    ...(options.onApplied === undefined ? {} : { onApplied: options.onApplied }),
     ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.log === undefined ? {} : { log: options.log }),
   });
 
   const realtime = options.realtime !== false;
+  /*
+   * 游标存储的读取函数：`stream` 连上时用它和 `ready.cursor` 比一比，
+   * **落后才同步**（见 `stream.ts` 的 `knownCursor`）。
+   *
+   * 没有游标存储时传 `undefined` —— 那会让 `controller` 退回「启动无条件拉一轮」，
+   * 方向是安全的（宁可多拉一次，不可漏一次）。
+   */
+  const cursorStore = options.cursorStore;
+  const knownCursor = cursorStore === undefined ? undefined : () => cursorStore.load(config.notebookId);
+
   const controller = createSyncController({
     runner: session.runner,
-    openStream: (onSignal) => {
+    openStream: (onSignal, onUpToDate) => {
       if (!realtime || !options.openEventStream) return null;
       const stream = createSyncStream({
         // ★ 令牌走**查询串** —— `EventSource` 不能设置请求头（§4.7 第 529 行）。
         url: `${config.baseUrl}/v1/events?nb=${encodeURIComponent(config.notebookId)}&authToken=${encodeURIComponent(authToken)}`,
         onSignal,
+        onUpToDate,
         open: options.openEventStream,
+        ...(knownCursor === undefined ? {} : { knownCursor }),
         ...(options.log === undefined ? {} : { log: options.log }),
       });
       stream.start();

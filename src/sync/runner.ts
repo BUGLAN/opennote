@@ -96,6 +96,15 @@ export interface SyncRunner {
    * （调用方不需要知道细节，它只要「同步过了」这个事实）。
    */
   request(trigger: SyncTrigger): Promise<SyncOnceResult | null>;
+  /**
+   * 「核对过：你已是最新」——**没有跑同步**，但游标与服务端一致。
+   *
+   * 为什么需要它：流连上时会先把 `ready.cursor` 和本机记的比一比，
+   * 一致就跳过同步（这是「打开应用 0 个请求」的来源）。可是**跳过**之后状态栏
+   * 还停在「尚未同步」，用户会以为没同步过 —— 而事实上我们刚刚**核对过**他确实是最新的。
+   * 所以这里只更新「上次同步时间」，不碰 `conflicts`（那是上一轮的事实）。
+   */
+  noteUpToDate(): void;
   /** 本地写成功之后调（去抖）。重复调用只保留最后一次。 */
   scheduleAfterLocalWrite(): void;
   /** 停掉定时器（关工作区 / 卸载）。 */
@@ -168,6 +177,12 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
 
   return {
     status: () => current,
+
+    noteUpToDate(): void {
+      // 只把「上次同步时间」推到现在：我们确实刚和服务端核对过，内容也一致。
+      lastSyncedAt = now();
+      publish({ phase: "idle", lastSyncedAt, conflicts });
+    },
 
     /** 引擎每完成一个文件回调一次（session 把它接到引擎的 onProgress 上）。 */
     reportProgress(newProgress: SyncProgress): void {

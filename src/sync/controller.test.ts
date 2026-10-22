@@ -25,25 +25,37 @@ function fakeRunner() {
   return { runner, triggers };
 }
 
-/** 一个记录调用的假流。 */
-function fakeStream() {
-  const resume = vi.fn();
+/**
+ * 一个记录调用的假流。
+ *
+ * `reconciles` 决定它会不会在连上时比对游标 —— 那正是「启动要不要无条件拉一轮」的分水岭，
+ * 所以它必须是**可配的**，而不是写死一个值。
+ */
+function fakeStream(options: { reconciles?: boolean } = {}) {
+  const reconciles = options.reconciles === true;
   const stop = vi.fn();
-  const stream: SyncStream = { start: vi.fn(), stop, resume, phase: () => "open" };
-  return { stream, resume, stop };
+  const stream: SyncStream = {
+    start: vi.fn(),
+    stop,
+    phase: () => "open",
+    reconcilesCursor: () => reconciles,
+  };
+  return { stream, stop };
 }
 
-function make(overrides: { openStream?: () => SyncStream | null; syncOnStart?: boolean } = {}) {
+function make(overrides: { openStream?: () => SyncStream | null; syncOnStart?: boolean; reconciles?: boolean } = {}) {
   const runner = fakeRunner();
-  const created: { stream: SyncStream; resume: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> }[] = [];
+  const created: { stream: SyncStream; stop: ReturnType<typeof vi.fn> }[] = [];
   let onSignal: ((cursor: string | null) => void) | null = null;
+  let onUpToDate: (() => void) | null = null;
 
   const controller = createSyncController({
     runner: runner.runner,
-    openStream: (handler) => {
+    openStream: (handler, upToDate) => {
       onSignal = handler;
+      onUpToDate = upToDate;
       if (overrides.openStream) return overrides.openStream();
-      const made = fakeStream();
+      const made = fakeStream({ reconciles: overrides.reconciles === true });
       created.push(made);
       return made.stream;
     },
@@ -56,6 +68,8 @@ function make(overrides: { openStream?: () => SyncStream | null; syncOnStart?: b
     created,
     /** 模拟服务端推来一个信号。 */
     signal: (cursor: string | null = "42") => onSignal?.(cursor),
+    /** 模拟「连上后核对：已经是最新」。 */
+    upToDate: () => onUpToDate?.(),
   };
 }
 
@@ -63,8 +77,21 @@ function make(overrides: { openStream?: () => SyncStream | null; syncOnStart?: b
    启动
    ============================================================================ */
 
-describe("§5.3 · 启动：先同步一轮，再订阅", () => {
-  it("`start()` 触发一次 `startup` 同步并建流", () => {
+describe("§5.3 · 启动：流能比对游标时不先拉，不能比时才无条件拉", () => {
+  it("★ 流会在连上时比对游标 ⇒ **一个请求都不发**（没变化就什么都不该跑）", () => {
+    /*
+     * 这是「打开应用」应有的成本：连上 → 服务端发 `ready`（带游标）→
+     * `stream.ts` 拿它和本机记的比一比 → 一样就什么都不做。
+     * 以前这里是**无条件**一轮（实测 2 个请求、约 650ms），哪怕什么都没变。
+     */
+    const world = make({ reconciles: true });
+    world.controller.start();
+    expect(world.triggers).toEqual([]);
+    expect(world.created).toHaveLength(1);
+    expect(world.controller.subscribed()).toBe(true);
+  });
+
+  it("流不会比对游标（没有游标存储）⇒ 仍然无条件拉一轮", () => {
     const world = make();
     world.controller.start();
     expect(world.triggers).toEqual(["startup"]);
@@ -122,10 +149,10 @@ describe("§4.6 · 远端信号变成一次同步触发", () => {
 });
 
 /* ============================================================================
-   停止与回前台
+   停止
    ============================================================================ */
 
-describe("停止与回前台", () => {
+describe("停止", () => {
   it("`stop()` 退订 + 停掉去抖", () => {
     const world = make();
     world.controller.start();
@@ -135,41 +162,24 @@ describe("停止与回前台", () => {
     expect((world.runner.dispose as ReturnType<typeof vi.fn>)).toHaveBeenCalledOnce();
   });
 
-  it("★ 第 2032 行 · `resume()` 一定触发一次同步（**即使宿主根本没建流**）", () => {
-    /*
-     * 用户可能在后台待了很久，期间的变更**不会重放**（SSE 没有历史）。
-     * 如果宿主没建流（`openStream` 返回 null），`stream?.resume()` 什么都不会做 ——
-     * 所以这里**必须**再发一次请求，否则回前台之后什么都不发生。
-     */
-    const world = make({ openStream: () => null });
-    world.controller.start();
-    world.triggers.length = 0;
-    world.controller.resume();
-    expect(world.triggers).toEqual(["focus"]);
-  });
-
-  it("有流时 `resume()` 既叫醒流、也发一次请求", () => {
-    const world = make();
-    world.controller.start();
-    world.triggers.length = 0;
-    world.controller.resume();
-    expect(world.created[0]!.resume).toHaveBeenCalledOnce();
-    expect(world.triggers).toEqual(["focus"]);
-  });
-
-  it("`stop()` 之后 `resume()` 相当于重新开始（登出再登入）", () => {
-    const world = make();
-    world.controller.start();
-    world.controller.stop();
-    world.triggers.length = 0;
-    world.controller.resume();
-    expect(world.created).toHaveLength(2);
-    expect(world.triggers).toEqual(["startup"]);
-  });
-
   it("`syncNow()` 用 `manual` 触发（与自动触发区分得开，便于日志与诊断）", async () => {
     const world = make();
     await world.controller.syncNow();
     expect(world.triggers).toEqual(["manual"]);
+  });
+});
+describe("连上后核对为最新：不跑同步，但状态要跟上", () => {
+  it("★ `onUpToDate` ⇒ 调用 `runner.noteUpToDate()`，**不发**同步请求", () => {
+    /*
+     * 跳过同步是「0 个请求」的来源，但状态栏不能因此停在「尚未同步」——
+     * 我们刚刚确实和服务端核对过，内容也一致。
+     */
+    const world = make({ reconciles: true });
+    const note = vi.fn();
+    (world.runner as unknown as { noteUpToDate: () => void }).noteUpToDate = note;
+    world.controller.start();
+    world.upToDate();
+    expect(note).toHaveBeenCalledOnce();
+    expect(world.triggers).toEqual([]);
   });
 });

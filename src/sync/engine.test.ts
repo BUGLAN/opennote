@@ -277,6 +277,67 @@ describe("§6.3/§6.4 · 删除语义", () => {
   });
 });
 
+
+describe("P0 · 远端树必须翻页取完（旧实现只取一页 ⇒ 大笔记本永远同步不全）", () => {
+  it("远端 25 篇、每页只给 3 条 ⇒ 新设备**全部**拉下来（不是只拉 3 篇）", async () => {
+    const seed: Record<string, string> = {};
+    for (let index = 0; index < 25; index += 1) seed[`notes/n${String(index).padStart(2, "0")}.md`] = `# n${index}`;
+    // pageSize=3：服务端每页只给 3 条（真实服务端默认 500、上限 2000，这里是同一件事的缩小版）。
+    const provider = createMemoryProvider({ pageSize: 3 });
+    const a = await makeHarness({ seedLocal: seed, provider });
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider });
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    // ★ 修复前这里是 3（只拿到第一页），而状态是「同步成功」——用户看到的就是「少了一大半」。
+    expect(result.pulled).toBe(25);
+    expect(b.local.size).toBe(25);
+    expect(result.treeTruncated).toBe(false);
+    // 树取全了，删除闸门就不该再挂起任何东西。
+    expect(result.suspendedDeletes).toEqual([]);
+  });
+
+  it("翻页之后删除恢复正常：远端删掉的一条**真的会**从另一台设备上消失", async () => {
+    const seed: Record<string, string> = {};
+    for (let index = 0; index < 10; index += 1) seed[`notes/n${index}.md`] = `# n${index}`;
+    const provider = createMemoryProvider({ pageSize: 3 });
+    const a = await makeHarness({ seedLocal: seed, provider });
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider });
+    await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+    expect(b.local.size).toBe(10);
+
+    // A 删一篇 → 推墓碑；B 同步后必须真的删掉（而不是被 truncated 闸门永久挂起）。
+    a.deleteLocalFile("notes/n3.md");
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+
+    expect(result.deleted).toBe(1);
+    expect(b.local.has("notes/n3.md")).toBe(false);
+    expect(result.treeTruncated).toBe(false);
+  });
+
+  it("并发度不影响正确性（8 路并发推 25 篇，账本一条不少）", async () => {
+    const seed: Record<string, string> = {};
+    for (let index = 0; index < 25; index += 1) seed[`notes/c${index}.md`] = `# c${index}`;
+    const harness = await makeHarness({ seedLocal: seed });
+    const result = await syncOnce({
+      provider: harness.provider,
+      ledger: harness.ledger,
+      deps: harness.deps,
+      concurrency: 8,
+    });
+    expect(result.pushed).toBe(25);
+    expect(Object.keys(harness.ledger.files)).toHaveLength(25);
+    // bid 必须互不相同（并发下最容易出的错：分配撞号）。
+    const bids = Object.values(harness.ledger.files).map((file) => file.bid);
+    expect(new Set(bids).size).toBe(25);
+    expect(Object.keys(harness.provider.snapshot())).toHaveLength(25);
+  });
+});
+
 describe("§6.4 规则 2 · 游标过期 ⇒ 走 resync 全量比对，已删文件不复活", () => {
   it("resync 时仍然遵守「远端显式说删了才算删」", async () => {
     const a = await makeHarness({ seedLocal: { "notes/a.md": "# a" } });

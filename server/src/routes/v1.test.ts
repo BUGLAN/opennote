@@ -802,3 +802,79 @@ describe("§4.7 · `/v1/events`（SSE 中继）", () => {
     expect(await extra.text()).toContain("实时连接太多");
   });
 });
+
+describe("批量取 · `POST /v1/files`（把请求数从「= 文件数」压到「文件数 / 批量」）", () => {
+  /** 造一个带附件的假库（`attachments` 的键是 `db/id/blob`）。 */
+  function seedDocs(world: World, dbName: string, entries: { did: string; path: string; text: string; hash: string }[]): void {
+    const docs = world.fake.databases.get(dbName)!;
+    for (const entry of entries) {
+      docs.set(entry.did, { _id: entry.did, _rev: "1-a", path: entry.path, hash: entry.hash });
+      world.fake.attachments.set(`${dbName}/${entry.did}/blob`, new TextEncoder().encode(entry.text));
+    }
+  }
+
+  it("一次拿回多条：正文与内容标识都对", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    seedDocs(world, notebook.dbName, [
+      { did: "f:a", path: "a.md", text: "# a", hash: "a".repeat(64) },
+      { did: "f:b", path: "b.md", text: "# b", hash: "b".repeat(64) },
+    ]);
+
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: ["f:a", "f:b"] }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { files: { did: string; hash: string; rev: string; data: string }[] };
+    expect(body.files.map((file) => file.did).sort()).toEqual(["f:a", "f:b"]);
+    const a = body.files.find((file) => file.did === "f:a")!;
+    expect(a.hash).toBe("a".repeat(64));
+    expect(Buffer.from(a.data, "base64").toString("utf8")).toBe("# a");
+  });
+
+  it("不存在的 did **直接跳过**，不编造（客户端按「没有这一条」处理）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    seedDocs(world, notebook.dbName, [{ did: "f:a", path: "a.md", text: "# a", hash: "a".repeat(64) }]);
+
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: ["f:a", "f:missing"] }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { files: { did: string }[] };
+    expect(body.files.map((file) => file.did)).toEqual(["f:a"]);
+  });
+
+  it("请求体不合法 ⇒ 400（不猜）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: [] }),
+    });
+    expect(response.status).toBe(400);
+  });
+});
+
+describe("列树的游标 · 增量同步的起点", () => {
+  it("`/v1/tree` 返回**非空 cursor**（以前恒为 null ⇒ 检查点永远写不进去）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.fake.databases.get(notebook.dbName)!.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
+
+    const body = (await (await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) })).json()) as {
+      cursor: string | null;
+    };
+    expect(typeof body.cursor).toBe("string");
+    expect(body.cursor).not.toBe("");
+  });
+});

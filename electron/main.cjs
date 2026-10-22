@@ -36,7 +36,7 @@ const { DEEPLINK_CHANNEL, PROTOCOL, deeplinkMessage, findDeeplinkInArgv, parseOp
 // 远程配图在界面里加载不了；扩展侧 host_permissions 又只有 127.0.0.1 的十条。
 // 主进程没有这两道限制 —— 「图片一起保存」真正落地就靠这一层。纯函数，可单测。
 const { downloadImages: downloadImagesInMain } = require('./fetch-images.cjs')
-const { createSyncProxy } = require('./sync.cjs')
+const { createSyncProxy, composeUrl, normalizeBaseUrl, assertSafeRelPath } = require('./sync.cjs')
 
 /** 图片下载通道（preload 用同一个常量；verify-contract 的 C-12a 靠常量名配对两侧）。 */
 const NET_DOWNLOAD_IMAGES_CHANNEL = 'opennote:net:downloadImages'
@@ -1320,6 +1320,136 @@ function registerSyncProxyHandlers() {
   )
 }
 
+
+/* ============================================================================
+   同步的实时流（SSE 中继）
+
+   ★ 为什么流必须建在主进程：CSP 的 `connect-src` 只有 `'self' file:`
+   （见 `cspPolicy()`），渲染层里 `new EventSource(远端)` 会被**静默**拦掉 ——
+   不报错、不连、也没有任何回调。用户看到的是「同步不动了」，而控制台一片干净。
+
+   ★ 与 `proxyRequest` 同一套三道闸门：只能开配置好的 base 下的相对路径、
+   拼出来的 URL 的 origin 必须还是那个 base。渲染层**不能**指定目的地。
+
+   ★ 令牌：渲染层给的 `relPath` 里那个 `authToken` 会被**剥掉**，换成主进程手里
+   那份（`syncAuthToken`）—— 「令牌只由主进程注入」这条纪律在 SSE 上也成立。
+   ============================================================================ */
+
+const SYNC_STREAM_EVENT_CHANNEL = 'opennote:sync:stream-event'
+
+/** 当前这条流的取消句柄。同一时刻只留一条（一个笔记本只有一条同步流）。 */
+let syncStreamAbort = null
+
+function sendSyncStreamEvent(payload) {
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  if (!window) return
+  window.webContents.send(SYNC_STREAM_EVENT_CHANNEL, payload)
+}
+
+/** 关流。**必须**在换笔记本 / 关窗口 / 登出时调用，否则会留下一条没人读的连接。 */
+function closeSyncStream() {
+  if (!syncStreamAbort) return
+  const controller = syncStreamAbort
+  syncStreamAbort = null
+  try {
+    controller.abort()
+  } catch {
+    /* 已经结束 */
+  }
+}
+
+/** 把相对路径拼成最终 URL（校验与 `proxyRequest` 完全同一套）。 */
+function syncStreamUrl(relPath) {
+  if (!syncProxyBaseUrl) {
+    const error = new Error('同步服务地址还没配置')
+    error.code = 'sync-proxy-unconfigured'
+    throw error
+  }
+  const base = normalizeBaseUrl(syncProxyBaseUrl)
+  const url = composeUrl(base, assertSafeRelPath(relPath))
+  // 令牌只由主进程贴：渲染层给的那个一律丢掉。
+  url.searchParams.delete('authToken')
+  if (typeof syncAuthToken === 'string' && syncAuthToken !== '') url.searchParams.set('authToken', syncAuthToken)
+  return url.toString()
+}
+
+/** 解析一个 SSE 块并转发给渲染层；纯注释块（`: ping`）当作心跳。 */
+function forwardSseBlock(block) {
+  let type = 'message'
+  const data = []
+  for (const rawLine of block.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    if (line === '' || line.startsWith(':')) continue
+    if (line.startsWith('event:')) type = line.slice(6).trim()
+    else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''))
+  }
+  if (data.length === 0) {
+    // 有字节就是活着：让渲染层的「静默死亡看门狗」重置。
+    sendSyncStreamEvent({ type: 'heartbeat', data: '{}' })
+    return
+  }
+  sendSyncStreamEvent({ type, data: data.join('\n') })
+}
+
+/**
+ * 开一条流。
+ *
+ * 返回 `true` 表示「已经连上」，随后的事件全部走 `SYNC_STREAM_EVENT_CHANNEL`。
+ * **不等流结束**：SSE 是长连接，await 它会让这个 IPC 永远挂着。
+ */
+async function openSyncStream(relPath) {
+  closeSyncStream()
+  const url = syncStreamUrl(relPath)
+  const controller = new AbortController()
+  syncStreamAbort = controller
+
+  const response = await fetch(url, { headers: { accept: 'text/event-stream' }, signal: controller.signal })
+  if (!response.ok || !response.body) {
+    closeSyncStream()
+    throw new Error(`实时流打不开：HTTP ${response.status}`)
+  }
+  sendSyncStreamEvent({ type: 'open' })
+
+  void (async () => {
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let index
+        while ((index = buffer.indexOf('\n\n')) !== -1) {
+          forwardSseBlock(buffer.slice(0, index))
+          buffer = buffer.slice(index + 2)
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        sendSyncStreamEvent({ type: 'error', data: error instanceof Error ? error.message : String(error) })
+      }
+    } finally {
+      if (syncStreamAbort === controller) syncStreamAbort = null
+      // 服务端主动断开也要让渲染层知道（它会退避重连）。主动 abort 的不算。
+      if (!controller.signal.aborted) sendSyncStreamEvent({ type: 'error', data: 'stream-closed' })
+    }
+  })()
+
+  return true
+}
+
+function registerSyncStreamHandlers() {
+  handle('opennote:sync:openStream', async (relPath) => openSyncStream(relPath), '打开实时流失败')
+  handle(
+    'opennote:sync:closeStream',
+    async () => {
+      closeSyncStream()
+      return true
+    },
+    '关闭实时流失败',
+  )
+}
 function registerSyncKeyHandlers() {
   handle('opennote:sync:loadAccountKey', async () => readSyncAccountKey(), '读取同步密钥失败')
   handle('opennote:sync:saveAccountKey', async (text) => { await writeSyncAccountKey(text); return true }, '保存同步密钥失败')
@@ -1435,6 +1565,7 @@ function registerIpcHandlers() {
   registerAppHandlers()
   registerSyncKeyHandlers()
   registerSyncProxyHandlers()
+  registerSyncStreamHandlers()
   registerImportHandlers()
   registerNetHandlers()
   registerUpdateHandlers()
@@ -2929,6 +3060,8 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   quitRequested = true
+  // 同步的实时流也要收掉：渲染层崩了的话它自己不会来调 closeStream。
+  closeSyncStream()
   // 契约：关掉本地接口 = 立刻 server.close() + 断开全部 keep-alive 连接。
   void stopBridgeQuietly()
 })

@@ -5,7 +5,7 @@
  * 它还没回来的时候就变了。若那次迟到的结果被 `start()` 起来，
  * 就会有一个**没人能关掉**的同步在后台跑着。
  */
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createWorkspaceSyncBinding } from "./binding";
 import type { AttachResult } from "./attach";
 import type { SyncController } from "./controller";
@@ -18,7 +18,6 @@ function fakeController() {
   const controller = {
     start: () => void calls.push("start"),
     stop: () => void calls.push("stop"),
-    resume: () => void calls.push("resume"),
     syncNow: async () => null,
     subscribed: () => false,
     status: (): SyncStatus => ({ phase: "idle", lastSyncedAt: null, conflicts: 0 }),
@@ -48,9 +47,6 @@ const ok = (controller: SyncController): AttachResult => ({
   // 绑定层只用 controller；session 是给上层（冲突裁决）的，这里给个占位。
   session: { runner: { scheduleAfterLocalWrite() {}, request: () => Promise.resolve(null) } } as unknown as SyncSession,
 });
-
-/** 让微任务跑一轮。 */
-const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 /* ============================================================================
    ★ 竞态
@@ -158,58 +154,5 @@ describe("接不上时要说清「为什么」", () => {
     deferred.release(1, ok(made.controller));
     await second;
     expect(binding.phase()).toBe("attached");
-  });
-});
-
-/* ============================================================================
-   回前台
-   ============================================================================ */
-
-describe("第 2032 行 · 回前台转给 controller", () => {
-  it("订阅到的「回来」⇒ `controller.resume()`", async () => {
-    const deferred = deferredAttach();
-    const made = fakeController();
-    let fire: (() => void) | null = null;
-    const binding = createWorkspaceSyncBinding({
-      attach: deferred.attach,
-      subscribeResume: (onResume) => {
-        fire = onResume;
-        return () => void (fire = null);
-      },
-    });
-    const starting = binding.start();
-    deferred.release(0, ok(made.controller));
-    await starting;
-
-    fire!();
-    expect(made.calls).toContain("resume");
-  });
-
-  it("★ `stop()` 之后**退订**（否则关掉工作区之后回前台还会去动它）", async () => {
-    const deferred = deferredAttach();
-    const made = fakeController();
-    const holder: { fire: (() => void) | null } = { fire: null };
-    const unsubscribed = vi.fn();
-    const binding = createWorkspaceSyncBinding({
-      attach: deferred.attach,
-      subscribeResume: (onResume) => {
-        holder.fire = onResume;
-        return () => {
-          unsubscribed();
-          holder.fire = null;
-        };
-      },
-    });
-    const starting = binding.start();
-    deferred.release(0, ok(made.controller));
-    await starting;
-
-    binding.stop();
-    expect(unsubscribed).toHaveBeenCalledOnce();
-    // 就算那个回调在退订之后还被触发一次（真实实现里可能），也不该再动 controller。
-    made.calls.length = 0;
-    holder.fire?.();
-    expect(made.calls).toEqual([]);
-    void settle;
   });
 });

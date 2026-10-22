@@ -110,6 +110,22 @@ export interface DesktopSyncBridge {
     headers: Record<string, string>;
     body?: number[];
   }): Promise<{ status: number; headers: Record<string, string>; body: number[] }>;
+
+  /*
+   * ---- 实时推送（SSE 中继）----
+   *
+   * 三个都是**可选**的：旧版 preload 没有它们，那时桌面端只是没有实时（启动/保存/
+   * 回前台/手动四个触发源照常工作），不会报错。
+   *
+   * 为什么必须走主进程：桌面 CSP 的 `connect-src` 不放 https，
+   * 渲染层里 `new EventSource(远端)` 会被静默拦掉（见 `desktopStream.ts` 模块头）。
+   */
+  /** 开一条流（**相对** base 的路径）。主进程会把其中的 `authToken` 换成自己保管的那份。 */
+  openStream?(relPath: string): Promise<unknown>;
+  /** 关掉当前这条。 */
+  closeStream?(): Promise<unknown>;
+  /** 订阅主进程推来的事件（`open` / `ready` / `change` / `heartbeat` / `error`）。 */
+  onStreamEvent?(listener: (message: { type: string; data?: string }) => void): () => void;
 }
 
 /** 取 `window.opennote.syncProxy`（非桌面端或旧版 preload 时为 null）。 */

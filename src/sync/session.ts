@@ -32,12 +32,14 @@
  */
 
 import type { CryptoMode } from "../../shared/contract";
-import { syncOnce, type SyncEngineDeps, type SyncOnceResult } from "./engine";
+import { syncOnceIncremental, type SyncEngineDeps, type SyncOnceResult } from "./engine";
 import { createIgnoreRules, type IgnoreRules } from "./ignore";
 import { createSyncRunner, type SyncProgress, type SyncRunner, type SyncStatus } from "./runner";
 import type { SyncProvider } from "./provider-types";
 import type { SyncLedger } from "./state";
 import type { WorkspaceSyncConfig } from "../data/workspaces";
+import type { HashCache } from "./hashCache";
+import type { CursorStore } from "./cursor";
 import { createWorkspaceEngineDeps, openRemoteBytes, selectSyncableEntries, type SyncFileBackend } from "./workspaceFiles";
 import type { EngineLocalFile } from "./engine";
 
@@ -54,12 +56,24 @@ export interface SyncSessionOptions {
   notebookKey?: Uint8Array;
   /** 工作区根目录的 notebookId（E2EE 的 AAD 要用）。 */
   notebookId: string;
+  /**
+   * 本地哈希缓存（可选，见 `hashCache.ts`）。传入同一个对象，原地更新，调用方负责落盘。
+   * 给了之后「没变的文件」不再重读重算哈希。
+   */
+  hashCache?: HashCache;
+  /**
+   * 增量同步的游标（见 `cursor.ts`）。不给就每轮都全树比对（正确、但慢）。
+   */
+  cursorStore?: CursorStore;
   onStatus?: (status: SyncStatus) => void;
   onApplied?: (paths: string[]) => void;
   /** 每一轮成功都回调（含纯推送）—— 账本落盘的挂点，见 runner 的说明。 */
   onSynced?: (result: SyncOnceResult) => void;
   now?: () => number;
+  /** 每页列树的条数（引擎会翻页取完，直到 `truncated === false`）。 */
   maxFiles?: number;
+  /** 同时在飞的请求数（默认 8）。见 `SyncOnceInput.concurrency`。 */
+  concurrency?: number;
   log?: (line: string) => void;
   localWriteDebounceMs?: number;
   setTimeoutFn?: (fn: () => void, ms: number) => unknown;
@@ -99,6 +113,7 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
     // `notebookId` 是内容 AAD 的一半 —— 两种模式都给（明文模式不用它，但形状一致）。
     notebookId: options.notebookId,
     ...(options.notebookKey === undefined ? {} : { notebookKey: options.notebookKey }),
+    ...(options.hashCache === undefined ? {} : { hashCache: options.hashCache }),
     /*
      * ★ 必须是**本地扫描结果 ∪ 账本里记着的路径**（引擎那边的原话）。
      *
@@ -133,14 +148,26 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
       if (!options.config.enabled) {
         throw new Error("同步是关闭的");
       }
-      return syncOnce({
+      /*
+       * ★ 走**增量**：先问远端「自上轮以来变了吗」。
+       *
+       * 游标来自站点存储（`cursor.ts`：它是设备属性，不能跟着笔记本目录走）。
+       * 没有游标 ⇒ `since = null` ⇒ 引擎自动退化成全树比对（正确性优先）。
+       */
+      const since = options.cursorStore?.load(options.notebookId) ?? null;
+      const result = await syncOnceIncremental({
         provider: options.provider,
         ledger: options.ledger,
         deps,
+        since,
         onProgress: (progress) => reportProgress?.(progress),
         ...(options.maxFiles === undefined ? {} : { maxFiles: options.maxFiles }),
+        ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
         ...(options.now === undefined ? {} : { now: options.now }),
       });
+      // 只有真的拿到了游标才推进；拿不到就保持旧值 —— 下一轮会再问一次（安全方向）。
+      if (result.checkpoint !== null) options.cursorStore?.save(options.notebookId, result.checkpoint);
+      return result;
     },
     ...(options.onStatus === undefined ? {} : { onStatus: options.onStatus }),
     ...(options.onApplied === undefined ? {} : { onApplied: options.onApplied }),

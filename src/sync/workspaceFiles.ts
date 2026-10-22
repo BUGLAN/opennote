@@ -36,6 +36,7 @@ import type { CryptoMode } from "../../shared/contract";
 import { normalizeNfc, normalizePath } from "../../shared/paths";
 import { decryptContent, didForPath, didForPlainPath, ehashOf, encryptContent, notebookKeysFrom, openContent, type NotebookKeys } from "./crypto";
 import type { EngineLocalFile, SyncEngineDeps } from "./engine";
+import type { HashCache } from "./hashCache";
 import { shouldSkipEntry, type IgnoreRules } from "./ignore";
 import { toHex } from "./accountKey";
 
@@ -44,6 +45,14 @@ export interface LocalEntry {
   /** 工作区**相对**路径。 */
   path: string;
   isDir: boolean;
+  /**
+   * 文件大小 / 修改时间（目录上不可靠，见 `FileSystemBackend.stat` 的说明）。
+   *
+   * 这两个字段只服务一件事：**让哈希缓存能判「这个文件没变」**。
+   * 没有它们就必须把每个文件读一遍才算得出哈希（见 `hashCache.ts` 模块头）。
+   */
+  size?: number;
+  mtimeMs?: number;
 }
 
 /**
@@ -59,6 +68,11 @@ export interface SyncFileBackend {
   read(path: string): Promise<Uint8Array>;
   write(path: string, bytes: Uint8Array): Promise<void>;
   remove(path: string): Promise<void>;
+  /**
+   * 文件元数据（**可选**）。给了才能让「拉取落地后」的那一条也进哈希缓存 ——
+   * 否则刚拉下来的文件下一轮会被当成「本地改了」再读一遍重算哈希。
+   */
+  stat?(path: string): Promise<{ size: number; mtimeMs: number } | null>;
 }
 
 export interface WorkspaceEngineOptions {
@@ -75,6 +89,14 @@ export interface WorkspaceEngineOptions {
   notebookId: string;
   /** 账本里记着的路径（引擎靠它把远端 did 翻回本机路径）。 */
   knownPaths: () => Promise<string[]>;
+  /**
+   * 本地内容哈希缓存（**可选**，见 `hashCache.ts`）。
+   *
+   * 给了它之后，`listLocal()` 只对「size 或 mtime 变过的文件」重算哈希；
+   * 没给就是每次全读全算（正确，但慢）。传入的是**同一个对象**，
+   * 本层原地更新它，由调用方负责落盘。
+   */
+  hashCache?: HashCache;
   log?: SyncEngineDeps["log"];
 }
 
@@ -88,7 +110,13 @@ export function selectSyncableEntries(entries: LocalEntry[], rules: IgnoreRules)
     if (shouldSkipEntry(rules, normalized, entry.isDir)) continue;
     // 目录本身不进「该同步的文件」列表（同步的是内容）。
     if (entry.isDir) continue;
-    out.push({ path: normalized, isDir: false });
+    // ★ size / mtime 一路带下去：哈希缓存靠它们判「没变」，见 `hashCache.ts`。
+    out.push({
+      path: normalized,
+      isDir: false,
+      ...(entry.size === undefined ? {} : { size: entry.size }),
+      ...(entry.mtimeMs === undefined ? {} : { mtimeMs: entry.mtimeMs }),
+    });
   }
   return out;
 }
@@ -122,14 +150,47 @@ export function createWorkspaceEngineDeps(options: WorkspaceEngineOptions): Sync
     return didForPlainPath(path);
   };
 
+  /** 缓存（可能是 `undefined` = 调用方没开）。 */
+  const cache: HashCache | undefined = options.hashCache;
+
   return {
     async listLocal(): Promise<EngineLocalFile[]> {
       const entries = await options.backend.list();
       const syncable = selectSyncableEntries(entries, options.rules);
       const out: EngineLocalFile[] = [];
       for (const entry of syncable) {
+        /*
+         * ★ 缓存命中就直接用上次的哈希，**不读文件**。
+         *
+         * 这是「改一个字不再扫全库」的落点：500 篇笔记时，一次保存触发的同步
+         * 从「读 500 个文件 + 算 500 次 sha256」降到「只读改了的那一个」。
+         *
+         * 判据是 `(size, mtimeMs)` 同时相等；缺任何一个就退回重算（宁可慢，不可错）。
+         */
+        const cached = cache?.entries[entry.path];
+        if (
+          cached !== undefined &&
+          entry.size !== undefined &&
+          entry.mtimeMs !== undefined &&
+          cached.size === entry.size &&
+          cached.mtimeMs === entry.mtimeMs
+        ) {
+          out.push({ path: entry.path, hash: cached.hash, bytes: entry.size });
+          continue;
+        }
         const bytes = await options.backend.read(entry.path);
-        out.push({ path: entry.path, hash: await hashOf(bytes), bytes: bytes.length });
+        const hash = await hashOf(bytes);
+        if (cache !== undefined && entry.size !== undefined && entry.mtimeMs !== undefined) {
+          cache.entries[entry.path] = { size: entry.size, mtimeMs: entry.mtimeMs, hash };
+        }
+        out.push({ path: entry.path, hash, bytes: bytes.length });
+      }
+      if (cache !== undefined) {
+        // 剪掉已经不在盘上的路径，否则缓存只增不减（删了很多照片之后会很大）。
+        const alive = new Set(syncable.map((entry) => entry.path));
+        for (const path of Object.keys(cache.entries)) {
+          if (!alive.has(path)) delete cache.entries[path];
+        }
       }
       return out;
     },
@@ -139,7 +200,19 @@ export function createWorkspaceEngineDeps(options: WorkspaceEngineOptions): Sync
     hashOfLocal: async (path) => {
       const normalized = normalizeNfc(normalizePath(path));
       const raw = await options.backend.read(normalized);
-      return hashOf(raw);
+      const hash = await hashOf(raw);
+      /*
+       * 拉取落地之后顺手把缓存写成「磁盘上的事实」。
+       *
+       * 不写会怎样：下一轮 `listLocal()` 缓存里没有这一条（或还是旧 size/mtime），
+       * 于是刚拉下来的每一个文件都要重读一遍 —— 500 篇的第一次同步会白读 500 次。
+       */
+      if (cache !== undefined) {
+        const stats = await options.backend.stat?.(normalized).catch(() => null);
+        if (stats) cache.entries[normalized] = { size: stats.size, mtimeMs: stats.mtimeMs, hash };
+        else delete cache.entries[normalized];
+      }
+      return hash;
     },
     didOf,
     knownPaths: options.knownPaths,
@@ -170,7 +243,11 @@ export function createWorkspaceEngineDeps(options: WorkspaceEngineOptions): Sync
       const plain = decryptContent(keys, didOf(normalized), options.notebookId, bytes);
       await options.backend.write(normalized, plain);
     },
-    removeLocal: (path) => options.backend.remove(normalizeNfc(normalizePath(path))),
+    removeLocal: async (path) => {
+      const normalized = normalizeNfc(normalizePath(path));
+      delete cache?.entries[normalized];
+      await options.backend.remove(normalized);
+    },
     ...(options.log === undefined ? {} : { log: options.log }),
   };
 }

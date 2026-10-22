@@ -39,6 +39,10 @@ import {
 import { describeKeyStorage, resolveAccountKeyStore, type AccountKeyStore } from "./keys";
 import { openAccountApi, type NotebookSummary } from "./accountApi";
 import { createSyncLedger, readSyncLedger, writeSyncLedger, type SyncLedger } from "./state";
+import { createHashCache, readHashCache, writeHashCache, type HashCache } from "./hashCache";
+import { resolveCursorStore } from "./cursor";
+import { createDesktopEventStream, supportsDesktopStream } from "./desktopStream";
+import type { EventStreamLike } from "./stream";
 import { createWorkspaceSyncBinding, type BindingPhase } from "./binding";
 import { setSyncActive } from "./mode";
 import { describeSyncStatus, type SyncStatus } from "./runner";
@@ -59,6 +63,15 @@ export interface LastSyncSummary {
   remoteDeleted: number;
   conflicts: { path: string; kind: string }[];
   unknownDids: number;
+  /**
+   * 因远端树没取全而**挂起**的删除条数。
+   *
+   * 这个数字必须露出来：挂起意味着「远端说它没了，但我们不敢删」，
+   * 用户不看到它就只会觉得「我删掉的笔记又回来了」。
+   */
+  suspendedDeletes: number;
+  /** 远端树**仍然没取全**（翻页到头也没拿到完整树）。正常应为 `false`。 */
+  treeTruncated: boolean;
 }
 
 export interface SyncUiState {
@@ -117,6 +130,11 @@ export function syncStatusBarInfo(
    ============================================================================ */
 
 const keyStore: AccountKeyStore = resolveAccountKeyStore();
+/**
+ * 增量同步的游标（`/v1/changes?since=`）。**每设备一份**，不进笔记本目录 ——
+ * 理由见 `cursor.ts` 模块头（跟着目录走会让另一台设备静默漏变更）。
+ */
+const cursorStore = resolveCursorStore();
 
 let binding = createWorkspaceSyncBinding({ attach: () => attachCurrent(), onStatus: onBindingStatus, onPhase: onBindingPhase, log: onBindingLog });
 let currentRecord: WorkspaceRecord | null = null;
@@ -129,6 +147,16 @@ let flushUnsubscribed: (() => void) | null = null;
  * 桌面端密钥在主进程，解锁是一次静默的 `POST /v1/account/unlock`，代价可以接受。
  */
 let encRootCache: { accountId: string; encRoot: Uint8Array } | null = null;
+
+/**
+ * 账本「心跳式落盘」的间隔（毫秒）。
+ *
+ * 为什么不是「每篇都写」：账本是整份 JSON（几百条时已 100+ KB），
+ * 每篇写一次 = 每 200ms 一次全量写盘，纯浪费。
+ * 为什么不是「只在整轮成功时写」：见 `onProgress` 的说明 —— 一轮几分钟，
+ * 中途失败就全丢。2 秒是「丢失窗口」与「写盘次数」的折中。
+ */
+const LEDGER_HEARTBEAT_MS = 2000;
 
 function onBindingStatus(status: SyncStatus): void {
   syncUiStore.set((prev) => ({ ...prev, status }));
@@ -196,11 +224,23 @@ async function loadLedger(backend: FileSystemBackend, record: WorkspaceRecord): 
   });
 }
 
-/** 每一轮成功同步：账本落盘 + 概要进 UI（含冲突列表 —— 对话框从这里取）。 */
-function handleSynced(backend: FileSystemBackend, ledger: SyncLedger, result: SyncOnceResult): void {
+/** 每一轮成功同步：账本 + 哈希缓存落盘 + 概要进 UI（含冲突列表 —— 对话框从这里取）。 */
+function handleSynced(
+  backend: FileSystemBackend,
+  ledger: SyncLedger,
+  result: SyncOnceResult,
+  hashCache: HashCache | null,
+): void {
   void writeSyncLedger(backend, ledger).catch((error: unknown) => {
     syncUiStore.set((prev) => ({ ...prev, error: `账本落盘失败：${error instanceof Error ? error.message : String(error)}` }));
   });
+  /*
+   * 哈希缓存与账本同一次落盘。少了它，下次启动的全部文件都要重算一遍哈希
+   * （500 篇 ≈ 几秒的纯 CPU/IO，而且是在「打开笔记本」这个最不该慢的时刻）。
+   */
+  if (hashCache !== null) {
+    void writeHashCache(backend, hashCache, { keep: Object.keys(ledger.files) }).catch(() => undefined);
+  }
   syncUiStore.set((prev) => ({
     ...prev,
     last: {
@@ -211,6 +251,8 @@ function handleSynced(backend: FileSystemBackend, ledger: SyncLedger, result: Sy
       remoteDeleted: result.remoteDeleted,
       conflicts: [...result.conflicts, ...result.pushConflicts].map((item) => ({ path: item.path, kind: item.kind })),
       unknownDids: result.unknownDids.length,
+      suspendedDeletes: result.suspendedDeletes.length,
+      treeTruncated: result.treeTruncated,
     },
   }));
 }
@@ -235,10 +277,27 @@ async function attachCurrent(): Promise<AttachResult> {
   }
 
   const ledger = await loadLedger(backend, record);
+  /*
+   * 本地哈希缓存：读不到（第一次同步 / 文件坏了 / 换了加密模式）就新建一份空的。
+   * 空缓存 = 这一轮把每个文件读一遍（正确），之后就是增量的。
+   */
+  const hashCache: HashCache = (await readHashCache(backend, config.cryptoMode)) ?? createHashCache(config.cryptoMode);
+  /** 上一次把账本落盘的时间（见下面 `onProgress` 的说明：心跳式落盘）。 */
+  let lastLedgerWriteAt = 0;
   const gitignoreText = await backend.readText(".gitignore").catch(() => "");
-  // 桌面 CSP 不放 https，`/v1/events` 的 SSE 订阅要走主进程 —— 那条桥还没接，
-  // 所以桌面端先不开实时（启动 / 保存 / 回前台 / 手动四个触发源照常工作）。
-  const isDesktop = desktopSyncBridge() !== null;
+  /*
+   * 实时推送：网页/移动用 `EventSource`；桌面端由主进程建流、经 IPC 推事件
+   * （桌面 CSP 不放 https，渲染层里 `new EventSource(远端)` 会被静默拦掉）。
+   *
+   * 主进程那条桥是**可选**的：旧版 preload 没有它时 `supportsDesktopStream()` 为假，
+   * 这里退回 `EventSource` —— 桌面端在旧版上会拿不到实时（四个触发源照常工作），
+   * 而不是整条同步挂掉。
+   */
+  const streamBridge = desktopSyncBridge();
+  const openEventStream = (url: string) =>
+    supportsDesktopStream(streamBridge)
+      ? createDesktopEventStream({ url, bridge: streamBridge })
+      : (new EventSource(url) as unknown as EventStreamLike);
 
   const result = await attachWorkspaceSync({
     record,
@@ -246,12 +305,48 @@ async function attachCurrent(): Promise<AttachResult> {
     backend,
     accountKeyText: material.keyText,
     gitignoreText,
+    hashCache,
+    cursorStore,
     notebookKeyForNotebook: (notebookId) =>
       config.cryptoMode === "user-key" ? deriveNotebookKey(encRootCache?.encRoot ?? new Uint8Array(), notebookId) : undefined,
-    onSynced: (synced) => handleSynced(backend, ledger, synced),
+    onSynced: (synced) => handleSynced(backend, ledger, synced, hashCache),
+    /**
+     * ★ **拉取落地后按路径刷新界面**。
+     *
+     * 这一条以前是**缺的**（`attach.ts` 根本没有这个口子），后果是：
+     * 同步把 500 篇笔记拉到了磁盘上，而侧栏还是空的 —— 用户看到的就是
+     * 「A 同步完了，B 什么都没收到」。桌面端的主进程 watcher 救不了它，
+     * 因为它会把「应用自己经 IPC 写过的路径」在 1.5 秒窗口内过滤掉，
+     * 而拉取落盘走的正是同一条 IPC（见 `library.applyExternalPaths` 的注释）。
+     */
+    onApplied: (paths) => {
+      void (async () => {
+        try {
+          const { applyExternalPaths } = await import("../data/library");
+          await applyExternalPaths(paths);
+        } catch (error) {
+          console.warn("[opennote] 同步落地后刷新界面失败", error);
+        }
+      })();
+    },
+    /**
+     * 进度回调同时充当**账本落盘的心跳**。
+     *
+     * 为什么要它：`handleSynced` 只在**整轮成功**后写账本（`appSync.ts` 的
+     * `onSynced`），而一轮同步可能跑几分钟（500 篇 ≈ 4 分钟）。
+     * 中途撞限流 429 / 用户关窗 / 断网 ⇒ 这一轮抛异常 ⇒ 一次都不写 ⇒
+     * 下一轮**从第 1 篇重新拉**，永远同步不完（实测：拉到 65 篇被中断，账本目录都不存在）。
+     * 这里每 2 秒落一次盘，让「已经拉下来的那些」算数。
+     */
+    onProgress: () => {
+      const at = Date.now();
+      if (at - lastLedgerWriteAt < LEDGER_HEARTBEAT_MS) return;
+      lastLedgerWriteAt = at;
+      void writeSyncLedger(backend, ledger).catch(() => undefined);
+    },
     // 实时状态（含进度）进 store —— 对话框与状态栏都从这里读。
     onStatus: (status) => syncUiStore.set((prev) => ({ ...prev, status })),
-    ...(isDesktop ? {} : { openEventStream: (url: string) => new EventSource(url) }),
+    openEventStream,
     log: (line) => syncUiStore.set((prev) => ({ ...prev, error: line })),
   });
   if (result.ok) {
