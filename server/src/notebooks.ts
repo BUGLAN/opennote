@@ -824,7 +824,8 @@ export class NotebookStore {
                 a.label AS owner_label,
                 (SELECT COUNT(*) FROM memberships m WHERE m.notebook_id = n.id) AS member_count,
                 -- ★ 体积取 notebook_usage（服务端自己记账的**库级**占用），
-                -- 不是 quota_usage（账号级缓存，且从来没被更新过）。
+                -- 不是 quota_usage（账号级缓存，且从来没被更新过 —— 服务端那份实现
+                -- 用 SUM(quota_usage) 顶替，结果恒为 0，因为没有任何代码更新那一列）。
                 -- 台账问的是「这个库占了多少」，而一个账号下的库各占多少只有前者回答得了。
                 COALESCE(u.bytes_used, 0) AS bytes_used,
                 p.design_ok, p.revs_limit, p.sync_info_ok, p.last_checked
@@ -866,6 +867,10 @@ export class NotebookStore {
        * 而那一列**永远不是 NULL** —— 于是每个刚建好的库都显示成红色的「不一致」，
        * 建库之后立刻去看台账会以为置备坏了。现在按 `last_checked` 判：
        * 没核对过就是「未核对」，核对过才谈「就位 / 不一致」。
+       *
+       * 服务器那份实现在这里还多要求 `design_ok === null`（`&& row.design_ok === null`），
+       * 那等于把「未核对」的条件收得更窄 —— 占位行的 `design_ok` 是 0 而不是 NULL，
+       * 所以它永远不成立，假的「不一致」照旧出现。合并时取这边。
        */
       provisioning:
         row.last_checked === null

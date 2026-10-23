@@ -47,7 +47,6 @@ server/dist/
 # 一个「测试写了、但从来没进仓库」的洞，而且它在本地是全绿的。
 /data/
 bore.exe
-
 # 设计原型（`prototype/sync-admin/`）：可点击原型，**不是交付物**。
 #
 # 它由 `server/src/panel/` 的正式实现取代（那份才是产品的一部分）。原型本身是
@@ -57,3 +56,7 @@ bore.exe
 # 写成 `prototype/` 而不是 `prototype/sync-admin/`：整个 prototype 目录都是过程产物，
 # 将来加别名的原型不该再需要改一次 .gitignore。
 prototype/
+
+# CLI 生成的引导码明文（`bootstrap-admin`）。**绝不能入库** —— 拿到它就能注册出管理员。
+# 它曾长期以未跟踪文件躺在服务器工作区（`/root/opennote/boot-code.txt`）。
+boot-code.txt
