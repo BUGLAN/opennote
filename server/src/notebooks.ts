@@ -523,6 +523,192 @@ export class NotebookStore {
     }));
   }
 
+  /* ------------------------------------------------------ 管理端聚合读 */
+
+  /**
+   * **全站**笔记本台账（管理页「同步台账」）。
+   *
+   * 只读、只出**服务端真有的**列：库名不透明、没有明文路径、没有笔记内容。
+   * `members` 走一次聚合而不是逐库 N+1 —— 台账页一屏 9 行只是恰好，
+   * 500 个库时那份 N+1 会变成 500 次查询。
+   */
+  listAllNotebooks(): {
+    id: string;
+    name: string;
+    ownerId: string;
+    ownerLabel: string | null;
+    cryptoMode: "none" | "user-key";
+    createdAt: number;
+    memberCount: number;
+    bytesUsed: number;
+    provisioning: { designOk: boolean; revsLimit: string | null; syncInfoOk: boolean; lastChecked: number | null } | null;
+  }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT n.id, n.name, n.owner_id, n.crypto_mode, n.created_at,
+                a.label AS owner_label,
+                (SELECT COUNT(*) FROM memberships m WHERE m.notebook_id = n.id) AS member_count,
+                (SELECT COALESCE(SUM(c.bytes_used), 0) FROM quota_usage c WHERE c.account_id = n.owner_id) AS bytes_used,
+                p.design_ok, p.revs_limit, p.sync_info_ok, p.last_checked
+           FROM notebooks n
+           LEFT JOIN accounts a ON a.id = n.owner_id
+           LEFT JOIN notebook_provisioning p ON p.notebook_id = n.id
+          WHERE n.deleted_at IS NULL
+          ORDER BY n.created_at DESC`,
+      )
+      .all() as unknown as {
+      id: string;
+      name: string;
+      owner_id: string;
+      crypto_mode: string;
+      created_at: number;
+      owner_label: string | null;
+      member_count: number;
+      bytes_used: number;
+      design_ok: number | null;
+      revs_limit: string | null;
+      sync_info_ok: number | null;
+      last_checked: number | null;
+    }[];
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      ownerId: row.owner_id,
+      ownerLabel: row.owner_label,
+      cryptoMode: row.crypto_mode === "user-key" ? "user-key" : "none",
+      createdAt: row.created_at,
+      memberCount: row.member_count,
+      bytesUsed: row.bytes_used,
+      provisioning:
+        row.last_checked === null && row.design_ok === null
+          ? null
+          : {
+              designOk: row.design_ok === 1,
+              revsLimit: row.revs_limit,
+              syncInfoOk: row.sync_info_ok === 1,
+              lastChecked: row.last_checked,
+            },
+    }));
+  }
+
+  /**
+   * **全站**设备账本（管理页「设备」）。
+   *
+   * 仍然是只读账本：一个账号密钥所有设备共用，所以没有「踢掉这一台」这个动作。
+   */
+  listAllDevices(): {
+    deviceId: string;
+    accountId: string;
+    accountLabel: string | null;
+    name: string | null;
+    platform: string | null;
+    createdAt: number;
+    lastSeenAt: number | null;
+  }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT d.id, d.account_id, d.name, d.platform, d.created_at, d.last_seen_at, a.label AS account_label
+           FROM devices d
+           LEFT JOIN accounts a ON a.id = d.account_id
+          ORDER BY COALESCE(d.last_seen_at, d.created_at) DESC`,
+      )
+      .all() as unknown as {
+      id: string;
+      account_id: string;
+      name: string | null;
+      platform: string | null;
+      created_at: number;
+      last_seen_at: number | null;
+      account_label: string | null;
+    }[];
+    return rows.map((row) => ({
+      deviceId: row.id,
+      accountId: row.account_id,
+      accountLabel: row.account_label,
+      name: row.name,
+      platform: row.platform,
+      createdAt: row.created_at,
+      lastSeenAt: row.last_seen_at,
+    }));
+  }
+
+  /**
+   * 邀请码列表（管理页「账号与访问」）。
+   *
+   * ★ **只有哈希，没有明文** —— 明文在生成那一刻就没了。这里展示前 8 位是为了
+   * 让运维能对上「哪张码」，不是为了让谁复制它。
+   */
+  listInvites(): {
+    codeHash: string;
+    createdBy: string | null;
+    creatorLabel: string | null;
+    createdAt: number;
+    expiresAt: number | null;
+    maxUses: number;
+    uses: number;
+    revokedAt: number | null;
+  }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT i.code_hash, i.created_by, i.created_at, i.expires_at, i.max_uses, i.uses, i.revoked_at, a.label AS creator_label
+           FROM invites i
+           LEFT JOIN accounts a ON a.id = i.created_by
+          ORDER BY i.created_at DESC`,
+      )
+      .all() as unknown as {
+      code_hash: string;
+      created_by: string | null;
+      created_at: number;
+      expires_at: number | null;
+      max_uses: number;
+      uses: number;
+      revoked_at: number | null;
+      creator_label: string | null;
+    }[];
+    return rows.map((row) => ({
+      codeHash: row.code_hash,
+      createdBy: row.created_by,
+      creatorLabel: row.creator_label,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      maxUses: row.max_uses,
+      uses: row.uses,
+      revokedAt: row.revoked_at,
+    }));
+  }
+
+  /**
+   * 按**哈希**作废邀请码。
+   *
+   * `AccountStore.revokeInvite()` 收的是明文码；管理页只有哈希，所以这里
+   * 直接在 `code_hash` 上更新。两条路径改的是同一张表、同一列。
+   *
+   * 返回 false 表示「没有这个哈希」或「已经作废过」—— 对运维来说目标状态
+   * 都已达成，所以上层按 204 处理。
+   */
+  revokeInviteByHash(codeHash: string, now = Date.now()): boolean {
+    const result = this.db
+      .prepare("UPDATE invites SET revoked_at = ? WHERE code_hash = ? AND revoked_at IS NULL")
+      .run(now, codeHash);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  /** 写一次置备核对结果（`inspectNotebook()` 之后调；它是**唯一**写这张表的地方）。 */
+  recordProvisioning(notebookId: string, input: { designOk: boolean; revsLimit: string | null; syncInfoOk: boolean; now?: number }): void {
+    const now = input.now ?? Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO notebook_provisioning (notebook_id, design_ok, revs_limit, sync_info_ok, last_checked)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(notebook_id) DO UPDATE SET
+           design_ok = excluded.design_ok,
+           revs_limit = excluded.revs_limit,
+           sync_info_ok = excluded.sync_info_ok,
+           last_checked = excluded.last_checked`,
+      )
+      .run(notebookId, input.designOk ? 1 : 0, input.revsLimit, input.syncInfoOk ? 1 : 0, now);
+  }
+
   /** 审计写入（**永不包含正文或密钥材料**，§4.3）。 */
   audit(event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null; now?: number }): void {
     this.db

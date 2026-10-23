@@ -109,15 +109,25 @@ describe("数值项的校验", () => {
     expect(() => loadConfig({ ...baseEnv(), LOG_LEVEL: "verbose" })).toThrow(/LOG_LEVEL/);
   });
 
+  it("突发容量可以单独配（令牌桶的 burst）", () => {
+    const config = loadConfig({ ...baseEnv(), ACCOUNT_BURST: "50", GLOBAL_BURST: "7" });
+    expect(config.accountBurst).toBe(50);
+    expect(config.globalBurst).toBe(7);
+  });
+
   it("没配的数值项用 §4.11 的默认值", () => {
     const config = loadConfig(baseEnv());
     expect(config.port).toBe(8787);
     expect(config.maxFileBytes).toBe(33554432);
     expect(config.defaultAccountQuotaBytes).toBe(2147483648);
     expect(config.defaultAccountQuotaNotebooks).toBe(100);
-    expect(config.accountRequestsPerMinute).toBe(120);
+    // ★ 2026-10-22 改：协议是「一篇一请求」，120/分钟 = 2 篇/秒，等于把正常同步按死。
+    expect(config.accountRequestsPerMinute).toBe(1200);
     expect(config.accountSseConnections).toBe(4);
-    expect(config.globalRequestsPerMinute).toBe(600);
+    expect(config.globalRequestsPerMinute).toBe(6000);
+    // 突发容量默认取每分钟速率的 1/10（10 秒的量），且至少 20。
+    expect(config.accountBurst).toBe(120);
+    expect(config.globalBurst).toBe(600);
   });
 });
 

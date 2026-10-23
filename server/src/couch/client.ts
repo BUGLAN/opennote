@@ -167,13 +167,25 @@ export class CouchClient {
     }
   }
 
-  async databaseInfo(db: string): Promise<{ docCount: number; sizeBytes: number }> {
-    const body = await this.request<{ doc_count?: number; sizes?: { active?: number; file?: number } }>(
-      "GET",
-      `/${encodeURIComponent(db)}`,
-      { idempotent: true },
-    );
-    return { docCount: body.doc_count ?? 0, sizeBytes: body.sizes?.file ?? body.sizes?.active ?? 0 };
+  /**
+   * 库信息。
+   *
+   * `updateSeq` 是**列树的游标来源**：客户端靠它记「我列到哪了」，下次拿它问
+   * `_changes?since=`，从而在远端没变时**完全不列树**（增量同步的第一步）。
+   *
+   * 它来自 CouchDB 自己（红线 2：Node 不生成游标，只搬运）。
+   */
+  async databaseInfo(db: string): Promise<{ docCount: number; sizeBytes: number; updateSeq: string | null }> {
+    const body = await this.request<{
+      doc_count?: number;
+      sizes?: { active?: number; file?: number };
+      update_seq?: string | number;
+    }>("GET", `/${encodeURIComponent(db)}`, { idempotent: true });
+    return {
+      docCount: body.doc_count ?? 0,
+      sizeBytes: body.sizes?.file ?? body.sizes?.active ?? 0,
+      updateSeq: body.update_seq === undefined || body.update_seq === null ? null : String(body.update_seq),
+    };
   }
 
   /** 读文档；不存在返回 `null`。 */
@@ -288,26 +300,46 @@ export class CouchClient {
     return doc !== null;
   }
 
-  /** `_all_docs?include_docs=true`（模式 B 的列树，§3.3）。 */
+  /**
+   * `_all_docs?include_docs=true`（模式 B 的列树，§3.3）。
+   *
+   * ⚠️ CouchDB 的 `startkey` 是**闭区间**（包含这一行本身）。分页时如果只传 `startkey = 上一页最后一条`，
+   * 下一页会把同一条再取一次 —— 页与页重叠一行。客户端按 `did` 去重能挡住重复，
+   * 但会白花一次取数，更重要的是让「有没有翻完」变得不精确。
+   * 所以翻页时**同时传 `skip=1`**，把边界那一行排除掉。
+   */
   async allDocs(
     db: string,
-    options: { limit?: number; startKey?: string; includeDocs?: boolean } = {},
+    options: { limit?: number; startKey?: string; skip?: number; includeDocs?: boolean } = {},
   ): Promise<{ rows: { id: string; key: string; value: { rev: string }; doc?: CouchDocument }[]; totalRows: number }> {
     const query = new URLSearchParams();
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     if (options.startKey !== undefined) query.set("startkey", JSON.stringify(options.startKey));
+    if (options.skip !== undefined && options.skip > 0) query.set("skip", String(options.skip));
     if (options.includeDocs) query.set("include_docs", "true");
     return this.request("GET", `/${encodeURIComponent(db)}/_all_docs?${query}`, { idempotent: true });
   }
 
-  /** `_changes`（`feed=normal` 由调用方分页；SSE 中继用 `feed=continuous`，P3）。 */
+  /**
+   * `_changes`（`feed=normal`；SSE 中继用 `feed=continuous`，P3）。
+   *
+   * `includeDocs` 会带上每条变更的**文档正文**（不含附件）。我们用它不是为了正文，
+   * 而是为了**同一趟拿回内容标识**：客户端要判断「这条变更是真的改了内容，
+   * 还是只是换了个 rev」，有了 `hash`/`ehash` 就不必再为每条变更补一次 `GET /v1/file`
+   * ——那是「变更驱动」比「整树比对」省下来的关键一步。
+   */
   async changes(
     db: string,
-    options: { since?: string | null; limit?: number; timeoutMs?: number } = {},
-  ): Promise<{ results: { seq: unknown; id: string; deleted?: boolean }[]; last_seq: unknown; pending: number }> {
+    options: { since?: string | null; limit?: number; timeoutMs?: number; includeDocs?: boolean } = {},
+  ): Promise<{
+    results: { seq: unknown; id: string; deleted?: boolean; doc?: CouchDocument }[];
+    last_seq: unknown;
+    pending: number;
+  }> {
     const query = new URLSearchParams();
     if (options.since) query.set("since", options.since);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.includeDocs) query.set("include_docs", "true");
     return this.request("GET", `/${encodeURIComponent(db)}/_changes?${query}`, { idempotent: true, timeoutMs: options.timeoutMs });
   }
 

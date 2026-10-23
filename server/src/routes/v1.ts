@@ -34,6 +34,8 @@ import { Hono } from "hono";
 import {
   changesResponseSchema,
   clientStatsRequestSchema,
+  filesBatchRequestSchema,
+  filesBatchResponseSchema,
   parseContract,
   treeResponseSchema,
   type CryptoMode,
@@ -224,6 +226,13 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     const startKey = c.req.query("startkey") ?? undefined;
 
     try {
+      /*
+       * ★ `cursor` 以前**恒为 null** —— 于是客户端 `syncOnce()` 的检查点永远写不进去，
+       * 增量同步也就无从谈起（`changes({since: null})` 每次都从头列全部变更）。
+       * 现在把它填成 CouchDB 自己的 `update_seq`：这是「列树这一刻」的游标，
+       * 由 CouchDB 生成、Node 只搬运（红线 2）。
+       */
+      const cursor = await currentCursor(deps, notebook.db_name);
       if (cryptoMode === "none") {
         /*
          * 模式 A：view 查询。key 是**明文 path**，所以列树本来就能给可读路径
@@ -233,23 +242,33 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
          * `_design` 就位；如果 `_design` 被手工删了，走 view 会直接 500，
          * 而 `_all_docs` 仍能工作 —— 那样控制台能看到「置备不一致」而不是「同步全挂」。
          */
-        const page = await deps.couch.allDocs(notebook.db_name, { limit, ...(startKey === undefined ? {} : { startKey }), includeDocs: true });
+        // `skip: 1` 把上一页最后那一条排掉 —— CouchDB 的 `startkey` 是闭区间，不排就会页页重叠。
+        const page = await deps.couch.allDocs(notebook.db_name, {
+          limit,
+          ...(startKey === undefined ? {} : { startKey, skip: 1 }),
+          includeDocs: true,
+        });
         const files = page.rows
           .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
           .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
           .filter((entry) => entry.deleted !== true)
           .filter((entry) => validTreeEntry(entry));
-        return json(parseContract(treeResponseSchema, { cursor: null, truncated: page.rows.length >= limit, files }, "GET /v1/tree"), 200);
+        return json(parseContract(treeResponseSchema, { cursor, truncated: page.rows.length >= limit, files }, "GET /v1/tree"), 200);
       }
 
       // 模式 B：`_all_docs?include_docs=true`（加密路径 ⇒ view 的 key 用不上，§3.3）。
-      const page = await deps.couch.allDocs(notebook.db_name, { limit, ...(startKey === undefined ? {} : { startKey }), includeDocs: true });
+      // `skip: 1` 把上一页最后那一条排掉 —— CouchDB 的 `startkey` 是闭区间，不排就会页页重叠。
+        const page = await deps.couch.allDocs(notebook.db_name, {
+          limit,
+          ...(startKey === undefined ? {} : { startKey, skip: 1 }),
+          includeDocs: true,
+        });
       const files = page.rows
         .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
         .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
         .filter((entry) => entry.deleted !== true)
         .filter((entry) => validTreeEntry(entry));
-      return json(parseContract(treeResponseSchema, { cursor: null, truncated: page.rows.length >= limit, files }, "GET /v1/tree"), 200);
+      return json(parseContract(treeResponseSchema, { cursor, truncated: page.rows.length >= limit, files }, "GET /v1/tree"), 200);
     } catch (error) {
       return couchError(error);
     }
@@ -273,20 +292,64 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     const since = c.req.query("since") ?? null;
 
     try {
-      const page = await deps.couch.changes(notebook.db_name, { since, limit: 500 });
+      const cryptoMode = cryptoModeOf(notebook);
+      /*
+       * ★ `include_docs=true`：同一趟把**内容标识**带回来。
+       *
+       * 客户端要拿它判断「这条变更是真的改了内容，还是只是换了个 rev」。
+       * 没有它，每条变更都得再补一次 `GET /v1/file` —— 那正是「变更驱动」想省掉的东西。
+       * 附件**不会**被带进来（我们从来不读 `attachments=true`），所以这里拿到的
+       * 只是几百字节的元数据，不是正文。
+       */
+      const page = await deps.couch.changes(notebook.db_name, { since, limit: 500, includeDocs: true });
       const changes = page.results
         // `_design` / `_local` / `syncinfo` 不参与同步（它们不是笔记）。
         .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
-        .map((row) => ({ did: row.id, op: row.deleted === true ? ("delete" as const) : ("update" as const) }));
+        .map((row) => {
+          const op = row.deleted === true ? ("delete" as const) : ("update" as const);
+          const entry: {
+            did: string;
+            op: "delete" | "update";
+            path?: string;
+            hash?: string;
+            ehash?: string;
+          } = { did: row.id, op };
+          if (op === "update" && row.doc) {
+            // 明文模式下 `path` 是可以带回去的（服务端本来就看得见，见 `treeEntryFromDoc`）。
+            if (cryptoMode === "none" && typeof row.doc.path === "string") entry.path = row.doc.path;
+            const contentId = contentIdOf(row.doc);
+            if (contentId) {
+              if (cryptoMode === "none") entry.hash = contentId;
+              else entry.ehash = contentId;
+            }
+          }
+          return entry;
+        });
       return json(
         parseContract(
           changesResponseSchema,
-          { cursor: String(page.last_seq ?? ""), resync: false, changes },
+          {
+            cursor: String(page.last_seq ?? ""),
+            resync: false,
+            // `pending > 0` ⇒ 这一页没装下。客户端必须退回整树，不能只按这一页办事。
+            truncated: (page.pending ?? 0) > 0,
+            changes,
+          },
           "GET /v1/changes",
         ),
         200,
       );
     } catch (error) {
+      /*
+       * ★ 游标过期（流水被裁剪 / 换了库）⇒ **明确回 resync**，让客户端退化成全树比对。
+       *
+       * 以前这里一律 `resync: false`，而客户端拿到 400 只会把整轮同步判失败。
+       * 现在只要带着 `since` 来问却问不出来，就按 Joplin 的 `resyncRequired` 语义办事
+       * （§6.4 规则 2）—— 这是唯一一处允许「降级」的地方。
+       */
+      if (since !== null && error instanceof CouchError && error.code === "bad-request") {
+        return json(parseContract(changesResponseSchema, { cursor: "", resync: true, changes: [] }, "GET /v1/changes"), 200);
+      }
       return couchError(error);
     }
   });
@@ -322,6 +385,60 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     }
   });
 
+  /* --------------------------------------------------------------- 批量取 */
+
+  /**
+   * `POST /v1/files` —— **一次取多条正文**（`dids` 数组）。
+   *
+   * 存在的唯一理由：**把请求数从「等于文件数」压到「文件数 / 批量」**。
+   * 只按 `/v1/file` 一条一条取时，500 篇笔记就是 500 次往返，吞吐被往返延迟钉死
+   * （实测串行 5 篇/秒），限流也得跟着文件数涨。批量之后 500 篇 = 5 个请求。
+   *
+   * 三条纪律：
+   * 1. **只读**（用 `POST` 只是因为 did 太多放不进 URL），不产生任何版本语义；
+   * 2. 找不到 / 没有内容标识的条目**直接跳过**，不编造 —— 客户端按「跳过 = 远端没有这一条」处理；
+   * 3. 单条超限时整批 413，让客户端退回单条路径拿到准确的错误，而不是静默截断。
+   */
+  routes.post("/files", async (c) => {
+    const resolved = resolveNotebook(c, "read");
+    if (resolved instanceof Response) return resolved;
+    const { notebook } = resolved;
+
+    let payload: unknown;
+    try {
+      payload = await c.req.json();
+    } catch {
+      return json({ error: "请求体不是合法 JSON", code: "bad-request" }, 400);
+    }
+    /*
+     * 请求体用 `safeParse` 而不是 `parseContract`：后者是给**响应**用的（失败 = 服务端 bug ⇒ 500）。
+     * 这里是**线上来的输入**，不合法就是客户端的错 ⇒ 400，而且要带上人能看懂的原因。
+     */
+    const checked = filesBatchRequestSchema.safeParse(payload);
+    if (!checked.success) {
+      return json({ error: `dids 必须是 1..200 个合法标识：${checked.error.issues[0]?.message ?? "形状不对"}`, code: "bad-request" }, 400);
+    }
+    const parsed = checked.data;
+
+    const files: { did: string; hash: string; rev: string; data: string }[] = [];
+    try {
+      for (const did of parsed.dids) {
+        const doc = await deps.couch.getDoc(notebook.db_name, did);
+        if (!doc) continue;
+        const hash = contentIdOf(doc);
+        if (!hash) continue;
+        const bytes = await deps.couch.getAttachment(notebook.db_name, did);
+        if (bytes === null) continue;
+        if (bytes.byteLength > deps.config.maxFileBytes) {
+          return json({ error: `文件超过上限（${deps.config.maxFileBytes} 字节）`, code: "too-large" }, 413);
+        }
+        files.push({ did, hash, rev: String(doc._rev ?? ""), data: Buffer.from(bytes).toString("base64") });
+      }
+      return json(parseContract(filesBatchResponseSchema, { files }, "POST /v1/files"), 200);
+    } catch (error) {
+      return couchError(error);
+    }
+  });
   /**
    * `PUT /v1/file?nb=&did=` —— 写一条（CAS）。
    *
@@ -655,9 +772,18 @@ data: ${JSON.stringify({ cursor, count: result.results.length })}
           } catch {
             // CouchDB 抖了一下不该把连接掐了 —— 客户端会重连，但我们先撑住。
           }
-          // 心跳：**注释行**（SSE 规范里客户端会忽略它），只为把连接撑活。
+          /*
+           * 心跳：以前是一条**注释行**（`": ping"`）—— 它只能把连接撑活，
+           * 客户端**看不到**它（`EventSource` 对注释不触发任何事件）。
+           *
+           * 后果是客户端的「静默死亡看门狗」会误判：它靠「多久没收到任何事件」判连接死了，
+           * 而一个安静的笔记本（25 秒没变更是常态）在 55 秒后就会被自己掐掉重连一次。
+           *
+           * 所以改成一个**真的事件**：连接照旧撑活，同时客户端能拿到「我还活着」的信号。
+           */
           if (Date.now() - lastBeat >= heartbeatMs) {
-            send(`: ping
+            send(`event: heartbeat
+data: ${JSON.stringify({ at: Date.now() })}
 
 `);
             lastBeat = Date.now();
@@ -700,6 +826,20 @@ data: ${JSON.stringify({ cursor, count: result.results.length })}
 
 function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+/**
+ * 当前游标（= CouchDB 的 `update_seq`）。
+ *
+ * 拿不到就返回 `null` —— 客户端会把「没有游标」当成「每次都全树比对」，
+ * 那是**正确但更慢**的退化，不会错。反过来（猜一个游标）才会漏同步。
+ */
+async function currentCursor(deps: V1RoutesDeps, dbName: string): Promise<string | null> {
+  try {
+    return (await deps.couch.databaseInfo(dbName)).updateSeq;
+  } catch {
+    return null;
+  }
 }
 
 /** 把 `limit` 夹到合理区间（默认 500，最大 2000）。 */

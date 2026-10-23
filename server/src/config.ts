@@ -58,10 +58,14 @@ export interface ServerConfig {
 
   /** 每账号请求速率（req/min）；不按 socket IP（隧道下都是边缘地址，§4.11）。 */
   accountRequestsPerMinute: number;
+  /** 每账号的**突发容量**（令牌桶容量）—— 吸收「一篇一请求」的首同步那一波。 */
+  accountBurst: number;
   /** 每账号 SSE 连接数上限。 */
   accountSseConnections: number;
   /** 全局限流（req/min per IP）：**防 DoS，不是防爆破**（密钥无法爆破）。 */
   globalRequestsPerMinute: number;
+  /** 全局的突发容量（令牌桶容量）。 */
+  globalBurst: number;
 
   /** 日志级别。 */
   logLevel: "debug" | "info" | "warn" | "error";
@@ -86,9 +90,20 @@ const DEFAULTS = {
   DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS: "100",
   SSE_HEARTBEAT_MS: "25000",
   TRUSTED_PROXY_HEADERS: "",
-  ACCOUNT_REQUESTS_PER_MINUTE: "120",
+  /*
+   * ★ 这两个默认值在 2026-10-22 被改过，理由写在这里（否则下一个人只会看到「数字变了」）：
+   *
+   * 同步协议的形状是「**一篇笔记 = 一个请求**」（推送逐篇 PUT）。一台设备首次接入
+   * 几百篇，就是几百个请求。旧的 120/分钟 意味着**理论上限 2 篇/秒**（500 篇要 4 分钟），
+   * 而且是通过 429 把客户端按住 —— 那是「限流器变成路障」。
+   *
+   * 现在：账号 1200/分钟（20 篇/秒，够 500 篇 25 秒推完）、全局 6000/分钟（100/秒，
+   * 只防跑飞的循环）。客户端那一侧也有限速器（`src/sync/http.ts` 默认 12 请求/秒），
+   * 两者是**两层**：客户端负责平滑，服务端负责兜底。
+   */
+  ACCOUNT_REQUESTS_PER_MINUTE: "1200",
   ACCOUNT_SSE_CONNECTIONS: "4",
-  GLOBAL_REQUESTS_PER_MINUTE: "600",
+  GLOBAL_REQUESTS_PER_MINUTE: "6000",
   LOG_LEVEL: "info",
 } as const;
 
@@ -103,6 +118,11 @@ function readPositiveInt(env: Env, key: string, fallback: string, problems: stri
     return Number.parseInt(fallback, 10);
   }
   return value;
+}
+
+/** 令牌桶的默认突发容量：10 秒的量，且至少 20（见 `ratelimit.ts` 模块头 ③）。 */
+function defaultBurst(perMinute: number): number {
+  return Math.max(20, Math.floor(perMinute / 10));
 }
 
 function readRequired(env: Env, key: string, problems: string[]): string {
@@ -182,8 +202,16 @@ export function loadConfig(env: Env = process.env): ServerConfig {
   const defaultAccountQuotaBytes = readPositiveInt(env, "DEFAULT_ACCOUNT_QUOTA_BYTES", DEFAULTS.DEFAULT_ACCOUNT_QUOTA_BYTES, problems);
   const defaultAccountQuotaNotebooks = readPositiveInt(env, "DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS", DEFAULTS.DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS, problems);
   const accountRequestsPerMinute = readPositiveInt(env, "ACCOUNT_REQUESTS_PER_MINUTE", DEFAULTS.ACCOUNT_REQUESTS_PER_MINUTE, problems);
+  /*
+   * 突发容量默认 = 每分钟速率的 1/10（10 秒的量）。
+   *
+   * 为什么不默认等于「一分钟的量」：那等于允许「一分钟的额度在一秒内打完」，
+   * 一个跑飞的客户端照样能把服务端打满 —— 桶容量要**小于**一整分钟的量才叫兜底。
+   */
+  const accountBurst = readPositiveInt(env, "ACCOUNT_BURST", String(defaultBurst(accountRequestsPerMinute)), problems);
   const accountSseConnections = readPositiveInt(env, "ACCOUNT_SSE_CONNECTIONS", DEFAULTS.ACCOUNT_SSE_CONNECTIONS, problems);
   const globalRequestsPerMinute = readPositiveInt(env, "GLOBAL_REQUESTS_PER_MINUTE", DEFAULTS.GLOBAL_REQUESTS_PER_MINUTE, problems);
+  const globalBurst = readPositiveInt(env, "GLOBAL_BURST", String(defaultBurst(globalRequestsPerMinute)), problems);
 
   const trustedProxyHeaders = (env.TRUSTED_PROXY_HEADERS ?? DEFAULTS.TRUSTED_PROXY_HEADERS)
     .split(",")
@@ -214,8 +242,10 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     sseHeartbeatMs,
     trustedProxyHeaders,
     accountRequestsPerMinute,
+    accountBurst,
     accountSseConnections,
     globalRequestsPerMinute,
+    globalBurst,
     logLevel: logLevelRaw as ServerConfig["logLevel"],
   };
 }
@@ -249,7 +279,9 @@ export function describeConfig(config: ServerConfig): Record<string, string | nu
     sseHeartbeatMs: config.sseHeartbeatMs,
     trustedProxyHeaders: config.trustedProxyHeaders,
     accountRequestsPerMinute: config.accountRequestsPerMinute,
+    accountBurst: config.accountBurst,
     globalRequestsPerMinute: config.globalRequestsPerMinute,
+    globalBurst: config.globalBurst,
     logLevel: config.logLevel,
     // 凭据一律**不回显**，连「配了没配」都不说（避免变成一次探测信号）。
   };

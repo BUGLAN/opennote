@@ -28,7 +28,7 @@
  */
 
 import { build } from "esbuild";
-import { cpSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -108,10 +108,32 @@ writeFileSync(join(outDir, "package.json"), `${JSON.stringify({ type: "module", 
  * 而「不把源码拷进镜像」这件事该由构建步骤保证，不该靠目录约定自觉。
  */
 const PANEL_EXTENSIONS = [".html", ".css", ".js"];
+/*
+ * 二进制资源（自托管字体与印章）也必须进镜像。
+ *
+ * ★ 漏掉它们的后果很隐蔽：页面**能打开**、JS 也**能跑**，只是字体静默回退
+ *   到系统字、印章 404。而 `PANEL_CSP` 的 font-src/img-src 只允许 self，
+ *   所以这些文件没有别的来源 —— 只能在镜像里。
+ *
+ * 仍然用**扩展名白名单**（不是整个目录递归）：理由同上一条，
+ * `server/src/panel/` 的约定是「只放静态资源」。
+ */
+const PANEL_BINARY_EXTENSIONS = [".woff2", ".png", ".svg", ".ico", ".webp"];
 mkdirSync(join(outDir, "panel"), { recursive: true });
 for (const name of readdirSync(join(root, "server", "src", "panel"))) {
   if (!PANEL_EXTENSIONS.some((ext) => name.endsWith(ext))) continue;
   cpSync(join(root, "server", "src", "panel", name), join(outDir, "panel", name));
+}
+for (const sub of ["assets"]) {
+  const from = join(root, "server", "src", "panel", sub);
+  if (!existsSync(from)) continue;
+  for (const name of readdirSync(from, { recursive: true })) {
+    const rel = String(name);
+    if (!PANEL_BINARY_EXTENSIONS.some((ext) => rel.endsWith(ext))) continue;
+    const target = join(outDir, "panel", sub, rel);
+    mkdirSync(dirname(target), { recursive: true });
+    cpSync(join(from, rel), target);
+  }
 }
 console.log("[build:server] 已拷贝控制台静态资源 → dist/panel/");
 

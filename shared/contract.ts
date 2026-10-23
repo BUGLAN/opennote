@@ -315,9 +315,64 @@ export type ChangeOp = z.infer<typeof changeOpSchema>;
 export const changesResponseSchema = z.object({
   cursor: cursorSchema.nullable(),
   resync: z.boolean().optional(),
-  changes: z.array(z.object({ did: didSchema, op: changeOpSchema })),
+  /**
+   * **这一页没装下**（CouchDB 还有 `pending` 条）。
+   *
+   * 客户端据此决定「敢不敢只按这一页办事」：为真时**必须**退回整树比对，
+   * 否则会漏掉后面那些变更，然后把游标推过去 —— 那些变更就**永远拉不到了**。
+   */
+  truncated: z.boolean().optional(),
+  changes: z.array(
+    z.object({
+      did: didSchema,
+      op: changeOpSchema,
+      /** 明文模式下这一条的工作区相对路径（服务端可逆地解出来，省客户端一次反查失败）。 */
+      path: z.string().min(1).max(1024).optional(),
+      /** 明文模式的内容标识。 */
+      hash: contentIdSchema.optional(),
+      /** E2EE 的内容标识。 */
+      ehash: contentIdSchema.optional(),
+    }),
+  ),
 });
 export type ChangesResponse = z.infer<typeof changesResponseSchema>;
+
+/**
+ * `POST /v1/files` 的响应：**一次取多条正文**。
+ *
+ * ## 为什么需要它
+ *
+ * 只按 `/v1/file` 一条一条取，请求数就**等于文件数**。500 篇笔记 = 500 个请求，
+ * 于是：吞吐被「每次往返」钉死（实测串行 5 篇/秒），而且**限流必须跟着文件数走**
+ * （服务端 `ACCOUNT_REQUESTS_PER_MINUTE` 是按请求数算的，不是按字节）。
+ *
+ * 批量之后：500 篇 = 10 个请求。代价是正文要 base64（+33% 传输量）——
+ * 对这个「文件多、文件小」的场景（笔记通常几百字节）是净赚；
+ * 大附件（图片）另有一条阈值，超过了仍走单条 `/v1/file`（见 provider 的实现）。
+ *
+ * ## 为什么是 `data` 而不是 `bytes`
+ *
+ * JSON 里放二进制只能编码。选 base64（带填充）而不是别的，是因为它在
+ * 四个宿主（Electron / 浏览器 / WebView / Node）上都有现成实现，
+ * 且 `atob`/`btoa` 在客户端不需要额外依赖。
+ */
+export const filesBatchResponseSchema = z.object({
+  files: z.array(
+    z.object({
+      did: didSchema,
+      hash: contentIdSchema,
+      rev: z.string().min(1).max(256),
+      data: z.string(),
+    }),
+  ),
+});
+export type FilesBatchResponse = z.infer<typeof filesBatchResponseSchema>;
+
+/** `POST /v1/files` 的请求体。 */
+export const filesBatchRequestSchema = z.object({
+  dids: z.array(didSchema).min(1).max(200),
+});
+export type FilesBatchRequest = z.infer<typeof filesBatchRequestSchema>;
 
 /** `POST /v1/account/rotate` 之后旧 `authToken` **立即失效** —— 客户端要能给明确文案（§1.5 代价 2）。 */
 export const authErrorSchema = z.object({

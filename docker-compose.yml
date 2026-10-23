@@ -133,7 +133,7 @@ services:
     #   宿主端口可用 SYNC_HOST_PORT 覆盖（默认 8787；本机同跑客户端时它自带
     #   的本地桥也用 8787，本地同跑就设成别的端口）。
     ports:
-      - "127.0.0.1:${SYNC_HOST_PORT:-8787}:8787"
+      - "0.0.0.0:${SYNC_HOST_PORT:-8787}:8787"
     read_only: true
     tmpfs:
       - /tmp

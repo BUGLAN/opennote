@@ -5,7 +5,7 @@
  *
  * 控制台的 HTML/CSS/JS 是**给人改的**（§4.6：它只是运维界面，不是产品的一部分）。
  * 把它们打进 bundle 的话，改一行样式也要重新构建 JS —— 那正好抵消了「无构建步骤」的收益。
- * 所以它们是**真的文件**，服务端在启动时读进内存（几个 KB，之后只从内存发）。
+ * 所以它们是**真的文件**，服务端在启动时读进内存（几百 KB，之后只从内存发）。
  *
  * ## 路径必须在两种运行方式下都对
  *
@@ -20,6 +20,12 @@
  *
  * 读失败**不静默**：控制台打不开是运维事故（§4.12：控制台是主要入口），
  * 所以如实报错并说清期望的路径。
+ *
+ * ## 为什么字体和印章也要走这张表
+ *
+ * 控制台与产品共用同一套自托管字体（Figtree / Newsreader / Fraunces / JetBrains Mono）。
+ * `PANEL_CSP` 里 `font-src` 与 `img-src` 都只允许 `'self'`，所以它们**必须**由本服务发出 ——
+ * 指向 CDN 会直接被浏览器拦掉，表现为「字体静默回退到系统字」，很难查。
  */
 
 import { readFileSync } from "node:fs";
@@ -29,25 +35,48 @@ import { fileURLToPath } from "node:url";
 const ASSET_DIR = new URL("./panel/", import.meta.url);
 
 export interface PanelAsset {
-  body: string;
+  body: string | Buffer;
   contentType: string;
+  /** 二进制资源（字体/PNG）发 Buffer，文本资源发 string。 */
+  binary: boolean;
 }
 
-/** 资源名 → content-type。**只允许这三个**（不是通用静态服务器）。 */
+/**
+ * 资源名 → content-type。**只允许表里这些**（不是通用静态服务器）。
+ *
+ * ⚠️ 白名单而不是「拼路径」：`/panel/{任意}` 若直接拼进文件路径就是一个
+ * 目录穿越漏洞（`/panel/../../etc/passwd`）。名字不在表里的一律 404。
+ */
 const ASSETS: Record<string, string> = {
   "index.html": "text/html; charset=utf-8",
+  "api.js": "text/javascript; charset=utf-8",
+  "views.js": "text/javascript; charset=utf-8",
+  "icons.js": "text/javascript; charset=utf-8",
   "app.js": "text/javascript; charset=utf-8",
   "styles.css": "text/css; charset=utf-8",
+  "tokens.css": "text/css; charset=utf-8",
+  "assets/fonts/figtree-latin-wght-normal.woff2": "font/woff2",
+  "assets/fonts/newsreader-latin-opsz-normal.woff2": "font/woff2",
+  "assets/fonts/fraunces-latin-full-normal.woff2": "font/woff2",
+  "assets/fonts/jetbrains-mono-latin-wght-normal.woff2": "font/woff2",
+  "assets/seal/seal-light.png": "image/png",
+  "assets/seal/seal-dark.png": "image/png",
+  "assets/seal/indigo-light.png": "image/png",
+  "assets/seal/indigo-dark.png": "image/png",
+  "assets/seal/pine-light.png": "image/png",
+  "assets/seal/pine-dark.png": "image/png",
+  "assets/seal/gamboge-light.png": "image/png",
+  "assets/seal/gamboge-dark.png": "image/png",
 };
+
+const BINARY = /\.(woff2|png|jpe?g|webp|gif|ico)$/;
 
 let cache: Map<string, PanelAsset> | null = null;
 
 /**
  * 读一个资源（带缓存）。
  *
- * ⚠️ **白名单**而不是「拼路径」：`/panel/{任意}` 若直接拼进文件路径就是一个
- * 目录穿越漏洞（`/panel/../../etc/passwd`）。这里的 `ASSETS` 表就是白名单，
- * 名字不在表里的一律返回 `null`。
+ * 名字不在白名单里 → `null`（调用方回 404）。
  */
 export function loadPanelAsset(name: string): PanelAsset | null {
   const contentType = ASSETS[name];
@@ -56,8 +85,13 @@ export function loadPanelAsset(name: string): PanelAsset | null {
     cache = new Map();
     for (const [key, type] of Object.entries(ASSETS)) {
       const path = fileURLToPath(new URL(key, ASSET_DIR));
+      const binary = BINARY.test(key);
       try {
-        cache.set(key, { body: readFileSync(path, "utf8"), contentType: type });
+        cache.set(key, {
+          body: binary ? readFileSync(path) : readFileSync(path, { encoding: "utf8" }),
+          contentType: type,
+          binary,
+        });
       } catch (error) {
         throw new Error(
           `控制台静态资源读不到：${path}\n` +

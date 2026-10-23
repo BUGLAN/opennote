@@ -308,6 +308,54 @@ describe("§6.4 规则 1 · `truncated` 如实上报（「禁止推断删除」�
   });
 });
 
+
+  it("★ `startkey` 翻页要**真的前进**：第二页不是第一页的复制", async () => {
+    /*
+     * 这条是被一次**误诊**逼出来的：排查时用 `startKey`（驼峰）调接口，
+     * 服务端读的是 `startkey`（全小写），于是第二页和第一页一模一样，
+     * 看起来像「分页坏了」。实际是参数名不匹配。
+     *
+     * 但误诊本身暴露了一个真风险：**没有用例锁住这件事**。
+     * 笔记本超过客户端一次取的量（1000 篇）时，翻页是唯一的取全手段；
+     * 一旦它悄悄退化成「重复第一页」，客户端会以为远端只有一页 ——
+     * 而那会让「远端删了它」的判断落在成千上百篇上。
+     */
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    for (let index = 0; index < 5; index += 1) {
+      docs.set(`f:${index}`, { _id: `f:${index}`, _rev: `${index + 1}-a`, path: `n${index}.md`, hash: "a".repeat(64) });
+    }
+
+    const first = (await (await call(world, `/v1/tree?nb=${notebook.id}&limit=2`, { headers: auth(alice.token) })).json()) as {
+      files: { did: string }[];
+      truncated: boolean;
+    };
+    expect(first.files).toHaveLength(2);
+    expect(first.truncated).toBe(true);
+
+    const cursor = first.files[first.files.length - 1]!.did;
+    const second = (await (
+      await call(world, `/v1/tree?nb=${notebook.id}&limit=2&startkey=${encodeURIComponent(cursor)}`, { headers: auth(alice.token) })
+    ).json()) as { files: { did: string }[]; truncated: boolean };
+
+    // ★ 关键：第二页的第一条绝不能是上一页的最后一条（否则就是原地打转）。
+    expect(second.files[0]!.did).not.toBe(cursor);
+    // 服务端靠 skip=1 把边界那一行排掉，所以这里应当正好从**下一条**开始。
+    expect(second.files[0]!.did).toBe("f:2");
+    expect(second.files.map((entry) => entry.did)).not.toEqual(first.files.map((entry) => entry.did));
+
+    // 三页拼起来正好是全部 5 条，不重不漏。
+    const third = (await (
+      await call(world, `/v1/tree?nb=${notebook.id}&limit=2&startkey=${encodeURIComponent(second.files[second.files.length - 1]!.did)}`, {
+        headers: auth(alice.token),
+      })
+    ).json()) as { files: { did: string }[]; truncated: boolean };
+    const all = [...first.files, ...second.files, ...third.files].map((entry) => entry.did);
+    expect(new Set(all).size).toBe(5);
+    expect(third.truncated).toBe(false);
+  });
 describe("§4.7 设计点 7 · 正文走原始字节", () => {
   it("GET /v1/file 返回字节与内容标识头", async () => {
     const world = makeWorld();
@@ -800,5 +848,81 @@ describe("§4.7 · `/v1/events`（SSE 中继）", () => {
     const extra = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`);
     expect(extra.status).toBe(429);
     expect(await extra.text()).toContain("实时连接太多");
+  });
+});
+
+describe("批量取 · `POST /v1/files`（把请求数从「= 文件数」压到「文件数 / 批量」）", () => {
+  /** 造一个带附件的假库（`attachments` 的键是 `db/id/blob`）。 */
+  function seedDocs(world: World, dbName: string, entries: { did: string; path: string; text: string; hash: string }[]): void {
+    const docs = world.fake.databases.get(dbName)!;
+    for (const entry of entries) {
+      docs.set(entry.did, { _id: entry.did, _rev: "1-a", path: entry.path, hash: entry.hash });
+      world.fake.attachments.set(`${dbName}/${entry.did}/blob`, new TextEncoder().encode(entry.text));
+    }
+  }
+
+  it("一次拿回多条：正文与内容标识都对", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    seedDocs(world, notebook.dbName, [
+      { did: "f:a", path: "a.md", text: "# a", hash: "a".repeat(64) },
+      { did: "f:b", path: "b.md", text: "# b", hash: "b".repeat(64) },
+    ]);
+
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: ["f:a", "f:b"] }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { files: { did: string; hash: string; rev: string; data: string }[] };
+    expect(body.files.map((file) => file.did).sort()).toEqual(["f:a", "f:b"]);
+    const a = body.files.find((file) => file.did === "f:a")!;
+    expect(a.hash).toBe("a".repeat(64));
+    expect(Buffer.from(a.data, "base64").toString("utf8")).toBe("# a");
+  });
+
+  it("不存在的 did **直接跳过**，不编造（客户端按「没有这一条」处理）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    seedDocs(world, notebook.dbName, [{ did: "f:a", path: "a.md", text: "# a", hash: "a".repeat(64) }]);
+
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: ["f:a", "f:missing"] }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { files: { did: string }[] };
+    expect(body.files.map((file) => file.did)).toEqual(["f:a"]);
+  });
+
+  it("请求体不合法 ⇒ 400（不猜）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: [] }),
+    });
+    expect(response.status).toBe(400);
+  });
+});
+
+describe("列树的游标 · 增量同步的起点", () => {
+  it("`/v1/tree` 返回**非空 cursor**（以前恒为 null ⇒ 检查点永远写不进去）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.fake.databases.get(notebook.dbName)!.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
+
+    const body = (await (await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) })).json()) as {
+      cursor: string | null;
+    };
+    expect(typeof body.cursor).toBe("string");
+    expect(body.cursor).not.toBe("");
   });
 });

@@ -158,6 +158,38 @@ export function buildSessionCookie(token: string, options: { https: boolean; max
   return parts.join("; ");
 }
 
+/**
+ * 二次验证（step-up）标记的 cookie 名。
+ *
+ * 与主会话 cookie **分开**，因为它由另一条路径签发、有效期短得多、且只对
+ * 破坏性动作有意义。混在同一个 cookie 里会让「我现在到底有没有二次验证过」
+ * 变成一件要解 token 才知道的事。
+ */
+export const STEP_UP_COOKIE = "opennote_step_up";
+
+/** step-up 标记的有效期：5 分钟（够点完一个确认框，不够被顺走）。 */
+export const STEP_UP_TTL_SECONDS = 5 * 60;
+
+/**
+ * 造一个 step-up 标记。
+ *
+ * 值就是**当前会话的 authToken** —— 这里刻意不签一个新令牌：那样就多出一份
+ * 可被伪造/可被长期持有的凭据。用 authToken 本身意味着「验证过」这件事等价于
+ * 「此刻这个浏览器仍然持有那把密钥」，而它会在轮换时自动失效（这正是想要的）。
+ */
+export function buildStepUpCookie(token: string, options: { https: boolean }): string {
+  const parts = [`${STEP_UP_COOKIE}=${encodeURIComponent(token)}`, "Path=/", "HttpOnly", "SameSite=Lax"];
+  if (options.https) parts.push("Secure");
+  parts.push(`Max-Age=${STEP_UP_TTL_SECONDS}`);
+  return parts.join("; ");
+}
+
+export function buildClearStepUpCookie(options: { https: boolean }): string {
+  const parts = [`${STEP_UP_COOKIE}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0"];
+  if (options.https) parts.push("Secure");
+  return parts.join("; ");
+}
+
 /** 清掉会话 cookie（退出 / 轮换之后）。`Max-Age=0` 立刻失效。 */
 export function buildClearCookie(options: { https: boolean }): string {
   return buildSessionCookie("", { https: options.https, maxAgeSeconds: 0 });
