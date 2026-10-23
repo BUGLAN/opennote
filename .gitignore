@@ -47,3 +47,13 @@ server/dist/
 # 一个「测试写了、但从来没进仓库」的洞，而且它在本地是全绿的。
 /data/
 bore.exe
+
+# 设计原型（`prototype/sync-admin/`）：可点击原型，**不是交付物**。
+#
+# 它由 `server/src/panel/` 的正式实现取代（那份才是产品的一部分）。原型本身是
+# 设计过程产物，其中 `screenshots/` 就有 7.6 M —— 截图进 git 是不可撤销的：
+# 后续任何一次 `git clone` 都要拖着它们，而它们对构建和运行毫无用处。
+#
+# 写成 `prototype/` 而不是 `prototype/sync-admin/`：整个 prototype 目录都是过程产物，
+# 将来加别名的原型不该再需要改一次 .gitignore。
+prototype/

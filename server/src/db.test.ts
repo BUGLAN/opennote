@@ -28,9 +28,11 @@ describe("首次打开", () => {
         "memberships",
         "notebook_invites",
         "notebook_provisioning",
+        "notebook_usage",
         "notebooks",
         "quota_usage",
         "schema_version",
+        "sync_activity",
       ].sort(),
     );
     expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: SCHEMA_VERSION });

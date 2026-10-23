@@ -21,7 +21,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SCHEMA_VERSION, openDatabase } from "./db";
+import { SCHEMA_VERSION, migrationList, openDatabase } from "./db";
 
 /** 造一个「schema_version = 1」的库：只建迁移 2 会碰到的那些表。 */
 function createV1Database(path: string): void {
@@ -83,8 +83,11 @@ describe("迁移 2 · `invites.created_by` 允许为空", () => {
       const applied: number[] = [];
       const db = openDatabase({ path, onMigration: (migration, didApply) => (didApply ? applied.push(migration.version) : undefined) });
 
-      // 只跑了迁移 2（迁移 1 已经标记为应用过）。
-      expect(applied).toEqual([2]);
+      //
+      // 只跑了**尚未应用**的那些（这个库标记为 v1 ⇒ 迁移 1 被跳过）。
+      // 期望值从迁移表推而不是写死 `[2]`：加迁移 3 时它又红了一次，
+      // 而那次失败不是升级路径坏了，只是期望值过期 —— 与 `db.test.ts` 里那条同一个道理。
+      expect(applied).toEqual(migrationList().map((item) => item.version).filter((version) => version > 1));
       expect((db.prepare("SELECT version FROM schema_version LIMIT 1").get() as { version: number }).version).toBe(SCHEMA_VERSION);
 
       // ★ 老的那条邀请码原样还在（连 uses 都保住）。

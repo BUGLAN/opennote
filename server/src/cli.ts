@@ -69,6 +69,8 @@ export const CLI_COMMANDS = [
   "list-accounts",
   "disable-account",
   "recompute-quota",
+  "grant-admin",
+  "revoke-admin",
 ] as const;
 
 export type CliCommand = (typeof CLI_COMMANDS)[number];
@@ -88,6 +90,9 @@ export const USAGE = `opennote-server 运维 CLI（§4.12）
                                应急生成注册邀请码（正常情况用控制台）
   list-accounts                列出账号（id / 标签 / 状态 / 用量）—— **不含任何密钥材料**
   disable-account <accountId>  禁用账号（应急止血）
+  grant-admin <accountId>      把一个**已有**账号提升为管理员
+                               （引导码只能建新账号；这个是给「已有账号要接管」用的）
+  revoke-admin <accountId>     取消管理员；**不允许取消最后一个活跃管理员**
   recompute-quota [--account <accountId>]
                                从账本重算配额缓存
 
@@ -181,7 +186,73 @@ export async function runCli(argv: readonly string[], deps: CliDeps = {}): Promi
       return disableAccount(context, positional[1]);
     case "recompute-quota":
       return recomputeQuota(context, flags);
+    case "grant-admin":
+      return setAdmin(context, positional[1], true);
+    case "revoke-admin":
+      return setAdmin(context, positional[1], false);
   }
+}
+
+/**
+ * 提权 / 降权（`grant-admin` / `revoke-admin`）。
+ *
+ * ## 为什么这两条**只在 CLI 里**
+ *
+ * 和 `bootstrap-admin` 完全同一个理由（§4.12）：引导码不通过 HTTP 暴露，是因为
+ * 一旦暴露，「任何一次管理员账号泄露」就升级成「能无限造管理员」。
+ * 提权是同一件事的另一半 —— 它能把普通账号**变成**那个能造管理员的人。
+ *
+ * 所以：管理员的增减只走**根信任通道**（能登上这台服务器的人），
+ * 控制台里没有、也不该有「设为管理员」按钮。
+ *
+ * ## 两条约束（`AccountStore.setAdmin` 里守，这里只负责翻译成人话）
+ *
+ * - 不能降掉**最后一个活跃管理员** —— 否则控制台永久进不去
+ * - 提权/降权都写审计（谁在什么时候把谁变成了管理员，这件事必须可追）
+ */
+export function setAdmin(context: CliContext, accountId: string | undefined, isAdmin: boolean): number {
+  if (!accountId) {
+    context.err(`用法：${isAdmin ? "grant-admin" : "revoke-admin"} <accountId>`);
+    context.err("先用 list-accounts 找到目标账号 id。");
+    return 1;
+  }
+
+  const target = context.accounts.findById2(accountId);
+  if (!target) {
+    context.err(`账号不存在：${accountId}`);
+    context.err("注意：这里要的是 **accountId**（16 字节十六进制），不是 label。");
+    return 1;
+  }
+
+  const result = context.accounts.setAdmin(accountId, isAdmin);
+  if (!result.ok) {
+    if (result.reason === "last-admin") {
+      context.err("拒绝：这是最后一个**活跃**管理员。");
+      context.err("降掉它会让控制台永久进不去 —— 那时只能再跑一次 bootstrap-admin");
+      context.err("注册一个全新账号，旧账号的数据要靠手工移交。");
+      context.err("要换人，请先 grant-admin 另一个账号，再 revoke-admin 这个。");
+      return 1;
+    }
+    context.err(`账号不存在：${accountId}`);
+    return 1;
+  }
+
+  if (!result.changed) {
+    context.out(`账号 ${accountId} 的 is_admin 已经是 ${isAdmin ? "1" : "0"}，未改动。`);
+    return 0;
+  }
+
+  context.notebooks.audit({
+    actorId: null,
+    action: isAdmin ? "cli_grant_admin" : "cli_revoke_admin",
+    target: accountId,
+    ip: null,
+    detail: "via CLI",
+  });
+  context.out(`${isAdmin ? "已提升为管理员" : "已取消管理员"}：${accountId}`);
+  context.err("");
+  context.err(isAdmin ? "这个账号现在可以打开 /panel 的管理区块了。" : "这个账号下一次请求起就没有管理员权限（无需重新登录）。");
+  return 0;
 }
 
 /**

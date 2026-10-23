@@ -27,7 +27,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 interface Migration {
   version: number;
@@ -209,6 +209,70 @@ const MIGRATIONS: readonly Migration[] = [
           SELECT code_hash, created_by, created_at, expires_at, max_uses, uses, revoked_at FROM invites_v1;
 
         DROP TABLE invites_v1;
+      `);
+    },
+  },
+  {
+    version: 3,
+    description: "控制台需要的真实用量与同步活动：notebook_usage / sync_activity",
+    up: (db) => {
+      /*
+       * ## 为什么需要这两张表
+       *
+       * 控制台的「同步台账」「账号与访问」「运行状态」都要回答**服务端自己就能回答**的问题，
+       * 而 v2 的 schema 里没有地方存答案：
+       *
+       * - `quota_usage.bytes_used` 只在注册时写过一次 0，之后**没有任何代码更新它**
+       *   （`quotaOf()` 读到的永远是 0）—— 用量条、台账的「占用」都是 0 B。
+       * - `client_stats` 是**客户端上报**的计数，而当前客户端没有上报调用
+       *   （`POST /v1/stats` 在生产路径上没人调）—— 流量图永远是空的。
+       *
+       * 这两件事服务端都**有证据**：正文是它写进 CouchDB 的（大小它知道），
+       * 请求是它自己接的（次数它知道）。所以这里给它们各自一张表，
+       * 由 `NotebookStore` 在数据面的读写路径上记账。
+       *
+       * ## 为什么不直接复用 `quota_usage` / `client_stats`
+       *
+       * - `quota_usage` 是**按账号**的配额缓存（一个账号一行）。而台账要的是
+       *   **按库**的占用 —— 一个账号有 20 个库时，「哪个库占了多少」是行级信息。
+       * - `client_stats` 是**客户端说是多少**。服务端自己数出来的不能和它混在一行，
+       *   否则「客户端上报」与「服务端实测」这两个来源就再也分不开了 ——
+       *   而它们回答的不是同一个问题（客户端数的是它自己发的请求，
+       *   服务端数的是它收到的请求；差一个重试、一个 429 就对不上）。
+       *
+       * ## 只加不删
+       *
+       * 两张都是新表，不动任何已有列。回滚服务端版本时旧代码看不到它们，也不会被它们影响。
+       */
+      db.exec(`
+        -- 每个库实际占用的字节数（服务端在写/删正文时记账，见 NotebookStore.addNotebookBytes）。
+        CREATE TABLE notebook_usage (
+          notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id),
+          bytes_used  INTEGER NOT NULL DEFAULT 0,
+          updated_at  INTEGER NOT NULL
+        );
+
+        -- 服务端在 /v1 数据面**亲自观察到**的同步活动（按账号 / 库 / 天）。
+        -- ★ 与 client_stats 刻意分开：那张是客户端上报的，这张是服务端实测的。
+        CREATE TABLE sync_activity (
+          account_id  TEXT NOT NULL,
+          notebook_id TEXT NOT NULL,
+          day         TEXT NOT NULL,
+          pulls       INTEGER NOT NULL DEFAULT 0,
+          pushes      INTEGER NOT NULL DEFAULT 0,
+          deletes     INTEGER NOT NULL DEFAULT 0,
+          conflicts   INTEGER NOT NULL DEFAULT 0,
+          errors      INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (account_id, notebook_id, day)
+        );
+
+        -- 按天做范围查询（控制台近 30 天聚合）要它；否则每次都要全表扫。
+        --
+        -- ⚠️ 这里**只**给新表建索引。client_stats 上也该有一条（同样的按天查询），
+        -- 但那是迁移 1 建的表 —— 在一个「只跑了迁移 1 的库」上它当然在，
+        -- 而迁移用例会造**形状不完整的 v1 库**（只建迁移会碰到的表），
+        -- 对不存在的表建索引会让整个迁移回滚。需要的话另加一条迁移，别在这里赌。
+        CREATE INDEX idx_sync_activity_day ON sync_activity(day);
       `);
     },
   },

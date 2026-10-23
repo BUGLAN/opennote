@@ -1077,3 +1077,161 @@ describe("★ N4 · CouchDB 的墓碑标记是 `_deleted`", () => {
     expect(body.files.map((file) => file.did)).toEqual(["f:a"]);
   });
 });
+
+/* ========================================================================== */
+
+describe("控制台取数 · 服务端在数据面上**自己数**（不依赖客户端上报）", () => {
+  /*
+   * 背景：控制台的流量图、冲突页、用量条原先都依赖 `client_stats`（客户端 `POST /v1/stats`）
+   * 与 `quota_usage.bytes_used`。而**当前客户端从不调用 `/v1/stats`**，后者也从来没被更新过 ——
+   * 于是那三个数字在生产上恒为 0，且没有任何报错。
+   *
+   * 这一组钉住新的记账点：每一次真实的拉/推/删/冲突都留一行，占用量跟着正文字节数走。
+   */
+
+  it("读一次树 = 一次 pull；写一次文件 = 一次 push", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+
+    await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) });
+    await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { method: "PUT", headers: { ...auth(alice.token), "x-opennote-hash": "a".repeat(64) }, body: "hello" });
+
+    const rows = world.notebooks.activityForAccount(alice.id, { notebookId: notebook.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ pulls: 1, pushes: 1, conflicts: 0, errors: 0 });
+  });
+
+  it("★ `If-Match` 对不上产生的 409 记成一次 conflict（这是「冲突」唯一的真实来源）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { method: "PUT", headers: { ...auth(alice.token), "x-opennote-hash": "a".repeat(64) }, body: "v1" });
+
+    const conflict = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, {
+      method: "PUT",
+      // 一个不存在的 base rev：服务端必须回 409 + 当前值。
+      headers: { ...auth(alice.token), "if-match": "b".repeat(64), "x-opennote-hash": "c".repeat(64) },
+      body: "v2",
+    });
+    expect(conflict.status).toBe(409);
+
+    const rows = world.notebooks.activityForAccount(alice.id, { notebookId: notebook.id });
+    expect(rows[0]!.conflicts).toBe(1);
+    /*
+     * 两次 PUT ⇒ **两次 push**（冲突那一次客户端也确实推了，它只是没写进去）。
+     * 所以 `conflicts` 与 `pushes` 不是互斥的两桶：读的时候要按「冲突 / 推送」的比例看，
+     * 而不是指望推送数里已经扣掉了冲突。断在这里是为了钉住这个语义。
+     */
+    expect(rows[0]!.pushes).toBe(2);
+  });
+
+  it("占用跟着正文字节走：写大 → 覆盖成小 → 删除归零", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id, "明文", "none");
+    const headers = { ...auth(alice.token), "x-opennote-hash": "a".repeat(64) };
+
+    await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { method: "PUT", headers, body: "0123456789" });
+    expect(world.notebooks.notebookBytesOf(notebook.id)).toBe(10);
+
+    /*
+     * 覆盖写变小：占用要**变小**（这正是 `MAX(0, old + delta)` 那个 SQL 的考点）。
+     *
+     * ⚠️ 覆盖必须带 `If-Match` —— 缺省 If-Match 的语义是「只允许新建」，服务端会回 409。
+     * 这正是客户端 CAS 的形状：基线里的 hash 就是 If-Match。
+     */
+    const overwrite = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, {
+      method: "PUT",
+      headers: { ...headers, "if-match": "a".repeat(64), "x-opennote-hash": "b".repeat(64) },
+      body: "012",
+    });
+    expect(overwrite.status).toBe(200);
+    expect(world.notebooks.notebookBytesOf(notebook.id)).toBe(3);
+
+    await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { method: "DELETE", headers: auth(alice.token) });
+    expect(world.notebooks.notebookBytesOf(notebook.id)).toBe(0);
+  });
+
+  it("账号用量 = 名下所有库之和（`/v1/account` 的配额读的就是它）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const a = world.notebook(alice.id, "a", "none");
+    const b = world.notebook(alice.id, "b", "none");
+    await call(world, `/v1/file?nb=${a.id}&did=f:a`, { method: "PUT", headers: { ...auth(alice.token), "x-opennote-hash": "a".repeat(64) }, body: "12345" });
+    await call(world, `/v1/file?nb=${b.id}&did=f:b`, { method: "PUT", headers: { ...auth(alice.token), "x-opennote-hash": "b".repeat(64) }, body: "123" });
+    expect(world.notebooks.quotaOf(alice.id).bytesUsed).toBe(8);
+  });
+
+  it("★ `PUT /v1/checkpoint` 会**登记设备**（客户端从不调 `/v1/devices`，这是唯一的来源）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const deviceId = "d".repeat(32);
+
+    // 先确认之前是空的（否则下面那条可能只是碰巧）。
+    expect(world.notebooks.listDevices(alice.id)).toEqual([]);
+
+    const response = await call(world, `/v1/checkpoint?nb=${notebook.id}`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ deviceId, cursor: "5-abc" }),
+    });
+    // 检查点不回正文（`204 No Content`），与 §4.7 一致。
+    expect(response.status).toBe(204);
+
+    const devices = world.notebooks.listDevices(alice.id);
+    expect(devices).toHaveLength(1);
+    expect(devices[0]).toMatchObject({ deviceId, name: null, platform: null });
+    // `lastSeenAt` 要有值：控制台靠它算「30 天未同步」。
+    expect(devices[0]!.lastSeenAt).toBeGreaterThan(0);
+  });
+
+  it("同一台设备重复打检查点 **不会**变成两台（deviceId 是主键）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const deviceId = "e".repeat(32);
+    for (const cursor of ["1-a", "2-b"]) {
+      await call(world, `/v1/checkpoint?nb=${notebook.id}`, {
+        method: "PUT",
+        headers: { ...auth(alice.token), "content-type": "application/json" },
+        body: JSON.stringify({ deviceId, cursor }),
+      });
+    }
+    expect(world.notebooks.listDevices(alice.id)).toHaveLength(1);
+  });
+
+  it("CouchDB 出错时记一次 error（否则「今天一片安静」与「全炸了」长得一样）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    // 把库从假 CouchDB 里删掉 ⇒ 下一次读写会失败。
+    world.fake.databases.delete(notebook.dbName);
+
+    const response = await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) });
+    // 库没了 ⇒ CouchDB 回 404 ⇒ 照实转成 404（那不是服务端 bug，不该报 500）。
+    expect(response.status).toBe(404);
+
+    const rows = world.notebooks.activityForAccount(alice.id, { notebookId: notebook.id });
+    /*
+     * 两个计数都要在：`pulls` 记「客户端确实试了一次拉取」（记账发生在真正读之前），
+     * `errors` 记「这一次失败了」。只记 pulls 会把「全炸了」画成一条正常流量曲线。
+     */
+    expect(rows[0]).toMatchObject({ errors: 1, pulls: 1 });
+  });
+
+  it("别人的流量不会算到我头上（记账按**发起请求的账号**）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const bob = world.account();
+    const notebook = world.notebook(alice.id);
+    world.notebooks.createInvite({ codeHash: "h1", notebookId: notebook.id, role: "editor", createdBy: alice.id });
+    world.notebooks.joinByInvite("h1", bob.id);
+
+    await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(bob.token) });
+    expect(world.notebooks.activityForAccount(alice.id)).toEqual([]);
+    expect(world.notebooks.activityForAccount(bob.id)[0]).toMatchObject({ pulls: 1 });
+  });
+});
+

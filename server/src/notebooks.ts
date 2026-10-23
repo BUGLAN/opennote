@@ -306,15 +306,197 @@ export class NotebookStore {
    * **读取仍可用**，只有写入被拒，§10.1 M9）。
    */
   quotaOf(accountId: string): { bytesUsed: number; notebooks: number; bytesLimit: number; notebooksLimit: number } {
-    return { bytesUsed: 0, notebooks: 0, bytesLimit: 0, notebooksLimit: 0, ...this.readQuota(accountId) };
+    /*
+     * ★ `bytesUsed` 现在由**账本**算，不再读 `quota_usage.bytes_used`。
+     *
+     * 那一列从注册起就是 0，之后没有任何代码更新它 —— 于是控制台的用量条永远是
+     * 空的、台账的「占用」永远是 0 B，而库里明明有数据。真正的字节数在
+     * `notebook_usage`（服务端在每一次写/删正文时记账，见 `addNotebookBytes`），
+     * 所以这里按「这个人拥有的、未被删掉的库」求和 —— 一个聚合查询，不会比原来贵。
+     *
+     * `notebooks` 仍然读缓存：它是**本地就能算准**的那一半，而且建/删库时都会刷。
+     */
+    return {
+      bytesUsed: this.bytesOwnedBy(accountId),
+      notebooks: 0,
+      bytesLimit: 0,
+      notebooksLimit: 0,
+      ...this.readQuota(accountId),
+    };
   }
 
-  private readQuota(accountId: string): { bytesUsed: number; notebooks: number } | null {
-    const row = this.db.prepare("SELECT bytes_used, notebooks FROM quota_usage WHERE account_id = ?").get(accountId) as unknown as
-      | { bytes_used: number; notebooks: number }
+  private readQuota(accountId: string): { notebooks: number } | null {
+    const row = this.db.prepare("SELECT notebooks FROM quota_usage WHERE account_id = ?").get(accountId) as unknown as
+      | { notebooks: number }
       | undefined;
-    if (!row) return null;
-    return { bytesUsed: row.bytes_used, notebooks: row.notebooks };
+    return row ?? null;
+  }
+
+  /** 这个人拥有的、未被删除的库合计占用了多少字节（`notebook_usage` 的聚合）。 */
+  bytesOwnedBy(accountId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(u.bytes_used), 0) AS total
+           FROM notebook_usage u
+           JOIN notebooks n ON n.id = u.notebook_id
+          WHERE n.owner_id = ? AND n.deleted_at IS NULL`,
+      )
+      .get(accountId) as unknown as { total: number } | undefined;
+    return row?.total ?? 0;
+  }
+
+  /* -------------------------------------------------------------- 用量记账 */
+
+  /**
+   * 记一个库的占用变化（**服务端在写/删正文时调**）。
+   *
+   * ## 为什么是「增量」而不是「重算」
+   *
+   * 重算要对每个库问一次 CouchDB（`_all_docs` 的 sizes），1000 个库时会把库打满
+   * （文档 §10 的 U22）。而写路径上手边就有 `body.byteLength` —— 它正是写进去的字节数。
+   * 所以这里记账是**免费**的，代价只有一次 UPSERT。
+   *
+   * ## 为什么允许负数、并且夹到 0
+   *
+   * 删除、覆盖写都会让占用变小。夹到 0 是因为「负数占用」没有任何解释空间：
+   * 真出现负数是账本漂移的信号（例如历史数据没记过），此时显示 0 比显示 -12 KB 诚实。
+   */
+  addNotebookBytes(notebookId: string, delta: number, now = Date.now()): number {
+    if (!Number.isFinite(delta) || delta === 0) return this.notebookBytesOf(notebookId);
+    const amount = Math.trunc(delta);
+    /*
+     * ⚠️ 增量要传**两次**：插入时夹到 0（新行不能是负数），更新时用原始值
+     * （`旧值 + 原始增量` 再夹 0）。
+     *
+     * 只传一次会有一个很隐蔽的错：SQLite 把 `excluded.bytes_used` 当成**已经**
+     * 夹过的值，于是 `-100` 变成 `0` —— 覆盖写和删除**永远不会让占用变小**，
+     * 用量只增不减。用例当场抓到（`expected 10 to be 0`）。
+     */
+    this.db
+      .prepare(
+        `INSERT INTO notebook_usage (notebook_id, bytes_used, updated_at) VALUES (?, MAX(0, ?), ?)
+         ON CONFLICT(notebook_id) DO UPDATE SET
+           bytes_used = MAX(0, notebook_usage.bytes_used + ?),
+           updated_at = ?`,
+      )
+      .run(notebookId, amount, now, amount, now);
+    return this.notebookBytesOf(notebookId);
+  }
+
+  /** 一个库当前记录在案的占用（控制台抽屉里那一行用）。 */
+  notebookBytesOf(notebookId: string): number {
+    const row = this.db.prepare("SELECT bytes_used FROM notebook_usage WHERE notebook_id = ?").get(notebookId) as unknown as
+      | { bytes_used: number }
+      | undefined;
+    return row?.bytes_used ?? 0;
+  }
+
+  /* ---------------------------------------------------------- 同步活动 */
+
+  /**
+   * 记一次**服务端亲自观察到**的同步活动（`/v1` 数据面的读写路径上调）。
+   *
+   * ## 为什么服务端要自己数
+   *
+   * `client_stats` 是**客户端上报**的（`POST /v1/stats`），而当前产品客户端**没有**
+   * 这个上报调用 —— 于是控制台的流量图、冲突热点永远是空的，而同步其实一直在跑。
+   *
+   * 服务端不需要客户端配合就能回答同一类问题：请求是它接的、409 是它回的。
+   * 所以这里按 `(账号, 库, 天)` 记一份**实测值**，与客户端上报的那份**分开存**
+   * （见迁移 3 的说明：两个来源不能混进一行）。
+   *
+   * `kind` 决定加在哪一列。**冲突与错误是「别人已经失败了」的事实**，
+   * 它们与被计入 pulls/pushes 的那次请求是**两件事**（一次 409 既是一次 push 尝试，
+   * 也是一次冲突），所以分开计数而不是二选一。
+   */
+  recordActivity(input: {
+    accountId: string;
+    notebookId: string;
+    day: string;
+    kind: "pull" | "push" | "delete" | "conflict" | "error";
+    amount?: number;
+  }): void {
+    const amount = Math.max(0, Math.trunc(input.amount ?? 1));
+    if (amount === 0) return;
+    const column = { pull: "pulls", push: "pushes", delete: "deletes", conflict: "conflicts", error: "errors" }[input.kind];
+    /*
+     * 先确保那一行在（`DO NOTHING`），再单独 UPDATE 加一列。
+     * 为什么不写一条「五个 excluded 相加」的 UPSERT：那样要把**没变的那四列**
+     * 也读出来再写回去，而这里只需要动一列 —— 少一半参数，也少一半出错的机会。
+     */
+    this.db
+      .prepare(
+        `INSERT INTO sync_activity (account_id, notebook_id, day, pulls, pushes, deletes, conflicts, errors)
+         VALUES (?, ?, ?, 0, 0, 0, 0, 0)
+         ON CONFLICT(account_id, notebook_id, day) DO NOTHING`,
+      )
+      .run(input.accountId, input.notebookId, input.day);
+    // 列名来自**上面那张白名单**（不是外部输入），所以拼接是安全的。
+    this.db
+      .prepare(
+        `UPDATE sync_activity SET ` + column + ` = ` + column + ` + ? WHERE account_id = ? AND notebook_id = ? AND day = ?`,
+      )
+      .run(amount, input.accountId, input.notebookId, input.day);
+  }
+
+  /**
+   * 某个账号的同步活动（与 `statsFor` 同形状，供「我的」视角与合并用）。
+   *
+   * 默认只给近 `limitDays` 天 —— 与 `statsFor` 的语义一致（控制台只画这段时间）。
+   */
+  activityForAccount(
+    accountId: string,
+    options: { notebookId?: string; limitDays?: number } = {},
+  ): { notebookId: string; day: string; pulls: number; pushes: number; deletes: number; conflicts: number; errors: number }[] {
+    const limit = options.limitDays ?? 30;
+    const rows = (
+      options.notebookId
+        ? this.db
+            .prepare("SELECT * FROM sync_activity WHERE account_id = ? AND notebook_id = ? ORDER BY day DESC LIMIT ?")
+            .all(accountId, options.notebookId, limit)
+        : this.db.prepare("SELECT * FROM sync_activity WHERE account_id = ? ORDER BY day DESC LIMIT ?").all(accountId, limit)
+    ) as unknown as {
+      notebook_id: string;
+      day: string;
+      pulls: number;
+      pushes: number;
+      deletes: number;
+      conflicts: number;
+      errors: number;
+    }[];
+    return rows.map((row) => ({
+      notebookId: row.notebook_id,
+      day: row.day,
+      pulls: row.pulls,
+      pushes: row.pushes,
+      deletes: row.deletes,
+      conflicts: row.conflicts,
+      errors: row.errors,
+    }));
+  }
+
+  /** **全站**同步活动（管理页按天聚合；与 `activityForAccount` 同一张表）。 */
+  activityForAll(): { accountId: string; notebookId: string; day: string; pulls: number; pushes: number; deletes: number; conflicts: number; errors: number }[] {
+    const rows = this.db.prepare("SELECT * FROM sync_activity").all() as unknown as {
+      account_id: string;
+      notebook_id: string;
+      day: string;
+      pulls: number;
+      pushes: number;
+      deletes: number;
+      conflicts: number;
+      errors: number;
+    }[];
+    return rows.map((row) => ({
+      accountId: row.account_id,
+      notebookId: row.notebook_id,
+      day: row.day,
+      pulls: row.pulls,
+      pushes: row.pushes,
+      deletes: row.deletes,
+      conflicts: row.conflicts,
+      errors: row.errors,
+    }));
   }
 
   /** 重算「笔记本数」这一项（每次建/删笔记本时调）—— 它是本地就能算准的那一半。 */
@@ -462,6 +644,13 @@ export class NotebookStore {
       this.db.prepare("DELETE FROM notebook_invites WHERE notebook_id = ?").run(id);
       this.db.prepare("DELETE FROM notebook_provisioning WHERE notebook_id = ?").run(id);
       this.db.prepare("DELETE FROM client_stats WHERE notebook_id = ?").run(id);
+      /*
+       * ★ 迁移 3 的两张新表也有 `notebook_id`（`notebook_usage` 还是外键）。
+       * 漏掉它们的症状与当年漏掉 `memberships` 一模一样：`FOREIGN KEY constraint failed`，
+       * 而且报错位置离根因很远（在删账号的 HTTP 处理器里）。
+       */
+      this.db.prepare("DELETE FROM notebook_usage WHERE notebook_id = ?").run(id);
+      this.db.prepare("DELETE FROM sync_activity WHERE notebook_id = ?").run(id);
       this.db.prepare("DELETE FROM notebooks WHERE id = ?").run(id);
     }
     /*
@@ -475,6 +664,92 @@ export class NotebookStore {
     this.db.prepare("DELETE FROM notebook_invites WHERE created_by = ?").run(accountId);
     this.db.prepare("DELETE FROM invites WHERE created_by = ?").run(accountId);
     return ids.length;
+  }
+
+  /* ------------------------------------------------------ 删账号的编排 */
+
+  /**
+   * **删一个账号在控制面上留下的全部痕迹**（一个事务里做完）。
+   *
+   * ## 为什么要有这一个方法
+   *
+   * 「删账号」在三个入口上都有（控制台、`/v1/admin`、客户端自助 `DELETE /v1/account`），
+   * 而它要按 §7.1 做三件不同的事：
+   *
+   * 1. **独占**的库 → 逻辑删行（库由调用方删，那是 CouchDB 的事）；
+   * 2. **共享**的库 → **移交** owner 给最早加入的其他成员（不删库）；
+   * 3. 清掉这个人名下的所有引用行（成员、设备、邀请码、用量、统计、审计里的 actor 不动）。
+   *
+   * 三个入口各写一遍的后果是**总有一个会漏**（真发生过：控制台那条漏了设备行，
+   * 于是 `FOREIGN KEY constraint failed` → 500 → 账号删不掉）。所以编排收敛在这里，
+   * 调用方只负责「库要不要真删」。
+   *
+   * ## 为什么先处理笔记本、再删账号行
+   *
+   * `notebooks.owner_id` 与 `devices.account_id` 都 `REFERENCES accounts(id)`。
+   * 先删账号行的话，所有指向它的子行会**一起炸**（而且错误只报第一张表）。
+   *
+   * @returns `{ exclusiveNotebooks, transferredNotebooks }` —— 前者需要调用方去删库。
+   */
+  deleteAccountCascade(accountId: string, now = Date.now()): { exclusiveNotebooks: string[]; transferredNotebooks: string[] } {
+    const exclusiveNotebooks: string[] = [];
+    const transferredNotebooks: string[] = [];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const owned = this.listForAccount(accountId).filter((item) => item.role === "owner");
+      for (const { notebook } of owned) {
+        /*
+         * `markDeleted` **只对独占库软删**（共享库不动）—— 那一条已在它的实现里，
+         * 这里只需要按 `exclusive` 分桶。
+         */
+        const result = this.markDeleted(notebook.id, now);
+        if (result.exclusive) {
+          exclusiveNotebooks.push(notebook.id);
+        } else if (result.otherMembers.length > 0) {
+          /*
+           * ⚠️ **不能调 `transferOwnership()`** —— 它自己会 `BEGIN IMMEDIATE`，
+           * 而 SQLite **不支持嵌套事务**（`cannot start a transaction within a transaction`）。
+           * 所以这里把它的两条语句直接写在本事务里：语义完全一样，只是不另开事务。
+           */
+          const next = result.otherMembers[0]!;
+          this.db.prepare("UPDATE notebooks SET owner_id = ? WHERE id = ?").run(next, notebook.id);
+          this.db
+            .prepare("INSERT OR REPLACE INTO memberships (notebook_id, account_id, role, created_at) VALUES (?, ?, 'owner', ?)")
+            .run(notebook.id, next, now);
+          transferredNotebooks.push(notebook.id);
+        }
+      }
+      this.removeMembershipsOf(accountId);
+      // 独占库的行**物理删掉**（库由调用方删；行留着会挡住 accounts 的外键）。
+      for (const id of exclusiveNotebooks) this.deleteNotebookRow(id);
+      this.deleteDevicesOf(accountId);
+      this.db.prepare("DELETE FROM notebook_invites WHERE created_by = ?").run(accountId);
+      this.db.prepare("DELETE FROM invites WHERE created_by = ?").run(accountId);
+      this.db.prepare("DELETE FROM sync_activity WHERE account_id = ?").run(accountId);
+      this.db.prepare("DELETE FROM client_stats WHERE account_id = ?").run(accountId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { exclusiveNotebooks, transferredNotebooks };
+  }
+
+  /** 物理删掉**一个**笔记本的全部子行（不含 CouchDB 库）。 */
+  private deleteNotebookRow(notebookId: string): void {
+    this.db.prepare("DELETE FROM memberships WHERE notebook_id = ?").run(notebookId);
+    this.db.prepare("DELETE FROM notebook_invites WHERE notebook_id = ?").run(notebookId);
+    this.db.prepare("DELETE FROM notebook_provisioning WHERE notebook_id = ?").run(notebookId);
+    this.db.prepare("DELETE FROM client_stats WHERE notebook_id = ?").run(notebookId);
+    this.db.prepare("DELETE FROM notebook_usage WHERE notebook_id = ?").run(notebookId);
+    this.db.prepare("DELETE FROM sync_activity WHERE notebook_id = ?").run(notebookId);
+    this.db.prepare("DELETE FROM notebooks WHERE id = ?").run(notebookId);
+  }
+
+  /** 删一个账号的设备账本行（设备**不是凭据**，所以删行不会留下安全后果）。 */
+  deleteDevicesOf(accountId: string): number {
+    const result = this.db.prepare("DELETE FROM devices WHERE account_id = ?").run(accountId);
+    return Number(result.changes ?? 0);
   }
 
   /* ---------------------------------------------------------------- 设备 */
@@ -521,6 +796,205 @@ export class NotebookStore {
       createdAt: row.created_at,
       lastSeenAt: row.last_seen_at,
     }));
+  }
+
+  /* ------------------------------------------------------ 管理端聚合读 */
+
+  /**
+   * **全站**笔记本台账（管理页「同步台账」）。
+   *
+   * 只读、只出**服务端真有的**列：库名不透明、没有明文路径、没有笔记内容。
+   * `members` 走一次聚合而不是逐库 N+1 —— 台账页一屏 9 行只是恰好，
+   * 500 个库时那份 N+1 会变成 500 次查询。
+   */
+  listAllNotebooks(): {
+    id: string;
+    name: string;
+    ownerId: string;
+    ownerLabel: string | null;
+    cryptoMode: "none" | "user-key";
+    createdAt: number;
+    memberCount: number;
+    bytesUsed: number;
+    provisioning: { designOk: boolean; revsLimit: string | null; syncInfoOk: boolean; lastChecked: number | null } | null;
+  }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT n.id, n.name, n.owner_id, n.crypto_mode, n.created_at,
+                a.label AS owner_label,
+                (SELECT COUNT(*) FROM memberships m WHERE m.notebook_id = n.id) AS member_count,
+                -- ★ 体积取 notebook_usage（服务端自己记账的**库级**占用），
+                -- 不是 quota_usage（账号级缓存，且从来没被更新过）。
+                -- 台账问的是「这个库占了多少」，而一个账号下的库各占多少只有前者回答得了。
+                COALESCE(u.bytes_used, 0) AS bytes_used,
+                p.design_ok, p.revs_limit, p.sync_info_ok, p.last_checked
+           FROM notebooks n
+           LEFT JOIN accounts a ON a.id = n.owner_id
+           LEFT JOIN notebook_provisioning p ON p.notebook_id = n.id
+           LEFT JOIN notebook_usage u ON u.notebook_id = n.id
+          WHERE n.deleted_at IS NULL
+          ORDER BY n.created_at DESC`,
+      )
+      .all() as unknown as {
+      id: string;
+      name: string;
+      owner_id: string;
+      crypto_mode: string;
+      created_at: number;
+      owner_label: string | null;
+      member_count: number;
+      bytes_used: number;
+      design_ok: number | null;
+      revs_limit: string | null;
+      sync_info_ok: number | null;
+      last_checked: number | null;
+    }[];
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      ownerId: row.owner_id,
+      ownerLabel: row.owner_label,
+      cryptoMode: row.crypto_mode === "user-key" ? "user-key" : "none",
+      createdAt: row.created_at,
+      memberCount: row.member_count,
+      bytesUsed: row.bytes_used,
+      /*
+       * ★ **`last_checked` 才是「核对过没有」的判据**，不是 `design_ok`。
+       *
+       * `create()` 会先插一行 `design_ok = 0, sync_info_ok = 0, last_checked = NULL`
+       * （占位，表示「还没核对」）。以前这里用 `design_ok === null` 判「未核对」，
+       * 而那一列**永远不是 NULL** —— 于是每个刚建好的库都显示成红色的「不一致」，
+       * 建库之后立刻去看台账会以为置备坏了。现在按 `last_checked` 判：
+       * 没核对过就是「未核对」，核对过才谈「就位 / 不一致」。
+       */
+      provisioning:
+        row.last_checked === null
+          ? null
+          : {
+              designOk: row.design_ok === 1,
+              revsLimit: row.revs_limit,
+              syncInfoOk: row.sync_info_ok === 1,
+              lastChecked: row.last_checked,
+            },
+    }));
+  }
+
+  /**
+   * **全站**设备账本（管理页「设备」）。
+   *
+   * 仍然是只读账本：一个账号密钥所有设备共用，所以没有「踢掉这一台」这个动作。
+   */
+  listAllDevices(): {
+    deviceId: string;
+    accountId: string;
+    accountLabel: string | null;
+    name: string | null;
+    platform: string | null;
+    createdAt: number;
+    lastSeenAt: number | null;
+  }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT d.id, d.account_id, d.name, d.platform, d.created_at, d.last_seen_at, a.label AS account_label
+           FROM devices d
+           LEFT JOIN accounts a ON a.id = d.account_id
+          ORDER BY COALESCE(d.last_seen_at, d.created_at) DESC`,
+      )
+      .all() as unknown as {
+      id: string;
+      account_id: string;
+      name: string | null;
+      platform: string | null;
+      created_at: number;
+      last_seen_at: number | null;
+      account_label: string | null;
+    }[];
+    return rows.map((row) => ({
+      deviceId: row.id,
+      accountId: row.account_id,
+      accountLabel: row.account_label,
+      name: row.name,
+      platform: row.platform,
+      createdAt: row.created_at,
+      lastSeenAt: row.last_seen_at,
+    }));
+  }
+
+  /**
+   * 邀请码列表（管理页「账号与访问」）。
+   *
+   * ★ **只有哈希，没有明文** —— 明文在生成那一刻就没了。这里展示前 8 位是为了
+   * 让运维能对上「哪张码」，不是为了让谁复制它。
+   */
+  listInvites(): {
+    codeHash: string;
+    createdBy: string | null;
+    creatorLabel: string | null;
+    createdAt: number;
+    expiresAt: number | null;
+    maxUses: number;
+    uses: number;
+    revokedAt: number | null;
+  }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT i.code_hash, i.created_by, i.created_at, i.expires_at, i.max_uses, i.uses, i.revoked_at, a.label AS creator_label
+           FROM invites i
+           LEFT JOIN accounts a ON a.id = i.created_by
+          ORDER BY i.created_at DESC`,
+      )
+      .all() as unknown as {
+      code_hash: string;
+      created_by: string | null;
+      created_at: number;
+      expires_at: number | null;
+      max_uses: number;
+      uses: number;
+      revoked_at: number | null;
+      creator_label: string | null;
+    }[];
+    return rows.map((row) => ({
+      codeHash: row.code_hash,
+      createdBy: row.created_by,
+      creatorLabel: row.creator_label,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      maxUses: row.max_uses,
+      uses: row.uses,
+      revokedAt: row.revoked_at,
+    }));
+  }
+
+  /**
+   * 按**哈希**作废邀请码。
+   *
+   * `AccountStore.revokeInvite()` 收的是明文码；管理页只有哈希，所以这里
+   * 直接在 `code_hash` 上更新。两条路径改的是同一张表、同一列。
+   *
+   * 返回 false 表示「没有这个哈希」或「已经作废过」—— 对运维来说目标状态
+   * 都已达成，所以上层按 204 处理。
+   */
+  revokeInviteByHash(codeHash: string, now = Date.now()): boolean {
+    const result = this.db
+      .prepare("UPDATE invites SET revoked_at = ? WHERE code_hash = ? AND revoked_at IS NULL")
+      .run(now, codeHash);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  /** 写一次置备核对结果（`inspectNotebook()` 之后调；它是**唯一**写这张表的地方）。 */
+  recordProvisioning(notebookId: string, input: { designOk: boolean; revsLimit: string | null; syncInfoOk: boolean; now?: number }): void {
+    const now = input.now ?? Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO notebook_provisioning (notebook_id, design_ok, revs_limit, sync_info_ok, last_checked)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(notebook_id) DO UPDATE SET
+           design_ok = excluded.design_ok,
+           revs_limit = excluded.revs_limit,
+           sync_info_ok = excluded.sync_info_ok,
+           last_checked = excluded.last_checked`,
+      )
+      .run(notebookId, input.designOk ? 1 : 0, input.revsLimit, input.syncInfoOk ? 1 : 0, now);
   }
 
   /** 审计写入（**永不包含正文或密钥材料**，§4.3）。 */

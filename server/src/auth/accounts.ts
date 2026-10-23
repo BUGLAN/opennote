@@ -307,6 +307,45 @@ export class AccountStore {
     return Number(result.changes ?? 0) > 0;
   }
 
+  /* ------------------------------------------------------------ 管理员位 */
+
+  /** 当前管理员数量（「最后一个管理员不能降权」要用）。 */
+  countAdmins(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM accounts WHERE is_admin = 1 AND status = 'active'").get() as { n: number } | undefined;
+    return row?.n ?? 0;
+  }
+
+  /**
+   * 改 `is_admin`。
+   *
+   * ## 为什么这条路径只给 CLI 用
+   *
+   * 引导码只能由 CLI 生成（§4.12），目的是「根信任通道不通过 HTTP 暴露」。
+   * 提权/降权是同一类动作 —— 它能把一个普通账号**变成**能用引导码的那个人。
+   * 一旦做成 HTTP 端点，任何一个被盗的管理员账号就能无限造管理员，
+   * 而那正是「引导码只在 CLI」想避免的事。
+   *
+   * ## 两条硬约束（都在这里守，不指望调用方记得）
+   *
+   * 1. **不能降掉最后一个管理员** —— 否则控制台永久进不去，只能再跑一次
+   *    `bootstrap-admin` 注册新账号，旧账号的数据要靠手工移交。
+   * 2. **降权时连禁用账号一起算**：`countAdmins` 只数 active 的，
+   *    所以「唯一的 active 管理员」被降权一定被拦住。
+   *
+   * @returns `{ ok: true, changed } | { ok: false, reason }`
+   */
+  setAdmin(accountId: string, isAdmin: boolean): { ok: true; changed: boolean } | { ok: false; reason: "not-found" | "last-admin" } {
+    const row = this.findById2(accountId);
+    if (!row) return { ok: false, reason: "not-found" };
+    const currently = row.is_admin === 1;
+    if (currently === isAdmin) return { ok: true, changed: false };
+    if (!isAdmin && row.status === "active" && this.countAdmins() <= 1) {
+      return { ok: false, reason: "last-admin" };
+    }
+    this.db.prepare("UPDATE accounts SET is_admin = ? WHERE id = ?").run(isAdmin ? 1 : 0, accountId);
+    return { ok: true, changed: true };
+  }
+
   /**
    * 删账号行。
    *

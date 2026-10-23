@@ -220,20 +220,9 @@ export function createAccountRoutes(deps: AccountRoutesDeps): Hono {
      * CouchDB 库的物理删除由调用方（控制台/CLI 的编排）按 `exclusive` 决定并执行；
      * 这里不直接删库，因为「决定」与「执行」分开才可回滚、可审计。
      */
-    const owned = deps.notebooks.listForAccount(auth.id).filter((item) => item.role === "owner");
-    const deleted: string[] = [];
-    const transferred: string[] = [];
-    for (const { notebook } of owned) {
-      const { exclusive, otherMembers } = deps.notebooks.markDeleted(notebook.id);
-      if (exclusive) {
-        deleted.push(notebook.id);
-      } else {
-        // 有别的成员 ⇒ **移交**给第一个非 owner 成员，而不是删库（§7.1）。
-        deps.notebooks.transferOwnership(notebook.id, otherMembers[0]!);
-        transferred.push(notebook.id);
-      }
-    }
-    deps.notebooks.removeMembershipsOf(auth.id);
+    const cascade = deps.notebooks.deleteAccountCascade(auth.id);
+    const deleted = cascade.exclusiveNotebooks;
+    const transferred = cascade.transferredNotebooks;
     deps.accounts.delete(auth.id);
     deps.audit?.({
       actorId: auth.id,

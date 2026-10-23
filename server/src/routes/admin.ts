@@ -148,38 +148,30 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     const target = deps.accounts.findById2(accountId);
     if (!target) return json({ error: "账号不存在", code: "not-found" }, 404);
 
+    /*
+     * ★ **先算出「哪些独占库要真删」，交给编排去清控制面**，再删库。
+     *
+     * 顺序是刻意的：库（CouchDB）与控制面（SQLite）跨两个系统、没有共同事务。
+     * 先清控制面、后删库 ⇒ 最坏是留下一个没人引用的库（可人工清）；
+     * 反过来 ⇒ 先删了库、控制面还指着它（用户会看到「这个笔记本还在」但打不开）。
+     *
+     * 编排在 `deleteAccountCascade()`（与控制台走同一条），这里只负责删库。
+     */
     const owned = deps.notebooks.listForAccount(accountId).filter((item) => item.role === "owner");
+    const cascade = deps.notebooks.deleteAccountCascade(accountId);
     let databasesDeleted = 0;
-    let notebooksTransferred = 0;
-    for (const { notebook } of owned) {
-      const { exclusive, otherMembers } = deps.notebooks.markDeleted(notebook.id);
-      if (exclusive) {
-        // 独占 ⇒ 库真删（否则磁盘只增不减）。
-        try {
-          await deps.couch.deleteDatabase(notebook.db_name);
-          databasesDeleted += 1;
-        } catch (error) {
-          // 删库失败**不**阻断账号删除（账号已经没用了），但如实记审计。
-          deps.audit?.({ actorId: admin.id, action: "delete_database_failed", target: notebook.id, ip: null, detail: String(error) });
-        }
-      } else {
-        deps.notebooks.transferOwnership(notebook.id, otherMembers[0]!);
-        notebooksTransferred += 1;
+    for (const notebookId of cascade.exclusiveNotebooks) {
+      const notebook = owned.find((item) => item.notebook.id === notebookId)?.notebook;
+      if (!notebook) continue;
+      try {
+        await deps.couch.deleteDatabase(notebook.db_name);
+        databasesDeleted += 1;
+      } catch (error) {
+        // 删库失败**不**阻断账号删除（账号已经没用了），但如实记审计。
+        deps.audit?.({ actorId: admin.id, action: "delete_database_failed", target: notebook.id, ip: null, detail: String(error) });
       }
     }
-    /*
-     * ⚠️ **顺序：先清「指向这个账号的笔记本行」，再删账号。**
-     *
-     * 第一版漏了这一步，结果是 `FOREIGN KEY constraint failed`：
-     * 「独占」的笔记本我们只是 `markDeleted()`（软删，**行还在**、`owner_id` 仍指向该账号），
-     * 于是删账号时外键炸掉 —— 而且它是在**成员行已经删掉之后**才失败，
-     * 留下一个「删了一半」的状态（成员没了、账号还在）。
-     *
-     * 现在把「独占」的笔记本行一并清掉（库已经删了，行没有留着的意义）；
-     * 已移交的那些本来就不再指向它。
-     */
-    deps.notebooks.deleteRowsOwnedBy(accountId);
-    deps.notebooks.removeMembershipsOf(accountId);
+    const notebooksTransferred = cascade.transferredNotebooks.length;
     const deleted = deps.accounts.delete(accountId);
     if (!deleted) return json({ error: "账号不存在", code: "not-found" }, 404);
     deps.audit?.({

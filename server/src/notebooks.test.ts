@@ -447,3 +447,140 @@ describe("§4.11 · 配额：只拦写入，不拦读取", () => {
     expect(notebooks.recomputeNotebookCount(alice.id)).toBe(2);
   });
 });
+
+/* ========================================================================== */
+
+describe("控制台取数：服务端自己记账的用量与同步活动", () => {
+  /*
+   * 这一组钉的是「控制台的数字有没有真实来源」。
+   *
+   * 在此之前的两个事实：`quota_usage.bytes_used` 从注册起就是 0（没有任何代码更新它），
+   * 而 `client_stats` 依赖客户端 `POST /v1/stats`（当前客户端没有这个调用）。
+   * 于是用量条、台账的「占用」、流量图**永远是 0**，且没有报错 —— 这是最难查的一类缺陷。
+   */
+
+  it("按库记账，账号总用量 = 名下未删库之和（不再是那个永远是 0 的缓存列）", () => {
+    const { accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+    const a = notebooks.create({ ownerId: alice.id, name: "a", cryptoMode: "none" });
+    const b = notebooks.create({ ownerId: alice.id, name: "b", cryptoMode: "none" });
+
+    notebooks.addNotebookBytes(a.id, 1024);
+    notebooks.addNotebookBytes(b.id, 512);
+    expect(notebooks.notebookBytesOf(a.id)).toBe(1024);
+    expect(notebooks.quotaOf(alice.id).bytesUsed).toBe(1536);
+
+    // 覆盖写（变小）与删除（清零）都要跟得上。
+    notebooks.addNotebookBytes(a.id, -1024 + 100);
+    expect(notebooks.quotaOf(alice.id).bytesUsed).toBe(612);
+
+    // 逻辑删掉的库不再计入。
+    notebooks.markDeleted(b.id);
+    expect(notebooks.quotaOf(alice.id).bytesUsed).toBe(100);
+  });
+
+  it("占用**不会变成负数**（账本漂移时显示 0 比显示 -12 KB 诚实）", () => {
+    const { accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+    const notebook = notebooks.create({ ownerId: alice.id, name: "a", cryptoMode: "none" });
+    notebooks.addNotebookBytes(notebook.id, 10);
+    // 模拟「历史数据没记过账，但删了一条 100 字节的」这种漂移。
+    expect(notebooks.addNotebookBytes(notebook.id, -100)).toBe(0);
+  });
+
+  it("台账的占用是**库级**的（不是把账号总量复制到每个库）", () => {
+    const { accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+    const a = notebooks.create({ ownerId: alice.id, name: "a", cryptoMode: "none" });
+    const b = notebooks.create({ ownerId: alice.id, name: "b", cryptoMode: "none" });
+    notebooks.addNotebookBytes(a.id, 1000);
+    notebooks.addNotebookBytes(b.id, 24);
+    const ledger = notebooks.listAllNotebooks();
+    expect(ledger.find((row) => row.id === a.id)!.bytesUsed).toBe(1000);
+    expect(ledger.find((row) => row.id === b.id)!.bytesUsed).toBe(24);
+  });
+
+  it("刚建好的库是「**未核对**」而不是「不一致」（`last_checked` 才是判据）", () => {
+    const { accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+    const fresh = notebooks.create({ ownerId: alice.id, name: "fresh", cryptoMode: "none" });
+    expect(notebooks.listAllNotebooks().find((row) => row.id === fresh.id)!.provisioning).toBeNull();
+
+    notebooks.recordProvisioning(fresh.id, { designOk: true, revsLimit: "1000", syncInfoOk: true });
+    const checked = notebooks.listAllNotebooks().find((row) => row.id === fresh.id)!;
+    expect(checked.provisioning).toMatchObject({ designOk: true, syncInfoOk: true, revsLimit: "1000" });
+  });
+
+  it("同步活动按 (账号, 库, 天) 累加，并且每种 kind 记在自己的列上", () => {
+    const { accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+    const notebook = notebooks.create({ ownerId: alice.id, name: "a", cryptoMode: "none" });
+    const day = "2026-10-23";
+    notebooks.recordActivity({ accountId: alice.id, notebookId: notebook.id, day, kind: "pull" });
+    notebooks.recordActivity({ accountId: alice.id, notebookId: notebook.id, day, kind: "pull" });
+    notebooks.recordActivity({ accountId: alice.id, notebookId: notebook.id, day, kind: "push" });
+    notebooks.recordActivity({ accountId: alice.id, notebookId: notebook.id, day, kind: "conflict" });
+    notebooks.recordActivity({ accountId: alice.id, notebookId: notebook.id, day, kind: "error", amount: 2 });
+
+    const rows = notebooks.activityForAccount(alice.id, { notebookId: notebook.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ day, pulls: 2, pushes: 1, conflicts: 1, errors: 2, deletes: 0 });
+  });
+
+  it("同步活动**按账号隔离**（一个人的流量不会出现在另一个人的页面上）", () => {
+    const { accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+    const bob = makeAccount(accounts);
+    const nb = notebooks.create({ ownerId: alice.id, name: "a", cryptoMode: "none" });
+    notebooks.recordActivity({ accountId: alice.id, notebookId: nb.id, day: "2026-10-23", kind: "pull" });
+    expect(notebooks.activityForAccount(alice.id)).toHaveLength(1);
+    expect(notebooks.activityForAccount(bob.id)).toEqual([]);
+    // 但全站视图看得见（管理页要的就是全站）。
+    expect(notebooks.activityForAll()).toHaveLength(1);
+  });
+});
+
+describe("删账号的编排（三个入口共用一条，§7.1）", () => {
+  it("★ 有设备、有独占库、有共享库时也能删干净（外键不再炸）", () => {
+    const { accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+    const bob = makeAccount(accounts);
+    // 独占库
+    const own = notebooks.create({ ownerId: alice.id, name: "own", cryptoMode: "none" });
+    // 共享库（bob 是成员）
+    const shared = notebooks.create({ ownerId: alice.id, name: "shared", cryptoMode: "none" });
+    notebooks.createInvite({ codeHash: "h-shared", notebookId: shared.id, role: "editor", createdBy: alice.id });
+    notebooks.joinByInvite("h-shared", bob.id);
+    // 设备行（`devices.account_id` 也是外键 —— 这一条正是当年 500 的根因）
+    notebooks.upsertDevice({ deviceId: "a".repeat(32), accountId: alice.id, name: "Mac", platform: "desktop" });
+
+    const result = notebooks.deleteAccountCascade(alice.id);
+    expect(result.exclusiveNotebooks).toEqual([own.id]);
+    expect(result.transferredNotebooks).toEqual([shared.id]);
+
+    // 独占库的行没了，共享库移交给了 bob。
+    expect(notebooks.findById(own.id)).toBeNull();
+    expect(notebooks.findById(shared.id)!.owner_id).toBe(bob.id);
+    expect(notebooks.resolveMembership(shared.id, bob.id)?.role).toBe("owner");
+    // 设备行清掉了。
+    expect(notebooks.listDevices(alice.id)).toEqual([]);
+    // 账号行本身**还**在（那是 `AccountStore.delete` 的事，两个系统分开）。
+    expect(accounts.findById2(alice.id)).not.toBeNull();
+    // 这一步不抛 ⇒ 调用方接着删账号行时外键不会挡路。
+    expect(() => accounts.delete(alice.id)).not.toThrow();
+  });
+
+  it("删账号会清掉它名下的用量与活动（不会留下孤立的记账行）", () => {
+    const { accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+    const nb = notebooks.create({ ownerId: alice.id, name: "a", cryptoMode: "none" });
+    notebooks.addNotebookBytes(nb.id, 500);
+    notebooks.recordActivity({ accountId: alice.id, notebookId: nb.id, day: "2026-10-23", kind: "pull" });
+
+    notebooks.deleteAccountCascade(alice.id);
+    expect(notebooks.activityForAccount(alice.id)).toEqual([]);
+    // 用回同一个 notebook id 建一个新库时，占用要从 0 起算（旧账没残留）。
+    expect(notebooks.notebookBytesOf(nb.id)).toBe(0);
+  });
+});
+

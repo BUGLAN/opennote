@@ -37,7 +37,7 @@ import {
 import { AccountError, AccountStore, generateCode, hashCode, type AccountRow } from "../auth/accounts";
 import type { CouchClient } from "../couch/client";
 import { NotebookError, NotebookStore, assertNotebookQuota, type NotebookRow } from "../notebooks";
-import { ProvisioningError, provisionNotebook } from "../provisioning";
+import { DEFAULT_REVS_LIMIT, ProvisioningError, provisionNotebook } from "../provisioning";
 import type { ServerConfig } from "../config";
 import { bearerToken } from "./account";
 
@@ -165,6 +165,20 @@ export function createNotebookRoutes(deps: NotebookRoutesDeps): Hono {
       return json({ error: `建笔记本失败（已回滚）：${detail}`, code: "server" }, 500);
     }
 
+    /*
+     * ★ **置备刚成功，就在这里把核对结果落到 `notebook_provisioning`。**
+     *
+     * 不写的话那一行会一直是创建时的占位（`design_ok = 0, sync_info_ok = 0,
+     * last_checked = NULL`），而控制台的台账/概览把它读成「置备不一致」——
+     * 于是**每个刚建好的库都显示成红的**，运维会去查一个不存在的问题。
+     * 这里只在**置备真的成功之后**写（失败分支在前面已经 return），所以它不撒谎：
+     * 写进去的就是 `provisionNotebook()` 刚刚做完的那几步。
+     */
+    deps.notebooks.recordProvisioning(notebook.id, {
+      designOk: true,
+      revsLimit: String(DEFAULT_REVS_LIMIT),
+      syncInfoOk: true,
+    });
     deps.notebooks.recomputeNotebookCount(auth.id);
     deps.audit?.({ actorId: auth.id, action: "create_notebook", target: notebook.id, ip: null, detail: input.cryptoMode });
     return json(summaryOf(notebook, "owner"), 201);

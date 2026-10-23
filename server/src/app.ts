@@ -45,6 +45,7 @@ import { createAdminRoutes } from "./routes/admin";
 import { createNotebookRoutes } from "./routes/notebooks";
 import { createV1Routes } from "./routes/v1";
 import { createPanelApi } from "./routes/panel";
+import { createAdminViewRoutes } from "./routes/adminView";
 import { loadPanelAsset, panelAssetNames } from "./panelAssets";
 import { csrfGuard, isHttps, securityHeaders, PANEL_CSP } from "./panelSecurity";
 
@@ -198,11 +199,15 @@ export function createApp(options: AppOptions): BuiltApp {
     app.get(route, () => {
       const asset = loadPanelAsset(name);
       if (!asset) return new Response("not found", { status: 404 });
-      return new Response(asset.body, {
+      /*
+       * 字体/印章是二进制，文本资源是字符串：两种都要能发。
+       * `cache-control: no-store` 对**所有**控制台资源都成立 —— 「改了没生效」
+       * 在这台页面上浪费过太多次时间，宁可每次重读。
+       */
+      return new Response(asset.body as string | Uint8Array, {
         status: 200,
         headers: {
           "content-type": asset.contentType,
-          // 控制台是运维界面：**不缓存**，否则「改了没生效」会浪费很多时间。
           "cache-control": "no-store",
         },
       });
@@ -211,11 +216,30 @@ export function createApp(options: AppOptions): BuiltApp {
   // `/panel/` 与 `index.html` 也指向同一份（用户会手打这两种）。
   app.get("/panel/", () => {
     const asset = loadPanelAsset("index.html")!;
-    return new Response(asset.body, {
+    return new Response(asset.body as string | Uint8Array, {
       status: 200,
       headers: { "content-type": asset.contentType, "cache-control": "no-store" },
     });
   });
+
+  /*
+   * 管理端聚合读端点（台账 / 全站设备 / 邀请码 / 配置 / 巡检 / 概览）。
+   * 与 `createPanelApi` 挂在**同一个前缀**下：它们的鉴权形状完全一样，
+   * 分成两个文件只是为了「每个文件的每个处理器都要 requireAdmin」这条纪律
+   * 能被一眼看出来。
+   */
+  app.route(
+    "/panel/api/admin",
+    createAdminViewRoutes({
+      accounts,
+      notebooks,
+      config,
+      couch,
+      audit: (event) => notebooks.audit(event),
+      ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+    }),
+  );
 
   app.route(
     "/panel/api",

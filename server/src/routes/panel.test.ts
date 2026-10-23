@@ -19,6 +19,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import vm from "node:vm";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
 import { AccountStore, newAccountId, newAuthTokenForTests } from "../auth/accounts";
 import { NotebookStore } from "../notebooks";
@@ -37,6 +38,24 @@ vi.mock("../db", async (importOriginal) => {
 });
 
 import { openDatabase } from "../db";
+
+/**
+ * 把 `views.js` 装进一个假窗口里跑一遍，拿到它的导出（`window.VIEWS`）。
+ *
+ * 它是**浏览器脚本**（不是 ES 模块）：文件末尾把导出挂到 `window.VIEWS` 上，
+ * 所以这里用 `vm` 造一个最小的 `window`。
+ * 用 `vm` 而不是 `new Function`：前者保证脚本里的函数声明不会漏进测试文件的作用域。
+ */
+/* eslint-disable @typescript-eslint/no-explicit-any -- 被测代码是纯 JS，没有类型可依。 */
+function loadViews(): Record<string, (...args: any[]) => any> {
+  const source = String(loadPanelAsset("views.js")!.body);
+  const icons = String(loadPanelAsset("icons.js")!.body);
+  const sandbox: { window: Record<string, unknown>; console: Console } = { window: {}, console };
+  vm.createContext(sandbox);
+  vm.runInContext(icons, sandbox);
+  vm.runInContext(source, sandbox);
+  return sandbox.window.VIEWS as Record<string, (...args: any[]) => any>;
+}
 
 const ENV: Record<string, string> = {
   EXTERNAL_BASE_URL: "https://notes.example.com",
@@ -207,33 +226,39 @@ describe("§10.1 M8 · 管理员区块：**API 403** + **页面不渲染**（两
     expect((await call(world, "/admin/accounts")).status).toBe(401);
   });
 
-  it("★ **页面不渲染**：`index.html` 里根本不出现管理员区块的标记", async () => {
+  it("★ **页面不渲染**：`index.html` 里根本不出现任何管理员页面的痕迹", async () => {
     /*
      * 这条与上一条是**两件事**。§10.1 M8 的原文是「页面不渲染 + API 403」。
      *
      * 一个常见的偷懒实现是「渲染出来再用 CSS/hidden 藏住」—— 那样在开发者工具里
      * 一改就出来，而且请求也早就发出去了。所以这里断言的是**服务端发出去的 HTML
-     * 里没有管理员区块**，而不是「不可见」。
+     * 里没有任何管理员页面的结构与文案**，而不是「不可见」。
      */
-    const html = loadPanelAsset("index.html")!.body;
-    // 管理员区块的 section 在 HTML 里**不该存在**（它们由 app.js 在确认 isAdmin 后创建）。
-    expect(html).not.toMatch(/data-panel="admin-/);
-    // 也不能出现那些区块的标题文字（区块名出现在普通账号的源码里同样含糊）。
-    expect(html).not.toContain("账号管理");
-    expect(html).not.toContain("服务器信息");
-    // 反向确认：用户区块**在**（否则上面那些断言可以靠删空文件通过）。
-    expect(html).toContain('data-panel="notebooks"');
-    expect(html).toContain('data-panel="devices"');
+    const html = String(loadPanelAsset("index.html")!.body);
+    // 导航与内容都由 app.js 生成 —— HTML 里连容器都不给管理员页留。
+    expect(html).not.toMatch(/data-panel="/);
+    // 管理员页面的名字不该出现在 HTML 里（只在 JS 里按 isAdmin 决定要不要生成）。
+    for (const label of ["账号与访问", "同步台账", "同步日志", "服务端配置", "冲突与异常"]) {
+      expect(html, label + " 不该出现在 HTML 里").not.toContain(label);
+    }
+    // 反向确认：这份 HTML 确实是个页面而不是空文件。
+    expect(html).toContain('id="main"');
+    expect(html).toContain('id="unlock"');
   });
 
-  it("★ 管理员区块确实由 `app.js` **创建**（`isAdmin` 是唯一开关）", () => {
-    const js = loadPanelAsset("app.js")!.body;
-    // 创建动作在 createAdminPanels 里，且它只在 `session.isAdmin` 为真时被调用。
-    expect(js).toContain("createAdminPanels");
-    expect(js).toMatch(/if \(session\.isAdmin && !adminPanels\)/);
-    expect(js).toContain('data-panel": "admin-accounts"');
-    // 也**不能**有「先渲染后隐藏」的写法。
-    expect(js).not.toMatch(/adminPanels\.\w+\.hidden = false[^]*isAdmin/);
+  it("★ 管理页的导航项只在 `isAdmin` 为真时**进入 DOM**（而不是渲染后隐藏）", () => {
+    /*
+     * 新实现里每一页都带 `adminOnly` 标记，`canView()` 用它在
+     * 「生成导航」与「路由守卫」两处同时过滤。这里钉住这条链路存在，
+     * 并且钉住它不是「先渲染再隐藏」。
+     */
+    const js = String(loadPanelAsset("app.js")!.body);
+    expect(js).toContain("adminOnly");
+    expect(js).toContain("function canView(");
+    // 导航过滤：越权条目直接 return，不进 DOM。
+    expect(js).toMatch(/items\.filter\(\(page\) => canView\(page\.id\)\)/);
+    // 路由守卫：手敲 URL 也拦得住（只是少发一次注定失败的请求，不是安全边界）。
+    expect(js).toMatch(/if \(!page \|\| !canView\(id\)\)/);
   });
 
   it("管理员自己访问 → 200（否则上面那些 403 可能只是因为端点根本没挂上）", async () => {
@@ -380,8 +405,17 @@ describe("cookie 工具函数", () => {
 });
 
 describe("静态资源是白名单（不是通用静态服务器）", () => {
-  it("只登记三个资源", () => {
-    expect(panelAssetNames().sort()).toEqual(["app.js", "index.html", "styles.css"]);
+  it("只登记**明确列出的**资源（白名单本身就是防线）", () => {
+    const names = panelAssetNames().sort();
+    // 源码与样式：控制台自己的四个文件。
+    for (const name of ["app.js", "api.js", "views.js", "icons.js", "index.html", "styles.css", "tokens.css"]) {
+      expect(names, name + " 应当登记").toContain(name);
+    }
+    // 字体与印章：CSP 的 font-src/img-src 只允许 self，所以必须由本服务发。
+    expect(names.filter((n) => n.startsWith("assets/fonts/")).length).toBe(4);
+    expect(names.filter((n) => n.startsWith("assets/seal/")).length).toBe(8);
+    // 没有别的杂项：白名单必须**穷举**，不能靠通配。
+    expect(names.length).toBe(7 + 4 + 8);
   });
 
   it("★ 名字不在白名单里 → `null`（**不拼路径**，于是没有目录穿越）", () => {
@@ -400,13 +434,15 @@ describe("静态资源是白名单（不是通用静态服务器）", () => {
   });
 
   it("页面里的引用**全是同源绝对路径**（CSP 的 `'self'` 才够用）", () => {
-    const html = loadPanelAsset("index.html")!.body;
+    const html = String(loadPanelAsset("index.html")!.body);
     for (const match of html.matchAll(/(?:src|href)="([^"]+)"/g)) {
       /*
        * 只要求「以 `/` 开头」= 同源，**不要求**都在 `/panel/` 下：
        * 页面里有一个指向 `/v1/health` 的构建哈希核对链接，那正是 §5.6⑤ 想要的。
        * 第一版把它写死成 `^/panel/`，于是这条用例红得毫无道理。
        */
+      // 站内哈希路由（#/overview）不是资源引用，不参与这条断言。
+      if (match[1].startsWith("#")) continue;
       expect(match[1], `${match[1]} 应当是同源绝对路径`).toMatch(/^\//);
       expect(match[1], `${match[1]} 不该指向外部站点`).not.toMatch(/^\/\//);
     }
@@ -417,12 +453,19 @@ describe("静态资源是白名单（不是通用静态服务器）", () => {
   });
 
   it("前端**没有**把密钥 POST 出去（只提交派生出来的 authToken）", () => {
-    const js = loadPanelAsset("app.js")!.body;
-    // 登录只提交 authToken。
-    expect(js).toContain('request("/session", { method: "POST", body: { authToken } })');
-    // 反向确认：没有任何地方把 accountKey / key 放进请求体。
-    expect(js).not.toMatch(/body:\s*\{[^}]*\bkey\b/);
-    expect(js).not.toMatch(/body:\s*\{[^}]*accountKey/);
+    /*
+     * ★ 这条是整个 E2EE 的地基：密钥一旦离开浏览器，红线 3 就破了。
+     *   所以断言「请求体里只有 authToken」，并且反向确认没有任何地方把
+     *   accountKey / 密钥文本放进 body。
+     */
+    const js = String(loadPanelAsset("api.js")!.body);
+    // 登录：只提交派生出来的令牌。
+    expect(js).toMatch(/body: \{ authToken \}/);
+    // 二次验证：同样是令牌，不是密钥。
+    expect(js).toMatch(/\/session\/verify", \{ method: "POST", body: \{ authToken \} \}/);
+    // 反向确认：没有任何请求体带上密钥材料。
+    expect(js).not.toMatch(/body:[^\n]*accountKey/);
+    expect(js).not.toMatch(/body:[^\n]*keyText/);
   });
 
   it("★ 派生令牌的 HKDF 参数与 `accountKey.ts` 一致（salt=accountId 字节、info=opennote/v1/auth）", () => {
@@ -432,19 +475,19 @@ describe("静态资源是白名单（不是通用静态服务器）", () => {
      * 所以这里逐参数钉住，并且在 `src/sync/accountKey.test.ts` 里有一条用例
      * **把 noble 与 WebCrypto 算出来的字节直接比对**。
      */
-    const js = loadPanelAsset("app.js")!.body;
+    const js = String(loadPanelAsset("api.js")!.body);
     expect(js).toContain('"opennote/v1/auth"');
     expect(js).toContain("HKDF");
     expect(js).toContain("SHA-256");
     // salt 必须是 accountId 的**字节**，不是那串十六进制文本的 ASCII。
     expect(js).toContain("salt: fromHex(accountId)");
-    // 也不许再出现旧的那套参数。
+    // 也不许出现别的那套参数。
     expect(js).not.toContain("opennote-auth-v1");
     expect(js).not.toContain("salt: new Uint8Array(0)");
   });
 
   it("控制台解得出密钥 blob 里的 `accountId`（少了它派不出令牌）", () => {
-    const js = loadPanelAsset("app.js")!.body;
+    const js = String(loadPanelAsset("api.js")!.body);
     // blob 形状：version(1) + accountId(16) + accountKey(32) = 49 字节。
     expect(js).toContain("1 + ACCOUNT_ID_BYTES + ACCOUNT_KEY_BYTES");
     expect(js).toContain("accountId: toHex(");
@@ -549,10 +592,294 @@ describe("控制台源码不该混进静态资源目录", () => {
     const { readdirSync } = require("node:fs") as typeof import("node:fs");
     const names = readdirSync(dir);
     for (const name of names) {
+      /*
+       * 允许两种东西：
+       *   1. 静态资源本身（html / css / js）
+       *   2. assets/ 子目录 —— 自托管字体与印章。
+       *      CSP 的 font-src / img-src 只允许 self，所以它们必须由本服务发出；
+       *      指向 CDN 会被浏览器直接拦掉，症状是「字体静默回退」，很难查。
+       */
+      if (name === "assets") continue;
       expect(name, `${name} 不该出现在 panel/（那是静态资源目录，§5.x 目录表）`).toMatch(/\.(html|css|js)$/);
     }
     // 反向确认目录非空。
     expect(names.length).toBeGreaterThanOrEqual(3);
+    // assets/ 下只有字体与印章，不该混进脚本。
+    const assets = readdirSync(join(dir, "assets"));
+    expect(assets.sort()).toEqual(["fonts", "seal"]);
     void readFileSync;
   });
 });
+
+/* ========================================================================== */
+
+describe("控制台取数 · 统计合并与真实的「我的」页面", () => {
+  /*
+   * `/stats` 现在是**两个来源**的合并（见 `panel.ts` 的 `mergeDailyStats`）。
+   * 这里钉住合并规则本身，因为「相加」这个错误实现看起来非常合理：
+   * 客户端数与服务端数描述的是**同一批请求**，相加会把每次同步数两遍。
+   */
+
+  it("★ 同一天同一库：两个来源取**较大值**，不是相加", async () => {
+    const world = makeWorld();
+    const member = world.member();
+    const notebook = world.notebooks.create({ ownerId: member.id, name: "n", cryptoMode: "none" });
+    const day = "2026-10-23";
+
+    // 客户端说：3 次拉取。服务端观察到：5 次。真实值至少是 5。
+    world.notebooks.reportStats({
+      accountId: member.id,
+      notebookId: notebook.id,
+      day,
+      pulls: 3,
+      pushes: 1,
+      deletes: 0,
+      conflicts: 0,
+      errors: 0,
+    });
+    world.notebooks.recordActivity({ accountId: member.id, notebookId: notebook.id, day, kind: "pull", amount: 5 });
+
+    const body = (await (await call(world, "/stats?limit=30", withCookie(member.token))).json()) as {
+      stats: { pulls: number; pushes: number }[];
+      sources: { clientStats: number; observed: number };
+    };
+    expect(body.stats).toHaveLength(1);
+    expect(body.stats[0]!.pulls).toBe(5);
+    // 推送那边只有客户端报了 1 次，服务端 0 次 ⇒ 取 1。
+    expect(body.stats[0]!.pushes).toBe(1);
+    // 两个来源各自有几行，也照实报出来（页面据此说明「这一屏的数据来自哪里」）。
+    expect(body.sources).toEqual({ clientStats: 1, observed: 1 });
+  });
+
+  it("只有服务端观测（客户端不上报）时，数字照样出得来", async () => {
+    const world = makeWorld();
+    const member = world.member();
+    const notebook = world.notebooks.create({ ownerId: member.id, name: "n", cryptoMode: "none" });
+    world.notebooks.recordActivity({ accountId: member.id, notebookId: notebook.id, day: "2026-10-23", kind: "conflict" });
+    const body = (await (await call(world, "/stats?limit=30", withCookie(member.token))).json()) as { stats: { conflicts: number }[] };
+    expect(body.stats[0]!.conflicts).toBe(1);
+  });
+
+  it("按天倒序（页面直接取前 N 天画图，不再前端排序）", async () => {
+    const world = makeWorld();
+    const member = world.member();
+    const notebook = world.notebooks.create({ ownerId: member.id, name: "n", cryptoMode: "none" });
+    for (const day of ["2026-10-20", "2026-10-23", "2026-10-21"]) {
+      world.notebooks.recordActivity({ accountId: member.id, notebookId: notebook.id, day, kind: "pull" });
+    }
+    const body = (await (await call(world, "/stats?limit=30", withCookie(member.token))).json()) as { stats: { day: string }[] };
+    expect(body.stats.map((row) => row.day)).toEqual(["2026-10-23", "2026-10-21", "2026-10-20"]);
+  });
+
+  it("★ 用量条读的是**真实占用**（`/usage` 与 `/account` 两处必须一致）", async () => {
+    const world = makeWorld();
+    const member = world.member();
+    const notebook = world.notebooks.create({ ownerId: member.id, name: "n", cryptoMode: "none" });
+    world.notebooks.recomputeNotebookCount(member.id);
+    world.notebooks.addNotebookBytes(notebook.id, 4096);
+
+    const usage = (await (await call(world, "/usage", withCookie(member.token))).json()) as { quota: { bytesUsed: number; notebooks: number } };
+    const account = (await (await call(world, "/account", withCookie(member.token))).json()) as { quota: { bytesUsed: number; notebooks: number } };
+    expect(usage.quota.bytesUsed).toBe(4096);
+    expect(usage.quota.notebooks).toBe(1);
+    // 两个端点读同一份数据，数字必须一样（页面分别在「用量」页与「我的账号」页显示它们）。
+    expect(account.quota).toEqual(usage.quota);
+  });
+
+  it("设备账本：检查点登记过的设备能在 `/devices` 里看到", async () => {
+    const world = makeWorld();
+    const member = world.member();
+    world.notebooks.upsertDevice({ deviceId: "a".repeat(32), accountId: member.id, name: null, platform: null });
+    const body = (await (await call(world, "/devices", withCookie(member.token))).json()) as {
+      devices: { deviceId: string; name: string | null }[];
+    };
+    expect(body.devices).toHaveLength(1);
+    // 客户端没报名字 ⇒ null（界面显示「未命名设备」，不编一个名字）。
+    expect(body.devices[0]!.name).toBeNull();
+  });
+});
+
+describe("删账号（控制台唯一不可撤销的动作）", () => {
+  it("★ 带设备与笔记本的账号也能删掉（原来是 500 FOREIGN KEY）", async () => {
+    const world = makeWorld();
+    const admin = world.admin();
+    const victim = world.member();
+    const own = world.notebooks.create({ ownerId: victim.id, name: "own", cryptoMode: "none" });
+    world.notebooks.upsertDevice({ deviceId: "b".repeat(32), accountId: victim.id, name: "Mac", platform: "desktop" });
+
+    const response = await call(
+      world,
+      "/admin/accounts/" + victim.id,
+      withCookie(admin.token, "DELETE", { cookie: `${PANEL_COOKIE}=${encodeURIComponent(admin.token)}` }),
+    );
+    /*
+     * 这条**必须**过 `requireStepUp()` 那一关。这里没做二次验证 ⇒ 403。
+     * 先用「被拦下」确认闸门在，再单独测「验证之后能删」。
+     */
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { code: string }).code).toBe("step-up-required");
+    // 被拦下时**什么都没改**（这一点比状态码更重要）。
+    expect(world.notebooks.findById(own.id)).not.toBeNull();
+  });
+});
+
+
+/* ========================================================================== */
+
+describe("控制台静态资源 · 结构完整性（一份 HTML、一份启动入口）", () => {
+  /*
+   * 这一组是**回归闸门**，来自一次真实事故：
+   *
+   * 面板重写时 `index.html` 里出现了**两个** `<html>` 根（第二段是外壳 + 登录页），
+   * 浏览器把第一个之后的内容整个吞掉 —— 现象是「打开控制台一片空白」，
+   * 而控制台里**连一行报错都没有**（HTML 解析错误不是 JS 错误）。
+   *
+   * 同时 `app.js` 少了 `boot()` 的调用点：脚本加载了、函数都在、什么都不发生。
+   * 这两种故障都不会被接口用例覆盖，所以单独钉在这里。
+   */
+
+  it("`index.html` 只有**一个** `<html>` / `<body>`（多根会让后半段被丢掉）", () => {
+    const raw = String(loadPanelAsset("index.html")!.body);
+    /*
+     * 先去掉 HTML 注释再数：注释里也会写 `<html>` / `<body>`（说明文字），
+     * 不剥掉的话这条用例会因为「注释写得太具体」而红 —— 我第一次就是这么红的。
+     */
+    const html = raw.replace(/<!--[\s\S]*?-->/g, "");
+    expect(html.match(/<html\b/gi) ?? []).toHaveLength(1);
+    expect(html.match(/<\/html>/gi) ?? []).toHaveLength(1);
+    expect(html.match(/<body\b/gi) ?? []).toHaveLength(1);
+    expect(html.match(/<\/body>/gi) ?? []).toHaveLength(1);
+    // 头尾要真的在（别为了「只有一个」把尾巴删了）。
+    expect(html.trimStart().toLowerCase().startsWith("<!doctype html>")).toBe(true);
+    expect(html.trimEnd().toLowerCase().endsWith("</html>")).toBe(true);
+  });
+
+  it("`index.html` 里的 `id` **不重复**（重复的 id 让 `$()` 只拿到第一个）", () => {
+    const html = String(loadPanelAsset("index.html")!.body);
+    const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]!);
+    const duplicated = ids.filter((id, index) => ids.indexOf(id) !== index);
+    expect(duplicated, "重复的 id：" + duplicated.join(", ")).toEqual([]);
+  });
+
+  it("`app.js` 真的会启动（`boot()` 被调用，而不是只定义了它）", () => {
+    const js = String(loadPanelAsset("app.js")!.body);
+    expect(js).toMatch(/^async function boot\(/m);
+    /*
+     * 允许两种写法：模块顶层直接 `boot()`，或等 DOM 就绪再调。
+     * 只要求「有一个**不在函数体内**的调用点」。
+     */
+    expect(js).toMatch(/^(boot\(\);|window\.addEventListener\("DOMContentLoaded", boot\);|document\.addEventListener\("DOMContentLoaded", boot\);)$/m);
+  });
+
+  it("`index.html` 引用的每个 `id` 都在 JS 里有落点（或反之：JS 要的 id 必须存在）", () => {
+    /*
+     * 反向那条（JS 要、HTML 没有）正是「按钮点了没反应」的常见根因：
+     * `$("#toasts")` 拿到 null ⇒ `toast()` 静默失败，用户看不到任何提示。
+     * 例外：这些 id 由 JS 自己生成（对话框 / 抽屉内容），不在静态 HTML 里。
+     */
+    const html = String(loadPanelAsset("index.html")!.body);
+    const js = String(loadPanelAsset("app.js")!.body);
+    const present = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]!));
+    const dynamic = new Set([
+      "step-up-key",
+      "step-up-error",
+      "invite-code",
+      "invite-uses",
+      "invite-days",
+      "invite-error",
+      "account-caret",
+    ]);
+    const required = [...js.matchAll(/\$\("#([a-zA-Z][a-zA-Z0-9_-]*)"\)/g)]
+      .map((match) => match[1]!)
+      .filter((id) => !dynamic.has(id));
+    const missing = [...new Set(required)].filter((id) => !present.has(id));
+    expect(missing, "JS 要但 HTML 没有的 id：" + missing.join(", ")).toEqual([]);
+  });
+
+  it("`views.js` / `app.js` 用到的类名**在样式表里都有定义**（少一条不报错，只是那行塌掉）", () => {
+    /*
+     * 这条覆盖的是一类「看不出来」的缺陷：标记写对了、CSS 没跟上。
+     * 浏览器不会报错，页面也没 404 —— 只是那一块退回默认样式。
+     */
+    const css = String(loadPanelAsset("styles.css")!.body);
+    const defined = new Set([...css.matchAll(/\.([a-zA-Z][a-zA-Z0-9_-]*)/g)].map((match) => match[1]!));
+    const used = new Set<string>();
+    for (const name of ["views.js", "app.js"]) {
+      const source = String(loadPanelAsset(name)!.body);
+      // 只取「字面量类名列表」：以字母开头的简单 token，跳过拼接出来的片段。
+      for (const match of source.matchAll(/class=\?"([a-zA-Z][a-zA-Z0-9_ -]*)\?"/g)) {
+        for (const token of match[1]!.split(/\s+/)) if (token) used.add(token);
+      }
+    }
+    const missing = [...used].filter((token) => !defined.has(token)).sort();
+    expect(missing, "样式表里缺：" + missing.join(", ")).toEqual([]);
+  });
+});
+
+
+describe("视图函数 · 显示层的小陷阱", () => {
+  /*
+   * 这些都是「浏览器不报错、接口也正常」的一类缺陷 —— 只在页面上看得出来。
+   */
+
+  it("★ `shortId(x, head, 0)` 只留前缀（`slice(-0)` 会返回整个字符串）", () => {
+    /*
+     * 邀请码那一列就是这么印出来的：`shortId(codeHash, 8, 0)` 本意是「只留前 8 位」，
+     * 但 `slice(-0)` === `slice(0)` —— 于是整串 64 位都被拼上去，
+     * 表格那一列被撑爆，而且看起来像是**数据**坏了（其实只是显示）。
+     */
+    const V = loadViews();
+    const hash = "f".repeat(64);
+    const shown = V.shortId(hash, 8, 0);
+    expect(shown).toBe("ffffffff…");
+    // 普通截断不受影响。
+    expect(V.shortId("abcdef0123456789")).toBe("abcdef01…6789");
+    // 短到不用截断的原样返回。
+    expect(V.shortId("short")).toBe("short");
+    expect(V.shortId(null)).toBe("—");
+  });
+
+  it("★ 流量图的纵轴**跟着数据走**（固定 400 会把个位数用量压成 0 像素）", () => {
+    /*
+     * 原型里量程写死成 `ceil(max/400)*400`，在冻结示例数据（每天几百次）上没问题；
+     * 搬到真服务器上就露馅：自托管日常用量是个位数，柱子高度不足 1 像素，
+     * 看起来与「没有数据」完全一样 —— 而卡片脚注明明写着「合计 9 次请求」。
+     */
+    const V = loadViews();
+    const day = { day: "2026-10-23", pulls: 6, pushes: 3, conflicts: 1, errors: 0, deletes: 0 };
+    const html = V.renderOverview(
+      {
+        generatedAt: Date.now(),
+        accounts: { total: 1, admins: 1, disabled: 0 },
+        notebooks: { total: 1, bytesUsed: 100 },
+        devices: { total: 1, stale: 0 },
+        traffic: { days: [day], total: { pulls: 6, pushes: 3, conflicts: 1, errors: 0 } },
+        health: { couchOk: true, couchVersion: "3.3.3", protocolVersion: 1, provisioningMismatch: 0, uptimeSeconds: 60 },
+        attention: [],
+        conflictHotspots: [],
+        recentEvents: [],
+      },
+      Date.now(),
+    );
+    /*
+     * 量程的判据：轴上的**最大值标签**必须接近数据（这里 pull+push = 9）。
+     * 固定 400 会印出 ">400" 这种标签，而实际只用了 9。
+     */
+    expect(html).not.toContain(">400<");
+    expect(html).toMatch(/>10</);
+  });
+
+  it("冲突图的单日数据也画得出点（一个点连不成线，但不能什么都不画）", () => {
+    const V = loadViews();
+    const html = V.renderIssues(
+      {
+        traffic: { days: [{ day: "2026-10-23", pulls: 1, pushes: 1, conflicts: 3, errors: 0, deletes: 0 }], total: { pulls: 1, pushes: 1, conflicts: 3, errors: 0 } },
+        health: { provisioningMismatch: 0 },
+        conflictHotspots: [],
+      },
+      Date.now(),
+    );
+    expect(html).toContain("<circle");
+  });
+});
+

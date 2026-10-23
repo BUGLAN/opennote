@@ -95,6 +95,20 @@ function treeEntryFromDoc(doc: CouchDocument, cryptoMode: CryptoMode): {
   return entry;
 }
 
+/**
+ * 服务端记账用的「天」（`YYYY-MM-DD`，**UTC**）。
+ *
+ * 为什么是 UTC 而不是服务器本地时区：控制台的按天聚合要把多个来源的同一 `day`
+ * 合进一行，而服务器可能被部署在任何时区（compose 里默认就是 UTC）。
+ * 用本地时区会让同一份数据在换机器后前后错开一天。
+ *
+ * 这里只影响**服务端实测**的 `sync_activity`；`client_stats` 的 `day` 是客户端
+ * 自己给的（它按设备本地时区算）。两套不混表，所以这个差异不会串味。
+ */
+function utcDayOf(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
 /** 内容标识：明文模式取 `hash`，E2EE 取 `ehash`。 */
 function contentIdOf(doc: CouchDocument): string | null {
   if (typeof doc.hash === "string") return doc.hash;
@@ -177,9 +191,37 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     return { account: auth, notebook };
   };
 
+  /**
+   * 记一次**服务端实测**的同步活动。
+   *
+   * ## 为什么要在这里记账（而不是等客户端上报）
+   *
+   * 控制台的流量图与冲突热点读的是 `client_stats`，而那个上报（`POST /v1/stats`）
+   * **当前客户端根本没有调用** —— 于是页面永远显示「没有同步计数」，
+   * 而同步其实一直在跑。服务端有全部证据（请求是它接的、409 是它回的），
+   * 所以它在**自己**这条路径上记一份（`sync_activity`，与客户端那份分表存）。
+   *
+   * 记账失败**绝不**影响请求本身：这是可观测性，不是正确性。所以整段吞掉异常
+   * 只留日志 —— 一个「因为统计写不进去所以笔记同步失败」的实现是不可接受的。
+   */
+  const record = (
+    accountId: string,
+    notebookId: string,
+    kind: "pull" | "push" | "delete" | "conflict" | "error",
+    amount = 1,
+  ): void => {
+    try {
+      deps.notebooks.recordActivity({ accountId, notebookId, day: utcDayOf(Date.now()), kind, amount });
+    } catch (error) {
+      console.warn("[opennote-server] 同步活动记账失败（不影响请求）", error);
+    }
+  };
+
   /** CouchDB 错误 → HTTP。**冲突与不存在要分开**，否则客户端没法做三方 diff。 */
-  const couchError = (error: unknown): Response => {
+  const couchError = (error: unknown, context?: { accountId: string; notebookId: string }): Response => {
     if (error instanceof CouchError) {
+      // CouchDB 那一侧出错了 —— 这是控制台「冲突与异常」页要看到的**错误**计数。
+      if (context) record(context.accountId, context.notebookId, "error");
       const status = error.code === "not-found" ? 404 : error.code === "conflict" ? 409 : error.code === "too-large" ? 413 : error.code === "timeout" ? 504 : 502;
       return json({ error: error.message, code: error.code }, status);
     }
@@ -225,7 +267,13 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
   routes.get("/tree", async (c) => {
     const resolved = resolveNotebook(c, "read");
     if (resolved instanceof Response) return resolved;
-    const { notebook } = resolved;
+    const { notebook, account } = resolved;
+    /*
+     * 列树 = 一次**拉取**（客户端问「远端现在有什么」）。
+     * 记在**解析成功之后、真正去读 CouchDB 之前**：越权的请求根本到不了这里，
+     * 而 CouchDB 坏掉的那一次仍算「客户端拉了一次」（它确实试过了）。
+     */
+    record(account.id, notebook.id, "pull");
     const cryptoMode = cryptoModeOf(notebook);
     /*
      * 页大小与 `maxFileBytes` **无关**（以前这里写的是 `maxFileBytes > 0 ? 500 : 500`，
@@ -302,7 +350,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         200,
       );
     } catch (error) {
-      return couchError(error);
+      return couchError(error, { accountId: account.id, notebookId: notebook.id });
     }
   });
 
@@ -320,7 +368,8 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
   routes.get("/changes", async (c) => {
     const resolved = resolveNotebook(c, "read");
     if (resolved instanceof Response) return resolved;
-    const { notebook } = resolved;
+    const { notebook, account } = resolved;
+    record(account.id, notebook.id, "pull");
     const since = c.req.query("since") ?? null;
 
     try {
@@ -382,7 +431,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       if (since !== null && error instanceof CouchError && error.code === "bad-request") {
         return json(parseContract(changesResponseSchema, { cursor: "", resync: true, changes: [] }, "GET /v1/changes"), 200);
       }
-      return couchError(error);
+      return couchError(error, { accountId: account.id, notebookId: notebook.id });
     }
   });
 
@@ -397,9 +446,10 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
   routes.get("/file", async (c) => {
     const resolved = resolveNotebook(c, "read");
     if (resolved instanceof Response) return resolved;
-    const { notebook } = resolved;
+    const { notebook, account } = resolved;
     const did = c.req.query("did");
     if (!did) return json({ error: "缺少 did 参数", code: "bad-request" }, 400);
+    record(account.id, notebook.id, "pull");
 
     try {
       const bytes = await deps.couch.getAttachment(notebook.db_name, did);
@@ -413,7 +463,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       };
       return new Response(bytes, { status: 200, headers });
     } catch (error) {
-      return couchError(error);
+      return couchError(error, { accountId: account.id, notebookId: notebook.id });
     }
   });
 
@@ -434,7 +484,9 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
   routes.post("/files", async (c) => {
     const resolved = resolveNotebook(c, "read");
     if (resolved instanceof Response) return resolved;
-    const { notebook } = resolved;
+    const { notebook, account } = resolved;
+    // 一批 = 一次拉取（不是「每篇一次」）：记账要跟着**请求**走，不是跟着文件数走。
+    record(account.id, notebook.id, "pull");
 
     let payload: unknown;
     try {
@@ -468,7 +520,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       }
       return json(parseContract(filesBatchResponseSchema, { files }, "POST /v1/files"), 200);
     } catch (error) {
-      return couchError(error);
+      return couchError(error, { accountId: account.id, notebookId: notebook.id });
     }
   });
   /**
@@ -481,9 +533,11 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
   routes.put("/file", async (c) => {
     const resolved = resolveNotebook(c, "write");
     if (resolved instanceof Response) return resolved;
-    const { notebook } = resolved;
+    const { notebook, account } = resolved;
     const did = c.req.query("did");
     if (!did) return json({ error: "缺少 did 参数", code: "bad-request" }, 400);
+    // 一次写 = 一次**推送**（哪怕随后冲突，客户端也确实推了）。
+    record(account.id, notebook.id, "push");
 
     const bytes = new Uint8Array(await c.req.arrayBuffer());
     if (bytes.byteLength > deps.config.maxFileBytes) {
@@ -529,10 +583,13 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
        * 又有人写，它会返回 409，我们再把它转成同一个形状）。
        */
       if (ifMatch !== null && currentId !== null && ifMatch !== currentId) {
+        // 冲突也是一条**事实**（控制台要能看到「哪一端在持续制造冲突」）。
+        record(account.id, notebook.id, "conflict");
         return json({ error: "内容标识对不上（远端已变）", code: "conflict", current: { hash: currentId, rev: existing?._rev ?? null } }, 409);
       }
       if (ifMatch === null && existing) {
         // 缺省 = 允许**新建**；但远端已有这一条 ⇒ 对不上。
+        record(account.id, notebook.id, "conflict");
         return json({ error: "这一条已存在（缺省 If-Match 只允许新建）", code: "conflict", current: { hash: currentId, rev: existing._rev ?? null } }, 409);
       }
 
@@ -579,15 +636,25 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         { baseRev: existing?._rev ?? null },
       );
       if ("conflict" in written) {
+        record(account.id, notebook.id, "conflict");
         return json({ error: "写入冲突（远端在我们读取之后又变了）", code: "conflict", current: written.current ? { hash: contentIdOf(written.current), rev: written.current._rev ?? null } : null }, 409);
       }
+      /*
+       * **用量记账**（控制台的「占用 / 配额」靠它，而不是靠一个永远是 0 的缓存列）。
+       *
+       * 增量 = 这一版的字节数 − 上一版的字节数（覆盖写会让它变负，删除是 −旧大小）。
+       * 上一版的大小从文档的 `size` 字段读 —— 那是我们自己写的，形状可信。
+       * 读不到就按 0 算（宁可少记，不可凭空多记一个账号的用量）。
+       */
+      const previousSize = typeof existing?.size === "number" ? existing.size : 0;
+      deps.notebooks.addNotebookBytes(notebook.id, bytes.byteLength - previousSize);
       // 响应里回**这一版**的标识与 rev（客户端据此更新基线，§4.7: `-> 200/201 { hash?, ehash?, rev }`）。
       return json(
         { rev: written.rev, ...(cryptoMode === "none" ? { hash: newHash } : { ehash: newHash }) },
         existing ? 200 : 201,
       );
     } catch (error) {
-      return couchError(error);
+      return couchError(error, { accountId: account.id, notebookId: notebook.id });
     }
   });
 
@@ -599,9 +666,10 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
   routes.delete("/file", async (c) => {
     const resolved = resolveNotebook(c, "write");
     if (resolved instanceof Response) return resolved;
-    const { notebook } = resolved;
+    const { notebook, account } = resolved;
     const did = c.req.query("did");
     if (!did) return json({ error: "缺少 did 参数", code: "bad-request" }, 400);
+    record(account.id, notebook.id, "delete");
 
     try {
       const existing = await deps.couch.getDoc(notebook.db_name, did);
@@ -609,13 +677,23 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       const ifMatch = c.req.header("if-match") ?? null;
       const currentId = contentIdOf(existing);
       if (ifMatch !== null && currentId !== null && ifMatch !== currentId) {
+        record(account.id, notebook.id, "conflict");
         return json({ error: "内容标识对不上", code: "conflict", current: { hash: currentId, rev: existing._rev ?? null } }, 409);
       }
       const result = await deps.couch.putDoc(notebook.db_name, { _id: did, _deleted: true }, { baseRev: existing._rev ?? null });
-      if ("conflict" in result) return json({ error: "删除冲突", code: "conflict", current: null }, 409);
+      if ("conflict" in result) {
+        record(account.id, notebook.id, "conflict");
+        return json({ error: "删除冲突", code: "conflict", current: null }, 409);
+      }
+      /*
+       * 墓碑不再占「内容」的字节（附件在删除后确实不在了），所以把这一条
+       * 记过的大小减回去。读不到 `size` 的（历史数据 / 手写文档）按 0 处理。
+       */
+      const previousSize = typeof existing.size === "number" ? existing.size : 0;
+      if (previousSize > 0) deps.notebooks.addNotebookBytes(notebook.id, -previousSize);
       return new Response(null, { status: 204 });
     } catch (error) {
-      return couchError(error);
+      return couchError(error, { accountId: account.id, notebookId: notebook.id });
     }
   });
 
@@ -630,11 +708,29 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
   routes.put("/checkpoint", async (c) => {
     const resolved = resolveNotebook(c, "read");
     if (resolved instanceof Response) return resolved;
-    const { notebook } = resolved;
-    const body = (await c.req.json().catch(() => null)) as { cursor?: unknown; deviceId?: unknown } | null;
+    const { notebook, account } = resolved;
+    const body = (await c.req.json().catch(() => null)) as { cursor?: unknown; deviceId?: unknown; name?: unknown; platform?: unknown } | null;
     const deviceId = typeof body?.deviceId === "string" ? body.deviceId : null;
     const cursor = typeof body?.cursor === "string" ? body.cursor : null;
     if (!deviceId || !/^[0-9a-f]{32}$/.test(deviceId)) return json({ error: "deviceId 形状不对", code: "bad-request" }, 400);
+
+    /*
+     * ★ **检查点顺带登记设备**（`devices` 是只读账本，但不是「只能手工填」的账本）。
+     *
+     * 设备清单原先只由 `POST /v1/devices` 写入，而当前产品客户端**没有**调它 ——
+     * 于是控制台的设备页永远是空的，哪怕三台设备正在同步。检查点是客户端**每次同步
+     * 都会打**的请求，而且它本来就带着稳定的 `deviceId`（`src/sync/device.ts`），
+     * 所以这里顺手登记一次：不改协议、不要求客户端配合，也让设备账本有了真实来源。
+     *
+     * `name` / `platform` 客户端**现在不传**（不能为了这个改客户端协议），所以留空 ——
+     * 界面上显示「未命名设备」，比编一个名字诚实。将来客户端愿意带，这里已经收着了。
+     */
+    deps.notebooks.upsertDevice({
+      deviceId,
+      accountId: account.id,
+      name: typeof body?.name === "string" ? body.name.slice(0, 120) : null,
+      platform: body?.platform === "desktop" || body?.platform === "android" || body?.platform === "web" ? body.platform : null,
+    });
 
     const id = `_local/device-${deviceId}`;
     try {
@@ -648,7 +744,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       }
       return new Response(null, { status: 204 });
     } catch (error) {
-      return couchError(error);
+      return couchError(error, { accountId: account.id, notebookId: notebook.id });
     }
   });
 

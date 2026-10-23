@@ -1,118 +1,133 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="paper" data-accent="seal" data-appearance="light">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <!-- 控制台不该被搜索引擎收录，也不该被当成 PWA 装起来。 -->
     <meta name="robots" content="noindex, nofollow" />
+    <meta name="color-scheme" content="light dark" />
     <title>Opennote 控制台</title>
+    <link rel="stylesheet" href="/panel/tokens.css" />
     <link rel="stylesheet" href="/panel/styles.css" />
   </head>
   <body>
     <!--
-      控制台（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §4.6）。
+      控制台（docs/执行-三端同步-密钥即身份-2026-10-13.md §4.6）。
 
-      无构建步骤：原生 HTML + 一点 JS。它**不是产品的一部分**，只是一台多账号自托管
+      无构建步骤：原生 HTML + CSS + JS。它**不是产品的一部分**，只是一台多账号自托管
       同步服务的「账户 + 仪表盘 + 开关」。
 
-      ★ 管理员区块在 HTML 里**只有容器、没有内容** —— 内容由 `app.js` 在确认 `isAdmin`
-        之后才创建。§10.1 M8 要求「越权控制台页面：页面不渲染 + API 403」，
-        「不渲染」必须是**不生成 DOM**，而不是生成后用 CSS 藏起来。
-    -->
-    <header>
-      <h1>Opennote 控制台</h1>
-      <p class="muted" id="who"></p>
-      <button id="logout" type="button" hidden>退出</button>
-    </header>
+      ★ 管理员区块在 HTML 里**一个字节都没有** —— 连容器都不留。
+        内容由 app.js 在确认 isAdmin 之后才创建。§10.1 M8 要求「越权控制台页面：
+        页面不渲染 + API 403」，「不渲染」必须是**不生成 DOM**，而不是生成后用 CSS
+        藏起来（后者在开发者工具里一改就出来）。
 
-    <main>
-      <!-- ============================ 未登录：导入密钥 ============================ -->
-      <section id="unlock">
-        <h2>用账号密钥进入</h2>
-        <p class="muted">
-          没有登录表单 —— 你的账号密钥就是账号本身。密钥在这台设备上派生出令牌，
-          服务端只保存它的哈希，<strong>看不到密钥</strong>。
-        </p>
-        <label for="key">账号密钥（导入或粘贴）</label>
-        <textarea id="key" rows="3" spellcheck="false" autocomplete="off"
-          placeholder="opennote-key-v1.<base64url>"></textarea>
-        <div class="row">
-          <button id="enter" type="button">进入</button>
-          <input id="keyfile" type="file" accept=".txt,.key,text/plain" />
-          <label class="file" for="keyfile">从文件导入</label>
+      ★ CSP 是 script-src 'self' / style-src 'self'，所以这里**没有一行内联脚本、
+        没有一个 style="…"**。所有间距走类名，所有颜色走 tokens.css 的变量。
+
+      ★ 这个文件里**只有一个** <html>/<body>：外壳（#app 里的 .console）与登录页
+        （#unlock）是同一份文档里的两段，由 app.js 用 hidden 切换。
+        写成两个根元素会让浏览器把第二段整个丢掉 —— 现象是「登录后什么都没有」，
+        而控制台里连报错都没有（HTML 解析错误不是 JS 错误）。
+    -->
+
+    <div class="console" id="app" hidden>
+      <!-- ===================== 顶栏 ===================== -->
+      <header class="topbar">
+        <div class="brand">
+          <img class="brand__seal" id="brand-seal" src="/panel/assets/seal/seal-light.png" alt="" width="22" height="22" />
+          <span class="brand__name">Opennote</span>
+          <span class="brand__divider" aria-hidden="true"></span>
+          <span class="brand__context">同步控制台</span>
         </div>
-        <p class="error" id="unlock-error" hidden></p>
-        <p class="muted small">
+
+        <div class="topbar__search">
+          <button class="search-trigger" id="search-trigger" type="button" aria-label="搜索账号、笔记本、设备与日志">
+            <span class="search-trigger__icon" id="search-icon" aria-hidden="true">⌕</span>
+            <span class="search-trigger__label">搜索账号、笔记本、设备、日志…</span>
+            <kbd>Ctrl K</kbd>
+          </button>
+        </div>
+
+        <div class="topbar__actions">
+          <span class="env-chip" id="env-chip" title="外部访问地址"><span class="env-chip__dot" aria-hidden="true"></span><span id="env-chip-text"></span></span>
+          <button class="icon-btn" id="appearance-btn" type="button" aria-label="切换亮色 / 暗色主题" title="切换亮色 / 暗色主题"></button>
+          <button class="account-btn" id="account-btn" type="button" aria-haspopup="menu" aria-expanded="false"></button>
+          <div class="menu" id="account-menu" role="menu" hidden></div>
+        </div>
+      </header>
+
+      <!-- ===================== 侧栏 ===================== -->
+      <!-- 导航由 app.js 按 isAdmin 生成：普通账号这里**不会出现**管理页的链接。 -->
+      <nav class="nav" id="nav" aria-label="主导航"></nav>
+
+      <!-- ===================== 内容 ===================== -->
+      <main class="main" id="main" tabindex="-1"></main>
+    </div>
+
+    <!-- ===================== 抽屉 ===================== -->
+    <div class="scrim" id="scrim" hidden></div>
+    <aside class="drawer" id="drawer" tabindex="-1" aria-hidden="true" aria-label="详情">
+      <div id="drawer-content"></div>
+    </aside>
+
+    <!-- ===================== 对话框 ===================== -->
+    <dialog class="dialog" id="dialog" aria-labelledby="dialog-title"></dialog>
+
+    <!-- ===================== 命令面板 ===================== -->
+    <div class="palette" id="palette" hidden>
+      <div class="palette__box" role="dialog" aria-modal="true" aria-label="全局搜索">
+        <div class="palette__inputrow">
+          <span class="palette__icon" id="palette-icon" aria-hidden="true">⌕</span>
+          <input class="palette__input" id="palette-input" type="text" placeholder="搜索账号、笔记本、设备、日志…" autocomplete="off" spellcheck="false" aria-controls="palette-list" />
+          <kbd>Esc</kbd>
+        </div>
+        <div class="palette__list" id="palette-list" role="listbox" aria-label="搜索结果"></div>
+        <div class="palette__foot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> 移动</span>
+          <span><kbd>Enter</kbd> 打开</span>
+          <span><kbd>Esc</kbd> 关闭</span>
+          <span class="spacer"></span>
+          <span class="mono" id="palette-count">0 项</span>
+        </div>
+      </div>
+    </div>
+
+    <!--
+      未登录：用账号密钥进入。
+
+      这一段在 HTML 里是静态的（它不含任何账号数据），登录成功后由 app.js 隐藏。
+      真正的密钥派生在 app.js 里用 WebCrypto 完成 —— **密钥从不发给服务端**。
+    -->
+    <section class="unlock" id="unlock" hidden>
+      <div class="unlock__card">
+        <img class="unlock__seal" id="unlock-seal" src="/panel/assets/seal/seal-light.png" alt="" width="52" height="52" />
+        <h1 class="unlock__title">用账号密钥进入</h1>
+        <p class="unlock__lede">
+          没有用户名、没有口令 —— <strong>你的账号密钥就是账号本身</strong>。
+          密钥在这台设备上派生出令牌，服务端只保存它的哈希，看不到密钥。
+        </p>
+        <label class="field-label" for="key">账号密钥</label>
+        <textarea class="field field--mono" id="key" rows="3" spellcheck="false" autocomplete="off" placeholder="opennote-key-v1.&lt;base64url&gt;"></textarea>
+        <div class="unlock__row">
+          <button class="btn btn--primary" id="enter" type="button">进入</button>
+          <input id="keyfile" type="file" accept=".txt,.key,text/plain" hidden />
+          <label class="btn" for="keyfile">从文件导入</label>
+        </div>
+        <p class="form-error" id="unlock-error" hidden></p>
+        <p class="unlock__note">
           密钥<b>不会</b>被发送到服务端：页面在这里派生出令牌，只把令牌放进 HttpOnly cookie。
-          但请注意：网页端终究信任「服务端当天发给它的这份 JS」——
+          但网页端终究信任「服务端当天发给它的这份 JS」——
           <a href="/v1/health" target="_blank" rel="noopener">核对构建哈希</a>。
         </p>
-      </section>
-
-      <!-- ============================ 已登录 ============================ -->
-      <div id="app" hidden>
-        <nav id="tabs"></nav>
-
-        <!-- 我的账号 -->
-        <section data-panel="account" hidden>
-          <h2>我的账号</h2>
-          <dl id="account-info"></dl>
-          <!-- ★ 三条能力边界说明由 API 下发（capabilityNotes），不写死在 HTML 里。 -->
-          <div class="notes" id="account-notes"></div>
-          <div class="row">
-            <button id="rotate" type="button" class="danger">轮换账号密钥</button>
-            <button id="delete-account" type="button" class="danger">删除账号</button>
-          </div>
-          <p class="error" id="rotate-error" hidden></p>
-        </section>
-
-        <!-- 我的设备 -->
-        <section data-panel="devices" hidden>
-          <h2>我的设备</h2>
-          <p class="muted" id="devices-note"></p>
-          <table id="devices"></table>
-        </section>
-
-        <!-- 我的笔记本 -->
-        <section data-panel="notebooks" hidden>
-          <h2>我的笔记本</h2>
-          <div class="row">
-            <input id="nb-name" placeholder="新笔记本的名字" />
-            <select id="nb-crypto">
-              <option value="none">明文（可共享）</option>
-              <option value="user-key">端到端加密（不可共享，v1 限制）</option>
-            </select>
-            <button id="nb-create" type="button">新建</button>
-          </div>
-          <p class="error" id="nb-error" hidden></p>
-          <table id="notebooks"></table>
-        </section>
-
-        <!-- 用量 -->
-        <section data-panel="usage" hidden>
-          <h2>用量</h2>
-          <dl id="usage-info"></dl>
-        </section>
-
-        <!-- 冲突与错误 -->
-        <section data-panel="stats" hidden>
-          <h2>冲突与错误</h2>
-          <p class="muted" id="stats-note"></p>
-          <table id="stats"></table>
-        </section>
-
-        <!--
-          ★ **管理员区块不在这里。** 它们在 `app.js` 里、只有在 `/panel/api/me` 回了
-            `isAdmin: true` 之后才被 **创建**。
-
-          为什么连「空容器」都不留：§10.1 M8 要求「页面不渲染 + API 403」。
-          留一个空容器意味着管理员的**区块名**出现在普通账号拿到的 HTML 里 ——
-          那不是漏洞（这些名字文档里就有），但它会让「页面不渲染」这句话变得含糊，
-          而含糊的边界迟早会被下一个人填上内容。**不生成**是没有歧义的。
-        -->
       </div>
-    </main>
+    </section>
 
-    <script type="module" src="/panel/app.js"></script>
+    <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+    <!-- 顺序有讲究：icons → views（纯函数）→ app（外壳，最后启动）。 -->
+    <script src="/panel/icons.js"></script>
+    <script src="/panel/views.js"></script>
+    <script src="/panel/app.js" type="module"></script>
   </body>
 </html>
