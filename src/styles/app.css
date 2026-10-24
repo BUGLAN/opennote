@@ -3522,3 +3522,41 @@ mark.hit {
   border-top: 1px solid var(--rule);
 }
 .cf-foot .spacer { flex: 1; }
+
+/* ------------------------------ 无限画布（画布 MVP · 任务 C） -------------------- */
+/*
+ * 只追加、不改既有规则；颜色/字号/间距一律取 tokens.css 令牌。
+ * .canvas-root（画布本体）的样式在 canvas.css —— 它随 CanvasView 懒加载分包
+ * 一起进入；这里只管外层容器与懒加载载入态。
+ */
+
+/* 画布标签的内容区：与 .editor-host 同一地位（.main 的 flex 子项、给画布根一个确定高度）。 */
+.canvas-pane {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--paper);
+}
+
+/* 懒加载分包首次打开画布时的载入态（复用 .busy__spinner 的环，颜色走 currentColor）。 */
+.canvas-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: var(--fs-md);
+}
+
+/* 画布标签上的锁按钮置灰：只读锁是 md 编辑器概念，画布不适用（App 传 lockDisabled）。
+   disabled 的按钮仍会命中 .icon-btn:hover，这里一并压掉，不留「灰按钮悬停变亮」的假活感。 */
+.tabbar__lock--off,
+.tabbar__lock--off:hover {
+  color: var(--ink-3);
+  background: transparent;
+  cursor: default;
+}
+

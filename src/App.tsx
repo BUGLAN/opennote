@@ -1,8 +1,10 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { EditorView } from "@codemirror/view";
 import {
   allTags,
+  canvasesReferencing,
   closeTab,
+  createCanvas,
   createFolder,
   createNote,
   currentBackend,
@@ -63,10 +65,10 @@ import {
   type ImportUndoResult,
   type ImportReceipt,
 } from "./lib/clip";
-import { importFilesIntoOpfs, isCapacitorNative, pickFiles, supportsFileSystemAccess, supportsOpfs } from "./fs";
+import { baseName, importFilesIntoOpfs, isCapacitorNative, pickFiles, stripExtension, supportsFileSystemAccess, supportsOpfs } from "./fs";
 import { desktopBridge, type ImportOutcome } from "./desktop/bridge";
 import { getUi, patchUi, setTheme as applyTheme, toggleAppearance, useUi } from "./data/ui";
-import type { Id, Snapshot, ThemeId, UiSettings } from "./data/types";
+import { noteKind, type Id, type Snapshot, type ThemeId, type UiSettings } from "./data/types";
 import { buildAppCommands, isEditableTarget, matchesShortcut } from "./lib/appCommands";
 import { useStore } from "./lib/store";
 import { askConfirm, askText } from "./lib/dialogs";
@@ -112,7 +114,18 @@ import { activeBackend } from "./data/library";
 import { TabBar } from "./components/TabBar";
 import { WindowControls } from "./components/WindowControls";
 import { setBridge } from "./editor/bridge";
+/* 画布（无限画布 MVP）：types 与 controller 都无三方依赖，静态 import 不破坏懒加载；
+   CanvasView 本体只经下面的 React.lazy 进入 —— 它连着 @xyflow/react。 */
+import { getActiveCanvasApi } from "./canvas/controller";
+import { parseCanvas } from "./canvas/types";
 import { findImageSource, unwrapSource } from "./editor/livePreview";
+
+/*
+ * 画布视图的唯一入口（React.lazy 动态 import）：静态引用 CanvasView 或其子模块会把
+ * @xyflow/react 打进启动包，破坏懒加载分包（产物应为 dist/assets/lazy/canvas-view-*.js，
+ * 且不进 Service Worker 预缓存）。
+ */
+const CanvasView = lazy(() => import("./canvas/CanvasView"));
 
 export default function App(): ReactNode {
   const library = useLibrary();
@@ -158,6 +171,8 @@ export default function App(): ReactNode {
   const activeNote = activeId ? library.notes[activeId] ?? library.trash[activeId] : null;
   /** 当前笔记的只读锁（标签栏的锁按钮 → EditorPane 的 readOnly）。 */
   const activeLocked = activeId !== null && ui.lockedNotes.includes(activeId);
+  /** 活跃标签是不是画布（回收站里打开的画布也算 —— kind 经 noteKind 归一化）。 */
+  const activeIsCanvas = activeNote !== null && noteKind(activeNote) === "canvas";
   const deferredContent = useDeferredValue(activeNote?.content ?? "");
   const hasWorkspace = Boolean(library.workspace);
   const bridge = useMemo(() => desktopBridge(), []);
@@ -177,6 +192,23 @@ export default function App(): ReactNode {
   );
   // 桌面端自更新：状态与动作都在 `src/lib/update.ts`（渲染层只显示状态、转发动作）。
   const update = useUpdateController();
+
+  /* 画布统计（状态栏「N 张卡片 · M 条连线」）：解析走 deferred 内容，打字时不抢主线程。 */
+  const canvasStats = useMemo(() => {
+    if (!activeIsCanvas) return null;
+    const { doc } = parseCanvas(deferredContent);
+    return { cards: doc.nodes.length, edges: doc.edges.length };
+  }, [activeIsCanvas, deferredContent]);
+
+  /** EditorPane 只收 md 标签：画布标签不建 CodeMirror 实例（画布视图自己接管）。 */
+  const editorTabIds = useMemo(
+    () =>
+      ui.tabs.filter((id) => {
+        const note = library.notes[id] ?? library.trash[id];
+        return !note || noteKind(note) === "note";
+      }),
+    [ui.tabs, library.notes, library.trash],
+  );
 
   const headings = useMemo(() => extractHeadings(deferredContent), [deferredContent]);
   const currentHeading = useMemo(
@@ -991,6 +1023,33 @@ export default function App(): ReactNode {
     // requestMeasure + focus —— 这里再抢一次 rAF 反而会扑在旧的（已隐藏的）实例上。
   };
 
+  const newCanvas = () => {
+    if (!hasWorkspace) return;
+    // 无 folder 参数：MVP 把新画布落在工作区根目录，落点可预测（笔记则跟随当前文件夹）。
+    const canvas = createCanvas();
+    notify("已新建画布", { action: { label: "移到回收站", run: () => trashNote(canvas.id) } });
+  };
+
+  /*
+   * 反向定位（在画布中显示此笔记）：多张画布引用时取 updatedAt 最新的一张。
+   * focusNode 必须等画布视图挂载、把命令入口注册进 controller —— 首次打开还要先
+   * 拉懒加载分包，所以经 focusCanvasNodeWhenReady 有界重试，而不是同步调用。
+   */
+  const showNoteInCanvas = () => {
+    if (!activeId || !activeNote || activeIsCanvas) return;
+    const hits = canvasesReferencing(activeId);
+    if (hits.length === 0) return;
+    let target = hits[0]!;
+    for (const hit of hits) {
+      if ((library.notes[hit.canvasId]?.updatedAt ?? 0) > (library.notes[target.canvasId]?.updatedAt ?? 0)) {
+        target = hit;
+      }
+    }
+    openNote(target.canvasId, { activate: true });
+    notify(`共 ${hits.length} 张画布引用此笔记`);
+    focusCanvasNodeWhenReady(target.canvasId, target.nodeId);
+  };
+
   const newFolder = async (parentId?: Id | null) => {
     if (!hasWorkspace) return;
     const name = await askText({ title: "新建文件夹", label: "文件夹名称", placeholder: "例如：读书笔记", confirmLabel: "创建" });
@@ -1008,6 +1067,11 @@ export default function App(): ReactNode {
 
   const exportNote = async (kind: "md" | "md-inline" | "html") => {
     if (!activeNote) return;
+    // 画布是 JSON Canvas 不是 Markdown：不进 md 导出管道（MVP 暂无画布导出）。
+    if (noteKind(activeNote) === "canvas") {
+      notify("画布暂不支持导出/打印");
+      return;
+    }
     try {
       if (kind === "html") await exportNoteHtml(activeNote);
       else await exportNoteMarkdown(activeNote, { inlineAssets: kind === "md-inline" });
@@ -1038,6 +1102,16 @@ export default function App(): ReactNode {
         hasWorkspace: () => hasWorkspace,
         newNote,
         newFolder: () => void newFolder(),
+        newCanvas,
+        activeCanvasApi: () =>
+          activeId !== null && activeNote !== null && noteKind(activeNote) === "canvas"
+            ? getActiveCanvasApi(activeId)
+            : null,
+        canvasRefsForActiveNote: () =>
+          activeId !== null && activeNote !== null && noteKind(activeNote) === "note"
+            ? canvasesReferencing(activeId)
+            : null,
+        showNoteInCanvas,
         openPalette: (mode) => setPalette(mode),
         openSearch: () => {
           patchUi({ sidebarOpen: true });
@@ -1101,7 +1175,14 @@ export default function App(): ReactNode {
             notify("浏览器拒绝了剪贴板访问", { kind: "danger" });
           }
         },
-        printNote: () => window.print(),
+        printNote: () => {
+          // 画布没有打印样式：不进 window.print()（与 exportNote 同一条守卫）。
+          if (activeNote && noteKind(activeNote) === "canvas") {
+            notify("画布暂不支持导出/打印");
+            return;
+          }
+          window.print();
+        },
         setTheme: (theme: ThemeId) => applyTheme(theme),
         notify: (message) => notify(message),
       }),
@@ -1317,11 +1398,13 @@ export default function App(): ReactNode {
             notes={library.notes}
             activeId={activeId}
             dirty={library.dirty}
-            locked={activeLocked}
+            locked={activeLocked && !activeIsCanvas}
+            lockDisabled={activeIsCanvas}
             onSelect={(id) => openNote(id)}
             onClose={closeTab}
             onToggleLock={() => {
-              if (!activeId) return;
+              // 只读锁是 md 编辑器概念：画布标签不适用（按钮同时置灰，双保险）。
+              if (!activeId || activeIsCanvas) return;
               // 只读锁：锁定的笔记编辑器不收输入（EditorPane 里用 Compartment 切），
               // 状态随 `ui.lockedNotes` 落盘 —— 重启后还锁着，删掉的笔记残留 id 无副作用。
               const locked = ui.lockedNotes.includes(activeId);
@@ -1378,12 +1461,17 @@ export default function App(): ReactNode {
                     if (bridge && absolute) void bridge.shell.showItemInFolder(absolute);
                   },
                 },
-                {
-                  id: "export",
-                  label: "导出这篇笔记",
-                  icon: "download",
-                  run: () => note && void exportNoteMarkdown(note),
-                },
+                /* 画布标签不给「导出这篇笔记」：那会下载一份装着 JSON 的 .md（与命令面板同一条守卫）。 */
+                ...(note && noteKind(note) !== "canvas"
+                  ? [
+                      {
+                        id: "export",
+                        label: "导出这篇笔记",
+                        icon: "download" as const,
+                        run: () => void exportNoteMarkdown(note),
+                      },
+                    ]
+                  : []),
               ]);
             }}
           />
@@ -1436,7 +1524,7 @@ export default function App(): ReactNode {
            * 一收一放就是用户看到的「切换文件整屏闪」（2026-10-10 用户报告）。
            * `viewRef` 语义不变：活跃实例的 view（大纲跳转、命令、新建笔记聚焦都用它）。
            */
-          tabs={ui.tabs}
+          tabs={editorTabIds}
           activeId={activeId}
           getNote={(id) => library.notes[id] ?? library.trash[id] ?? null}
           lockedIds={ui.lockedNotes}
@@ -1458,9 +1546,37 @@ export default function App(): ReactNode {
           }}
         />
 
+        {/* 画布标签：懒加载分包首次打开时先见「正在载入画布…」。key=canvasId —— 换画布 =
+            卸载重建（视口恢复与 controller 注册都只认挂载那一刻的 id，与 EditorHost 同款约定）。 */}
+        {hasWorkspace && activeId && activeNote && activeIsCanvas ? (
+          <div className="canvas-pane">
+            <Suspense
+              fallback={
+                <div className="canvas-loading" role="status">
+                  <span className="busy__spinner" aria-hidden="true" />
+                  正在载入画布…
+                </div>
+              }
+            >
+              <CanvasView
+                key={activeId}
+                canvasId={activeId}
+                content={activeNote.content}
+                onContentChange={(text) => updateNoteContent(activeId, text)}
+                onOpenNote={(id) => openNote(id, { activate: true })}
+                getNoteInfo={(id) => {
+                  /* 只认工作区里的目标：进了回收站 = 失效（不翻 trash 桶），标题退回路径 stem。 */
+                  const note = library.notes[id];
+                  return note ? { title: note.title, exists: true } : { title: stripExtension(baseName(id)), exists: false };
+                }}
+              />
+            </Suspense>
+          </div>
+        ) : null}
+
         {/* 只读锁 = 阅读视图（0.4.0 用户反馈）：锁上时编辑器留在挂载状态（undo/光标都在），
             上面整篇渲染成文章排版 —— 读笔记就该是读文章，不是盯着一个不能打字的光标。 */}
-        {hasWorkspace && activeNote && activeLocked ? <ReadingView note={activeNote} /> : null}
+        {hasWorkspace && activeNote && activeLocked && !activeIsCanvas ? <ReadingView note={activeNote} /> : null}
 
         {/* 正文宽度拖拽条：铺在 .main 上、贴着正文栏左右边缘（见组件的文件头注释）。
             没有打开的笔记时不挂；只读锁时量的是阅读视图的 .reading。
@@ -1480,6 +1596,7 @@ export default function App(): ReactNode {
 
         <StatusBar
           counts={counts}
+          canvas={canvasStats}
           cursor={cursor}
           settings={ui}
           locationLabel={locationLabel}
@@ -1783,6 +1900,17 @@ function storageLabel(record: WorkspaceRecord): string {
   if (record.kind === "fsa") return `浏览器文件夹 · ${record.name}`;
   if (record.kind === "capacitor") return `手机文件夹 · Documents/OpenNote/${record.name}`;
   return `浏览器本地 · ${record.name}`;
+}
+
+/** 等画布视图把命令入口注册进 controller（懒加载分包首次加载是异步的），最多等 5 秒后放弃。 */
+function focusCanvasNodeWhenReady(canvasId: string, nodeId: string, attempts = 50): void {
+  const api = getActiveCanvasApi(canvasId);
+  if (api) {
+    api.focusNode(nodeId);
+    return;
+  }
+  if (attempts <= 0) return;
+  window.setTimeout(() => focusCanvasNodeWhenReady(canvasId, nodeId, attempts - 1), 100);
 }
 
 function positionOfLine(markdown: string, line: number): number {

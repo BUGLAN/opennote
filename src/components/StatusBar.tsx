@@ -6,6 +6,12 @@ import type { CursorInfo } from "./EditorPane";
 
 interface StatusBarProps {
   counts: { chars: number; words: number; minutes: number };
+  /**
+   * 画布活跃时的卡片/连线统计（普通笔记为 `null`）。非空时字数槽位换成
+   * 「N 张卡片 · M 条连线」（仍受 `showWordCount` 开关管），光标行列不渲染
+   * （画布没有行列概念，残留上一次编辑器的值只会误导）。
+   */
+  canvas: { cards: number; edges: number } | null;
   cursor: CursorInfo;
   settings: UiSettings;
   locationLabel: string;
@@ -87,16 +93,24 @@ export function StatusBar(props: StatusBarProps): ReactNode {
         <span className="statusbar__spacer" />
 
         {settings.showWordCount ? (
-          <span className="statusbar__item statusbar__item--compact" title="字数统计">
-            {props.counts.words.toLocaleString("zh-CN")} 字 · {props.counts.chars.toLocaleString("zh-CN")} 字符 · 约{" "}
-            {props.counts.minutes} 分钟
-          </span>
+          props.canvas ? (
+            <span className="statusbar__item statusbar__item--compact" title="画布统计">
+              {props.canvas.cards.toLocaleString("zh-CN")} 张卡片 · {props.canvas.edges.toLocaleString("zh-CN")} 条连线
+            </span>
+          ) : (
+            <span className="statusbar__item statusbar__item--compact" title="字数统计">
+              {props.counts.words.toLocaleString("zh-CN")} 字 · {props.counts.chars.toLocaleString("zh-CN")} 字符 · 约{" "}
+              {props.counts.minutes} 分钟
+            </span>
+          )
         ) : null}
 
-        <span className="statusbar__item statusbar__item--cursor" title="光标位置">
-          行 {props.cursor.line} · 列 {props.cursor.column}
-          {props.cursor.selected ? ` · 选中 ${props.cursor.selected}` : ""}
-        </span>
+        {props.canvas ? null : (
+          <span className="statusbar__item statusbar__item--cursor" title="光标位置">
+            行 {props.cursor.line} · 列 {props.cursor.column}
+            {props.cursor.selected ? ` · 选中 ${props.cursor.selected}` : ""}
+          </span>
+        )}
       </div>
 
       <div className="statusbar__actions">

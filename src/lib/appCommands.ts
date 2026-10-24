@@ -1,6 +1,7 @@
 import type { EditorView } from "@codemirror/view";
 import { redo, undo } from "@codemirror/commands";
 import type { IconName } from "../components/Icons";
+import type { CanvasViewApi } from "../canvas/controller";
 import { THEMES, type Id, type ThemeId } from "../data/types";
 import { markdownCommands, setHeading, toggleLinePrefix } from "../editor/commands";
 import { isApple } from "./utils";
@@ -49,6 +50,18 @@ export interface CommandContext {
   importFromGithub: (() => void) | null;
   /** 同步当前镜像笔记本与 GitHub（不是镜像笔记本时传 `null`，那一组命令整个不出现）。 */
   syncGithub: (() => void) | null;
+  /** 新建一篇无限画布（`.canvas` 落工作区根目录，数据层负责打开标签）。 */
+  newCanvas(): void;
+  /**
+   * 活跃画布的命令入口（App 解析「当前标签是不是画布」后向 controller 取）。
+   * 活跃标签不是画布、或画布视图尚未挂载（懒加载分包在路上）时为 `null` ——
+   * 缩放类命令因此天然走 `enabled()` 机制，面板里看不到不可用的条目。
+   */
+  activeCanvasApi(): CanvasViewApi | null;
+  /** 活跃 md 笔记被哪些画布的文件卡片引用；活跃标签不是普通笔记时为 `null`。 */
+  canvasRefsForActiveNote(): { canvasId: string; nodeId: string }[] | null;
+  /** 「在画布中显示此笔记」：打开引用它的画布（多张取 updatedAt 最新）并居中命中卡片。 */
+  showNoteInCanvas(): void;
 }
 
 export type CommandGroup =
@@ -187,6 +200,21 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       keys: ["mod+shift+n"],
       run: () => ctx.newFolder(),
     },
+    /*
+     * 画布族命令（无限画布 MVP）。可见性全走 enabled()：不满足条件时命令面板里
+     * 整条不出现 —— 与浏览器专属 / GitHub 那两组同一套纪律，不造假按钮。
+     */
+    {
+      id: "new-canvas",
+      label: "新建画布",
+      group: "笔记",
+      icon: "plus",
+      // 与「新建笔记 mod+N / 新建文件夹 mod+Shift+N」同一族的第三档；编辑器键位表不用 Alt 修饰键。
+      shortcut: `${accel("Alt")} + N`,
+      keys: ["mod+alt+n"],
+      enabled: () => ctx.hasWorkspace(),
+      run: () => ctx.newCanvas(),
+    },
     { id: "duplicate", label: "创建副本", group: "笔记", icon: "copy", run: () => ctx.duplicateNote() },
     { id: "star", label: "加星标 / 取消星标", group: "笔记", icon: "star", run: () => ctx.toggleStar() },
     {
@@ -251,6 +279,15 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       keys: ["alt+w", "mod+w", "mod+alt+w"],
       run: () => ctx.closeTab(),
     },
+    {
+      id: "canvas-show-note",
+      label: "在画布中显示此笔记",
+      group: "导航",
+      icon: "external",
+      // 反向定位：活跃 md 笔记至少被一张画布引用时才出现。
+      enabled: () => (ctx.canvasRefsForActiveNote()?.length ?? 0) > 0,
+      run: () => ctx.showNoteInCanvas(),
+    },
 
     {
       id: "toggle-sidebar",
@@ -294,6 +331,22 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       group: "视图",
       icon: "hash",
       run: () => ctx.toggleWordCount(),
+    },
+    {
+      id: "canvas-fit-view",
+      label: "画布：缩放适配全部",
+      group: "视图",
+      icon: "focus",
+      enabled: () => ctx.activeCanvasApi() !== null,
+      run: () => ctx.activeCanvasApi()?.fitView(),
+    },
+    {
+      id: "canvas-reset-zoom",
+      label: "画布：重置缩放",
+      group: "视图",
+      icon: "rotate",
+      enabled: () => ctx.activeCanvasApi() !== null,
+      run: () => ctx.activeCanvasApi()?.resetZoom(),
     },
 
     {
