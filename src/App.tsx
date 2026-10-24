@@ -1023,10 +1023,11 @@ export default function App(): ReactNode {
     // requestMeasure + focus —— 这里再抢一次 rAF 反而会扑在旧的（已隐藏的）实例上。
   };
 
-  const newCanvas = () => {
+  const newCanvas = (folderId?: Id | null) => {
     if (!hasWorkspace) return;
-    // 无 folder 参数：MVP 把新画布落在工作区根目录，落点可预测（笔记则跟随当前文件夹）。
-    const canvas = createCanvas();
+    // 无 folder 参数（命令面板）：落在工作区根目录，落点可预测（笔记则跟随当前文件夹）；
+    // 侧栏文件夹右键菜单传入所在文件夹，画布就建在那里。
+    const canvas = createCanvas(folderId == null ? undefined : { folderId });
     notify("已新建画布", { action: { label: "移到回收站", run: () => trashNote(canvas.id) } });
   };
 
@@ -1357,6 +1358,7 @@ export default function App(): ReactNode {
         onTab={setTab}
         onOpenNote={(id) => openNote(id)}
         onNewNote={(folderId) => newNote(folderId)}
+        onNewCanvas={(folderId) => newCanvas(folderId)}
         onNewFolder={(parentId) => void newFolder(parentId)}
         onToggleSidebar={() => patchUi({ sidebarOpen: !ui.sidebarOpen })}
         onOpenWorkspace={(record) => void openRecord(record)}

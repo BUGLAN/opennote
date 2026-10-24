@@ -76,6 +76,7 @@ export interface SidebarProps {
   onTab(tab: SidebarTab): void;
   onOpenNote(id: Id): void;
   onNewNote(folderId?: Id | null): void;
+  onNewCanvas(folderId?: Id | null): void;
   onNewFolder(parentId?: Id | null): void;
   /**
    * 头部那个「收起 / 展开」按钮。**必须是切换**：收起后头部仍然留在原地
@@ -789,6 +790,7 @@ function FolderBranch({ folder, depth, dropZoneProps, ...props }: BranchProps): 
 function folderMenu(folder: Folder, props: SidebarProps): MenuItem[] {
   return [
     { id: "new-note", label: "在此新建笔记", icon: "plus", run: () => props.onNewNote(folder.id) },
+    { id: "new-canvas", label: "在此新建画布", icon: "plus", run: () => props.onNewCanvas(folder.id) },
     { id: "new-folder", label: "新建子文件夹", icon: "folder", run: () => props.onNewFolder(folder.id) },
     {
       id: "rename",
