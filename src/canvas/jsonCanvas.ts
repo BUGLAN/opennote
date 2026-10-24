@@ -7,13 +7,16 @@
  * 2. **往返幂等**：`serializeCanvas(parseCanvas(serializeCanvas(doc))) ===
  *    serializeCanvas(doc)` —— 序列化输出的字段序是唯一范式（node:
  *    id,type,x,y,width,height,类型字段,未知字段按原插入序；edge:
- *    id,fromNode,fromSide,toNode,toSide,label,未知字段），`JSON.parse` 又按
- *    文档序还原对象键序，于是第二次序列化逐字节复现第一次。
+ *    id,fromNode,fromSide,toNode,toSide,label,color,fromEnd,toEnd,未知字段），
+ *    `JSON.parse` 又按文档序还原对象键序，于是第二次序列化逐字节复现第一次。
  */
 import type {
   CanvasDocument,
   CanvasEdge,
+  CanvasEdgeEnd,
   CanvasFileNode,
+  CanvasGroupNode,
+  CanvasLinkNode,
   CanvasNode,
   CanvasNodeSide,
   CanvasParseError,
@@ -21,12 +24,17 @@ import type {
   CanvasTextNode,
   CanvasUnknownNode,
 } from "./types";
-import { isCanvasFileNode, isCanvasTextNode } from "./types";
+import { isCanvasFileNode, isCanvasGroupNode, isCanvasLinkNode, isCanvasTextNode } from "./types";
 
 const SIDES: readonly string[] = ["top", "right", "bottom", "left"];
+const ENDS: readonly string[] = ["none", "arrow"];
 
 function isSide(value: unknown): value is CanvasNodeSide {
   return typeof value === "string" && (SIDES as string[]).includes(value);
+}
+
+function isEdgeEnd(value: unknown): value is CanvasEdgeEnd {
+  return typeof value === "string" && (ENDS as string[]).includes(value);
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -173,14 +181,16 @@ function scanJsonLine(text: string): number | undefined {
 /**
  * 单个节点 → 领域对象。
  *
- * 已知类型（text/file）缺任何一个必填字段（id / x / y / width / height / 类型
- * 字段）都返回 `null`（调用方记 error 并跳过该项，不毁整篇）；未知类型只要求
- * `id` 与 `type` 是非空字符串，其余字段原样带走（见 `CanvasUnknownNode` 的注释）。
+ * 已知类型（text/file/link/group）缺任何一个必填字段（id / x / y / width /
+ * height，text 另需 `text`、file 另需 `file`、link 另需非空 `url`；group 无
+ * 额外必填字段）都返回 `null`（调用方记 error 并跳过该项，不毁整篇）；未知类型
+ * 只要求 `id` 与 `type` 是非空字符串，其余字段原样带走（见 `CanvasUnknownNode`
+ * 的注释）。
  */
 function parseNode(raw: Record<string, unknown>): CanvasNode | null {
   const { id, type } = raw;
   if (!isNonEmptyString(id) || !isNonEmptyString(type)) return null;
-  if (type === "text" || type === "file") {
+  if (type === "text" || type === "file" || type === "link" || type === "group") {
     const { x, y, width, height } = raw;
     if (!isFiniteNumber(x) || !isFiniteNumber(y) || !isFiniteNumber(width) || !isFiniteNumber(height)) return null;
     if (type === "text") {
@@ -189,8 +199,15 @@ function parseNode(raw: Record<string, unknown>): CanvasNode | null {
       // 所以解析产物保持了源文档的键序 —— 序列化侧的字段序稳定靠这个。
       return { ...raw, id, type, x, y, width, height, text: raw.text } as CanvasTextNode;
     }
-    if (typeof raw.file !== "string") return null;
-    return { ...raw, id, type, x, y, width, height, file: raw.file } as CanvasFileNode;
+    if (type === "file") {
+      if (typeof raw.file !== "string") return null;
+      return { ...raw, id, type, x, y, width, height, file: raw.file } as CanvasFileNode;
+    }
+    if (type === "link") {
+      if (!isNonEmptyString(raw.url)) return null;
+      return { ...raw, id, type, x, y, width, height, url: raw.url } as CanvasLinkNode;
+    }
+    return { ...raw, id, type, x, y, width, height } as CanvasGroupNode;
   }
   return { ...raw, id, type } as CanvasUnknownNode;
 }
@@ -270,12 +287,15 @@ export function parseCanvas(text: string): CanvasParseResult {
 /**
  * 节点 → 按范式字段序重建的普通对象。
  *
- * 已知类型：`id,type,x,y,width,height,类型字段` 固定在前，其余未知字段按源对象
- * 插入序排在后面；未知类型：整体原样输出（保持源键序，一个字段都不动）。
+ * 已知类型：`id,type,x,y,width,height,类型字段` 固定在前（group 的 `label`、
+ * link 的 `url` 排在几何之后；label 非字符串时退到未知字段区），其余未知字段
+ * 按源对象插入序排在后面；未知类型：整体原样输出（保持源键序，一个字段都不动）。
  */
 function serializeNode(node: CanvasNode): Record<string, unknown> {
   const raw = node as Record<string, unknown>;
-  if (!isCanvasTextNode(node) && !isCanvasFileNode(node)) return { ...raw };
+  const known =
+    isCanvasTextNode(node) || isCanvasFileNode(node) || isCanvasLinkNode(node) || isCanvasGroupNode(node);
+  if (!known) return { ...raw };
   const out: Record<string, unknown> = {
     id: raw.id,
     type: raw.type,
@@ -285,7 +305,9 @@ function serializeNode(node: CanvasNode): Record<string, unknown> {
     height: raw.height,
   };
   if (isCanvasTextNode(node)) out.text = raw.text;
-  else out.file = raw.file;
+  else if (isCanvasFileNode(node)) out.file = raw.file;
+  else if (isCanvasLinkNode(node)) out.url = raw.url;
+  else if (typeof raw.label === "string") out.label = raw.label;
   const emitted = new Set(Object.keys(out));
   for (const [key, value] of Object.entries(raw)) {
     if (!emitted.has(key)) out[key] = value;
@@ -297,7 +319,8 @@ function serializeNode(node: CanvasNode): Record<string, unknown> {
  * 边 → 按范式字段序重建的普通对象。
  *
  * 已知可选字段只在**类型正确**时占自己的槽位：`fromSide`/`toSide` 必须是四个
- * 方向之一、`label` 必须是字符串；类型不对的值整体落到未知字段区原样输出
+ * 方向之一、`label`/`color` 必须是字符串、`fromEnd`/`toEnd` 必须是
+ * none/arrow 之一；类型不对的值整体落到未知字段区原样输出
  * （不丢字节，也不再冒充合法方向）。
  */
 function serializeEdge(edge: CanvasEdge): Record<string, unknown> {
@@ -307,6 +330,9 @@ function serializeEdge(edge: CanvasEdge): Record<string, unknown> {
   out.toNode = raw.toNode;
   if (isSide(raw.toSide)) out.toSide = raw.toSide;
   if (typeof raw.label === "string") out.label = raw.label;
+  if (typeof raw.color === "string") out.color = raw.color;
+  if (isEdgeEnd(raw.fromEnd)) out.fromEnd = raw.fromEnd;
+  if (isEdgeEnd(raw.toEnd)) out.toEnd = raw.toEnd;
   const emitted = new Set(Object.keys(out));
   for (const [key, value] of Object.entries(raw)) {
     if (!emitted.has(key)) out[key] = value;

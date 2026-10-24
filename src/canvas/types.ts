@@ -1,10 +1,9 @@
 /**
  * JSON Canvas 1.0（https://jsoncanvas.org/spec/1.0.md，MIT）的领域类型。
  *
- * 只建模数据层需要的部分：`text` / `file` 两种节点是一等公民（`file` 卡片指向
- * 工作区里的另一篇笔记），其余类型（Obsidian 落盘的 `link` / `group`…）不解释、
- * **原样保留** —— 「往返不丢数据」优先于「类型穷举」，别的客户端写入的新类型
- * 经过本库读一遍再存回去，一个字节都不能少。
+ * 一等公民节点：`text` / `file` / `link` / `group`（视图可建可改）；其余类型
+ * （Obsidian 或别的客户端写入的 `embed`…）不解释、**原样保留** —— 「往返不丢数据」
+ * 优先于「类型穷举」，别的客户端写入的新类型经过本库读一遍再存回去，一个字节都不能少。
  *
  * 解析与序列化的实现见 `./jsonCanvas.ts`；这里的 re-export 让消费方
  * （视图层 B 端）只 import 这一个文件就能拿到全部契约。
@@ -12,6 +11,9 @@
 
 /** 边吸附到节点的哪一侧。 */
 export type CanvasNodeSide = "top" | "right" | "bottom" | "left";
+
+/** 边端点的箭头形态（规范只定义 none / arrow 两种）。 */
+export type CanvasEdgeEnd = "none" | "arrow";
 
 /**
  * 已知类型节点的公共几何字段（规范要求 id + 矩形）。
@@ -25,6 +27,8 @@ export interface CanvasNodeBase {
   y: number;
   width: number;
   height: number;
+  /** 规范预设色（"1"-"6"）或别的工具写入的任意颜色串（hex）；缺省 = 无色。 */
+  color?: string;
   [key: string]: unknown;
 }
 
@@ -38,14 +42,29 @@ export interface CanvasTextNode extends CanvasNodeBase {
  * 文件卡片：`file` 是**工作区根相对 POSIX 路径**，即目标笔记的 id
  * （与 Obsidian 落盘行为一致）。反斜杠 / `./` 前缀等容错形态由 `../canvas/refs`
  * 的 `normalizeFileRef()` 收口，比较一律在规范化之后做。
+ * `subpath`（以 `#` 开头）指向笔记内标题，可选。
  */
 export interface CanvasFileNode extends CanvasNodeBase {
   type: "file";
   file: string;
+  /** 笔记内定位（`#标题`）；Obsidian 同款形态。 */
+  subpath?: string;
+}
+
+/** 网页卡片：`url` 必填（解析侧缺 url 的 link 节点整节点跳过）。 */
+export interface CanvasLinkNode extends CanvasNodeBase {
+  type: "link";
+  url: string;
+}
+
+/** 分组框：虚线容器，`label` 可选；不建模子节点归属（MVP 容器语义）。 */
+export interface CanvasGroupNode extends CanvasNodeBase {
+  type: "group";
+  label?: string;
 }
 
 /**
- * 未知类型节点：`type` 保留原文（只要不是 `"text"` / `"file"`），全部字段按
+ * 未知类型节点：`type` 保留原文（只要不是四种已知类型），全部字段按
  * 解析原样保留。**不继承 `CanvasNodeBase`** —— 结构上只要求 `id` 与 `type`：
  * 对不认识的类型强校验 x/y/width/height，缺了就只能整节点丢弃，与「全部字段
  * 原样保留」矛盾。几何字段若存在，自然躺在索引签名里跟着走。
@@ -56,10 +75,15 @@ export interface CanvasUnknownNode {
   [key: string]: unknown;
 }
 
-export type CanvasNode = CanvasTextNode | CanvasFileNode | CanvasUnknownNode;
+export type CanvasNode =
+  | CanvasTextNode
+  | CanvasFileNode
+  | CanvasLinkNode
+  | CanvasGroupNode
+  | CanvasUnknownNode;
 
 /**
- * 连线。`fromSide` / `toSide` / `label` 可选；未知字段原样保留
+ * 连线。`fromSide` / `toSide` / `label` / `color` / 箭头端可选；未知字段原样保留
  * （序列化时按原插入序排在已知字段之后）。
  *
  * ⚠️ 已知可选字段的**值**不做枚举清洗：`fromSide: "wibble"` 这类越界值会整体
@@ -72,6 +96,9 @@ export interface CanvasEdge {
   toNode: string;
   toSide?: CanvasNodeSide;
   label?: string;
+  color?: string;
+  fromEnd?: CanvasEdgeEnd;
+  toEnd?: CanvasEdgeEnd;
   [key: string]: unknown;
 }
 
@@ -99,12 +126,33 @@ export interface CanvasParseResult {
   errors: CanvasParseError[];
 }
 
-/* ------------------------------------------------------------------ 判别辅助 */
+/* --------------------------------------------------------------- 预设色 */
+
+/**
+ * 规范的六个预设色（落盘串 "1"-"6"）。具体色值是**视觉决策**，归 canvas.css 的
+ * `--canvas-c-1..6` 令牌（深浅主题各一组）；这里只有名单本身 —— 菜单渲染、
+ * 预设判定共用，不允许出现第二份色值表。
+ */
+export const CANVAS_COLOR_PRESETS = ["1", "2", "3", "4", "5", "6"] as const;
+
+export type CanvasColorPreset = (typeof CANVAS_COLOR_PRESETS)[number];
+
+export function isCanvasColorPreset(value: unknown): value is CanvasColorPreset {
+  return typeof value === "string" && (CANVAS_COLOR_PRESETS as readonly string[]).includes(value);
+}
+
+/**
+ * 画布侧消费的笔记拖拽 MIME（与侧栏源侧共享的契约，一字不改）：
+ * data 为笔记 id（工作区相对路径）纯字符串。
+ */
+export const CANVAS_NOTE_DRAG_MIME = "application/x-opennote-note";
+
+/* --------------------------------------------------------------- 判别辅助 */
 
 /**
  * `CanvasUnknownNode.type` 是 `string`，TS 无法靠判别联合自动收窄
  * （`node.type === "text"` 之后 `CanvasUnknownNode & { type: "text" }` 仍留在
- * 分支里），所以消费方一律走这三个守卫，不要手写 `===` 收窄。
+ * 分支里），所以消费方一律走这些守卫，不要手写 `===` 收窄。
  */
 export function isCanvasTextNode(node: CanvasNode): node is CanvasTextNode {
   return node.type === "text";
@@ -114,8 +162,41 @@ export function isCanvasFileNode(node: CanvasNode): node is CanvasFileNode {
   return node.type === "file";
 }
 
+export function isCanvasLinkNode(node: CanvasNode): node is CanvasLinkNode {
+  return node.type === "link";
+}
+
+export function isCanvasGroupNode(node: CanvasNode): node is CanvasGroupNode {
+  return node.type === "group";
+}
+
 export function isCanvasUnknownNode(node: CanvasNode): node is CanvasUnknownNode {
-  return node.type !== "text" && node.type !== "file";
+  return node.type !== "text" && node.type !== "file" && node.type !== "link" && node.type !== "group";
+}
+
+/* --------------------------------------------------------- 箭头端缺省语义 */
+
+/**
+ * 边端点的**渲染语义**：规范缺省 fromEnd=none、toEnd=arrow；只有显式写出的
+ * 合法值能改变它（越界值不当箭头用，见 CanvasEdge 注释）。
+ */
+export function effectiveEdgeEnds(edge: CanvasEdge): { fromEnd: CanvasEdgeEnd; toEnd: CanvasEdgeEnd } {
+  return {
+    fromEnd: edge.fromEnd === "arrow" ? "arrow" : "none",
+    toEnd: edge.toEnd === "none" ? "none" : "arrow",
+  };
+}
+
+/**
+ * 按规范缺省语义写一个箭头端：**等于缺省值时删字段**（fromEnd 缺省 none、
+ * toEnd 缺省 arrow），落盘只写偏离缺省的端 —— 与 Obsidian 的落盘形态一致。
+ */
+export function withEdgeEnd(edge: CanvasEdge, end: "fromEnd" | "toEnd", value: CanvasEdgeEnd): CanvasEdge {
+  const next: CanvasEdge = { ...edge };
+  const isDefault = end === "fromEnd" ? value === "none" : value === "arrow";
+  if (isDefault) delete next[end];
+  else next[end] = value;
+  return next;
 }
 
 /* --------------------------------------------------- 解析/序列化（实现在隔壁） */
