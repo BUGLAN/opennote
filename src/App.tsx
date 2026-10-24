@@ -107,8 +107,8 @@ import { Sidebar, currentFolderId, revealTag, type Scope } from "./components/Si
 import { SidebarResizer } from "./components/SidebarResizer";
 import { StatusBar } from "./components/StatusBar";
 import { SyncDialog } from "./components/SyncDialog";
-import { closeWorkspaceSync, openWorkspaceSync, scheduleAfterLocalWrite, syncStatusBarInfo, syncUiStore } from "./sync/appSync";
-import { activeBackend, onLocalFlush } from "./data/library";
+import { closeWorkspaceSync, openWorkspaceSync, syncStatusBarInfo, syncUiStore } from "./sync/appSync";
+import { activeBackend } from "./data/library";
 import { TabBar } from "./components/TabBar";
 import { WindowControls } from "./components/WindowControls";
 import { setBridge } from "./editor/bridge";
@@ -422,8 +422,15 @@ export default function App(): ReactNode {
     };
   }, [workspaceRecord]);
 
-  // 本地写盘 → 去抖推一次（library 只发事件，语义在这里接）。
-  useEffect(() => onLocalFlush(() => scheduleAfterLocalWrite()), []);
+  /*
+   * 「本地写盘 → 去抖推一次」的订阅**已经搬到 `sync/appSync.ts`**（`subscribeWorkspaceWrites`）。
+   *
+   * 这里原来订阅的是 `library.onLocalFlush` —— 那个事件只在库层的保存路径上发，
+   * 于是收件箱入库 / 导入迁移 / GitHub 拉取这些**直写后端**的产地一条都不通知
+   * （用户实测：入库后 A 不推送、B 要等 A 手动同步）。
+   * 留在 `App.tsx` 里还会变成**双重订阅**：一次落盘排两次去抖。
+   * 写入通知是唯一入口，见 `src/fs/writeLog.ts` 模块头。
+   */
 
   // 收件箱变更检测：桌面端用主进程的独立 watcher（`.opennote/**` 被工作区
   // watcher 跳过，所以必须是另一条链路）；浏览器后端退化为轮询。

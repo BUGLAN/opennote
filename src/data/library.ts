@@ -53,6 +53,12 @@ import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
 import type { Folder, FolderChoice, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
 import { getUi, patchUi } from "./ui";
 import { activeWorkspaceRecord, resolveBackend, setActiveWorkspace, type WorkspaceRecord } from "./workspaces";
+/*
+ * 写入通知（方案 B）：所有写入产地共同的下游是 `FileSystemBackend` 本身，
+ * 所以「有字节落盘」这件事在那一层统一报告，而不是在四个产地各加一行。
+ * 见 `src/fs/writeLog.ts` 模块头（含本次缺陷的完整证据链）。
+ */
+import { observeWrites } from "../fs/writeObserver";
 
 /* ============================================================================
    The vault: a folder on disk, mirrored in memory for instant search and
@@ -169,33 +175,14 @@ export function activeBackend(): FileSystemBackend | null {
   return backend;
 }
 
-/**
- * 本地落盘事件（同步层订阅它触发「保存后去抖推一次」）。
+/*
+ * 「本地落盘了」这件事现在由 `src/fs/writeLog.ts` 统一广播（在所有写入产地共同的下游
+ * —— `FileSystemBackend` 上报告）。库层曾经自己有一套 `onLocalFlush`：
+ * 它只在 `flushNote()` / `flushAll()` 里发，于是收件箱入库 / 导入迁移 / GitHub 拉取
+ * 这些**直写后端**的产地一条都不通知，用户的症状就是「入库后 A 不推送、B 要等手动同步」。
  *
- * 这里**刻意不 import 同步层**：库层与同步层互相 import 会把两套语义焊死
- * （`src/sync/mode.ts` 的模块头），所以只留一个无类型约束的事件口。
+ * 保留两套的代价是**双重触发**（一次落盘排两次去抖），所以那一套已删除。
  */
-const localFlushListeners = new Set<() => void>();
-
-/**
- * 通知同步层「本地刚写过盘」。
- *
- * ★ 落盘有**两条**路，两条都得通知：
- * - `flushAll()`：关工作区 / 退出 / 重扫之前（会一次写很多条）；
- * - `flushNote()`：**平时打字自动保存走的就是它**。
- *
- * 第二条以前漏了 —— 只通知 `flushAll()`。后果很具体：在编辑器里改完一篇，
- * 文件确实落盘了，但同步层**从没收到通知**，于是推送要等到关工作区或退出才发生；
- * 另一台设备自然一直看不到。
- */
-function notifyLocalFlush(): void {
-  for (const listener of [...localFlushListeners]) listener();
-}
-
-export function onLocalFlush(listener: () => void): () => void {
-  localFlushListeners.add(listener);
-  return () => localFlushListeners.delete(listener);
-}
 let meta: WorkspaceMeta = { ...defaultMeta };
 let metaTimer: ReturnType<typeof setTimeout> | null = null;
 const writeTimers = new Map<Id, ReturnType<typeof setTimeout>>();
@@ -713,7 +700,7 @@ export async function openWorkspace(
     await flushAll();
     await flushMeta();
     flushed = true;
-    const resolved = await resolveBackend(record, options.requestPermission ?? false);
+    const resolved = observeWrites(await resolveBackend(record, options.requestPermission ?? false));
     const scanned = await scanWorkspace(resolved);
     // A newer open/close won the race: dropping this result beats publishing a
     // stale tree (and later writing its notes into the wrong folder) — see D02.
@@ -1357,8 +1344,6 @@ async function flushNote(id: Id): Promise<void> {
     return;
   }
   const prior = pendingWrites.get(id);
-  /** 这一串写里有没有**真的**动过磁盘（早退的分支一个字节都没写）。 */
-  let wroteToDisk = false;
   const write = (prior?.catch(() => undefined) ?? Promise.resolve()).then(async () => {
     const record = fileStates.get(id);
     const current = await target.stat(id).catch(() => null);
@@ -1390,8 +1375,8 @@ async function flushNote(id: Id): Promise<void> {
     // 好几次击键，写完之后再取会把「写完那一版」错记成「用户后来敲的」。
     beginWrite(id);
     await target.writeText(id, note.content);
-    // 真有字节落了盘才需要通知同步层（上面那些「磁盘赢 / 没变」的早退都不算）。
-    wroteToDisk = true;
+    // 「真有字节落了盘」这个事实由 `writeObserver` 在 `writeText` 成功之后报告
+    // （见 `src/fs/writeLog.ts`）——这里不再自己发通知，否则一次保存会触发两轮去抖。
     const after = await target.stat(id).catch(() => null);
     if (after) fileStates.commitWrite(id, note.content, after);
     else {
@@ -1403,8 +1388,6 @@ async function flushNote(id: Id): Promise<void> {
   try {
     await write;
     if (backend === target && (libraryStore.get().notes[id] ?? libraryStore.get().trash[id])?.content === note.content) markClean(id);
-    // ★ 平时打字保存走的就是这条路：写完要告诉同步层「可以推了」。
-    if (wroteToDisk) notifyLocalFlush();
   } catch (error) {
     reportError(error, "写入笔记失败");
     throw error;
@@ -1435,8 +1418,11 @@ export async function flushAll(): Promise<void> {
   // History counts as "written": a snapshot that is still on its way must not be
   // left behind by a close, and a rename must not move the directory it writes into (D22).
   if (pendingSnapshots.size) await Promise.allSettled([...pendingSnapshots.values()]);
-  // 只在真有落盘时通知同步层 —— 打开/关闭笔记本时的例行 flush 不该触发一轮推送。
-  if (ids.size > 0 || pendingWrites.size > 0) notifyLocalFlush();
+  /*
+   * 这里**不再**自己发「本地落盘了」通知：真正的落盘点（`target.writeText(id, …)`）
+   * 已经在 `flushNote` 里，而它经由「写完就报告」的后端自动广播出去了
+   * （`src/fs/writeObserver.ts`）。在这里补一次会让一次保存排两次去抖。
+   */
 }
 
 function scheduleMeta(delay = 700): void {

@@ -24,6 +24,7 @@
  */
 
 import type { FileSystemBackend } from "../fs/types";
+import { silenceWrites } from "../fs/writeLog";
 import type { LocalEntry, SyncFileBackend } from "./workspaceFiles";
 
 /** 目录递归的深度上限（防符号链接环 / 异常深的工作区）。 */
@@ -108,6 +109,16 @@ async function listAll(options: BackendSyncFilesOptions): Promise<ScanResult> {
  * `remove()` 用 `recursive: true`：远端确认删除一条路径时，本地那一侧可能
  * 已经变成了目录（或反过来），不递归删会留下半棵树 —— 而半棵树会被下一轮
  * 同步当成「新增」，于是**刚删掉的东西又回来了**。
+ *
+ * ## ★ 三个写方法都要静默（否则同步会自己触发自己）
+ *
+ * 后端现在是「写完就报告」的（`src/fs/writeObserver.ts`）：所有产地共用一个对象，
+ * 于是**同步自己的拉取落地也会报告**。不静默的话：拉一轮 → 触发一轮 → 又拉一轮。
+ *
+ * 静默点选在**这里**而不是 `attach.ts`，理由是它才是「同步往本地写」的唯一出口
+ * （`write` / `remove` 两个方法），而 `attach` 只负责把它们接上。
+ * 静默是**按路径**的（见 `writeLog.ts` 纪律②）：一次全量拉取写几百篇要十几秒，
+ * 期间用户正在打字的那个保存必须照常触发推送。
  */
 export function createBackendSyncFiles(options: BackendSyncFilesOptions): SyncFileBackend {
   return {
@@ -118,10 +129,8 @@ export function createBackendSyncFiles(options: BackendSyncFilesOptions): SyncFi
      */
     listWithIssues: () => listAll(options),
     read: (path) => options.backend.readBytes(path),
-    write: (path, bytes) => options.backend.writeBytes(path, bytes),
+    write: (path, bytes) => silenceWrites([path], () => options.backend.writeBytes(path, bytes)),
     stat: (path) => options.backend.stat(path),
-    remove: async (path) => {
-      await options.backend.remove(path, { recursive: true });
-    },
+    remove: (path) => silenceWrites([path], () => options.backend.remove(path, { recursive: true })),
   };
 }

@@ -44,6 +44,9 @@ import { resolveCursorStore } from "./cursor";
 import { createDesktopEventStream, supportsDesktopStream } from "./desktopStream";
 import type { EventStreamLike } from "./stream";
 import { createWorkspaceSyncBinding, type BindingPhase } from "./binding";
+import { createDefaultIgnoreRules, shouldSkipEntry } from "./ignore";
+import { onWorkspaceWrite } from "../fs/writeLog";
+import { normalizePath } from "../fs/paths";
 import { setSyncActive } from "./mode";
 import type { SyncStatus } from "./runner";
 /* `syncStatusBarInfo` 已移到 `statusBar.ts`（纯函数，可单独测），这里只转发。 */
@@ -137,7 +140,8 @@ let currentRecord: WorkspaceRecord | null = null;
 let currentBackend: FileSystemBackend | null = null;
 /** 当前接上的会话（冲突裁决与「保存后去抖」都要用它）。 */
 let activeSession: SyncSession | null = null;
-let flushUnsubscribed: (() => void) | null = null;
+/** 「有字节落盘」的订阅退订句柄（见 `subscribeWorkspaceWrites`）。 */
+let writeUnsubscribed: (() => void) | null = null;
 /**
  * 解锁后的加密根。**只存内存**（红线 3）：退出应用就要重新解锁 ——
  * 桌面端密钥在主进程，解锁是一次静默的 `POST /v1/account/unlock`，代价可以接受。
@@ -413,11 +417,7 @@ export async function openWorkspaceSync(record: WorkspaceRecord, backend: FileSy
   if (previous === null || previous.id !== record.id) {
     syncUiStore.set((prev) => ({ ...prev, last: null }));
   }
-  if (!flushUnsubscribed) {
-    // 懒订阅：让 library 的落盘事件在这里转成「去抖推一次」。
-    const { onLocalFlush } = await import("../data/library");
-    flushUnsubscribed = onLocalFlush(() => scheduleAfterLocalWrite());
-  }
+  subscribeWorkspaceWrites();
   await refreshAccountState();
   await binding.start();
 }
@@ -427,6 +427,7 @@ export function closeWorkspaceSync(): void {
   currentRecord = null;
   currentBackend = null;
   activeSession = null;
+  unsubscribeWorkspaceWrites();
   binding.stop();
   setSyncActive(false);
   /*
@@ -438,7 +439,50 @@ export function closeWorkspaceSync(): void {
   syncUiStore.set((prev) => ({ ...prev, status: null, last: null }));
 }
 
-/** 本地写盘之后（library 的 onLocalFlush）→ 去抖推一次。 */
+/**
+ * 订阅「有字节落盘」→ 去抖推一次。
+ *
+ * ## 为什么订阅的不是 `library.onLocalFlush`
+ *
+ * 那个事件只在库层的 `flushNote()` / `flushAll()` 里发 ——
+ * 于是**绕过库层直写后端的产地（收件箱入库、导入 / 迁移、GitHub 拉取）一条都不通知**。
+ * 用户实测的症状：「收件箱入库后 A 设备不推送，B 设备要等 A 手动同步」。
+ *
+ * 现在订阅的是 `FileSystemBackend` 那一层的写入通知（`src/fs/writeLog.ts`）：
+ * 所有产地共用一个后端对象，所以新增产地自动接入，不需要谁记得来加一行。
+ *
+ * ## 两道过滤，缺一不可
+ *
+ * 1. **只有真的动了内容才推**（`write.content`）：`mkdir` 不推 ——
+ *    目录本身不过同步（`selectSyncableEntries` 丢弃 `isDir`），推一轮也只会是空转。
+ * 2. **不在同步范围里的路径不推**：最要紧的是 `.opennote/**` ——
+ *    账本（`sync.json`）、元数据、收件箱暂存在这个目录下，**每轮同步自己都会写它们**。
+ *    不排除的话，一轮同步写完账本就触发下一轮，形成自我驱动的循环。
+ *
+ *    这里用的是 `ignore.ts` 的**同一套内置判定**（不是另抄一张目录表）：
+ *    同步范围只有一个产地，过滤它就必须走它，否则两张表迟早漂移。
+ *    注意内置集里没有「所有隐藏路径」这条规则 —— `.gitignore` 是精确文件名命中、
+ *    `.assets` 是正常目录（要同步的附件），所以这里只按内置集判，不额外加「点开头就排除」。
+ */
+function subscribeWorkspaceWrites(): void {
+  if (writeUnsubscribed) return;
+  const rules = createDefaultIgnoreRules();
+  writeUnsubscribed = onWorkspaceWrite((write) => {
+    if (!write.content) return;
+    // 全是忽略路径（账本 / 元数据 / 收件箱暂存）⇒ 这一批与同步范围无关。
+    if (write.paths.every((path) => shouldSkipEntry(rules, normalizePath(path), false))) return;
+    activeSession?.runner.scheduleAfterLocalWrite();
+  });
+}
+
+/** 退订写入通知（关工作区 / 登出）。没开同步的笔记本一个监听都不该留。 */
+function unsubscribeWorkspaceWrites(): void {
+  const off = writeUnsubscribed;
+  writeUnsubscribed = null;
+  if (off) off();
+}
+
+/** 本地写盘之后 → 去抖推一次。**保留给显式调用方**（写入通知是主路径）。 */
 export function scheduleAfterLocalWrite(): void {
   activeSession?.runner.scheduleAfterLocalWrite();
 }
