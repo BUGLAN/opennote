@@ -379,11 +379,11 @@
   left: 0;
   top: 0;
   transform: translate(var(--menu-x, 0), var(--menu-y, 0));
-  min-width: 168px;
+  min-width: 152px;
   padding: var(--s1);
   display: flex;
   flex-direction: column;
-  gap: var(--s1);
+  gap: 1px;
   background: var(--paper-2);
   border: 1px solid var(--rule-strong);
   border-radius: var(--radius);
@@ -392,11 +392,14 @@
 }
 
 .canvas-menu__item {
-  min-height: 44px;
+  /* 视觉紧凑（28px 行高），但用 padding + ::before 撑出 44px 触控命中区：
+     指针设备点得舒服，触屏也不会点错。 */
+  position: relative;
+  min-height: 28px;
   width: 100%;
   display: flex;
   align-items: center;
-  padding: 0 var(--s3);
+  padding: 0 var(--s2);
   background: transparent;
   border: none;
   border-radius: var(--radius-sm);
@@ -405,6 +408,12 @@
   color: var(--ink-2);
   text-align: left;
   cursor: pointer;
+}
+
+.canvas-menu__item::before {
+  content: "";
+  position: absolute;
+  inset: -8px 0;
 }
 
 .canvas-menu__item:hover:not(:disabled) {
@@ -419,7 +428,44 @@
 
 .canvas-menu__sep {
   height: 1px;
+  margin: 2px 0;
   background: var(--rule);
+}
+
+/* ---- 常驻建卡工具条 ---------------------------------------------------
+ * 画布有内容后空态引导消失，靠这条轻量工具条保持「新建卡片 / 引用笔记」可达。
+ * 悬浮在画布左上角，不遮挡内容；样式只吃令牌。 */
+
+.canvas-tools {
+  position: absolute;
+  left: var(--s3);
+  top: var(--s3);
+  display: flex;
+  gap: var(--s1);
+  padding: var(--s1);
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  z-index: 5;
+}
+
+.canvas-tools__btn {
+  min-height: 28px;
+  padding: 0 var(--s3);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.canvas-tools__btn:hover {
+  background: var(--paper-3);
+  color: var(--ink);
 }
 
 /* ---- 引用笔记选择器 --------------------------------------------------- */

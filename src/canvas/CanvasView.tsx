@@ -1107,6 +1107,18 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
         </div>
       )}
 
+      {/* 常驻建卡条：空画布有大引导，有内容后靠这条轻量工具条保持入口可达。 */}
+      {!isEmpty && (
+        <div className="canvas-tools" role="toolbar" aria-label="新建">
+          <button type="button" className="canvas-tools__btn" title="新建卡片" onClick={addTextCard}>
+            新建卡片
+          </button>
+          <button type="button" className="canvas-tools__btn" title="引用笔记" onClick={() => setPickerOpen(true)}>
+            引用笔记
+          </button>
+        </div>
+      )}
+
       {isEmpty && (
         <div className="canvas-empty">
           <div className="canvas-empty__card">
@@ -1291,6 +1303,14 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
           )}
           {menu.nodeId == null && menu.edgeId == null && (
             <>
+              {/* 空白处右键：最常用的两种卡片放在最前，其次才是分组/网页卡。 */}
+              <button type="button" role="menuitem" className="canvas-menu__item" onClick={() => { setMenu(null); addTextCard(); }}>
+                新建卡片
+              </button>
+              <button type="button" role="menuitem" className="canvas-menu__item" onClick={() => { setMenu(null); setPickerOpen(true); }}>
+                引用笔记
+              </button>
+              <div className="canvas-menu__sep" />
               <button type="button" role="menuitem" className="canvas-menu__item" onClick={() => { setMenu(null); addGroupCard(); }}>
                 新建分组
               </button>
