@@ -121,9 +121,9 @@ import { parseCanvas } from "./canvas/types";
 import { findImageSource, unwrapSource } from "./editor/livePreview";
 
 /*
- * 画布视图的唯一入口（React.lazy 动态 import）：静态引用 CanvasView 或其子模块会把
- * @xyflow/react 打进启动包，破坏懒加载分包（产物应为 dist/assets/lazy/canvas-view-*.js，
- * 且不进 Service Worker 预缓存）。
+ * 画布视图的唯一渲染入口（React.lazy 动态 import；下面的离线预热会再动态 import
+ * 同一个模块，不渲染）：静态引用 CanvasView 或其子模块会把 @xyflow/react 打进启动包，
+ * 破坏懒加载分包（产物应为 dist/assets/lazy/canvas-view-*.js，且不进 Service Worker 预缓存）。
  */
 const CanvasView = lazy(() => import("./canvas/CanvasView"));
 
@@ -246,6 +246,28 @@ export default function App(): ReactNode {
       setTimeout(() => boot.remove(), 400);
     }
   }, [library.ready]);
+
+  /*
+   * PWA 离线预热：画布视图只经动态 import 可达，也不进 SW 安装期预缓存
+   * （vite.config 的 globIgnores），不预热的话离线后首次打开画布会永远停在
+   * 「正在载入画布…」。所以库里有画布时，空闲期把 chunk 拉一次 —— 只为让
+   * SW 的 runtimeCaching 缓到字节，不渲染、不挂载；无画布不预热；每会话一次。
+   */
+  const canvasChunkWarmed = useRef(false);
+  useEffect(() => {
+    if (!library.ready || canvasChunkWarmed.current) return;
+    if (!Object.values(library.notes).some((note) => noteKind(note) === "canvas")) return;
+    canvasChunkWarmed.current = true;
+    const warmUp = () => {
+      void import("./canvas/CanvasView").catch(() => undefined);
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const handle = window.requestIdleCallback(warmUp);
+      return () => window.cancelIdleCallback(handle);
+    }
+    const timer = window.setTimeout(warmUp, 5000);
+    return () => window.clearTimeout(timer);
+  }, [library.ready, library.notes]);
 
   useEffect(() => watchLibraryErrors((message) => notify(message, { kind: "danger" })), []);
 
@@ -1571,6 +1593,8 @@ export default function App(): ReactNode {
                   const note = library.notes[id];
                   return note ? { title: note.title, exists: true } : { title: stripExtension(baseName(id)), exists: false };
                 }}
+                /* 「指向标题」要用目标笔记的正文抽标题列表；没接时画布退化为手输 subpath。 */
+                getNoteContent={(id) => library.notes[id]?.content ?? null}
               />
             </Suspense>
           </div>
@@ -1734,7 +1758,7 @@ export default function App(): ReactNode {
         type="file"
         multiple
         hidden
-        accept=".md,.markdown,.txt,.text,.zip,image/*"
+        accept=".canvas,.md,.markdown,.txt,.text,.zip,image/*"
         onChange={(event) => {
           const files = event.target.files;
           if (files?.length) void importFiles(files);

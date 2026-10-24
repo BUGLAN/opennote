@@ -180,6 +180,15 @@ describe("planImport · 树 → 导入计划（纯函数）", () => {
     expect(plan.truncated).toBe(true);
     expect(planImport(treeOf([blob("a.md", "sha-1", 5)])).truncated).toBe(false);
   });
+
+  it("画布（.canvas）按笔记物化：排进 materialize、不计 skippedNotNotes", () => {
+    const plan = planImport(
+      treeOf([blob("看板/读书.canvas", "sha-canvas", 40), blob("src/main.ts", "sha-ts", 500)]),
+    );
+    expect(plan.materialize).toEqual([{ path: "看板/读书.canvas", sha: "sha-canvas", size: 40 }]);
+    expect(plan.skippedNotNotes).toBe(1); // 只有 src/main.ts
+    expect(plan.files["看板/读书.canvas"]).toEqual({ remoteSha: "sha-canvas", localHash: null, imported: false });
+  });
 });
 
 describe("runImport · 取字节、写盘、记哈希", () => {
@@ -263,6 +272,28 @@ describe("runImport · 取字节、写盘、记哈希", () => {
       treeSha: "tree-1",
     });
     expect(report.baseline.importedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("画布（.canvas）与 md 走同一条文本通道：writeText 落地、localHash 记写字节的 sha256", async () => {
+    const canvasJson = '{"nodes":[],"edges":[]}\n';
+    const plan = planImport(treeOf([blob("看板/读书.canvas", "sha-canvas", bytesOf(canvasJson))]));
+    const backend = new MemoryBackend();
+    const api = rawApi(async (path) => {
+      if (path === "看板/读书.canvas") return utf8(canvasJson);
+      throw new Error(`用例没有准备 ${path} 的字节`);
+    });
+
+    const report = await runImport(importInput(plan, backend, api));
+
+    // 不是图片 ⇒ writeText（md 同款文本通道），绝不被 writeBytes 当二进制写
+    expect(backend.text("看板/读书.canvas")).toBe(canvasJson);
+    expect(backend.calls).toContain("writeText:看板/读书.canvas");
+    expect(backend.calls).not.toContain("writeBytes:看板/读书.canvas");
+    expect(report.baseline.files["看板/读书.canvas"]).toEqual({
+      remoteSha: "sha-canvas",
+      localHash: await sha256Hex(utf8(canvasJson)),
+      imported: true,
+    });
   });
 
   it("某个文件 raw() 失败：算进 failed、本地不写、基线留 imported:false（下次同步不会误删远端）", async () => {

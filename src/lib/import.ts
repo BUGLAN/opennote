@@ -3,6 +3,7 @@ import {
   ASSETS_DIR,
   assertSafeRelative,
   baseName,
+  isCanvasPath,
   isHiddenPath,
   isImagePath,
   isMarkdownPath,
@@ -77,9 +78,10 @@ export async function importIntoWorkspace(
     return parent;
   };
 
-  const writeNote = async (content: string, folderId: Id | null, name: string): Promise<void> => {
+  /* ext 只有两种值：画布必须落 `.canvas`（扩展名丢了，重扫后就不是画布了），其余照旧 `.md`。 */
+  const writeNote = async (content: string, folderId: Id | null, name: string, ext = ".md"): Promise<void> => {
     const dir = folderId ?? "";
-    const requested = joinPath(dir, `${sanitizeName(name, "未命名")}.md`);
+    const requested = joinPath(dir, `${sanitizeName(name, "未命名")}${ext}`);
     // Check the disk too: a file that appeared after the last scan must not be
     // overwritten just because memory has never heard of it (D03).
     const path = await resolveAvailablePath(backend, requested, taken);
@@ -127,7 +129,8 @@ export async function importIntoWorkspace(
         return false;
       }
     });
-    const notes = safe.filter((entry) => isMarkdownPath(entry.name));
+    // 画布与 md 同一条文本管线（读 string → writeNote），只多保一个 `.canvas` 扩展名。
+    const notes = safe.filter((entry) => isMarkdownPath(entry.name) || isCanvasPath(entry.name));
     const images = safe.filter((entry) => isImagePath(entry.name));
     const legacyPrefix = notes.length > 0 && notes.every((entry) => entry.name.startsWith("notes/")) ? "notes/" : "";
     const movedImages = new Map<string, string>();
@@ -171,7 +174,7 @@ export async function importIntoWorkspace(
         text = text.split(`](./${ASSETS_DIR}/${baseName(original)})`)
           .join(`](./${ASSETS_DIR}/${baseName(destination)})`);
       }
-      await writeNote(text, folderId, stripExtension(fileName));
+      await writeNote(text, folderId, stripExtension(fileName), isCanvasPath(entry.name) ? ".canvas" : ".md");
     }
   };
 
@@ -185,7 +188,7 @@ export async function importIntoWorkspace(
         await handleZip(file);
         continue;
       }
-      if (isMarkdownPath(file.name)) {
+      if (isMarkdownPath(file.name) || isCanvasPath(file.name)) {
         const text = await readFileAsText(file);
         if (!text.trim()) {
           result.skipped += 1;
@@ -195,7 +198,7 @@ export async function importIntoWorkspace(
         const segments = relative.split("/").filter(Boolean);
         const fileName = segments.pop() ?? file.name;
         const folderId = await ensureFolder(segments);
-        await writeNote(text, folderId, stripExtension(fileName));
+        await writeNote(text, folderId, stripExtension(fileName), isCanvasPath(file.name) ? ".canvas" : ".md");
         continue;
       }
       if (isImagePath(file.name) || file.type.startsWith("image/")) {

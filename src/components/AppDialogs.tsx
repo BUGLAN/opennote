@@ -1,7 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { ACCENTS, FONTS, THEMES, WIDTHS, type Id, type Snapshot, type UiSettings } from "../data/types";
+/* 画布快照摘要需要解析 JSON Canvas：`canvas/types` 无三方依赖，静态 import 不破坏懒加载分包。 */
+import { parseCanvas } from "../canvas/types";
+import { ACCENTS, FONTS, THEMES, WIDTHS, noteKind, type Id, type Snapshot, type UiSettings } from "../data/types";
 import { hasLegacyData } from "../data/legacy";
-import { listSnapshots, restoreSnapshot, takeManualSnapshot } from "../data/library";
+import { getLibrary, listSnapshots, restoreSnapshot, takeManualSnapshot } from "../data/library";
 import type { WorkspaceRecord } from "../data/workspaces";
 import type { UpdateStatus } from "../desktop/bridge";
 import { patchUi, setTheme, toggleAppearance } from "../data/ui";
@@ -665,6 +667,13 @@ function workspaceHint(workspace: WorkspaceRecord): string {
 export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void }): ReactNode {
   const [snapshots, setSnapshots] = useState<Snapshot[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  /*
+   * 画布的快照是 JSON Canvas，整篇摊开是噪声：预览改摘要、原文折叠。
+   * kind 从数据层现取（快照本身不带 kind）；它由路径扩展名决定，对话框开着的
+   * 这一会儿不会变。
+   */
+  const note = getLibrary().notes[noteId] ?? getLibrary().trash[noteId] ?? null;
+  const canvasHistory = note !== null && noteKind(note) === "canvas";
 
   const load = () => {
     void listSnapshots(noteId).then((list) => {
@@ -752,11 +761,31 @@ export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void
               </button>
             ))}
           </div>
-          <pre className="history__preview">{current?.content ?? ""}</pre>
+          {canvasHistory ? (
+            <div>
+              <p className="dialog__message">{canvasSnapshotSummary(current?.content ?? "")}</p>
+              <details>
+                <summary>查看画布原文</summary>
+                <pre className="history__preview">{current?.content ?? ""}</pre>
+              </details>
+            </div>
+          ) : (
+            <pre className="history__preview">{current?.content ?? ""}</pre>
+          )}
         </div>
       )}
     </Modal>
   );
+}
+
+/**
+ * 画布快照的一句话摘要。整篇级解析失败（`error.ref` 缺省 = JSON 语法错 / 根不是对象，
+ * 见 `canvas/jsonCanvas` 的处置表）如实说读不出；其余按解析产物报卡片与连线数。
+ */
+function canvasSnapshotSummary(content: string): string {
+  const { doc, errors } = parseCanvas(content);
+  if (errors.some((error) => error.ref === undefined)) return "（无法解析的画布快照）";
+  return `${doc.nodes.length} 张卡片 · ${doc.edges.length} 条连线`;
 }
 
 /* =============================== shortcuts ============================== */

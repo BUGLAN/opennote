@@ -38,6 +38,33 @@ vi.mock("../data/legacy", () => ({
   getLegacyAsset: async (id: string) => legacyAssets.get(id) ?? null,
 }));
 
+/*
+ * Node 测试环境没有 FileReader（`readFileAsText` 靠它读单个文件），给它补一个
+ * 最小替身：只实现 readAsText，走 Blob 原生的 text()。既有用例全走 zip
+ * （JSZip 在 Node 原生能跑），所以这个缺口到现在才被单文件导入的用例踩到。
+ */
+vi.stubGlobal(
+  "FileReader",
+  class {
+    result: string | null = null;
+    error: unknown = null;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    readAsText(file: Blob): void {
+      void file.text().then(
+        (text) => {
+          this.result = text;
+          this.onload?.();
+        },
+        (error: unknown) => {
+          this.error = error;
+          this.onerror?.();
+        },
+      );
+    }
+  },
+);
+
 import { openWorkspace, flushAll, flushMeta } from "../data/library";
 import { insertFileSnippets } from "../editor/media";
 import { importIntoWorkspace, migrateLegacyData } from "./import";
@@ -131,6 +158,47 @@ describe("zip 导入：旧布局原样落地（正文写着 ./assets/，就不�
     const text = testBackend.text(notePath!);
     expect(text).toContain("![图](./assets/图片.png)");
     expect(text).not.toContain("归档/assets/图片.png");
+  });
+});
+
+describe("画布（.canvas）导入：与 md 同一条文本管线，只多保住扩展名", () => {
+  const CANVAS_JSON = '{"nodes":[{"id":"n1","type":"text","x":0,"y":0,"width":100,"height":60,"text":"卡"}],"edges":[]}\n';
+
+  it("拖入 / 选择的 .canvas 按文本落成 `<名>.canvas` 笔记", async () => {
+    const file = new File([CANVAS_JSON], "读书看板.canvas", { type: "application/json" });
+
+    const result = await importIntoWorkspace([file], null);
+
+    expect(result.notes).toBe(1);
+    expect(testBackend.text("读书看板.canvas")).toBe(CANVAS_JSON);
+    // 走 writeText（md 同款文本通道），不是图片的 writeBytes
+    expect(testBackend.calls).toContain("writeText:读书看板.canvas");
+    expect(testBackend.calls).not.toContain("writeBytes:读书看板.canvas");
+  });
+
+  it("zip 里的 .canvas 随目录结构落地，扩展名原样保留（丢了就不是画布了）", async () => {
+    const zip = await zipFile("导出.zip", {
+      "看板/读书.canvas": CANVAS_JSON,
+      "普通.md": "# 普通\n",
+    });
+
+    const result = await importIntoWorkspace([zip], null);
+
+    expect(result.notes).toBe(2);
+    expect(testBackend.text("看板/读书.canvas")).toBe(CANVAS_JSON);
+    expect(testBackend.text("普通.md")).toBe("# 普通\n");
+    expect(testBackend.calls).toContain("writeText:看板/读书.canvas");
+  });
+
+  it("空画布与空 md 同命：跳过并计进 skipped，不产出空文件", async () => {
+    const empty = new File(["   "], "空.canvas", { type: "application/json" });
+    const valid = new File(["# 有效\n"], "有效.md", { type: "text/markdown" });
+
+    const result = await importIntoWorkspace([empty, valid], null);
+
+    expect(result.notes).toBe(1); // 只有 md 落地
+    expect(result.skipped).toBe(1);
+    expect(workspacePaths().some((path) => path.endsWith(".canvas"))).toBe(false);
   });
 });
 

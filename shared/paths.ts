@@ -289,16 +289,28 @@ export function isImagePath(path: string): boolean {
 }
 
 /**
+ * 画布文件（JSON Canvas 1.0，客户端 `src/canvas/` 的磁盘形态）：与 `.md` 同等的一等公民。
+ *
+ * 曾经只在客户端 `src/fs/paths.ts` —— 那时它只服务数据层扫描。同步拉取把画布判据
+ * 并进 `isMaterializable()` 之后，它成了「导入与拉取也要认」的判据（与
+ * `isMarkdownPath` / `isImagePath` 同类），按 `fs/paths.ts` 头部的分工搬来这里，
+ * 客户端经 re-export 消费同一份。
+ */
+export function isCanvasPath(path: string): boolean {
+  return /\.canvas$/i.test(path);
+}
+
+/**
  * 「这个路径该不该被物化到本地」——**唯一产地**。
  *
- * 只认笔记与图片；其余（源码、配置、CI…）只进基线账本、**永不落地**。
+ * 只认笔记、图片与画布；其余（源码、配置、CI…）只进基线账本、**永不落地**。
  * 这条判据曾经在 `planPull()` 里漏成「只要远端 sha 变了就下载」，后果不是多下几个文件，
  * 而是**把仓库源码写进笔记本、下一次推送又把它当成新笔记推回去**。
  *
  * 放在 `shared/` 是因为**导入与拉取必须共用同一条**，而它们在单仓下本来就该是同一份。
  */
 export function isMaterializable(path: string): boolean {
-  return isMarkdownPath(path) || isImagePath(path);
+  return isMarkdownPath(path) || isImagePath(path) || isCanvasPath(path);
 }
 
 export interface CaseFoldCollision {

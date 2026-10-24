@@ -998,8 +998,15 @@ function NoteRow({
       {...(dnd
         ? {
             draggable: true,
-            onDragStart: () => {
+            onDragStart: (event: React.DragEvent) => {
               dragPayload = { kind: "note", id: note.id };
+              /*
+               * 画布侧拖拽契约（与并行队友共享，一字不改）：额外带
+               * `application/x-opennote-note` = 笔记 id 纯字符串，`effectAllowed` 为 copy。
+               * 树内拖放仍只认模块级 dragPayload，这条 setData 不参与树内判定。
+               */
+              event.dataTransfer.setData("application/x-opennote-note", note.id);
+              event.dataTransfer.effectAllowed = "copy";
             },
             onDragEnd: () => {
               dragPayload = null;
