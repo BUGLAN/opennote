@@ -1,0 +1,535 @@
+/* ============================================================ canvas.css
+ * 无限画布视图的唯一样式文件（D28：只被 src/canvas/** 模块 import，
+ * 随画布懒加载 chunk 分发，不进 PWA 安装期预缓存 —— 绝不在 main.tsx 引入）。
+ *
+ * 纪律：颜色 / 边框 / 圆角 / 阴影 / 间距 / 字体一律引用 tokens.css 的 var(--*)；
+ * 禁语义色（成功绿 / 警告黄 / 失败红）；几何值（50% 圆、1px 分隔线）除外。
+ * React Flow 自带的类名（.react-flow__*）只做覆盖，不复制其实现。
+ * ============================================================ */
+
+/* ---- 外壳 ---------------------------------------------------------- */
+
+.canvas-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--ink);
+}
+
+.canvas-host {
+  position: absolute;
+  inset: 0;
+}
+
+.canvas-flow {
+  background: var(--paper);
+  --xy-connectionline-stroke: var(--accent);
+  --xy-connectionline-stroke-width: 2;
+}
+
+.canvas-flow .react-flow__pane {
+  cursor: grab;
+}
+
+.canvas-flow .react-flow__pane.dragging {
+  cursor: grabbing;
+}
+
+/* 点阵背景：默认灰是硬编码值，改走 ink-3 令牌（深浅主题都成立） */
+.canvas-flow .react-flow__background circle {
+  fill: var(--ink-3);
+  opacity: 0.45;
+}
+
+/* 框选矩形 */
+.canvas-flow .react-flow__selection {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+}
+
+/* React Flow 归属标识（开源用法要求保留，样式收敛到不抢眼） */
+.canvas-flow .react-flow__attribution {
+  font-size: var(--fs-xs);
+  opacity: 0.55;
+}
+
+.canvas-flow .react-flow__attribution a {
+  color: var(--ink-3);
+}
+
+/* ---- 卡片 ---------------------------------------------------------- */
+
+.canvas-card {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  background: var(--paper-2);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  color: var(--ink);
+}
+
+.react-flow__node.selected .canvas-card {
+  border-color: var(--accent-line);
+  box-shadow: var(--shadow-2), 0 0 0 2px var(--accent-soft);
+}
+
+/* 文本卡片正文：--font-doc + 略缩放的正文号（卡内排版，不是编辑区排版） */
+.canvas-card__body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-doc);
+  font-size: calc(var(--doc-fs) * 0.82);
+  line-height: var(--doc-lh);
+  color: var(--ink);
+  cursor: inherit;
+}
+
+.canvas-card__placeholder {
+  color: var(--ink-3);
+}
+
+.canvas-card__edit {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  padding: 0;
+  font-family: var(--font-doc);
+  font-size: calc(var(--doc-fs) * 0.82);
+  line-height: var(--doc-lh);
+  color: var(--ink);
+}
+
+/* 文件卡片：横排（图标 + 标题/路径），失效态整体置灰 */
+.canvas-card--file {
+  flex-direction: row;
+  align-items: flex-start;
+}
+
+.canvas-card__glyph {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin-top: 2px;
+  color: var(--ink-2);
+}
+
+.canvas-card__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.canvas-card__title {
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-card__path {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-card__missing {
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+
+.canvas-card.is-missing {
+  opacity: 0.55;
+}
+
+/* 未知类型节点：虚线占位，可拖动 / 删除 / 连线，内容不可编辑 */
+.canvas-card--unknown {
+  border-style: dashed;
+  background: var(--paper-3);
+}
+
+.canvas-card__tag {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-card__hint {
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+
+/* ---- 连线桩 ---------------------------------------------------------
+ * 可视 10px；::before 外扩命中区到 44px（触控目标的下限）。四边各一个，
+ * 相邻两个的命中区不会互相重叠（卡片最小边长 ≥ 110px）。 */
+
+.canvas-flow .react-flow__handle.canvas-handle {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--paper-2);
+  border: 1.5px solid var(--ink-3);
+}
+
+.canvas-flow .react-flow__handle.canvas-handle:hover,
+.canvas-flow .react-flow__handle.canvas-handle.connectionindicator {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.canvas-flow .react-flow__handle.canvas-handle::before {
+  content: "";
+  position: absolute;
+  inset: -17px;
+  border-radius: 50%;
+  background: transparent;
+}
+
+/* ---- 边与标签 -------------------------------------------------------- */
+
+.canvas-flow .react-flow__edge-path.canvas-edge {
+  stroke: var(--ink-3);
+  stroke-width: 1.6;
+}
+
+.canvas-flow .react-flow__edge.selected .react-flow__edge-path.canvas-edge,
+.canvas-flow .react-flow__edge-path.canvas-edge.is-selected {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+/* 标签位置由组件经 --edge-x/--edge-y 下发（React Flow 每帧重算的几何量） */
+.canvas-edge-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(var(--edge-x, 0), var(--edge-y, 0)) translate(-50%, -50%);
+  max-width: 180px;
+  padding: var(--s1) var(--s2);
+  background: var(--paper-2);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+  user-select: none;
+  pointer-events: all;
+}
+
+.canvas-edge-label.is-selected {
+  border-color: var(--accent-line);
+  color: var(--ink);
+}
+
+.canvas-edge-edit-host {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(var(--edge-x, 0), var(--edge-y, 0)) translate(-50%, -50%);
+  pointer-events: all;
+}
+
+.canvas-edge-edit {
+  width: 120px;
+  padding: var(--s1) var(--s2);
+  background: var(--paper-2);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  outline: none;
+}
+
+/* ---- 空画布引导 ------------------------------------------------------ */
+
+.canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.canvas-empty__card {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--s6) var(--s7);
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+  text-align: center;
+}
+
+.canvas-empty__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  color: var(--ink);
+}
+
+.canvas-empty__hint {
+  margin: 0 0 var(--s3);
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+
+.canvas-empty__actions {
+  display: flex;
+  gap: var(--s2);
+}
+
+/* ---- 按钮（画布自带一套，不依赖 app.css —— 样式文件随懒加载 chunk 走） --- */
+
+.canvas-btn {
+  min-height: 44px;
+  padding: 0 var(--s4);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s1);
+  background: var(--paper-2);
+  color: var(--ink);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.canvas-btn:hover {
+  background: var(--paper-3);
+}
+
+.canvas-btn:active {
+  transform: translateY(0.5px);
+}
+
+.canvas-btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.canvas-btn--primary:hover {
+  background: var(--accent);
+  filter: brightness(1.06);
+}
+
+/* ---- 右键菜单 ---------------------------------------------------------
+ * 命中目标 ≥44px（含菜单项）；定位坐标经 --menu-x/--menu-y 下发。 */
+
+.canvas-menu {
+  position: fixed;
+  left: 0;
+  top: 0;
+  transform: translate(var(--menu-x, 0), var(--menu-y, 0));
+  min-width: 168px;
+  padding: var(--s1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  background: var(--paper-2);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-3);
+  z-index: 20;
+}
+
+.canvas-menu__item {
+  min-height: 44px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--s3);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--ink-2);
+  text-align: left;
+  cursor: pointer;
+}
+
+.canvas-menu__item:hover:not(:disabled) {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.canvas-menu__item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.canvas-menu__sep {
+  height: 1px;
+  background: var(--rule);
+}
+
+/* ---- 引用笔记选择器 --------------------------------------------------- */
+
+.canvas-picker {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+}
+
+.canvas-picker__panel {
+  width: min(420px, calc(100% - var(--s6)));
+  max-height: min(480px, calc(100% - var(--s6)));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--paper-2);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-3);
+}
+
+.canvas-picker__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--s2) var(--s3) var(--s2) var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.canvas-picker__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  color: var(--ink);
+}
+
+.canvas-picker__close {
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.canvas-picker__close:hover {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.canvas-picker__close svg {
+  width: 14px;
+  height: 14px;
+}
+
+.canvas-picker__filter {
+  margin: var(--s3) var(--s4) var(--s2);
+  min-height: 44px;
+  box-sizing: border-box;
+  padding: var(--s1) var(--s3);
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--ink);
+  outline: none;
+}
+
+.canvas-picker__filter:focus {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.canvas-picker__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--s2) var(--s2);
+}
+
+.canvas-picker__item {
+  min-height: 44px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  padding: var(--s1) var(--s2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+}
+
+.canvas-picker__item:hover,
+.canvas-picker__item:focus-visible {
+  background: var(--paper-3);
+}
+
+.canvas-picker__name {
+  font-size: var(--fs-md);
+  color: var(--ink);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-picker__path {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-picker__empty {
+  padding: var(--s4);
+  text-align: center;
+  color: var(--ink-3);
+  font-size: var(--fs-sm);
+}
