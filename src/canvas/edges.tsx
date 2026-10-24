@@ -6,11 +6,11 @@ import {
   type Edge,
   type EdgeProps,
 } from "@xyflow/react";
-import type { CanvasEdge as CanvasEdgeDoc } from "./types";
+import { isCanvasColorPreset, type CanvasEdge as CanvasEdgeDoc } from "./types";
 
 /**
- * 边数据：source 是契约原边（含未知字段与 label），label 的增删改都写回它，
- * 序列化时整条边以它为底回写。
+ * 边数据：source 是契约原边（含未知字段与 label），label / 颜色 / 箭头端的增删改
+ * 都写回它，序列化时整条边以它为底回写。
  */
 export interface CanvasCardEdgeData {
   source: CanvasEdgeDoc;
@@ -39,9 +39,25 @@ function useEdgeLabelPosition(labelX: number, labelY: number, active: boolean) {
   return ref;
 }
 
+/**
+ * 边的颜色也走 CSS 变量：预设色存的是编号（"1"-"6"），这里下发对应的令牌引用；
+ * 非预设色（别的工具写的 hex）原样下发。stroke 的实际取值在 canvas.css
+ * （var(--edge-accent, var(--ink-3))，选中态另有覆盖）。
+ */
+function useEdgeAccentVar(color: string | undefined): React.RefObject<SVGGElement | null> {
+  const ref = useRef<SVGGElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (color) el.style.setProperty("--edge-accent", isCanvasColorPreset(color) ? `var(--canvas-c-${color})` : color);
+    else el.style.removeProperty("--edge-accent");
+  }, [color]);
+  return ref;
+}
+
 /** 可编辑标签的边：双击边（或标签）出现小输入框，Enter / blur 提交，Esc 取消。 */
 export function CanvasCardEdgeView(props: EdgeProps<CanvasCardEdge>): ReactNode {
-  const { id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, selected } = props;
+  const { id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, selected, markerStart, markerEnd } = props;
   const [path, labelX, labelY] = getBezierPath({
     sourceX,
     sourceY,
@@ -51,6 +67,8 @@ export function CanvasCardEdgeView(props: EdgeProps<CanvasCardEdge>): ReactNode 
     targetPosition,
   });
   const label = data?.source.label ?? "";
+  const color = typeof data?.source.color === "string" ? data.source.color : undefined;
+  const accentRef = useEdgeAccentVar(color);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(label);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -81,12 +99,19 @@ export function CanvasCardEdgeView(props: EdgeProps<CanvasCardEdge>): ReactNode 
   return (
     <>
       <g
+        ref={accentRef}
         onDoubleClick={(event) => {
           event.stopPropagation();
           startEdit();
         }}
       >
-        <BaseEdge id={id} path={path} className={selected ? "canvas-edge is-selected" : "canvas-edge"} />
+        <BaseEdge
+          id={id}
+          path={path}
+          markerStart={markerStart}
+          markerEnd={markerEnd}
+          className={selected ? "canvas-edge is-selected" : "canvas-edge"}
+        />
       </g>
       <EdgeLabelRenderer>
         {editing ? (

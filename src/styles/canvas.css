@@ -63,6 +63,7 @@
 /* ---- 卡片 ---------------------------------------------------------- */
 
 .canvas-card {
+  position: relative;
   box-sizing: border-box;
   width: 100%;
   height: 100%;
@@ -80,6 +81,27 @@
 .react-flow__node.selected .canvas-card {
   border-color: var(--accent-line);
   box-shadow: var(--shadow-2), 0 0 0 2px var(--accent-soft);
+}
+
+/* 有强调色的卡：描边与顶部标题条着色，选中态也不丢自己的颜色（ring 仍给选中信号） */
+.canvas-card.is-colored {
+  border-color: var(--card-accent, var(--rule-strong));
+}
+
+.react-flow__node.selected .canvas-card.is-colored {
+  border-color: var(--card-accent, var(--accent-line));
+}
+
+.canvas-card.is-colored::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 3px;
+  background: var(--card-accent, var(--rule-strong));
+  border-radius: var(--radius) var(--radius) 0 0;
+  pointer-events: none;
 }
 
 /* 文本卡片正文：--font-doc + 略缩放的正文号（卡内排版，不是编辑区排版） */
@@ -212,13 +234,13 @@
 /* ---- 边与标签 -------------------------------------------------------- */
 
 .canvas-flow .react-flow__edge-path.canvas-edge {
-  stroke: var(--ink-3);
+  stroke: var(--edge-accent, var(--ink-3));
   stroke-width: 1.6;
 }
 
 .canvas-flow .react-flow__edge.selected .react-flow__edge-path.canvas-edge,
 .canvas-flow .react-flow__edge-path.canvas-edge.is-selected {
-  stroke: var(--accent);
+  stroke: var(--edge-accent, var(--accent));
   stroke-width: 2;
 }
 
@@ -533,3 +555,378 @@
   color: var(--ink-3);
   font-size: var(--fs-sm);
 }
+
+
+/* ---- 预设色令牌 ---------------------------------------------------------
+ * JSON Canvas 规范的六个预设色（落盘串 "1"-"6"）。色值只在两处主题组里定义
+ * （浅色一组、深色一组），卡片 / 边 / 菜单色板全部引用这里的变量 —— 不允许
+ * 出现第二份色值表。非预设色（别的工具写入的 hex）不经这里：组件经
+ * --card-accent / --edge-accent 变量下发原值。 */
+
+:root {
+  --canvas-c-1: #a8423a;
+  --canvas-c-2: #b07028;
+  --canvas-c-3: #93861e;
+  --canvas-c-4: #4a7d4e;
+  --canvas-c-5: #3b7ea1;
+  --canvas-c-6: #7d5ba6;
+}
+
+[data-theme="night"],
+[data-theme="ink"] {
+  --canvas-c-1: #e0664f;
+  --canvas-c-2: #d99a4e;
+  --canvas-c-3: #cbb845;
+  --canvas-c-4: #62b98a;
+  --canvas-c-5: #63a6c8;
+  --canvas-c-6: #a98fd1;
+}
+
+.canvas-card.is-color-1 {
+  --card-accent: var(--canvas-c-1);
+}
+
+.canvas-card.is-color-2 {
+  --card-accent: var(--canvas-c-2);
+}
+
+.canvas-card.is-color-3 {
+  --card-accent: var(--canvas-c-3);
+}
+
+.canvas-card.is-color-4 {
+  --card-accent: var(--canvas-c-4);
+}
+
+.canvas-card.is-color-5 {
+  --card-accent: var(--canvas-c-5);
+}
+
+.canvas-card.is-color-6 {
+  --card-accent: var(--canvas-c-6);
+}
+
+/* ---- 分组框 ------------------------------------------------------------
+ * 虚线描边圆角容器（MVP 容器语义：可拖动/缩放/删除/连线，子节点不随动）。 */
+
+.canvas-card--group {
+  background: color-mix(in srgb, var(--paper-3) 55%, transparent);
+  border: 1.5px dashed var(--rule-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+  padding: var(--s2) var(--s3);
+}
+
+.canvas-card--group.is-colored {
+  border-color: var(--card-accent, var(--rule-strong));
+}
+
+.react-flow__node.selected .canvas-card--group {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.canvas-card__group-label {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--ink-2);
+  align-self: flex-start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+}
+
+.canvas-card--group.is-colored .canvas-card__group-label {
+  color: var(--card-accent);
+}
+
+.canvas-card__group-edit {
+  width: min(240px, 70%);
+  min-height: 32px;
+  padding: var(--s1) var(--s2);
+  background: var(--paper-2);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--ink);
+  outline: none;
+}
+
+/* ---- 网页卡片 ---------------------------------------------------------- */
+
+.canvas-card--link {
+  flex-direction: row;
+  align-items: flex-start;
+}
+
+/* ---- 图片卡片 ----------------------------------------------------------
+ * 文件卡引用的是图片路径时渲染缩略图（blob URL 机制复用 assets.ts）；
+ * 图没读到时沿用文件卡原样（含失效态）。 */
+
+.canvas-card--image {
+  flex-direction: column;
+  padding: var(--s1);
+  gap: var(--s1);
+}
+
+.canvas-card__thumb {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--paper-3);
+}
+
+.canvas-card__caption {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* subpath（#标题）以等宽小字缀在路径后 */
+.canvas-card__subpath {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  margin-left: var(--s1);
+}
+
+/* ---- 节点缩放柄 --------------------------------------------------------
+ * 视觉 10px、命中区扩到 44px（::before 外扩）；四角把手，握住即缩放。
+ * 只在节点选中时渲染（NodeResizer isVisible）。 */
+
+.canvas-flow .react-flow__resize-control.handle {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--accent);
+  border: 1.5px solid var(--paper-2);
+}
+
+.canvas-flow .react-flow__resize-control.handle::before {
+  content: "";
+  position: absolute;
+  inset: -17px;
+  border-radius: 8px;
+  background: transparent;
+}
+
+/* 边线把手保持可拖但不抢眼（默认的实色线在纸面上太重） */
+.canvas-flow .react-flow__resize-control.line {
+  background: transparent;
+}
+
+/* ---- MiniMap / Controls（@xyflow/react 自带件，令牌化 + 触控命中 ≥44px） */
+
+.canvas-flow {
+  --xy-controls-button-background-color: var(--paper-2);
+  --xy-controls-button-background-color-hover: var(--paper-3);
+  --xy-controls-button-color: var(--ink-2);
+  --xy-controls-button-color-hover: var(--ink);
+  --xy-controls-button-border-color: var(--rule);
+  --xy-controls-box-shadow: var(--shadow-2);
+  --xy-minimap-background-color: var(--paper-2);
+  --xy-minimap-mask-background-color: color-mix(in srgb, var(--ink) 18%, transparent);
+  --xy-minimap-mask-stroke-color: transparent;
+  --xy-minimap-node-background-color: var(--ink-3);
+  --xy-minimap-node-stroke-color: var(--paper-2);
+}
+
+.canvas-flow .react-flow__controls {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.canvas-flow .react-flow__controls-button {
+  width: 44px;
+  height: 44px;
+}
+
+.canvas-flow .react-flow__controls-button svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.canvas-flow .react-flow__minimap {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  box-shadow: var(--shadow-2);
+}
+
+/* ---- 画布内搜索（Ctrl/Cmd+F 打开，Enter 跳下一处，Esc 关闭） ----------- */
+
+.canvas-search {
+  position: absolute;
+  top: var(--s3);
+  right: var(--s3);
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: var(--s1);
+  background: var(--paper-2);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-2);
+}
+
+.canvas-search__input {
+  min-height: 44px;
+  box-sizing: border-box;
+  width: 220px;
+  padding: 0 var(--s2);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--ink);
+  outline: none;
+}
+
+.canvas-search__input:focus {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.canvas-search__count {
+  min-width: 4ch;
+  text-align: center;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+
+.canvas-search__close {
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.canvas-search__close:hover {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.canvas-search__close svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---- 右键菜单 · 颜色子菜单（六个预设 + 无） ----------------------------- */
+
+.canvas-menu__swatches {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) var(--s3) var(--s2);
+}
+
+.canvas-menu__swatch {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--rule-strong);
+  background: var(--paper-3);
+  padding: 0;
+  cursor: pointer;
+}
+
+/* 命中区扩到 44px（22px 视觉 + 11px 外扩） */
+.canvas-menu__swatch::before {
+  content: "";
+  position: absolute;
+  inset: -11px;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.canvas-menu__swatch.is-color-1 {
+  background: var(--canvas-c-1);
+}
+
+.canvas-menu__swatch.is-color-2 {
+  background: var(--canvas-c-2);
+}
+
+.canvas-menu__swatch.is-color-3 {
+  background: var(--canvas-c-3);
+}
+
+.canvas-menu__swatch.is-color-4 {
+  background: var(--canvas-c-4);
+}
+
+.canvas-menu__swatch.is-color-5 {
+  background: var(--canvas-c-5);
+}
+
+.canvas-menu__swatch.is-color-6 {
+  background: var(--canvas-c-6);
+}
+
+.canvas-menu__swatch.is-active {
+  box-shadow: 0 0 0 2px var(--paper-2), 0 0 0 4px var(--accent);
+}
+
+.canvas-menu__swatch--none {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+}
+
+/* ---- 「指向标题」选择器（复用引用笔记选择器的面板样式） ------------------ */
+
+.canvas-picker__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.canvas-picker__foot .canvas-btn {
+  min-height: 44px;
+}
+
+/* 标题层级缩进（data-level 由组件下发，缩进量留在样式表） */
+.canvas-picker__name[data-level="2"] {
+  padding-left: 16px;
+}
+
+.canvas-picker__name[data-level="3"] {
+  padding-left: 32px;
+}
+
+.canvas-picker__name[data-level="4"] {
+  padding-left: 48px;
+}
+
+.canvas-picker__name[data-level="5"] {
+  padding-left: 64px;
+}
+
+.canvas-picker__name[data-level="6"] {
+  padding-left: 80px;
+}
+
