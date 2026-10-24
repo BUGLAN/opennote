@@ -168,6 +168,29 @@
   color-scheme: dark;
 }
 
+/* ======================= semantic (status) ============================== */
+/*
+ * 状态色**不跟主题色走**。
+ *
+ * `--accent` 会随用户选的主题变（朱砂 / 靛青 / 松绿 / 藤黄），
+ * 但「成功 / 提醒 / 危险」在任何主题下都必须是同一个意思 ——
+ * 否则换了主题之后「有冲突」这个提示会变成主题色，看上去像普通强调。
+ */
+:root,
+[data-theme="paper"],
+[data-theme="celadon"],
+[data-theme="sepia"] {
+  --ok: #3f7d4e;
+  --warn: #a9761b;
+  --danger: #b23a2e;
+}
+[data-theme="night"],
+[data-theme="ink"] {
+  --ok: #62b98a;
+  --warn: #d9a537;
+  --danger: #e0664f;
+}
+
 /* ============================ accents =================================== */
 /* 朱砂 (default) */
 :root,

@@ -129,7 +129,14 @@ function installDomShim() {
     removeEventListener: noop,
     visibilityState: "visible",
     hidden: false,
-    documentElement: { dataset: {}, style: { setProperty() {} }, classList: { add() {}, remove() {} } },
+    // `classList` 必须是**完整**的 DOMTokenList 形状：`applyUi()` 会先问
+    // `contains("is-resizing-content")` 再决定是否写死宽度覆盖 —— 只给 add/remove
+    // 的桩会在 `openWorkspace()` 里抛 "root.classList.contains is not a function"。
+    documentElement: {
+      dataset: {},
+      style: { setProperty() {}, removeProperty() {} },
+      classList: { add() {}, remove() {}, contains: () => false, toggle() {} },
+    },
     createElement: () => ({ style: {}, dataset: {}, setAttribute() {}, appendChild() {}, addEventListener() {}, rel: "", href: "" }),
     body: { appendChild() {}, removeChild() {} },
     querySelector: () => null,
