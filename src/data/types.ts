@@ -30,6 +30,9 @@ export interface FolderChoice {
   disabled?: boolean;
 }
 
+/** 笔记的种类：普通 Markdown 笔记，或 JSON Canvas 画布（`.canvas`）。 */
+export type NoteKind = "note" | "canvas";
+
 export interface Note {
   id: Id;
   folderId: Id | null;
@@ -48,6 +51,21 @@ export interface Note {
   words: number;
   trashed: boolean;
   trashedAt: number | null;
+  /**
+   * 笔记种类。**可选 + 缺省视为 "note"**：既有测试（如 `tagTree.test.ts`）直接
+   * 构造完整的 `Note` 字面量，必填字段会让全仓 typecheck 失败；而「缺省即笔记」
+   * 也正是磁盘事实 —— `.canvas` 出现之前所有文件都是笔记。
+   * 读取侧一律经 `noteKind()` 归一化，不要直接读 `note.kind`（会是 `undefined`）。
+   */
+  kind?: NoteKind;
+}
+
+/**
+ * `Note.kind` 的归一化读取：缺省与坏值一律落回 "note"。
+ * 「这篇是不是画布」的唯一判据，视图层与数据层共用。
+ */
+export function noteKind(note: Pick<Note, "kind">): NoteKind {
+  return note.kind === "canvas" ? "canvas" : "note";
 }
 
 export type SnapshotReason = "auto" | "manual" | "restore" | "before-disk";

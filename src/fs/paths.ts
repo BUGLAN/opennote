@@ -45,6 +45,18 @@ export {
 } from "../../shared/paths";
 export type { CaseFoldCollision } from "../../shared/paths";
 
+/**
+ * 画布文件（JSON Canvas 1.0）：与 `.md` 同等的一等公民。
+ *
+ * 实现留在本文件而不进 `shared/paths.ts`：`isMarkdownPath` / `isImagePath` 是
+ * 「导入与远端拉取也要认」的判据（`isMaterializable` 消费它们），而 `.canvas`
+ * 目前只有客户端数据层（`src/data/library.ts` 的扫描/守卫）消费 —— 按本文件
+ * 头部注释的分工，服务端不认识的扩展名不往 shared 里放。
+ */
+export function isCanvasPath(path: string): boolean {
+  return /\.canvas$/i.test(path);
+}
+
 /** Metadata directory that travels with a workspace. */
 export const ASSETS_DIR = "assets";
 export const STATE_FILE = ".opennote/state.json";
