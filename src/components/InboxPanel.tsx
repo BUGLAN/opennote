@@ -855,6 +855,21 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
         notify(errorMessage(error) || "入库失败，请重试。", { kind: "danger" });
       } finally {
         setBusy(false);
+        /*
+         * 收尾无条件重读一次收件箱。
+         *
+         * 主按钮的文字是 `committing ? "正在入库…" : …`，而 `committing = busy || status ===
+         * "committing"`：只把 `busy` 放开是不够的，**界面上那句话由磁盘状态说了算**。
+         * 真机上正是这里出的错——笔记已经落盘、`state.json` 已经是 `committed`，但那次
+         * 刷新被并发读覆盖成了入库途中的 `committing`，于是按钮永远停在「正在入库…」，
+         * 而它同时承担着「禁用入库 / 禁用跳过这次」两条锁（见 `primaryDisabled`）——
+         * 条目就此成了死结。
+         *
+         * 数据层已经改成串行刷新（`refreshInbox`）+ 孤儿自愈（`recoverStaleCommit`），
+         * 这里再显式收尾一次：无论底层是成功、抛错还是被别处提前发布过，面板都会在
+         * 入库动作结束后与磁盘对齐。
+         */
+        void refreshInbox().catch(() => undefined);
       }
     },
     [folderPick],

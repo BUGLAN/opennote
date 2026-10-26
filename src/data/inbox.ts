@@ -40,6 +40,7 @@ import { assertSafeRelative, baseName, joinPath, sanitizeName } from "../fs/path
 import type { FileSystemBackend } from "../fs/types";
 import { normalizeFolder } from "../lib/clip/envelope";
 import { createStore, useStore } from "../lib/store";
+import { readImportIndex } from "./importLog";
 import { currentBackend, currentWorkspace, rescanWorkspace } from "./library";
 
 export type { InboxEntry, InboxStatus } from "../desktop/bridge";
@@ -70,6 +71,18 @@ export const INBOX_FULL_MESSAGE = "收件箱已满（500 条），请先处理�
 export const INBOX_COMMITTED_TTL_MS = 24 * 60 * 60 * 1000;
 /** `failed` 条目保留 7 天。 */
 export const INBOX_FAILED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * 一条 `committing` 多久没有动静就算**孤儿**（见 `recoverStaleCommit()`）。
+ *
+ * 三十秒的依据：`runCommit()` 在进入真正的写盘阶段那一刻把 `updatedAt` 刷成当前时刻，
+ * 之后最长的一段是「接收端落盘 + 重扫一次工作区」（本机 2000 篇笔记的库实测 1–2 秒，
+ * 正文另有 8 MiB 上限）。留一个数量级的余量，才能既不自愈到真正在跑的那一次，
+ * 又不让用户对着「正在写入…」等太久。
+ *
+ * 它也**不是唯一判据**：同进程里真正在跑的提交记在 `inFlight` 里，一律不算孤儿。
+ */
+export const INBOX_COMMIT_STALE_MS = 30_000;
 
 /** 清除时机 = 工作区打开时扫一遍 + 每 6 小时一次（`02` §5.8.5）。 */
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -531,21 +544,55 @@ async function readDir(target: FileSystemBackend, dirName: string): Promise<Inbo
 /** 幂等：同 id 的第二个条目标 `failed` 并记 `IMP-4017`（`02` §5.8.2）。 */
 const DUPLICATE_CODE = "IMP-4017";
 
-/** 并发护栏：只让最后一次 `refreshInbox` 的结果落地（外部投递可能连发多次）。 */
-let refreshSeq = 0;
+/**
+ * 并发护栏：`refreshInbox()` **串行化**（同一时刻只有一次读盘在跑），期间新来的请求
+ * 合并成**一次尾随重读**。
+ *
+ * ⚠️ 这里原来写的是「只让最后一次开始的结果落地」（`seq === refreshSeq`），它有两个
+ * 真机可复现的后果：
+ *
+ * 1. **读得早、发布得晚的那一次会把新状态盖回去**。`runCommit()` 的收尾
+ *    `refreshInbox()` 之前，文件监听已经排了一次去抖刷新；两次交替完成时，
+ *    后者（读到的是写 `committed` **之前**的盘面）反而活了下来 —— store 里永远停在
+ *    `committing`，而磁盘上已经是 `committed`。
+ * 2. 卡住的条目**没有任何出路**：`committing` 状态在 UI 上同时禁用「入库」与「跳过这次」，
+ *    而 store 自己不会再刷新（磁盘不再变化，没有新事件），于是「一直正在入库」。
+ *
+ * 串行 + 尾随重读保证：**最后一次读盘一定发生在此前所有写入之后**，谁调用 `await
+ * refreshInbox()` 谁就能看到自己刚写下的状态。
+ */
+let refreshRunning: Promise<void> | null = null;
+let refreshAgain = false;
 
 /**
  * 从磁盘重读收件箱。写盘之后、`onInboxChanged` 到达之后、以及面板打开时都会调用。
  * 同时执行契约规定的幂等收尾：同 `importId` 的第二个条目只处理第一个。
  */
 export async function refreshInbox(): Promise<void> {
-  const seq = ++refreshSeq;
+  // 串行化：正在读盘的那一次跑完后，若期间有新请求就再读一遍（谁都不会被丢掉）。
+  if (refreshRunning) {
+    refreshAgain = true;
+    return refreshRunning;
+  }
+  refreshRunning = (async () => {
+    try {
+      do {
+        refreshAgain = false;
+        await refreshInboxOnce();
+      } while (refreshAgain);
+    } finally {
+      refreshRunning = null;
+    }
+  })();
+  return refreshRunning;
+}
+
+/** `refreshInbox()` 的单次读盘体（只由串行循环调用，不自己处理并发）。 */
+async function refreshInboxOnce(): Promise<void> {
   const target = currentBackend();
   if (!target) {
-    if (seq === refreshSeq) {
-      publish([]);
-      loadedStore.set(true);
-    }
+    publish([]);
+    loadedStore.set(true);
     return;
   }
   const names = await listDirNames(target);
@@ -573,13 +620,74 @@ export async function refreshInbox(): Promise<void> {
       }
     }
     seen.add(detail.entry.id);
-    next.push(detail);
+    // 卡在 `committing` 的孤儿条目就地自愈（见 `recoverStaleCommit`）。
+    next.push((await recoverStaleCommit(target, detail)) ?? detail);
   }
-  if (seq === refreshSeq) {
-    // 列表按目录名倒序 = 最新投递的排在最前（目录名以 UTC 时间戳开头，可直接比较）。
-    publish(next.sort((a, b) => (a.dirName < b.dirName ? 1 : a.dirName > b.dirName ? -1 : 0)));
-    loadedStore.set(true);
+  // 列表按目录名倒序 = 最新投递的排在最前（目录名以 UTC 时间戳开头，可直接比较）。
+  publish(next.sort((a, b) => (a.dirName < b.dirName ? 1 : a.dirName > b.dirName ? -1 : 0)));
+  loadedStore.set(true);
+}
+
+/**
+ * `committing` 是**锁**，不是终态：写它的人如果没走到收尾（进程被杀、接收端抛错后
+ * 进程没来得及落 `failed`、窗口在提交途中最中被关掉…），磁盘上就永远留着一条
+ * 「正在写入」。而 UI 在 `committing` 上同时禁用「入库」与「跳过这次」——
+ * 于是这条条目**没有任何出路**，用户看到的就是「一直正在入库、什么按钮都点不动」。
+ *
+ * 契约里的 `committing` 恰恰是「**保留、不设期限**」（`02` §5.8.3），没有任何自动清理
+ * 会来救它，所以出路必须由这里给：
+ *
+ * - **本进程正在提交**（`inFlight`）→ 不动，那是真的在写。
+ * - 刚写下去不到 {@link INBOX_COMMIT_STALE_MS} → 不动，给正在跑的那次留足时间。
+ * - 否则按**磁盘事实**判定终态：
+ *   - 幂等索引里有这个 `importId` 且文件确实在 → `committed`（`committedPath` = 索引里的
+ *     落点）。这正是真机上最常见的形态：笔记已经写好，只是收尾没跑完；
+ *   - 其余 → 退回 `pending`，把「入库 / 跳过这次」两个按钮还给用户。**不猜 `committed`**：
+ *     索引里没有就是「不知道有没有写成」，谎报入库会让用户以为笔记在、其实不在。
+ *
+ * 退回 `pending` 的代价是可能多出一篇「同名另存」的笔记（重试时同名文件还在），
+ * 而卡死的代价是这条条目**彻底无法处理**——两害相权前者可接受，且重试前界面会如实
+ * 提示「同名文件已存在，入库时会另存为《… 2》」。
+ *
+ * 只在**整盘刷新**里跑（`refreshInboxOnce`），单条读取（`findDir`）不碰磁盘状态：
+ * 否则用户点一下条目就会触发一次写盘 + watcher 自激。
+ */
+async function recoverStaleCommit(
+  target: FileSystemBackend,
+  detail: InboxDetail,
+): Promise<InboxDetail | null> {
+  const { entry } = detail;
+  if (entry.status !== "committing") return null;
+  if (inFlight.has(entry.id)) return null;
+  const updatedAt = Date.parse(entry.updatedAt);
+  if (Number.isFinite(updatedAt) && Date.now() - updatedAt < INBOX_COMMIT_STALE_MS) return null;
+
+  let next: InboxDiskState = {
+    status: "pending",
+    attempts: entry.attempts,
+    lastError: null,
+    committedPath: entry.committedPath,
+    updatedAt: Date.now(),
+  };
+  try {
+    const indexed = (await readImportIndex(target)).find((item) => item.importId === entry.id);
+    if (indexed?.path && (await target.exists(indexed.path))) {
+      next = { ...next, status: "committed", committedPath: indexed.path };
+    }
+  } catch {
+    // 索引读不出来（备份文件坏 / 后端拒绝）→ 按「不知道」处理，退回 pending。
   }
+  const kept = await writeStateIfPresent(target, detail.dirName, next).catch(() => false);
+  if (!kept) return null;
+  console.warn(
+    "[opennote] 收件箱条目卡在 committing，已按磁盘事实自愈：",
+    detail.dirName,
+    next.status,
+  );
+  return {
+    ...detail,
+    entry: { ...entry, status: next.status, committedPath: next.committedPath, notePath: next.committedPath, updatedAt: toIso(next.updatedAt) },
+  };
 }
 
 export async function listInboxDetails(): Promise<InboxDetail[]> {

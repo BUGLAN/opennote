@@ -26,7 +26,9 @@ vi.mock("./workspaces", () => ({
 }));
 
 import { flushAll, flushMeta, getLibrary, openWorkspace } from "./library";
+import { rememberImport } from "./importLog";
 import {
+  INBOX_COMMIT_STALE_MS,
   INBOX_DIR,
   INBOX_FULL_MESSAGE,
   INBOX_LIMIT,
@@ -584,6 +586,155 @@ describe("commitInbox：确认入库", () => {
     expect(failed.status).toBe("failed");
     expect(failed.lastError).toBe("IMP-5001");
     expect(failed.message).toBe("写入笔记失败，磁盘可能已满或没有权限。原内容没有丢失。");
+  });
+});
+
+/* ------------------- 入库后收件箱必须跟上磁盘（回归） ------------------- */
+
+/**
+ * 真机缺陷（2026-10-26 用户截图）：「一直卡在正在入库，但笔记其实已经入库，
+ * 而且这个页面关不掉」。
+ *
+ * 两处独立成因，都要有用例钉住：
+ *
+ * 1. **并发刷新把新状态盖回旧的**。`refreshInbox()` 原来的并发护栏是
+ *    「只让最后一次**开始**的结果落地」（`seq === refreshSeq`），而不是「最后一次**完成**」
+ *    —— 先开始、后完成的那个（读到的是写 `committed` 之前的盘面）会把 store 覆盖成
+ *    `committing`。而 `committing` 在界面上同时禁用「入库」与「跳过这次」，
+ *    store 又没有任何理由再刷一次，于是这条条目**永远出不去**。
+ * 2. **`committing` 没有任何自愈路径**。进程被杀 / 收尾没跑完会把锁永远留在磁盘上，
+ *    而契约规定 `committing` **不设期限**（`02` §5.8.3），清理永远不会来救它。
+ */
+describe("入库后的收件箱状态：并发刷新不许把 committed 盖回 committing", () => {
+  it("入库途中排进来的刷新不会让条目停在 committing", async () => {
+    const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached = false;
+    setInboxReceiver(async () => {
+      reached = true;
+      await gate;
+      return importResult();
+    });
+
+    const running = commitInbox(entry.id);
+    for (let tick = 0; tick < 200 && !reached; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(reached).toBe(true);
+    // 此刻磁盘上是 committing（`runCommit` 刚写完锁）。
+    expect((await listInboxDetails())[0].entry.status).toBe("committing");
+
+    // 文件监听在入库期间排一次去抖刷新：它就是真机上「抢先读到 committing」的那一次。
+    const raced = refreshInbox();
+    release();
+    await running;
+    await raced;
+
+    // 真机上这里读到的是 committing，而磁盘上早就是 committed。
+    expect((await readInboxEntry(entry.id))!.status).toBe("committed");
+    const view = (await listInboxDetails())[0].entry;
+    expect(view.status).toBe("committed");
+    expect(view.notePath).toBe("读书笔记/中文排版指北.md");
+    // 「待确认」的计数必须跟着归零，否则侧栏徽标会一直挂着一个处理不了的条目。
+    expect(inboxCount()).toBe(0);
+  });
+
+  it("refreshInbox 串行化：并发调用者看到的就是自己写完之后的状态", async () => {
+    const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    // 先让一次读盘在跑，期间改成 committed，再让它看到结果。
+    const first = refreshInbox();
+    await setInboxStatus(entry.id, "committed", { notePath: "读书笔记/中文排版指北.md" });
+    await first;
+    expect((await readInboxEntry(entry.id))!.status).toBe("committed");
+  });
+});
+
+describe("committing 孤儿自愈（进程被杀 / 收尾没跑完）", () => {
+  /** 造一个「上次会话写到一半就没了」的条目：state.json = committing，updatedAt 很久以前。 */
+  async function seedOrphan(overrides: { notePath?: string | null; ageMs?: number } = {}) {
+    const entry = await enqueueInbox(JSON.stringify(ENVELOPE), META);
+    const dirName = await firstDirName();
+    const ageMs = overrides.ageMs ?? INBOX_COMMIT_STALE_MS * 2;
+    testBackend.seed(
+      statePath(dirName),
+      JSON.stringify({
+        status: "committing",
+        attempts: 1,
+        lastError: null,
+        committedPath: overrides.notePath ?? null,
+        updatedAt: new Date(Date.now() - ageMs).toISOString(),
+      }),
+    );
+    return { entry, dirName };
+  }
+
+  it("索引里有落点且文件在 → 自愈成 committed（真机上最常见的形态）", async () => {
+    const { entry, dirName } = await seedOrphan();
+    // 笔记确实写过（接收端落了盘），幂等索引也记下了。
+    testBackend.seed("读书笔记/中文排版指北.md", "# 中文排版指北\n");
+    await rememberImport(
+      {
+        importId: entry.id,
+        path: "读书笔记/中文排版指北.md",
+        title: "中文排版指北",
+        sourceUrl: null,
+        site: null,
+        publishedAt: null,
+        selection: false,
+        sourceHash: "sha256:s",
+        bodyHash: "sha256:b",
+        contentHash: "sha256:c",
+        tags: [],
+        client: "cli",
+        at: new Date().toISOString(),
+        action: "created",
+      },
+      testBackend,
+    );
+
+    await refreshInbox();
+
+    const healed = (await readInboxEntry(entry.id))!;
+    expect(healed.status).toBe("committed");
+    expect(healed.notePath).toBe("读书笔记/中文排版指北.md");
+    expect(readState(dirName)).toMatchObject({ status: "committed", committedPath: "读书笔记/中文排版指北.md" });
+    // 已入库就不该再占着「待确认」。
+    expect(inboxCount()).toBe(0);
+  });
+
+  it("索引里没有落点 → 退回 pending，把「入库 / 跳过这次」还给用户", async () => {
+    const { entry, dirName } = await seedOrphan();
+
+    await refreshInbox();
+
+    const healed = (await readInboxEntry(entry.id))!;
+    expect(healed.status).toBe("pending");
+    expect(healed.notePath).toBeNull();
+    expect(readState(dirName)).toMatchObject({ status: "pending", committedPath: null });
+    // 不许凭空宣称入库（谎报会把用户引向一篇并不存在的笔记）。
+    expect(healed.message).toBeNull();
+  });
+
+  it("刚写下去的 committing（更新于阈值之内）不被动：那是真的在跑", async () => {
+    const { entry, dirName } = await seedOrphan({ ageMs: 1000 });
+
+    await refreshInbox();
+
+    expect((await readInboxEntry(entry.id))!.status).toBe("committing");
+    expect(readState(dirName)).toMatchObject({ status: "committing" });
+  });
+
+  it("自愈之后可以正常入库，不会再撞 IMP-4020", async () => {
+    const { entry } = await seedOrphan();
+    installReceiver();
+
+    await refreshInbox();
+    await commitInbox(entry.id);
+
+    expect((await readInboxEntry(entry.id))!.status).toBe("committed");
   });
 });
 
