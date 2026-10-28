@@ -102,9 +102,10 @@ const REFRESH_DEBOUNCE_MS = 450;
 /** 单个附件解码后 ≤ 8 MiB；数量 ≤ 32（`02` §2.7）。 */
 const MAX_ASSET_BYTES = 8 * 1024 * 1024;
 const MAX_ASSETS = 32;
-/** HTML 页面资源：条数与单件上限（与 `lib/clip/envelope.ts` 的 `MAX_HTML_RESOURCE*` 同值）。 */
+/** HTML 页面资源：条数、单件与合计上限（与 `lib/clip/envelope.ts` 的 `MAX_HTML_RESOURCE*` 同值）。 */
 const MAX_RESOURCES = 256;
 const MAX_RESOURCE_BYTES = 8 * 1024 * 1024;
+const MAX_RESOURCES_TOTAL_BYTES = 8 * 1024 * 1024;
 
 /* ============================== 错误模型 =============================== */
 
@@ -922,7 +923,9 @@ async function stageResources(
 ): Promise<NonNullable<ImportEnvelope["resources"]>> {
   const list = resources ?? [];
   if (list.length > MAX_RESOURCES) throw new InboxError("IMP-4013", inboxFailureMessage("IMP-4013"));
-  const out: NonNullable<ImportEnvelope["resources"]> = [];
+  // 先把字节全部解析并过完校验（单件 + 合计），再统一写盘：中途失败不留半个 resources/ 目录。
+  const staged: Array<{ path: string; mime?: string; file: string; bytes: Uint8Array }> = [];
+  let total = 0;
   for (const resource of list) {
     if (!resource || typeof resource !== "object") continue;
     const path = typeof resource.path === "string" ? normalizeResourcePath(resource.path) : null;
@@ -944,14 +947,19 @@ async function stageResources(
       bytes = await target.readBytes(relative).catch(() => null);
     }
     if (!bytes || bytes.byteLength > MAX_RESOURCE_BYTES) throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
-    const relative = joinPath(RESOURCES_DIR, path);
-    const absolute = joinPath(entryDirPath(dirName), relative);
+    // 合计上限在这里把住：信封校验只对 dataBase64 形态计数，file 形态要等读盘后才知道大小。
+    total += bytes.byteLength;
+    if (total > MAX_RESOURCES_TOTAL_BYTES) throw new InboxError("IMP-4013", inboxFailureMessage("IMP-4013"));
+    staged.push({ path, ...(resource.mime ? { mime: resource.mime } : {}), file: joinPath(RESOURCES_DIR, path), bytes });
+  }
+  for (const item of staged) {
+    const absolute = joinPath(entryDirPath(dirName), item.file);
     const parent = absolute.slice(0, absolute.lastIndexOf("/"));
     await target.mkdir(parent).catch(() => undefined);
-    await target.writeBytes(absolute, bytes);
-    out.push({ path, ...(resource.mime ? { mime: resource.mime } : {}), file: relative });
+    await target.writeBytes(absolute, item.bytes);
   }
-  return out;
+  // `entry.json` 里的形态不带字节（`file` 相对条目目录）。
+  return staged.map((item) => ({ path: item.path, ...(item.mime ? { mime: item.mime } : {}), file: item.file }));
 }
 
 /**

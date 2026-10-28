@@ -52,6 +52,8 @@ import {
   utf8Bytes,
   warningText,
   decodeBase64,
+  MAX_HTML_RESOURCE_BYTES,
+  MAX_HTML_RESOURCES_TOTAL_BYTES,
   MAX_REQUEST_BYTES,
   serializeEnvelopeJson,
   type ImportEnvelope,
@@ -526,8 +528,9 @@ async function resolveHtmlResources(backend: FileSystemBackend, envelope: Import
       resources.push(resource);
       continue;
     }
+    let bytes: Uint8Array;
     try {
-      resources.push({ ...resource, bytes: await backend.readBytes(resource.file) });
+      bytes = await backend.readBytes(resource.file);
     } catch (error) {
       throw new ImportRejection(
         importProblem("IMP-4012", {
@@ -536,6 +539,20 @@ async function resolveHtmlResources(backend: FileSystemBackend, envelope: Import
         }),
       );
     }
+    // 外置文件与 `dataBase64` 同一条体积判据：信封校验是纯函数不碰磁盘，`file` 形态只能在这里补，
+    // 否则一个远超 8 MiB 的文件会先被整个读进内存、才被内联器的合计上限丢弃。
+    if (bytes.byteLength > MAX_HTML_RESOURCE_BYTES) {
+      throw new ImportRejection(
+        importProblem("IMP-4012", { field: `resources[${index}].file`, reason: "size", bytes: bytes.byteLength }),
+      );
+    }
+    resources.push({ ...resource, bytes });
+  }
+  // 合计上限跨形态闭合：内联部分在信封校验时已查过，这里对「全部已解析字节」再查一次，
+  // 混合（dataBase64 + file）与纯 file 的投递也逃不掉。
+  const total = resources.reduce((sum, resource) => sum + (resource.bytes?.byteLength ?? 0), 0);
+  if (total > MAX_HTML_RESOURCES_TOTAL_BYTES) {
+    throw new ImportRejection(importProblem("IMP-4013", { field: "resources", reason: "total", bytes: total }));
   }
   return { ...envelope, resources };
 }

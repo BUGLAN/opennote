@@ -396,6 +396,40 @@ describe("enqueueInbox：投递即 pending", () => {
     });
     expect(INBOX_FULL_MESSAGE).toBe("收件箱已满（500 条），请先处理一些条目。");
   });
+
+  it("★ HTML 页面条目：body.html + resources/ 落到条目目录，entry.json 带 format 与 resources", async () => {
+    const htmlEnvelope = {
+      ...ENVELOPE,
+      importId: "html-entry-happy-01",
+      format: "html",
+      assets: [],
+      resources: [{ path: "css/a.css", mime: "text/css", dataBase64: Buffer.from("p{}").toString("base64") }],
+    };
+    const entry = await enqueueInbox(JSON.stringify(htmlEnvelope), META);
+    expect(entry.status).toBe("pending");
+    const dirName = await firstDirName();
+    expect(testBackend.files.get(joinPath(INBOX_DIR, dirName, "body.html"))).toBe(ENVELOPE.body);
+    expect(new TextDecoder().decode(testBackend.files.get(joinPath(INBOX_DIR, dirName, "resources/css/a.css")) as Uint8Array)).toBe("p{}");
+    const raw = JSON.parse(String(testBackend.files.get(joinPath(INBOX_DIR, dirName, "entry.json")))) as Record<string, unknown>;
+    expect(raw.format).toBe("html");
+    expect(raw.bodyFile).toBe("body.html");
+    expect(raw.resources).toEqual([{ path: "css/a.css", mime: "text/css", file: "resources/css/a.css" }]);
+  });
+
+  it("★ HTML 页面资源合计超 8 MiB：投递即拒（IMP-4013），校验在写盘之前不留半个条目", async () => {
+    const five = "x".repeat(5 * 1024 * 1024);
+    const htmlEnvelope = {
+      ...ENVELOPE,
+      importId: "html-resources-total-01",
+      format: "html",
+      resources: [
+        { path: "a.css", mime: "text/css", dataBase64: Buffer.from(five).toString("base64") },
+        { path: "b.png", mime: "image/png", dataBase64: Buffer.from(five).toString("base64") },
+      ],
+    };
+    await expect(enqueueInbox(JSON.stringify(htmlEnvelope), META)).rejects.toMatchObject({ code: "IMP-4013" });
+    expect([...testBackend.files.keys()].filter((path) => path.startsWith(`${INBOX_DIR}/`))).toEqual([]);
+  });
 });
 
 /* ------------------------------ 状态迁移 ------------------------------- */

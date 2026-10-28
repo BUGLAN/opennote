@@ -194,4 +194,27 @@ describe("接收端 · format: html 的信封", () => {
     expect(second.status).toBe("created");
     expect(second.path).toBe("图表页 2.html");
   });
+
+  it("★ 外置 file 形态的资源同一条体积判据：单件超 8 MiB 拒收且不落盘", async () => {
+    testBackend.seed("staged/big.png", "x".repeat(9 * 1024 * 1024));
+    await expect(
+      receiveEnvelope(envelope({ resources: [{ path: "big.png", file: "staged/big.png" }] })),
+    ).rejects.toMatchObject({ name: "ImportRejection", code: "IMP-4012" });
+    // 笔记本里除了投递前就存在的暂存文件，没有被写进任何页面。
+    expect(testBackend.paths().filter((path) => !path.startsWith(".opennote/"))).toEqual(["staged/big.png"]);
+  });
+
+  it("★ 合计上限跨形态闭合：dataBase64 与 file 混合超 8 MiB 拒收", async () => {
+    testBackend.seed("staged/mid.png", "x".repeat(4 * 1024 * 1024));
+    await expect(
+      receiveEnvelope(
+        envelope({
+          resources: [
+            { path: "a.css", dataBase64: Buffer.alloc(5 * 1024 * 1024).toString("base64") },
+            { path: "mid.png", file: "staged/mid.png" },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ name: "ImportRejection", code: "IMP-4013" });
+  });
 });
