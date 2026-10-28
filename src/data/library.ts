@@ -251,6 +251,12 @@ const SNAPSHOT_KEEP = 60;
 const SNAPSHOT_NAME_MEMORY = 200;
 /** Backend calls a workspace scan keeps in flight — the walk used to be one IPC call at a time (D25). */
 const SCAN_CONCURRENCY = 12;
+/**
+ * 扫描时读入内存的 HTML 页面上限：与入库路径的单页上限（receive 的 `MAX_HTML_PAGE_BYTES`）同值。
+ * 更大的只可能是外部塞进来的（coverage 报告之类）：读进来会常驻几十 MB、搜索还要对它跑正则，
+ * 宁可不把它当一篇笔记（文件本身仍在磁盘与同步基线里，不受影响）。
+ */
+const MAX_HTML_SCAN_BYTES = 24 * 1024 * 1024;
 
 /* ------------------------------------------------- 占位名笔记的自动改名（停笔 5 秒）
 
@@ -691,8 +697,10 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
       if (entry.kind !== "file") continue;
       const path = joinPath(node.path, entry.name);
       // 画布、HTML 页面与笔记同一待遇：一并读入内存（makeNote 按扩展名分派 kind）。
-      if (!isNoteFilePath(path)) continue;
-      pending.push({ path, size: entry.size, mtimeMs: entry.mtimeMs });
+      // 例外：超过扫描上限的 HTML 不读 —— Phase 3 里 contents 没有它，自然不会成为一篇笔记。
+      if (isNoteFilePath(path) && !(isHtmlPath(path) && entry.size > MAX_HTML_SCAN_BYTES)) {
+        pending.push({ path, size: entry.size, mtimeMs: entry.mtimeMs });
+      }
     }
   }
   const contents = new Map<Id, string>();
@@ -1129,6 +1137,25 @@ async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileCha
       continue;
     }
     const stat = await target.stat(id).catch(() => null);
+    // 超大 HTML 页面：与 scanWorkspace 同一条上限，不读入内存。已在树里的（外部把它撑大的）
+    // 同步出树 —— 全量重扫对它的结论也是「不是一篇」，两条路径必须一致。
+    if (stat !== null && isHtmlPath(id) && stat.size > MAX_HTML_SCAN_BYTES) {
+      if (known) {
+        console.warn("[opennote] HTML 页面超过扫描上限，未载入", id, stat.size);
+        setState((prev) => {
+          const notes = { ...prev.notes };
+          delete notes[id];
+          const trash = { ...prev.trash };
+          delete trash[id];
+          return { ...prev, notes, trash };
+        });
+        fileStates.delete(id);
+        invalidateSearchCache(id);
+        closeTab(id);
+        reconcileTabs();
+      }
+      continue;
+    }
     const onDisk = stat === null ? null : await target.readText(id).catch(() => null);
     if (stat === null || onDisk === null) continue;
     if (known) {
