@@ -20,7 +20,7 @@
  *     回传的消息一律不含宿主机绝对路径/用户名（审计 D35）
  */
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, nativeImage, safeStorage, session, shell } = require('electron')
+const { app, BrowserWindow, Menu, dialog, ipcMain, nativeImage, protocol, safeStorage, session, shell } = require('electron')
 const { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } = require('node:fs/promises')
 const { existsSync, watch, readdirSync, readFileSync } = require('node:fs')
 const { spawn } = require('node:child_process')
@@ -37,6 +37,17 @@ const { DEEPLINK_CHANNEL, PROTOCOL, deeplinkMessage, findDeeplinkInArgv, parseOp
 // 主进程没有这两道限制 —— 「图片一起保存」真正落地就靠这一层。纯函数，可单测。
 const { downloadImages: downloadImagesInMain } = require('./fetch-images.cjs')
 const { createSyncProxy, composeUrl, normalizeBaseUrl, assertSafeRelPath } = require('./sync.cjs')
+/*
+ * HTML 页面的专用协议（0.16.0）。纯函数部分单独一个文件：越权规则要能被真单测钉住，
+ * 而主进程本体依赖 Electron、进不了 vitest（与 `deeplink.cjs` 同一套做法）。
+ */
+const {
+  PAGE_SCHEME,
+  PAGE_CSP,
+  pageUrlFor,
+  resolvePageRequest,
+  contentTypeFor,
+} = require('./pageProtocol.cjs')
 
 /** 图片下载通道（preload 用同一个常量；verify-contract 的 C-12a 靠常量名配对两侧）。 */
 const NET_DOWNLOAD_IMAGES_CHANNEL = 'opennote:net:downloadImages'
@@ -148,6 +159,10 @@ function cspPolicy() {
     "base-uri 'none'",
     "form-action 'none'",
     "frame-ancestors 'none'",
+    // HTML 页面走 `opennote-page:` 专用协议（见 `pageProtocol.cjs` 的文件头）：
+    // 页面文档要能被嵌进主窗口，就必须在这一条里放行。**只放行这一个协议** ——
+    // 放行 `https:` 等于允许嵌任意第三方页面。
+    `frame-src ${PAGE_SCHEME}:`,
     "worker-src 'self' blob:",
   ].join('; ')
 }
@@ -3042,17 +3057,146 @@ if (!singleInstance) {
   })
 }
 
+
+// ---------------------------------------------------------------------------
+// HTML 页面协议（opennote-page://）
+// ---------------------------------------------------------------------------
+//
+// 为什么不是 iframe srcdoc / blob：子框架继承父文档 CSP，原型页面的内联 <script> 会被
+// script-src 'self' file: 静默挡掉（白屏 + 只有控制台报错）。专用协议让文档带着**自己的**
+// CSP 加载 —— 详见 pageProtocol.cjs 的文件头。
+
+/** 页面协议必须在 app ready **之前**声明特权，否则 standard/secure 不生效、相对路径也解析不了。 */
+function registerPageScheme() {
+  try {
+    protocol.registerSchemesAsPrivileged([
+      {
+        scheme: PAGE_SCHEME,
+        privileges: {
+          standard: true,
+          secure: true,
+          supportFetchAPI: false,
+          corsEnabled: false,
+          stream: false,
+        },
+      },
+    ])
+  } catch (error) {
+    console.error('[opennote] 页面协议注册失败：' + (errorCodeOf(error) || '未知错误'))
+  }
+}
+
+/**
+ * 把一条协议请求变成响应。
+ *
+ * 三层校验，缺一不可：
+ *   ① 纯函数的路径规则（pageProtocol.cjs：扩展名白名单、.opennote 子树白名单、编码分隔符）；
+ *   ② requireAuthorizedRoot + resolveInsideRoot（词法上落在**已授权**的工作区内）；
+ *   ③ assertRealPathInsideRoot（realpath 之后仍在工作区内，挡住 junction / 符号链接越界）。
+ *
+ * 只服务**当前打开的那个工作区**：页面不属于别的笔记本，跨库读盘的入口不该存在。
+ */
+/**
+ * 页面协议的**唯一**响应出口。
+ *
+ * 为什么连错误响应也要走这里：**每一份**响应都必须带 `PAGE_CSP`，一个都不许漏。
+ * 只给成功的 .html 加是不行的 ——
+ *   - CSS/JS/图片也要过同一条策略（`img-src` 里的 `opennote-page:` 与 `script-src` 的形状
+ *     若在两处各说一套，就是安全声明最容易漂移的地方）；
+ *   - 更重要的是**将来**：有人把某条路径规则放宽、让一个 .html 从 403 变成 200 时，
+ *     策略头不该靠「那条分支记不记得加」来决定。出口只有一个，就不会漏。
+ */
+function pageResponse(body, options = {}) {
+  return new Response(body, {
+    status: options.status ?? 200,
+    headers: {
+      'Content-Type': options.contentType ?? 'text/plain; charset=utf-8',
+      'Content-Security-Policy': PAGE_CSP,
+      // 页面不许被缓存：文件随时可能被外部编辑器改，缓存住就变成「改了没反应」。
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  })
+}
+
+async function servePageRequest(request) {
+  const verdict = resolvePageRequest(request.url)
+  if (!verdict.ok) return pageResponse(verdict.reason, { status: verdict.status })
+  const root = currentWorkspaceRoot
+  if (!root) return pageResponse('还没有打开笔记本', { status: 404 })
+  let target
+  try {
+    const safeRoot = requireAuthorizedRoot(root)
+    target = resolveInsideRoot(safeRoot, verdict.path)
+    await assertRealPathInsideRoot(safeRoot, target)
+  } catch (error) {
+    return pageResponse('这个文件不对页面开放', { status: 403 })
+  }
+  let data
+  try {
+    data = await readFile(target)
+  } catch (error) {
+    const missing = isMissingPathError(error)
+    return pageResponse(missing ? '找不到这个文件' : '读取失败', { status: missing ? 404 : 500 })
+  }
+  return pageResponse(data, { contentType: contentTypeFor(verdict.path) })
+}
+
+/** 在 app.whenReady() 之后调用一次。 */
+function installPageProtocol() {
+  try {
+    protocol.handle(PAGE_SCHEME, (request) => {
+      // 任何异常都必须变成响应，否则这一次加载会挂死在 pending 上（页面永远转圈）。
+      return servePageRequest(request).catch((error) => {
+        console.error('[opennote] 页面协议处理失败：' + (errorCodeOf(error) || '未知错误'))
+        return pageResponse('页面打开失败', { status: 500 })
+      })
+    })
+  } catch (error) {
+    console.error('[opennote] 页面协议安装失败：' + (errorCodeOf(error) || '未知错误'))
+  }
+}
+
+/**
+ * 渲染层问「这个页面该用哪个 URL」。
+ *
+ * 为什么不把 URL 拼装放在渲染层：协议名、host 与编码规则都在 pageProtocol.cjs 里，
+ * 两处各拼一遍必然漂移（一处改了另一处不改，症状是页面 404 而没有任何报错）。
+ * 这里只回**字符串**，不回绝对路径 —— 与 D35 的「不向渲染层泄漏宿主机路径」一致。
+ */
+function registerPageHandlers() {
+  handle(
+    'opennote:page:urlFor',
+    async (relPath) => {
+      if (!currentWorkspaceRoot) throw new Error('还没有打开笔记本')
+      // 先过路径规则：不合规的路径不该拿到一个「看起来能用」的 URL。
+      const verdict = resolvePageRequest(pageUrlFor(relPath))
+      if (!verdict.ok) throw new Error(verdict.reason)
+      return pageUrlFor(verdict.path)
+    },
+    '取页面地址失败',
+  )
+}
+
 // ---------------------------------------------------------------------------
 // 生命周期
 // ---------------------------------------------------------------------------
 
+/*
+ * 页面协议的特权必须在 ready **之前**登记（Electron 的硬要求：ready 之后再登记不生效，
+ * 症状是 `standard` 没有生效 ⇒ 相对路径全部解析错）。
+ */
+registerPageScheme()
+
 app.whenReady().then(async () => {
   if (!singleInstance) return
   registerIpcHandlers()
+  registerPageHandlers()
   installApplicationMenu()
   await loadPersistentRoots()
   await loadInlineScriptHashes()
   installContentSecurityPolicy()
+  installPageProtocol()
 
   try {
     // 图标先设：Dock 里一出现就是我们的印章，而不是 Electron 默认图标。

@@ -43,6 +43,14 @@ interface StatusBarProps {
     title: string;
     onOpen(): void;
   } | null;
+  /**
+   * 当前页面是不是只读页面（HTML）。
+   *
+   * 有它就把「字数 / 字符 / 行·列」整组换成一句「只读页面」：这两组数字对 HTML
+   * 全都**没有意义**（页面正文不在我们手里，光标在 iframe 里，我们收不到行列）。
+   * 显示一排永远为 0 的数字，比不显示更糟 —— 用户会以为统计坏了。
+   */
+  readOnlyPage?: { kind: "html" } | null;
 }
 
 /**
@@ -86,17 +94,27 @@ export function StatusBar(props: StatusBarProps): ReactNode {
             左侧那三段（存放位置 / 文件数 / 文件夹）留得更久。 */}
         <span className="statusbar__spacer" />
 
-        {settings.showWordCount ? (
+        {props.readOnlyPage ? (
+          <span
+            className="statusbar__item statusbar__item--compact"
+            title="HTML 页面在页内渲染为独立文档（只读）；字数与行列不适用于它"
+          >
+            只读页面
+          </span>
+        ) : settings.showWordCount ? (
           <span className="statusbar__item statusbar__item--compact" title="字数统计">
             {props.counts.words.toLocaleString("zh-CN")} 字 · {props.counts.chars.toLocaleString("zh-CN")} 字符 · 约{" "}
             {props.counts.minutes} 分钟
           </span>
         ) : null}
 
-        <span className="statusbar__item statusbar__item--cursor" title="光标位置">
-          行 {props.cursor.line} · 列 {props.cursor.column}
-          {props.cursor.selected ? ` · 选中 ${props.cursor.selected}` : ""}
-        </span>
+        {/* 只读页面的光标在 iframe 里，我们收不到行列 —— 整项不渲染，而不是显示 1:1。 */}
+        {props.readOnlyPage ? null : (
+          <span className="statusbar__item statusbar__item--cursor" title="光标位置">
+            行 {props.cursor.line} · 列 {props.cursor.column}
+            {props.cursor.selected ? ` · 选中 ${props.cursor.selected}` : ""}
+          </span>
+        )}
       </div>
 
       <div className="statusbar__actions">

@@ -3,9 +3,10 @@ import {
   ASSETS_DIR,
   assertSafeRelative,
   baseName,
+  extName,
   isHiddenPath,
   isImagePath,
-  isMarkdownPath,
+  isPagePath,
   joinPath,
   sanitizeName,
   stripExtension,
@@ -77,9 +78,16 @@ export async function importIntoWorkspace(
     return parent;
   };
 
-  const writeNote = async (content: string, folderId: Id | null, name: string): Promise<void> => {
+  /**
+   * 写一篇页面。
+   *
+   * `extension` 必须由调用方按**源文件的扩展名**传进来（`".md"` 或 `".html"`）：
+   * 固定拼 `.md` 会把 `原型/登录页.html` 存成 `登录页.md` —— 文件还在，但它不再是
+   * 一个 HTML 页面，打开就是源码。这是 HTML 导入最容易被忽略的一处。
+   */
+  const writeNote = async (content: string, folderId: Id | null, name: string, extension = ".md"): Promise<void> => {
     const dir = folderId ?? "";
-    const requested = joinPath(dir, `${sanitizeName(name, "未命名")}.md`);
+    const requested = joinPath(dir, `${sanitizeName(name, "未命名")}${extension}`);
     // Check the disk too: a file that appeared after the last scan must not be
     // overwritten just because memory has never heard of it (D03).
     const path = await resolveAvailablePath(backend, requested, taken);
@@ -127,7 +135,11 @@ export async function importIntoWorkspace(
         return false;
       }
     });
-    const notes = safe.filter((entry) => isMarkdownPath(entry.name));
+    /*
+     * 页面 = Markdown + HTML（`isPagePath`）。zip 里的 .html 走**同一条**文本分支 ——
+     * 它本来就是 UTF-8 文本，不需要 readBytes，也不需要另写一套目录推导。
+     */
+    const notes = safe.filter((entry) => isPagePath(entry.name));
     const images = safe.filter((entry) => isImagePath(entry.name));
     const legacyPrefix = notes.length > 0 && notes.every((entry) => entry.name.startsWith("notes/")) ? "notes/" : "";
     const movedImages = new Map<string, string>();
@@ -171,7 +183,8 @@ export async function importIntoWorkspace(
         text = text.split(`](./${ASSETS_DIR}/${baseName(original)})`)
           .join(`](./${ASSETS_DIR}/${baseName(destination)})`);
       }
-      await writeNote(text, folderId, stripExtension(fileName));
+      // 扩展名跟着源文件走：`.html` 存成 `.html`（否则打开就是源码）。
+      await writeNote(text, folderId, stripExtension(fileName), extName(fileName) || ".md");
     }
   };
 
@@ -185,7 +198,7 @@ export async function importIntoWorkspace(
         await handleZip(file);
         continue;
       }
-      if (isMarkdownPath(file.name)) {
+      if (isPagePath(file.name)) {
         const text = await readFileAsText(file);
         if (!text.trim()) {
           result.skipped += 1;
@@ -195,7 +208,7 @@ export async function importIntoWorkspace(
         const segments = relative.split("/").filter(Boolean);
         const fileName = segments.pop() ?? file.name;
         const folderId = await ensureFolder(segments);
-        await writeNote(text, folderId, stripExtension(fileName));
+        await writeNote(text, folderId, stripExtension(fileName), extName(fileName) || ".md");
         continue;
       }
       if (isImagePath(file.name) || file.type.startsWith("image/")) {

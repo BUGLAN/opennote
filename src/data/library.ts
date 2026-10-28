@@ -9,6 +9,7 @@ import {
   formatStamp,
   isHiddenPath,
   isMarkdownPath,
+  isPagePath,
   joinPath,
   normalizePath,
   parentPath,
@@ -20,6 +21,7 @@ import {
   type FileSystemBackend,
 } from "../fs";
 import { createStore, useStore } from "../lib/store";
+import { htmlFallbackTitle, htmlTitle, pageKindOf } from "../lib/htmlPage";
 import {
   countText,
   derivePlaceholderTitle,
@@ -50,7 +52,7 @@ import { clearConflicts, recordConflict, remapConflict, resolveConflict } from "
 import { isSyncActive } from "../sync/mode";
 import { beginWrite, fileStates, type FileRecord, type FileStamp } from "./fileStates";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
-import type { Folder, FolderChoice, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
+import type { Folder, FolderChoice, Id, Note, PageKind, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
 import { getUi, patchUi } from "./ui";
 import { activeWorkspaceRecord, resolveBackend, setActiveWorkspace, type WorkspaceRecord } from "./workspaces";
 /*
@@ -361,23 +363,34 @@ function makeFolder(path: string, mtimeMs: number): Folder {
 
 function makeNote(path: string, content: string, mtimeMs: number, options: { starred?: boolean; trashed?: boolean } = {}): Note {
   const text = normalizeEol(content);
-  const counts = countText(text);
+  const kind = pageKindOf(path);
+  /*
+   * HTML 页面**不参与** Markdown 的那套派生：
+   *   - `deriveTitle()` 会把 `<h1>` 之前的第一行（多半是 `<!doctype html>`）当标题；
+   *   - `deriveTags()` 会把 `<h1>` 里的 `#` 当标签、把 CSS 里的 `#fff` 当标签；
+   *   - `countText()` 先把标签当 Markdown 剥一遍再数字数 —— 得到的是「字数 3000、
+   *     字数里混着 class 名」这种假数据，而 HTML 页面的「字数」本来就没有意义。
+   * 所以按 kind 分流，而不是「先算再覆盖」：覆盖式写法会让人以为那些计算是对的。
+   */
+  const counts = kind === "html" ? null : countText(text);
   const stamp = mtimeMs || Date.now();
   // 占位名出身：扫描到的第一篇 `无标题.md` 就靠这一行进候选集（自动改名的入口条件）。
-  if (!options.trashed && isPlaceholderName(stripExtension(baseName(path)))) placeholderOrigin.add(path);
+  // HTML 页面不进候选集：自动改名要写回正文标题，而页面正文不可编辑。
+  if (kind === "md" && !options.trashed && isPlaceholderName(stripExtension(baseName(path)))) placeholderOrigin.add(path);
   return {
     id: path,
     folderId: parentPath(path) || null,
-    title: deriveTitle(text, stripExtension(baseName(path))),
+    kind,
+    title: kind === "html" ? htmlTitle(text, htmlFallbackTitle(path)) : deriveTitle(text, stripExtension(baseName(path))),
     titleOverride: null,
     content: text,
     createdAt: stamp,
     updatedAt: stamp,
     openedAt: stamp,
     starred: Boolean(options.starred),
-    tags: deriveTags(text),
-    chars: counts.chars,
-    words: counts.words,
+    tags: kind === "html" ? [] : deriveTags(text),
+    chars: counts ? counts.chars : 0,
+    words: counts ? counts.words : 0,
     trashed: Boolean(options.trashed),
     trashedAt: options.trashed ? stamp : null,
   };
@@ -385,6 +398,19 @@ function makeNote(path: string, content: string, mtimeMs: number, options: { sta
 
 function refresh(note: Note, content: string): Note {
   const text = normalizeEol(content);
+  // HTML 页面与 `makeNote()` **走同一套分流**（理由见那里）：只读页面的正文不会因为我们
+  // 而变，但它会被 `adoptExternal`（磁盘赢了）与快照恢复一路带到这里，不分流就会在
+  // 一次外部改动之后把标题算成 `<!doctype html>`、把 CSS 颜色算成标签。
+  if (note.kind === "html") {
+    return {
+      ...note,
+      content: text,
+      title: note.titleOverride ?? htmlTitle(text, htmlFallbackTitle(note.id)),
+      tags: [],
+      chars: 0,
+      words: 0,
+    };
+  }
   const counts = countText(text);
   return {
     ...note,
@@ -585,14 +611,16 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
     await discover(trashRoot);
   }
 
-  // Phase 2: read every markdown file, again with bounded concurrency.
+  // Phase 2: read every page file (Markdown + HTML), again with bounded concurrency.
   const pending: { path: Id; size: number; mtimeMs: number }[] = [];
   for (const node of [root, ...children.values()]) {
     if (!node.listed) continue;
     for (const entry of node.entries) {
       if (entry.kind !== "file") continue;
       const path = joinPath(node.path, entry.name);
-      if (!isMarkdownPath(path)) continue;
+      // `isPagePath`：Markdown 与 HTML 都读成文本（HTML 只是「另一种页面」，
+      // 读法与 Markdown 完全相同 —— 都是 UTF-8 文本，都不需要 readBytes）。
+      if (!isPagePath(path)) continue;
       pending.push({ path, size: entry.size, mtimeMs: entry.mtimeMs });
     }
   }
@@ -617,7 +645,7 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
         emit(child);
         continue;
       }
-      if (!isMarkdownPath(path)) continue;
+      if (!isPagePath(path)) continue;
       const content = contents.get(path);
       if (content === undefined) continue;
       files += 1;
@@ -997,13 +1025,18 @@ export function applyExternalPaths(paths: readonly string[], options: { type?: W
 async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileChange[]): Promise<void> {
   const myGen = generation;
   if (backend !== target) return;
-  const md = changes.filter((change) => isMarkdownPath(change.path));
-  const dirs = changes.filter((change) => !isMarkdownPath(change.path) && !isHiddenPath(change.path) && change.type !== "delete");
-  if (md.length > PATH_REFRESH_LIMIT) {
+  /*
+   * 「页面」= Markdown + HTML（`isPagePath`）。这个名字仍然是 `pages` 而不是 `md`：
+   * HTML 页面被外部改（编辑器保存、git pull、同步落盘）也必须走这条增量刷新，
+   * 否则它只在整库重扫时才更新 —— 用户看到的是「页面明明改了，软件里还是旧的」。
+   */
+  const pages = changes.filter((change) => isPagePath(change.path));
+  const dirs = changes.filter((change) => !isPagePath(change.path) && !isHiddenPath(change.path) && change.type !== "delete");
+  if (pages.length > PATH_REFRESH_LIMIT) {
     await rescanWorkspace();
     return;
   }
-  for (const change of md) {
+  for (const change of pages) {
     if (myGen !== generation || backend !== target) return;
     const id = change.path;
     const known = libraryStore.get().notes[id] ?? libraryStore.get().trash[id];
@@ -1490,11 +1523,27 @@ if (typeof window !== "undefined") {
 
 /* --------------------------------------------------------------------- notes */
 
-export function createNote(options: { folderId?: Id | null; content?: string; title?: string | null; open?: boolean } = {}): Note {
+export function createNote(
+  options: {
+    folderId?: Id | null;
+    content?: string;
+    title?: string | null;
+    open?: boolean;
+    /**
+     * 页面类型，默认 `md`。
+     *
+     * 为什么让调用方传而不是「看 content 像不像 HTML」：类型由**扩展名**决定
+     * （`pageKindOf()` 是唯一判据，见 `src/lib/htmlPage.ts` 文件头）。
+     * 从内容猜会让一篇写着 `<div>` 示例的 Markdown 笔记变成只读页面。
+     */
+    kind?: PageKind;
+  } = {},
+): Note {
   const target = backend;
   const folderId = options.folderId ?? null;
   const title = options.title ?? "无标题";
-  const fileName = `${sanitizeName(title, "无标题")}.md`;
+  // 扩展名跟着 kind 走：写成 `副本.md` 而内容是 HTML，打开就是源码。
+  const fileName = `${sanitizeName(title, "无标题")}${options.kind === "html" ? ".html" : ".md"}`;
   const taken = new Set(Object.keys(libraryStore.get().notes));
   const path = target ? uniquePath(joinPath(folderId ?? "", fileName), taken) : fileName;
   const content = options.content ?? "";
@@ -1549,6 +1598,12 @@ function replaceExpandedId(oldId: Id, newId: Id): void {
 export interface AutoRenameContext {
   /** 笔记当前路径（= 磁盘文件名）。 */
   id: Id;
+  /**
+   * 页面类型。**只读页面永远不参与自动改名** —— 改名要把正文标题写回文件名，
+   * 而 HTML 页面的「正文标题」在 `<title>` 里、页面本身不可编辑，改名等于替用户
+   * 改了一个他改不回来的东西。
+   */
+  kind: PageKind;
   /** `stripExtension(baseName(id))`。 */
   stem: string;
   /** 这篇笔记是不是**占位名出身**（当前名字是占位名，或曾经是）。 */
@@ -1591,6 +1646,9 @@ export function shouldAutoRename(ctx: AutoRenameContext): string | null {
   // 条件 -1：设置里的总开关（设置 · 文件 → 「写完标题自动改名」，默认开）。
   // 关掉之后**所有**占位名笔记一律不动 —— 这是用户能自己收回这个功能的那条路。
   if (!ctx.autoTitleFromPlaceholder) return "设置里已关闭自动改名";
+  // 条件 -2：只读页面（HTML）不参与 —— 见 `AutoRenameContext.kind` 的说明。
+  // 放在总开关之后、占位名判定之前：它比「是不是占位名」更根本（改不了的东西不谈改名）。
+  if (ctx.kind === "html") return "只读页面（HTML）不参与自动改名";
   // 条件 0 ★ 本次收窄的核心：只有**占位名出身**的笔记才在候选集里，其余笔记一律不动。
   // （`placeholderOrigin` 而不是「当前名字是占位名」：第一次自动改名之后名字就变了，
   //   按当前名字判定会让第二次改标题不再跟随 —— 那正是本次要修的缺陷。）
@@ -1653,6 +1711,7 @@ function autoRenameContext(id: Id, now = Date.now()): AutoRenameContext | null {
   if (!subject) return null;
   return {
     id,
+    kind: subject.kind,
     stem: stripExtension(baseName(id)),
     placeholderOrigin: placeholderOrigin.has(id) || isPlaceholderName(stripExtension(baseName(id))),
     content: subject.content,

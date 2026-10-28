@@ -192,6 +192,13 @@ function contentSecurityPolicyPlugin(): Plugin {
         "base-uri 'none'",
         "form-action 'none'",
         "frame-ancestors 'none'",
+        /*
+         * HTML 页面（0.16.0）：网页版靠 Service Worker 在 /__page/<token> 上返回一个
+         * **自带独立 CSP** 的响应，那个 URL 与主页同源 ⇒ `'self'` 正好够用。
+         * 这行本来由 `default-src 'self'` 兜着，写出来是为了让「谁能被嵌」这一条**可检索**：
+         * 页面隔离的完整说明在 `src/sw.ts` 与 `src/components/HtmlPageView.tsx`。
+         */
+        "frame-src 'self'",
         "worker-src 'self' blob:",
         "manifest-src 'self'",
       ].join("; ");
@@ -216,6 +223,23 @@ export default defineConfig({
     VitePWA({
       disable: isDesktop || isMobile,
       registerType: "autoUpdate",
+      /*
+       * 手工 SW（`src/sw.ts`）而不是 `generateSW`。
+       *
+       * 唯一理由是**网页版 HTML 页面**：它需要在 `/__page/<token>` 上返回一个
+       * 自带独立 CSP 的响应，而 `generateSW` 的 `runtimeCaching` 只能选内置策略
+       * （CacheFirst / NetworkFirst…），**没法合成响应**。见 `src/sw.ts` 的文件头。
+       */
+      strategies: "injectManifest",
+      srcDir: "src",
+      filename: "sw.ts",
+      injectManifest: {
+        // 与原来的 `workbox.globPatterns` / `globIgnores` 保持一致：
+        // 按需加载的分包（CodeMirror 语言、Mermaid、KaTeX、字体）不进安装期预缓存。
+        globPatterns: ["**/*.{js,css,html,svg,png,woff,woff2}"],
+        globIgnores: ["**/assets/lazy/**", "**/mermaid-*.js", "**/katex-*.js", "**/*.woff", "**/*.woff2", "**/*.ttf"],
+        maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+      },
       includeAssets: ["favicon.svg", "icon-192.png", "icon-512.png"],
       manifest: {
         name: "Opennote · 开源笔记",
@@ -235,53 +259,12 @@ export default defineConfig({
           { src: "favicon.svg", sizes: "any", type: "image/svg+xml" },
         ],
       },
-      workbox: {
-        globPatterns: ["**/*.{js,css,html,svg,png,woff,woff2}"],
-        // Mermaid (~4.9 MB), KaTeX, the ~150 CodeMirror language chunks and the
-        // webfonts are only needed once a note actually uses them, so keep them
-        // out of the install-time precache and cache them on first use instead.
-        globIgnores: [
-          "**/assets/lazy/**",
-          "**/mermaid-*.js",
-          "**/katex-*.js",
-          "**/*.woff",
-          "**/*.woff2",
-          "**/*.ttf",
-        ],
-        maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
-        cleanupOutdatedCaches: true,
-        runtimeCaching: [
-          {
-            urlPattern: /\/assets\/(?:lazy\/)?(?:mermaid|katex)[\w.-]*\.js$/,
-            handler: "StaleWhileRevalidate",
-            options: {
-              cacheName: "opennote-on-demand",
-              expiration: { maxEntries: 32, maxAgeSeconds: 60 * 60 * 24 * 30 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            // Every other on-demand chunk (CodeMirror languages and Mermaid's own
-            // dependencies): hashed and immutable, fetched only when needed.
-            urlPattern: /\/assets\/lazy\/[\w.-]+\.js$/,
-            handler: "CacheFirst",
-            options: {
-              cacheName: "opennote-languages",
-              expiration: { maxEntries: 400, maxAgeSeconds: 60 * 60 * 24 * 30 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            urlPattern: /\.(?:woff2?|ttf)$/,
-            handler: "CacheFirst",
-            options: {
-              cacheName: "opennote-fonts",
-              expiration: { maxEntries: 80, maxAgeSeconds: 60 * 60 * 24 * 365 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-        ],
-      },
+      /*
+       * 运行期缓存规则搬进 `src/sw.ts` 了（`registerRoute`）：`injectManifest` 模式下
+       * `workbox.runtimeCaching` 不生效 —— 留着它只会让人以为它还在管用。
+       * 原来的三条规则（Mermaid/KaTeX StaleWhileRevalidate、语言分包 CacheFirst、
+       * 字体 CacheFirst）在 sw.ts 里逐条保留。
+       */
     }),
     contentSecurityPolicyPlugin(),
     appImportScanPlugin(),

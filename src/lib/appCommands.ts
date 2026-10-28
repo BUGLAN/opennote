@@ -49,6 +49,14 @@ export interface CommandContext {
   importFromGithub: (() => void) | null;
   /** 同步当前镜像笔记本与 GitHub（不是镜像笔记本时传 `null`，那一组命令整个不出现）。 */
   syncGithub: (() => void) | null;
+  /**
+   * 当前打开的页面是不是**只读页面**（HTML）。
+   *
+   * 作用范围只有一条：「只对 Markdown 成立」的那组命令要整条禁掉 ——
+   * 复制为 Markdown、导出 Markdown、创建副本、格式化。它们对 HTML 页面要么产出
+   * 一堆源码、要么悄悄把页面复制成一篇 `.md`（用户拿到的是一坨 HTML 文本）。
+   */
+  isReadOnlyPage(): boolean;
 }
 
 export type CommandGroup =
@@ -187,7 +195,15 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       keys: ["mod+shift+n"],
       run: () => ctx.newFolder(),
     },
-    { id: "duplicate", label: "创建副本", group: "笔记", icon: "copy", run: () => ctx.duplicateNote() },
+    {
+      id: "duplicate",
+      label: "创建副本",
+      group: "笔记",
+      icon: "copy",
+      // 复制出来的永远是 `.md`：对 HTML 页面来说那不是「副本」，是一份源码快照。
+      enabled: () => !ctx.isReadOnlyPage(),
+      run: () => ctx.duplicateNote(),
+    },
     { id: "star", label: "加星标 / 取消星标", group: "笔记", icon: "star", run: () => ctx.toggleStar() },
     {
       id: "trash",
@@ -348,6 +364,8 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       label: "复制为 Markdown",
       group: "格式",
       icon: "copy",
+      // HTML 页面没有「Markdown」可复制；给它一条把源码塞进剪贴板的命令只会让人困惑。
+      enabled: () => !ctx.isReadOnlyPage(),
       run: () => ctx.copyMarkdown(),
     },
 
@@ -367,6 +385,7 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       icon: "download",
       shortcut: `${accel("Shift")} + E`,
       keys: ["mod+shift+e"],
+      enabled: () => !ctx.isReadOnlyPage(),
       run: () => ctx.exportNote("md"),
     },
     {
@@ -374,6 +393,7 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
       label: "导出当前笔记（图片内嵌，单文件）",
       group: "数据",
       icon: "image",
+      enabled: () => !ctx.isReadOnlyPage(),
       run: () => ctx.exportNote("md-inline"),
     },
     { id: "export-html", label: "导出当前笔记为独立 HTML", group: "数据", icon: "external", run: () => ctx.exportNote("html") },

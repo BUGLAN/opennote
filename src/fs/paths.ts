@@ -11,8 +11,8 @@
  * 这里只做 re-export，于是既有 import 路径（`../fs/paths`）一行不用改，
  * 而实现只有一份 —— 不是「两端各照规格实现一遍」。
  *
- * 留在本文件的只有**客户端自己的**东西：扩展名判据（`isMarkdownPath` / `isImagePath`）
- * 与 `.opennote/` 下的具体文件名常量。
+ * 留在本文件的只有**客户端自己的**东西：扩展名判据（`isMarkdownPath` / `isHtmlPagePath` /
+ * `isPagePath` / `isImagePath`）与 `.opennote/` 下的具体文件名常量。
  */
 
 export {
@@ -26,9 +26,11 @@ export {
   foldCaseKey,
   idForPath,
   isHiddenPath,
+  isHtmlPagePath,
   isImagePath,
   isMarkdownPath,
   isMaterializable,
+  isPagePath,
   isValidPathDocId,
   joinPath,
   normalizeNfc,

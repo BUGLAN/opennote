@@ -101,6 +101,7 @@ import { Icon } from "./components/Icons";
 import { InboxPanel } from "./components/InboxPanel";
 import { ConflictDialogHost, installImportConflictDialog, uninstallImportConflictDialog } from "./components/ConflictDialog";
 import { DialogHost, MenuHost, Toasts, openMenu } from "./components/Overlays";
+import { HtmlPageView } from "./components/HtmlPageView";
 import { Outline } from "./components/Outline";
 import { ReadingView } from "./components/ReadingView";
 import { Sidebar, currentFolderId, revealTag, type Scope } from "./components/Sidebar";
@@ -158,6 +159,18 @@ export default function App(): ReactNode {
   const activeNote = activeId ? library.notes[activeId] ?? library.trash[activeId] : null;
   /** 当前笔记的只读锁（标签栏的锁按钮 → EditorPane 的 readOnly）。 */
   const activeLocked = activeId !== null && ui.lockedNotes.includes(activeId);
+  /*
+   * HTML 页面**恒为只读**，而且这个只读**不是** `ui.lockedNotes` 里的一条记录：
+   *
+   *   - 它是页面类型的属性（只读页面没有「编辑模式」可切），不是一个可以点掉的锁；
+   *   - 写进 `lockedNotes` 会在两处留下脏数据：用户把 `.html` 改名成 `.md` 之后，
+   *     那篇笔记会莫名其妙地带着一把锁；删掉页面之后 `lockedNotes` 里还留着永久残留 id。
+   *
+   * 所以这里单独一条，只在**渲染与按钮**两层叠加（见 `lockedForUi`）。
+   */
+  const activeForceLocked = activeNote?.kind === "html";
+  /** 界面看到的「锁住了吗」：持久化的锁 **或** 页面类型强制。 */
+  const lockedForUi = activeLocked || activeForceLocked;
   const deferredContent = useDeferredValue(activeNote?.content ?? "");
   const hasWorkspace = Boolean(library.workspace);
   const bridge = useMemo(() => desktopBridge(), []);
@@ -1008,6 +1021,15 @@ export default function App(): ReactNode {
 
   const exportNote = async (kind: "md" | "md-inline" | "html") => {
     if (!activeNote) return;
+    /*
+     * HTML 页面导出成 Markdown 是**没有意义**的（产物是一份源码围栏）。
+     * 「导出为独立 HTML」仍然可用 —— 那是把当前页面另存一份，语义正确。
+     * 命令面板里已经禁用了这两个入口，这里再挡一次：快捷键与将来的自动化都会绕过面板。
+     */
+    if (activeNote.kind === "html" && kind !== "html") {
+      notify("HTML 页面不能导出为 Markdown", { kind: "info" });
+      return;
+    }
     try {
       if (kind === "html") await exportNoteHtml(activeNote);
       else await exportNoteMarkdown(activeNote, { inlineAssets: kind === "md-inline" });
@@ -1085,7 +1107,13 @@ export default function App(): ReactNode {
         },
         duplicateNote: () => {
           if (!activeNote) return;
-          createNote({ folderId: activeNote.folderId, content: activeNote.content, title: `${activeNote.title} 副本` });
+          // `kind` 一路带上：HTML 页面复制出来的仍是 `.html` 页面，不是一份 `.md` 源码。
+          createNote({
+            folderId: activeNote.folderId,
+            content: activeNote.content,
+            title: `${activeNote.title} 副本`,
+            kind: activeNote.kind,
+          });
         },
         trashNote: () => {
           if (!activeNote) return;
@@ -1094,6 +1122,11 @@ export default function App(): ReactNode {
         },
         copyMarkdown: async () => {
           if (!activeNote) return;
+          // 「复制为 Markdown」对 HTML 页面没有对应物：复制源码只会让人以为复制到了正文。
+          if (activeNote.kind === "html") {
+            notify("HTML 页面没有 Markdown 正文可复制", { kind: "info" });
+            return;
+          }
           try {
             await navigator.clipboard.writeText(activeNote.content);
             notify("Markdown 已复制到剪贴板");
@@ -1102,6 +1135,8 @@ export default function App(): ReactNode {
           }
         },
         printNote: () => window.print(),
+        // 只读页面（HTML）：让「只对 Markdown 成立」的那组命令整条禁掉。
+        isReadOnlyPage: () => activeNote?.kind === "html",
         setTheme: (theme: ThemeId) => applyTheme(theme),
         notify: (message) => notify(message),
       }),
@@ -1317,10 +1352,14 @@ export default function App(): ReactNode {
             notes={library.notes}
             activeId={activeId}
             dirty={library.dirty}
-            locked={activeLocked}
+            locked={lockedForUi}
+            lockForced={activeForceLocked}
             onSelect={(id) => openNote(id)}
             onClose={closeTab}
             onToggleLock={() => {
+              // 只读页面没有「解锁」这件事：按钮已经 disabled，这里再挡一次是因为
+              // 命令面板 / 快捷键 / 以后的自动化都可能绕过 disabled 直接调这个回调。
+              if (activeForceLocked) return;
               if (!activeId) return;
               // 只读锁：锁定的笔记编辑器不收输入（EditorPane 里用 Compartment 切），
               // 状态随 `ui.lockedNotes` 落盘 —— 重启后还锁着，删掉的笔记残留 id 无副作用。
@@ -1436,7 +1475,14 @@ export default function App(): ReactNode {
            * 一收一放就是用户看到的「切换文件整屏闪」（2026-10-10 用户报告）。
            * `viewRef` 语义不变：活跃实例的 view（大纲跳转、命令、新建笔记聚焦都用它）。
            */
-          tabs={ui.tabs}
+          /*
+           * HTML 页面**不挂 CodeMirror 实例**。
+           *
+           * 一个看不见的可编辑器留在后台不是「无害的空实现」：它会注册输入法合成、
+           * 抢 focus、在切标签时把光标位置写回状态栏，而且 `viewRef` 会指向一个
+           * **用户看不见的文档**（大纲跳转、命令面板的格式化命令都会作用到它上面）。
+           */
+          tabs={ui.tabs.filter((id) => (library.notes[id] ?? library.trash[id])?.kind !== "html")}
           activeId={activeId}
           getNote={(id) => library.notes[id] ?? library.trash[id] ?? null}
           lockedIds={ui.lockedNotes}
@@ -1460,7 +1506,14 @@ export default function App(): ReactNode {
 
         {/* 只读锁 = 阅读视图（0.4.0 用户反馈）：锁上时编辑器留在挂载状态（undo/光标都在），
             上面整篇渲染成文章排版 —— 读笔记就该是读文章，不是盯着一个不能打字的光标。 */}
-        {hasWorkspace && activeNote && activeLocked ? <ReadingView note={activeNote} /> : null}
+        {hasWorkspace && activeNote && activeLocked && !activeForceLocked ? <ReadingView note={activeNote} /> : null}
+
+        {/*
+          HTML 页面：只读、直接渲染、右上角悬浮全屏。
+          它**不是** `ReadingView` 的一个变体 —— 那块是 Markdown → DOMPurify → `prose`，
+          这里是独立文档（iframe + 自己的 CSP）；混在一起会让两条渲染路径互相污染。
+        */}
+        {hasWorkspace && activeNote?.kind === "html" ? <HtmlPageView note={activeNote} /> : null}
 
         {/* 正文宽度拖拽条：铺在 .main 上、贴着正文栏左右边缘（见组件的文件头注释）。
             没有打开的笔记时不挂；只读锁时量的是阅读视图的 .reading。
@@ -1482,6 +1535,8 @@ export default function App(): ReactNode {
           counts={counts}
           cursor={cursor}
           settings={ui}
+          // HTML 页面：字数与行列不适用（见 StatusBar 的 readOnlyPage 说明）。
+          readOnlyPage={activeNote?.kind === "html" ? { kind: "html" } : null}
           locationLabel={locationLabel}
           snapshotCount={snapshots.length}
           storageLabel={library.workspace ? storageLabel(library.workspace) : "未打开笔记本"}
@@ -1615,7 +1670,7 @@ export default function App(): ReactNode {
         type="file"
         multiple
         hidden
-        accept=".md,.markdown,.txt,.text,.zip,image/*"
+        accept=".md,.markdown,.txt,.text,.html,.htm,.zip,image/*"
         onChange={(event) => {
           const files = event.target.files;
           if (files?.length) void importFiles(files);

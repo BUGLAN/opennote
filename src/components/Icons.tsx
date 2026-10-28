@@ -45,7 +45,9 @@ export type IconName =
   | "unlock"
   | "winMin"
   | "winMax"
-  | "winRestore";
+  | "winRestore"
+  | "fullscreen"
+  | "fullscreenExit";
 
 const PATHS: Record<IconName, JSX.Element> = {
   file: (
@@ -241,6 +243,27 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M9.2 9.2V7.9a1.7 1.7 0 0 1 1.7-1.7h5.3a1.7 1.7 0 0 1 1.7 1.7v5.3a1.7 1.7 0 0 1-1.7 1.7h-1.3" />
       <rect x="6.1" y="9.2" width="8.7" height="8.7" rx="1.7" />
+    </>
+  ),
+  /*
+   * 全屏进出（HTML 页面的悬浮按钮）。用**四个角**而不是「一个方框套箭头」：
+   * 后者在 13–15px 下会糊成一团，四角在同样尺寸下仍然看得清。
+   * 进 = 角朝外，出 = 角朝内 —— 两个图标的笔画数一致，切换时不跳。
+   */
+  fullscreen: (
+    <>
+      <path d="M4.5 9V5.5a1 1 0 0 1 1-1H9" />
+      <path d="M15 4.5h3.5a1 1 0 0 1 1 1V9" />
+      <path d="M19.5 15v3.5a1 1 0 0 1-1 1H15" />
+      <path d="M9 19.5H5.5a1 1 0 0 1-1-1V15" />
+    </>
+  ),
+  fullscreenExit: (
+    <>
+      <path d="M9.5 4.5v4a1 1 0 0 1-1 1h-4" />
+      <path d="M14.5 4.5v4a1 1 0 0 0 1 1h4" />
+      <path d="M19.5 14.5h-4a1 1 0 0 0-1 1v4" />
+      <path d="M4.5 14.5h4a1 1 0 0 1 1 1v4" />
     </>
   ),
 };

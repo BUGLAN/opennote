@@ -3522,3 +3522,159 @@ mark.hit {
   border-top: 1px solid var(--rule);
 }
 .cf-foot .spacer { flex: 1; }
+/* ============================ HTML 页面（只读） ============================ */
+
+/*
+ * HTML 页面与 Markdown 的阅读视图**共用同一块主栏空间**，但不是同一个东西：
+ * 那块是 `.reading-scroll` + `prose`（应用自己的排版），这块是一个**独立文档**
+ * （iframe，自带 CSP）。混用一套样式会让两边的内边距互相污染。
+ */
+.html-page {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  background: var(--paper);
+  overflow: hidden;
+}
+
+.html-page__frame {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--paper);
+  /* 页面自己的配色由它自己决定；底色跟着主题走，避免深色主题下闪一下白。 */
+  color-scheme: normal;
+}
+
+/*
+ * 悬浮全屏按钮：右上角，压在页面之上。
+ *
+ * 为什么是 `position: absolute` 而不是 fixed：fixed 会盖住标签栏与状态栏，
+ * 而「全屏这个页面」在语义上属于主栏里的这一块（见 PageFullscreen 的注释）。
+ * z-index 取 6：低于正文宽度把手（7）与一切对话框（55+），高于 iframe。
+ */
+.html-page__fullscreen-btn {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  /* 页面底色不可控，所以按钮自己带一层纸色底 + 细边，任何页面之上都看得清。 */
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+  border: 1px solid var(--rule);
+  color: var(--ink-2);
+  box-shadow: var(--shadow-1);
+  opacity: 0.55;
+  transition:
+    opacity var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.html-page:hover .html-page__fullscreen-btn,
+.html-page__fullscreen-btn:focus-visible {
+  opacity: 1;
+}
+
+.html-page__fullscreen-btn:hover {
+  background: var(--paper-2);
+  color: var(--accent);
+}
+
+/* 全屏中：按钮压在 iframe 上会挡住页面右上角内容 —— 但它是**唯一的退出入口**，
+   所以只淡到 0.25，鼠标扫过立刻回到 1。 */
+.html-page__fullscreen-btn.is-on {
+  opacity: 0.25;
+}
+
+.html-page__fullscreen-btn.is-on:hover,
+.html-page__fullscreen-btn.is-on:focus-visible {
+  opacity: 1;
+}
+
+/*
+ * 全屏态：两种模式共用一套视觉。
+ *
+ *   - 原生全屏（:fullscreen）：浏览器已经把它变成了全屏元素，只需清掉圆角与内边距；
+ *   - 应用内全屏（.html-page--fullscreen）：自己铺满视口，用 fixed + 视口单位。
+ *
+ * 两条都写，是因为 requestFullscreen() 可能被拒（非用户手势 / WebView / 权限策略），
+ * 那时靠第二条兜底 —— 用户在两种情况下看到的都是「铺满」。
+ */
+.html-page:fullscreen {
+  border-radius: 0;
+  padding: 0;
+}
+
+.html-page--fullscreen:not(:fullscreen) {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: var(--paper);
+}
+
+/* 全屏时退出按钮要更显眼：背景是整张页面，0.55 的半透明底在浅色页面上会看不见。 */
+.html-page--fullscreen .html-page__fullscreen-btn,
+.html-page:fullscreen .html-page__fullscreen-btn {
+  opacity: 1;
+  top: 14px;
+  right: 16px;
+  width: 32px;
+  height: 32px;
+}
+
+/* ------------------------- 加载 / 空 / 失败 三态 ------------------------- */
+
+.html-page__notice {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  padding: var(--s6);
+  text-align: center;
+  color: var(--ink-2);
+}
+
+.html-page__notice-icon {
+  color: var(--ink-3);
+  margin-bottom: var(--s1);
+}
+
+.html-page__notice-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.html-page__notice-body {
+  max-width: 46ch;
+  font-size: var(--fs-md);
+  line-height: 1.7;
+  color: var(--ink-2);
+}
+
+/* 路径提示：等宽、低调、可省略（长路径不该把卡片撑宽）。 */
+.html-page__notice-hint {
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+
+.html-page__notice .btn {
+  margin-top: var(--s2);
+}
+

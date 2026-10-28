@@ -30,9 +30,22 @@ export interface FolderChoice {
   disabled?: boolean;
 }
 
+/**
+ * 页面类型。**从路径现算，不进 `state.json`**。
+ *
+ * 为什么不做成持久化字段：文件改名（`.html` → `.md`）之后，持久化的类型就与磁盘不符，
+ * 而「它是什么」本来就是磁盘事实（扩展名）。现算 = 永远不会与磁盘脱节。
+ *
+ * 现在只有两种；画布（`.canvas`）在 `feat/board` 分支上是第三种，本分支没有它，
+ * 所以这里**不预先留一个用不到的值**（多一个枚举项就会有人以为它已经能用）。
+ */
+export type PageKind = "md" | "html";
+
 export interface Note {
   id: Id;
   folderId: Id | null;
+  /** 页面类型：`md` = 可编辑的 Markdown，`html` = 只读 HTML 页面。见 {@link PageKind}。 */
+  kind: PageKind;
   /** Denormalised title, kept in sync with the content (or with `titleOverride`). */
   title: string;
   /** Set when the user renames a note from the tree; wins over the derived title. */

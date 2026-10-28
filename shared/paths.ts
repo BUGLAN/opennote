@@ -283,6 +283,31 @@ export function isMarkdownPath(path: string): boolean {
   return /\.(md|markdown|mdown|mkd|txt)$/i.test(path);
 }
 
+/**
+ * HTML 页面（`.html` / `.htm`）——**第二种可打开的页面类型**。
+ *
+ * 为什么它必须与 `isMarkdownPath()` 并列而不是并进同一个正则：两者的**渲染与可编辑性
+ * 完全不同**（HTML 走 iframe、恒为只读；Markdown 走 CodeMirror）。合成一条判据之后，
+ * 每一个「这是不是 Markdown」的问句都会变成「这是不是页面」，而 `saveImage()` 的守卫、
+ * 自动改名、正文派生标题这些**只对 Markdown 成立**的地方就会开始误伤 HTML 页面。
+ *
+ * 扩展名大小写不敏感（`A.HTML` 在 Windows / macOS 上就是同一个文件）；
+ * `页面.html.bak` 不匹配（末尾锚定），与 `isMarkdownPath()` 同一习惯。
+ */
+export function isHtmlPagePath(path: string): boolean {
+  return /\.html?$/i.test(path);
+}
+
+/**
+ * 「这是一个可以打开的页面」—— Markdown 或 HTML。
+ *
+ * 扫描（`scanWorkspace`）、增量刷新（`refreshPaths`）这类**页面集合**的判据用它；
+ * 「这篇怎么写」的判据继续用 `isMarkdownPath()` / `isHtmlPagePath()` 各取所需。
+ */
+export function isPagePath(path: string): boolean {
+  return isMarkdownPath(path) || isHtmlPagePath(path);
+}
+
 /** 图片（附件里最常见的一类，要用 `writeBytes` 而不是 `writeText`）。 */
 export function isImagePath(path: string): boolean {
   return /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(path);
@@ -298,7 +323,7 @@ export function isImagePath(path: string): boolean {
  * 放在 `shared/` 是因为**导入与拉取必须共用同一条**，而它们在单仓下本来就该是同一份。
  */
 export function isMaterializable(path: string): boolean {
-  return isMarkdownPath(path) || isImagePath(path);
+  return isPagePath(path) || isImagePath(path);
 }
 
 export interface CaseFoldCollision {

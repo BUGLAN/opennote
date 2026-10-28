@@ -644,6 +644,7 @@ function autoRenameCtx(overrides: Partial<AutoRenameContext> = {}): AutoRenameCo
   const now = Date.now();
   return {
     id: "无标题.md",
+    kind: "md",
     stem: "无标题",
     placeholderOrigin: true,
     content: "## 修改提示词\n",
@@ -1345,3 +1346,95 @@ describe("本地落盘要通知同步层", () => {
     expect(flushes.flat()).toContain("故事/第一章.md");
   });
 });
+
+/**
+ * HTML 页面（第二种页面类型）在**数据层**的契约。
+ *
+ * 这些用例钉的是「页面只是另一种文件，不是特例」这条设计：它能进树、能打开、能进回收站，
+ * 但它**不参与** Markdown 那套派生（正文 H1 当标题、井号当标签、标签剥完再数字数）。
+ * 后者不是洁癖：把 `<h1 id="x">` 里的井号当成标签、把整篇 HTML 的标签剥掉再数字数，
+ * 会让标签树里出现一条叫 `fff` 的标签（CSS 颜色），字数也全是假的。
+ */
+describe("HTML 页面：扫描、派生与回收站", () => {
+  const PAGE = [
+    "<!doctype html>",
+    '<html lang="zh-CN"><head><meta charset="utf-8"><title>原型 · 登录页</title>',
+    "<style>h1{color:#fff}</style></head>",
+    "<body><h1>欢迎回来</h1><p>这是一个原型页面。</p>",
+    "<script>document.title = '被脚本改掉'</script>",
+    "</body></html>",
+  ].join("");
+
+  it("扫描把 .html 收进 notes，并标成 html 类型", async () => {
+    testBackend.seed("原型/登录页.html", PAGE);
+    await rescanWorkspace();
+
+    const note = getLibrary().notes["原型/登录页.html"];
+    expect(note, "HTML 页面没有进树").toBeTruthy();
+    expect(note!.kind).toBe("html");
+    // 标题取 title，不是 h1、也不是 doctype 那一行
+    expect(note!.title).toBe("原型 · 登录页");
+    // 内容原样保留（渲染要的是原文，不是被改写过的 HTML）
+    expect(note!.content).toContain("<!doctype html>");
+    expect(note!.content).toContain("<script>");
+  });
+
+  it("HTML 页面不产出标签、不数字数（Markdown 的那些派生对它没有意义）", async () => {
+    testBackend.seed("原型/登录页.html", PAGE);
+    await rescanWorkspace();
+    const note = getLibrary().notes["原型/登录页.html"]!;
+    expect(note.tags).toEqual([]);
+    expect(note.words).toBe(0);
+    expect(note.chars).toBe(0);
+  });
+
+  it("同目录下 Markdown 笔记的派生结果一格不变（HTML 支持不许顺手改 Markdown）", async () => {
+    testBackend.seed("原型/说明.md", "# 说明\n参见 #设计");
+    await rescanWorkspace();
+    const md = getLibrary().notes["原型/说明.md"]!;
+    expect(md.kind).toBe("md");
+    expect(md.title).toBe("说明");
+    expect(md.tags).toEqual(["设计"]);
+    expect(md.words).toBeGreaterThan(0);
+  });
+
+  it("HTML 页面能进回收站、也能从回收站里打开（回收站只是普通目录）", async () => {
+    testBackend.seed("原型/登录页.html", PAGE);
+    await rescanWorkspace();
+
+    await trashNote("原型/登录页.html");
+    const trashed = getLibrary().trash[".opennote/trash/原型/登录页.html"];
+    expect(trashed, "进回收站后找不到页面").toBeTruthy();
+    // 进回收站之后仍然按 HTML 派生：否则列表里会重新出现「字数/标签」
+    expect(trashed!.kind).toBe("html");
+    expect(trashed!.title).toBe("原型 · 登录页");
+    expect(trashed!.tags).toEqual([]);
+
+    await restoreNote(".opennote/trash/原型/登录页.html");
+    expect(testBackend.files.get("原型/登录页.html")).toBe(PAGE);
+    expect(getLibrary().notes["原型/登录页.html"]?.kind).toBe("html");
+  });
+
+  it("空页面照样进树（进不进树看扩展名，不看内容）", async () => {
+    testBackend.seed("原型/空白.html", "");
+    await rescanWorkspace();
+    const note = getLibrary().notes["原型/空白.html"];
+    expect(note?.kind).toBe("html");
+    // 没有 title、没有 h1 → 回退到文件名
+    expect(note?.title).toBe("空白");
+  });
+
+  it("HTML 页面不会被「停笔自动改名」卷进去（那条路要写回正文标题）", async () => {
+    expect(shouldAutoRename(autoRenameCtx({ id: "原型/无标题.html", kind: "html", stem: "无标题" }))).toBe(
+      "只读页面（HTML）不参与自动改名",
+    );
+  });
+
+  it("外部把页面改成 Markdown 扩展名后，类型与派生跟着扩展名走", async () => {
+    testBackend.seed("原型/切换.md", "<title>其实是页面</title><p>正文</p>");
+    await rescanWorkspace();
+    // .md 就是 Markdown：类型由扩展名决定，不靠内容猜
+    expect(getLibrary().notes["原型/切换.md"]?.kind).toBe("md");
+  });
+});
+

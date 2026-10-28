@@ -42,7 +42,11 @@ const EXPECTED_CSP =
   "font-src 'self' file: data: https://cdn.jsdelivr.net; " +
   "connect-src 'self' file:; " +
   "media-src 'self' file: blob: data:; " +
-  "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; worker-src 'self' blob:"
+  "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
+  // HTML 页面（0.16.0）：页面文档走专用协议，要能被主窗口嵌进来。**只放行这一个协议** ——
+  // 放行 https: 等于允许嵌任意第三方页面，那条线不能松。
+  "frame-src opennote-page:; " +
+  "worker-src 'self' blob:"
 
 /** 内联脚本哈希会被追加进 script-src（桌面构建的启动脚本需要它）。 */
 function expectedCsp(hashes = []) {
@@ -450,16 +454,38 @@ function createHarness(options = {}) {
     },
   }
 
+  /**
+   * HTML 页面协议（`opennote-page:`）的桩。
+   *
+   * 两个 API 都要有：`registerSchemesAsPrivileged`（ready **之前**）与 `handle`（ready 之后）。
+   * 桩里**真的记下来**，下面就能验两件只有真机才看得见的事：
+   *   ① 特权登记发生在 ready 之前、且带 `standard + secure`（顺序错了相对路径会解析错）；
+   *   ② 协议处理的响应真的带着页面自己的 CSP（而不是应用那条）。
+   * 没有这两个 API 时 main.cjs 会走 catch 分支、打印「注册失败」—— 日志里看着像真失败，
+   * 也就是「桩不全 ⇒ 护栏自欺」的经典形态。
+   */
+  const pageProtocol = { schemes: [], handlers: new Map() }
+  const protocol = {
+    registerSchemesAsPrivileged(schemes) {
+      pageProtocol.schemes.push(...schemes)
+    },
+    handle(scheme, handler) {
+      pageProtocol.handlers.set(scheme, handler)
+    },
+  }
+
   return {
     state,
     /** 模拟渲染层 → 主进程的 ipcMain.on 消息。 */
     emit: (channel, ...args) => ipcMain.emit(channel, ...args),
+    pageProtocol,
     electronStub: {
       app,
       BrowserWindow: FakeBrowserWindow,
       Menu,
       dialog,
       ipcMain,
+      protocol,
       session,
       shell,
       /** 打桩返回「能解出图」：`applyDockIcon` 会真的走到 `app.dock.setIcon`。 */
@@ -1361,6 +1387,67 @@ async function main() {
     off()
     assert.equal((preload.listeners.get('opennote:update:changed') || []).length, 0, '退订后应移除监听')
     return '透传 + 退订正常'
+  })
+
+
+  section('HTML 页面协议（opennote-page:）：特权登记顺序与响应策略')
+
+  await check('协议特权在 ready 之前登记，且 standard + secure（顺序错了相对路径会解析错）', async () => {
+    const registered = harnessA.pageProtocol.schemes
+    assert.ok(registered.length >= 1, '没有登记任何协议特权')
+    const page = registered.find((item) => item.scheme === 'opennote-page')
+    assert.ok(page, '未登记 opennote-page')
+    assert.equal(page.privileges.standard, true, 'standard 必须为 true（否则相对路径不按目录解析）')
+    assert.equal(page.privileges.secure, true, 'secure 必须为 true')
+    // 不给 supportFetchAPI：页面的 fetch 由 CSP 的 default-src 'none' 拦，
+    // 协议层再开一次等于给它另一个通道 —— 两处口径必须一致。
+    assert.notEqual(page.privileges.supportFetchAPI, true, 'supportFetchAPI 不应开启')
+    return `已登记 ${registered.length} 个协议：${registered.map((item) => item.scheme).join(', ')}`
+  })
+
+  await check('协议 handler 已安装，且只认自己的 scheme', async () => {
+    assert.ok(harnessA.pageProtocol.handlers.has('opennote-page'), 'protocol.handle 没有被调用')
+    assert.equal(harnessA.pageProtocol.handlers.size, 1, '只应安装一个页面协议')
+    return '已安装 1 个 handler'
+  })
+
+  await check('页面响应带**自己的** CSP，且客户端拿不到 connect-src', async () => {
+    /*
+     * 真的调一次 handler：`servePageRequest` 是纯路径 + 读盘，桩环境里能跑到底。
+     * 这里不验证「能不能读」—— 那个由 pageProtocol 的单测覆盖 —— 而是验证**响应头**：
+     * 忘了加 `Content-Security-Policy` 时页面会在「继承父文档策略」的状态下静默失败。
+     */
+    const handler = harnessA.pageProtocol.handlers.get('opennote-page')
+    const response = await handler({ url: 'opennote-page://page/' + encodeURIComponent('不存在.html') })
+    assert.ok(response instanceof Response, 'handler 必须返回 Response')
+    const csp = response.headers.get('Content-Security-Policy')
+    // 工作区还没打开时是 404，那一条响应**也**应该带页面策略 —— 否则我们会有一个
+    // 「先漏一次策略、后来才补上」的窗口。两种情况都要求有策略头。
+    assert.ok(csp, '响应必须带 Content-Security-Policy')
+    assert.ok(csp.includes("default-src 'none'"), '页面策略应以 default-src none 为基线')
+    assert.ok(!csp.includes('connect-src'), '页面策略不得给 connect-src（fetch 必须被拦）')
+    const scriptSrc = /script-src([^;]*)/.exec(csp)
+    assert.ok(scriptSrc, '页面策略必须有 script-src')
+    assert.ok(scriptSrc[1].includes("'unsafe-inline'"), '内联脚本必须放行')
+    assert.ok(!scriptSrc[1].includes("'self'"), "script-src 不得含 'self'（不能加载应用自己的产物）")
+    return '策略头就位，形状与桌面基线一致'
+  })
+
+  await check('主进程 CSP 只放行 opennote-page: 作为 frame-src（没有扩展到 https）', async () => {
+    // 从**真实**注入的响应头里取策略（不是直接读常量）：常量与实现脱节时这一条才会红。
+    const { listener } = stateA.webRequestHandlers[0]
+    let captured
+    listener({ url: 'file:///tmp/index.html', responseHeaders: {} }, (result) => {
+      captured = result
+    })
+    assert.ok(captured, 'CSP 注入回调必须被调用')
+    const injected = (captured.responseHeaders['Content-Security-Policy'] || [])[0]
+    assert.equal(injected, EXPECTED_CSP)
+    const frameSrc = /frame-src([^;]*)/.exec(injected || '')
+    assert.ok(frameSrc, 'CSP 必须有 frame-src')
+    assert.equal(frameSrc[1].trim(), 'opennote-page:', 'frame-src 只应放行页面协议')
+    assert.equal(/frame-src[^;]*https?:/.test(EXPECTED_CSP), false, 'frame-src 不得放行 http(s)')
+    return 'frame-src = opennote-page:'
   })
 
   // ------------------------------------------------------------------ summary

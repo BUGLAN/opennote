@@ -8,6 +8,37 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **HTML 页面**（`.html` / `.htm`）成为第二种可打开的页面类型：放进笔记本文件夹就以页面身份
+  出现在树里，打开是**渲染好的页面本身**，不是源码、也不用另开浏览器。右上角一颗悬浮全屏
+  按钮（Esc 退出，回到原来的位置）。页面里的脚本照常运行，但跑在**无同源权限**的沙箱里。
+  页面**恒为只读**——锁按钮显示锁定且点不动，因为「编辑页面」应当在你的编辑器里做。
+  详见 [`docs/html-page.md`](docs/html-page.md)。
+- 导入（单个文件 / zip / 拖入）认 `.html` 与 `.htm`，扩展名原样保留。
+
+### 安全
+
+- 页面通过**自带 CSP 的独立文档**加载（桌面端 `opennote-page:` 协议，网页版 Service Worker
+  合成 `/__page/<token>`），而不是 `srcdoc` / `blob:`：后两者会继承父文档的 CSP，
+  页面里的内联脚本会被静默挡掉。
+- 页面的 CSP **不含 `connect-src`**（fetch / XHR / WebSocket 全拦），`script-src` **不含 `'self'`**
+  （不能加载应用自己的产物）。
+- iframe `sandbox="allow-scripts"`，**不含 `allow-same-origin`**：页面读不到
+  `localStorage`、`window.parent.opennote` 与工作区里别的文件。
+- 桌面协议只服务**当前打开的工作区**，且 `.opennote/` 下只放行 `trash` / `history`
+  两棵子树；`sync.json`（E2EE 的 `did ↔ 路径` 映射）、`github.json`、`state.json`、
+  `inbox/**` 一律 403。
+- 桌面端 CSP 增加 `frame-src opennote-page:`（**只**放行这一个协议）。
+
+### 内部
+
+- 网页版 PWA 从 `generateSW` 改为 `injectManifest`（`src/sw.ts`）：`generateSW` 的
+  `runtimeCaching` 无法合成带自定义 CSP 的响应。原有三条运行期缓存规则原样搬进
+  `registerRoute`。新增 `tsconfig.sw.json` 与 `pnpm typecheck:sw`（SW 需要 `lib: WebWorker`，
+  与应用的 DOM 全局不能同时开启）。
+- `Note.kind`（`"md"` | `"html"`）与 `shared/paths.ts` 的 `isHtmlPagePath()` / `isPagePath()`。
+
 ## [0.15.0] - 2026-10-24
 
 > **多设备同步首次交付**：自带同步服务端（Node + CouchDB，密钥即身份、默认端到端加密）、

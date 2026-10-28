@@ -120,6 +120,14 @@ const WINDOW_SET_BACKGROUND_CHANNEL = 'opennote:window:setBackground'
 /** 主进程 → 渲染层：最大化状态变化（切换「最大化 ↔ 还原」图标）。 */
 const WINDOW_CHANGED_CHANNEL = 'opennote:window:changed'
 
+/**
+ * HTML 页面（0.16.0）：问主进程「这个页面该用哪个 URL」。
+ *
+ * 渲染层只拿得到一个 **URL 字符串**，拿不到绝对路径 —— 与 D35「不向渲染层泄漏宿主机路径」
+ * 一致。协议名与编码规则都在 `electron/pageProtocol.cjs`，两处各拼一遍必然漂移。
+ */
+const PAGE_URL_FOR_CHANNEL = 'opennote:page:urlFor'
+
 const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args)
 
 /** 订阅一个主进程频道，返回退订函数（与 `onDeepLink` / `onInboxChanged` 同一套写法）。 */
@@ -185,6 +193,16 @@ const bridge = {
   shell: {
     showItemInFolder: (absolutePath) => invoke('opennote:shell:showItemInFolder', absolutePath),
     openExternal: (url) => invoke('opennote:shell:openExternal', url),
+  },
+
+  /**
+   * HTML 页面（`opennote-page:` 协议）。
+   *
+   * 只有一个动作：把**工作区相对路径**换成主进程认可的 URL。页面内容本身不过 IPC ——
+   * 由协议直接喂给 iframe，渲染层连正文都不经手（少一次结构化克隆，也少一条正文泄漏面）。
+   */
+  page: {
+    urlFor: (relPath) => invoke(PAGE_URL_FOR_CHANNEL, relPath),
   },
 
   /**

@@ -37,6 +37,7 @@ import { copyPathToClipboard, noteAbsolutePath } from "../lib/notePath";
 import { sealIconUrl } from "../lib/sealIcon";
 import { notify } from "../lib/toast";
 import type { UpdateAction, UpdateView } from "../lib/updateView";
+import { htmlExcerpt } from "../lib/htmlPage";
 import { cn, excerpt, formatRelativeTime } from "../lib/utils";
 import { Icon, type IconName } from "./Icons";
 import { openMenu, type MenuItem } from "./Overlays";
@@ -1023,13 +1024,23 @@ function NoteRow({
     >
       <span className="tree__caret" />
       <span className="tree__icon">
-        <Icon name="note" size={14} />
+        {/*
+          「这是什么页面」在树里就该看得出来：HTML 页面不可编辑、打开是渲染结果，
+          与 Markdown 是两回事。图标用既有的 `file` / `note` 一对（**不新增图标集**，
+          见 DESIGN.md「缺图标先讨论」）。
+        */}
+        <Icon name={note.kind === "html" ? "file" : "note"} size={14} />
       </span>
       <span className="tree__label">
         {/* 标题包一层 `.tree__label-main`：`tree__row--stacked` 里它是**第一行**，
             裸文本节点在块级摘要旁边会被折成匿名块，省略号对它不生效（见 app.css）。 */}
         <span className="tree__label-main">{note.title}</span>
-        {variant === "list" ? <span className="tree__note-snippet">{excerpt(note.content, 80)}</span> : null}
+        {variant === "list" ? (
+          <span className="tree__note-snippet">
+            {/* HTML 的摘要要走剥标签那条路（`htmlExcerpt`）；`excerpt()` 是给 Markdown 的。 */}
+            {note.kind === "html" ? htmlExcerpt(note.content, 80) || "（空页面）" : excerpt(note.content, 80)}
+          </span>
+        ) : null}
       </span>
       <span className="tree__extra">
         {note.starred ? <Icon name="star" size={13} filled className="tree__star" /> : null}

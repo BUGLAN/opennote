@@ -27,5 +27,7 @@
     "vite.config.ts",
     "vitest.config.ts",
     "vite.clip.config.ts"
-  ]
+  ],
+  "//exclude": "src/sw.ts 跑在 ServiceWorkerGlobalScope 里，需要 lib: WebWorker；与 DOM 同时开启会让 self/fetch/caches 变成两套类型。所以单独一份 tsconfig.sw.json（pnpm typecheck:sw）。",
+  "exclude": ["src/sw.ts"]
 }

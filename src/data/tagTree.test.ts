@@ -12,6 +12,8 @@ function makeNote(tags: string[], extra: Partial<Note> = {}): Note {
   return {
     id: `note-${seq}`,
     folderId: null,
+    // 页面类型是必填字段（见 `types.ts` 的 `PageKind`）：标签树只读 notes，Markdown 就够。
+    kind: "md",
     title: `笔记${seq}`,
     titleOverride: null,
     content: "",

@@ -343,6 +343,19 @@ export interface OpennoteBridge {
     showItemInFolder(absolutePath: string): Promise<void>;
     openExternal(url: string): Promise<void>;
   };
+  /**
+   * HTML 页面（`opennote-page:` 专用协议）。
+   *
+   * 桌面端的 HTML 页面**不经过**渲染层读正文：主进程按工作区相对路径直接服务文件，
+   * 响应自带一份独立的 CSP（页面里的内联脚本才能跑），并且页面跑在无同源的
+   * `sandbox="allow-scripts"` iframe 里。这里只问「该用哪个 URL」。
+   *
+   * ⚠️ 返回的是**URL 字符串**（`opennote-page://page/…`），不是宿主机绝对路径 ——
+   * 与 D35「不向渲染层泄漏绝对路径」一致，也正因如此它可以安全地进 `<iframe src>`。
+   */
+  page: {
+    urlFor(relPath: string): Promise<string>;
+  };
   app: {
     getRecentWorkspaces(): Promise<string[]>;
     /** Only roots the main process already trusts can be added (see fs.authorizeRoot). */
