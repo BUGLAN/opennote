@@ -1,9 +1,19 @@
-import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
-import { isCanvasColorPreset, isCanvasFileNode, isCanvasGroupNode, isCanvasLinkNode, isCanvasTextNode, type CanvasNode } from "./types";
+import {
+  isCanvasColorPreset,
+  isCanvasFileNode,
+  isCanvasGroupNode,
+  isCanvasHtmlNode,
+  isCanvasLinkNode,
+  isCanvasTextNode,
+  type CanvasNode,
+} from "./types";
 import { normalizeFileRef } from "./refs";
 import { ensureImageUrl, imageUrl } from "../data/assets";
 import { isImagePath } from "../fs/paths";
+import { HtmlFrame } from "../html/HtmlFrame";
+import { htmlPlainText } from "../html/bundle";
 import { cn } from "../lib/utils";
 
 /** 缩放最小尺寸（任务口径 140×80；Resizer 与 CSS 各自引用，不重复定义数值语义）。 */
@@ -22,6 +32,8 @@ export interface CanvasCardCallbacks {
   openLink(url: string): void;
   /** 分组框 label 提交（空串 = 清除字段）。 */
   editGroupLabel(id: string, label: string): void;
+  /** HTML 卡内容提交（源码就地编辑，与 editText 同一链路）。 */
+  editHtml(id: string, html: string): void;
 }
 
 export interface CanvasCardData {
@@ -298,6 +310,101 @@ export function GroupCard({ data, selected }: NodeProps<CanvasCardNode>): ReactN
         >
           {label || <span className="canvas-card__placeholder">未命名分组</span>}
         </div>
+      )}
+    </div>
+  );
+}
+
+/** HTML 卡标题：`<title>` > 首个 `<h1>` 的文字 > 「HTML」（内容变了标题跟着变）。 */
+function htmlCardTitle(html: string): string {
+  const source = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(html)?.[1] ?? /<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/i.exec(html)?.[1] ?? "";
+  const text = source.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return text || "HTML";
+}
+
+/**
+ * HTML 卡片（本库私有扩展，见 `CanvasHtmlNode`）：画布内嵌的 HTML 内容。
+ *
+ * 展示分三层（设计口径：按需激活，同一画布最多一个活跃预览）：
+ * - 默认 = 轻量卡：`</>` 字形 + 标题 + 纯文本摘要（`htmlPlainText`，认文字不认标记）；
+ * - 选中 = 卡内**实时沙箱预览**（复用 `HtmlFrame`，与 HTML 页面标签同一套隔离；
+ *   iframe 的 pointer-events 由 CSS 关掉 —— 缩放≠100% 时 iframe 会劫持滚轮/错位点击，
+ *   预览态只看不滚，失焦即卸载）；
+ * - 双击 = 编辑源码（与文本卡同一就地编辑惯例，等宽字体）。
+ * 卡片尺寸就是视口：拉大卡片，预览跟着变大。
+ */
+export function HtmlCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNode {
+  const node = data.source;
+  const html = isCanvasHtmlNode(node) ? node.html : "";
+  const color = typeof node.color === "string" ? node.color : undefined;
+  const accentRef = useAccentVar(color);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(html);
+  const areaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (editing) areaRef.current?.focus();
+  }, [editing]);
+
+  const commit = () => {
+    setEditing(false);
+    if (draft !== html) data.cb.editHtml(node.id, draft);
+  };
+
+  const title = htmlCardTitle(html);
+  const excerpt = useMemo(() => {
+    const text = htmlPlainText(html);
+    return text.length > 140 ? `${text.slice(0, 140)}…` : text;
+  }, [html]);
+  const live = selected && !editing && html.trim() !== "";
+
+  return (
+    <div
+      ref={accentRef}
+      className={cn("canvas-card", "canvas-card--html", colorClass(color), selected && "is-selected", live && "is-live")}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        setDraft(html);
+        setEditing(true);
+      }}
+    >
+      <NodeResizer isVisible={selected} minWidth={NODE_MIN_WIDTH} minHeight={NODE_MIN_HEIGHT} />
+      <SideHandles />
+      {editing ? (
+        <textarea
+          ref={areaRef}
+          className="canvas-card__html-edit"
+          value={draft}
+          spellCheck={false}
+          placeholder="<p>粘贴或编写 HTML…</p>"
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            // 编辑中不让画布拿到按键（Backspace 会删节点，Esc 会被视作收起菜单）
+            event.stopPropagation();
+            if (event.key === "Escape") commit();
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+        />
+      ) : live ? (
+        <>
+          <HtmlFrame html={html} title={title} className="canvas-card__html-frame" />
+          <div className="canvas-card__caption">
+            <div className="canvas-card__title">{title}</div>
+            <div className="canvas-card__hint-line">HTML · 选中预览，双击编辑</div>
+          </div>
+        </>
+      ) : (
+        <>
+          <svg className="canvas-card__glyph" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M6 3.5 2.5 8 6 12.5M10 3.5 13.5 8 10 12.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+          <div className="canvas-card__main">
+            <div className="canvas-card__title">{title}</div>
+            <div className="canvas-card__excerpt">{excerpt || "双击粘贴或编写 HTML"}</div>
+          </div>
+        </>
       )}
     </div>
   );

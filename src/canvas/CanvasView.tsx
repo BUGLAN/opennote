@@ -38,7 +38,7 @@ import {
 } from "./clipboard";
 import { searchCanvas, type CanvasSearchMatch } from "./search";
 import { CanvasCardEdgeView, type CanvasCardEdge } from "./edges";
-import { FileCard, GroupCard, LinkCard, TextCard, UnknownCard, type CanvasCardCallbacks, type CanvasCardNode } from "./nodes";
+import { FileCard, GroupCard, HtmlCard, LinkCard, TextCard, UnknownCard, type CanvasCardCallbacks, type CanvasCardNode } from "./nodes";
 import { NotePicker } from "./notePicker";
 import {
   CANVAS_COLOR_PRESETS,
@@ -50,7 +50,17 @@ import {
   serializeCanvas,
   withEdgeEnd,
 } from "./types";
-import type { CanvasDocument, CanvasEdge, CanvasFileNode, CanvasGroupNode, CanvasLinkNode, CanvasNode, CanvasNodeSide, CanvasTextNode } from "./types";
+import type {
+  CanvasDocument,
+  CanvasEdge,
+  CanvasFileNode,
+  CanvasGroupNode,
+  CanvasHtmlNode,
+  CanvasLinkNode,
+  CanvasNode,
+  CanvasNodeSide,
+  CanvasTextNode,
+} from "./types";
 
 /**
  * 视图契约 props —— 后续集成工位按此消费。核心五项一字不改；
@@ -70,7 +80,7 @@ export interface CanvasViewProps {
   getNoteContent?(id: string): string | null;
 }
 
-const nodeTypes = { text: TextCard, file: FileCard, group: GroupCard, link: LinkCard, canvasUnknown: UnknownCard };
+const nodeTypes = { text: TextCard, file: FileCard, group: GroupCard, link: LinkCard, html: HtmlCard, canvasUnknown: UnknownCard };
 const edgeTypes = { canvasCard: CanvasCardEdgeView };
 
 /** 新卡默认尺寸（JSON Canvas 的宽高是节点数据的一部分，落盘可见）。 */
@@ -78,6 +88,8 @@ const NEW_TEXT_CARD_SIZE = { width: 260, height: 160 };
 const NEW_FILE_CARD_SIZE = { width: 260, height: 110 };
 const NEW_LINK_CARD_SIZE = { width: 300, height: 110 };
 const NEW_GROUP_SIZE = { width: 400, height: 300 };
+/** HTML 卡默认给一个「预览有意义」的尺寸（选中即挂 iframe，太小看不清）。 */
+const NEW_HTML_CARD_SIZE = { width: 360, height: 240 };
 const DELETE_KEYS = ["Backspace", "Delete"];
 const VIEWPORT_SAVE_DELAY = 500;
 /** 粘贴/副本的整体偏移：贴出来的东西不与原物完全重叠。 */
@@ -113,11 +125,12 @@ function fieldNumber(value: unknown): number | undefined {
 }
 
 /** 契约节点类型 → 本视图的渲染组件 key。未知类型一律走占位卡片。 */
-function nodeKindOf(node: CanvasNode): "text" | "file" | "group" | "link" | "canvasUnknown" {
+function nodeKindOf(node: CanvasNode): "text" | "file" | "group" | "link" | "html" | "canvasUnknown" {
   if (node.type === "text") return "text";
   if (node.type === "file") return "file";
   if (node.type === "group") return "group";
   if (node.type === "link") return "link";
+  if (node.type === "html") return "html";
   return "canvasUnknown";
 }
 
@@ -351,6 +364,22 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
           else delete next.label;
           return next;
         }),
+      editHtml: (id, html) =>
+        applyAndEmit((nodes) => [
+          nodes.map((node) =>
+            node.id === id && node.data.source.type === "html"
+              ? {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    // 已按 type 收窄，cast 只是绕开联合展开的保守推断
+                    source: { ...(node.data.source as CanvasHtmlNode), html },
+                  },
+                }
+              : node,
+          ),
+          edgesRef.current,
+        ]),
     }),
     [applyAndEmit, patchNodeField],
   );
@@ -790,6 +819,19 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
       y: 0,
       ...NEW_GROUP_SIZE,
     } satisfies CanvasGroupNode);
+  }, [addNodeAtCenter]);
+
+  /** 新建 HTML 卡：空内容落位（选中态），卡上提示「双击粘贴或编写 HTML」。 */
+  const addHtmlCard = useCallback(() => {
+    const id = newCanvasNodeId(nodesRef.current.map((node) => node.id));
+    addNodeAtCenter({
+      id,
+      type: "html",
+      x: 0,
+      y: 0,
+      ...NEW_HTML_CARD_SIZE,
+      html: "",
+    } satisfies CanvasHtmlNode);
   }, [addNodeAtCenter]);
 
   const addLinkCard = useCallback(() => {
@@ -1316,6 +1358,9 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
               </button>
               <button type="button" role="menuitem" className="canvas-menu__item" onClick={() => { setMenu(null); addLinkCard(); }}>
                 新建网页卡
+              </button>
+              <button type="button" role="menuitem" className="canvas-menu__item" onClick={() => { setMenu(null); addHtmlCard(); }}>
+                新建 HTML 卡
               </button>
               <div className="canvas-menu__sep" />
             </>

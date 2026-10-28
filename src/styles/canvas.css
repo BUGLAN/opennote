@@ -745,6 +745,67 @@
   margin-left: var(--s1);
 }
 
+/* ---- HTML 卡片（内嵌 HTML，私有扩展）------------------------------------
+ * 默认 = 轻量卡（</> 字形 + 标题 + 纯文本摘要）；选中（is-live）= 卡内实时
+ * 沙箱预览。预览的 iframe 关掉 pointer-events：缩放 ≠100% 时 iframe 会劫持
+ * 滚轮、点击坐标错位 —— 预览态只看不滚，双击仍由卡片本身接住（进源码编辑）。 */
+
+.canvas-card--html {
+  flex-direction: row;
+  align-items: flex-start;
+}
+
+/* 摘要：与文件卡路径同一层级的小字，两行封顶 */
+.canvas-card__excerpt {
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--ink-2);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* 预览态：整卡变成「视口 + 底部说明条」，与图片卡同构 */
+.canvas-card--html.is-live {
+  flex-direction: column;
+  align-items: stretch;
+  padding: var(--s1);
+  gap: var(--s1);
+}
+
+.canvas-card--html .canvas-card__html-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border-radius: calc(var(--radius) - 2px);
+  pointer-events: none;
+}
+
+.canvas-card__hint-line {
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 源码编辑：等宽小字，占满卡身 */
+.canvas-card__html-edit {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--ink);
+}
+
 /* ---- 节点缩放柄 --------------------------------------------------------
  * 视觉 10px、命中区扩到 44px（::before 外扩）；四角把手，握住即缩放。
  * 只在节点选中时渲染（NodeResizer isVisible）。 */

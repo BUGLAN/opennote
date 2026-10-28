@@ -1,11 +1,13 @@
 /**
  * 画布内搜索的纯匹配逻辑（UI 在 CanvasView）。
  *
- * 匹配面：文本卡文字、文件卡标题/路径、网页卡 url、分组 label、边标签。
- * 文件卡标题经视图注入的 `noteTitle` 取（getNoteInfo 的产物），这里不碰库。
+ * 匹配面：文本卡文字、文件卡标题/路径、网页卡 url、分组 label、HTML 卡纯文本、
+ * 边标签。文件卡标题经视图注入的 `noteTitle` 取（getNoteInfo 的产物），这里不碰库；
+ * HTML 卡用 `htmlPlainText`（认文字不认标记，与笔记本搜索同一口径）。
  */
 import type { CanvasDocument } from "./types";
-import { isCanvasFileNode, isCanvasGroupNode, isCanvasLinkNode, isCanvasTextNode } from "./types";
+import { isCanvasFileNode, isCanvasGroupNode, isCanvasHtmlNode, isCanvasLinkNode, isCanvasTextNode } from "./types";
+import { htmlPlainText } from "../html/bundle";
 
 export interface CanvasSearchMatch {
   /** 命中的节点/边 id（跳转用）。 */
@@ -52,6 +54,9 @@ export function searchCanvas(
       if (hit(node.url, needle)) matches.push({ id: node.id, kind: "node", label: snippet(node.url, needle) });
     } else if (isCanvasGroupNode(node)) {
       if (hit(node.label, needle)) matches.push({ id: node.id, kind: "node", label: snippet(node.label ?? "", needle) });
+    } else if (isCanvasHtmlNode(node)) {
+      const text = htmlPlainText(node.html);
+      if (hit(text, needle)) matches.push({ id: node.id, kind: "node", label: snippet(text, needle) });
     }
   }
   for (const edge of doc.edges) {

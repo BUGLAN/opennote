@@ -1,5 +1,6 @@
 /**
- * 画布搜索纯逻辑测试：匹配面（文本/文件标题/路径/链接/分组/边标签）、大小写、空查询。
+ * 画布搜索纯逻辑测试：匹配面（文本/文件标题/路径/链接/分组/HTML 卡纯文本/边标签）、
+ * 大小写、空查询。
  */
 import { describe, expect, it } from "vitest";
 import { searchCanvas } from "./search";
@@ -11,6 +12,7 @@ const doc: CanvasDocument = {
     { id: "f1", type: "file", x: 0, y: 0, width: 10, height: 10, file: "读书/系统设计.md" },
     { id: "l1", type: "link", x: 0, y: 0, width: 10, height: 10, url: "https://example.com/PR" },
     { id: "g1", type: "group", x: 0, y: 0, width: 10, height: 10, label: "评审组" },
+    { id: "h1", type: "html", x: 0, y: 0, width: 10, height: 10, html: "<style>.a{color:red}</style><h1>状态板</h1><p>服务正常</p>" },
     { id: "u1", type: "embed", src: "embed 不参与搜索" },
   ],
   edges: [{ id: "e1", fromNode: "t1", toNode: "f1", label: "展开评审" }],
@@ -34,6 +36,14 @@ describe("searchCanvas", () => {
     expect(search("example.com").map((m) => m.id)).toEqual(["l1"]);
     expect(search("评审").map((m) => m.id)).toEqual(["g1", "e1"]);
     expect(search("embed")).toEqual([]);
+  });
+
+  it("HTML 卡认纯文本（标题/正文），不认标记与样式", () => {
+    expect(search("状态板").map((m) => m.id)).toEqual(["h1"]);
+    expect(search("服务正常").map((m) => m.id)).toEqual(["h1"]);
+    // <style> 块整段消失：标记与 CSS 都不是搜索面
+    expect(search("color")).toEqual([]);
+    expect(search("h1")).toEqual([]);
   });
 
   it("空查询与纯空白返回空", () => {

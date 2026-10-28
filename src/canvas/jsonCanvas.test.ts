@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { parseCanvas, serializeCanvas } from "./jsonCanvas";
 import type { CanvasDocument, CanvasFileNode, CanvasGroupNode, CanvasLinkNode, CanvasTextNode } from "./types";
-import { isCanvasFileNode, isCanvasGroupNode, isCanvasLinkNode, isCanvasTextNode, isCanvasUnknownNode } from "./types";
+import { isCanvasFileNode, isCanvasGroupNode, isCanvasHtmlNode, isCanvasLinkNode, isCanvasTextNode, isCanvasUnknownNode } from "./types";
 
 function textNode(over: Partial<CanvasTextNode> = {}): CanvasTextNode {
   return { id: "n1", type: "text", x: 0, y: 0, width: 120, height: 60, text: "你好", ...over };
@@ -229,6 +229,52 @@ describe("parseCanvas / serializeCanvas", () => {
     const badShape = parseCanvas('{"nodes": 3, "edges": {}}');
     expect(badShape.doc).toEqual({ nodes: [], edges: [] });
     expect(badShape.errors.map((error) => error.ref)).toEqual(["nodes", "edges"]);
+  });
+
+  it("html 节点（私有扩展）：解析、字段序（html 排几何后）、未知字段跟随、往返幂等", () => {
+    const raw = JSON.stringify({
+      nodes: [
+        { id: "h1", type: "html", x: 0, y: 0, width: 360, height: 240, html: "<p>状态卡</p>", color: "2", badge: true },
+        // 空串合法：新建的空白 HTML 卡
+        { id: "h2", type: "html", x: 1, y: 2, width: 30, height: 40, html: "" },
+      ],
+      edges: [],
+    });
+    const { doc, errors } = parseCanvas(raw);
+    expect(errors).toEqual([]);
+    const node = doc.nodes[0]!;
+    expect(isCanvasHtmlNode(node)).toBe(true);
+    expect(isCanvasUnknownNode(node)).toBe(false);
+    if (isCanvasHtmlNode(node)) expect(node.html).toBe("<p>状态卡</p>");
+    expect(isCanvasHtmlNode(doc.nodes[1]!)).toBe(true);
+    const once = serializeCanvas(doc);
+    expect(Object.keys((JSON.parse(once) as { nodes: Record<string, unknown>[] }).nodes[0]!)).toEqual([
+      "id",
+      "type",
+      "x",
+      "y",
+      "width",
+      "height",
+      "html",
+      "color",
+      "badge",
+    ]);
+    expect(serializeCanvas(parseCanvas(once).doc)).toBe(once);
+  });
+
+  it("html 缺 html 字段 / html 非字符串：整节点跳过并记 ref", () => {
+    const { doc, errors } = parseCanvas(
+      JSON.stringify({
+        nodes: [
+          { id: "bad1", type: "html", x: 0, y: 0, width: 10, height: 10 },
+          { id: "bad2", type: "html", x: 0, y: 0, width: 10, height: 10, html: 42 },
+          { id: "ok", type: "html", x: 0, y: 0, width: 10, height: 10, html: "<b>x</b>" },
+        ],
+        edges: [],
+      }),
+    );
+    expect(doc.nodes.map((node) => node.id)).toEqual(["ok"]);
+    expect(errors.map((error) => error.ref)).toEqual(["nodes[0]", "nodes[1]"]);
   });
 
   it("未知节点 type 与未知字段原样保留（type 原文 + 全部字段 + 键序）", () => {

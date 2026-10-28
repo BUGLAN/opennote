@@ -16,6 +16,7 @@ import type {
   CanvasEdgeEnd,
   CanvasFileNode,
   CanvasGroupNode,
+  CanvasHtmlNode,
   CanvasLinkNode,
   CanvasNode,
   CanvasNodeSide,
@@ -24,7 +25,7 @@ import type {
   CanvasTextNode,
   CanvasUnknownNode,
 } from "./types";
-import { isCanvasFileNode, isCanvasGroupNode, isCanvasLinkNode, isCanvasTextNode } from "./types";
+import { isCanvasFileNode, isCanvasGroupNode, isCanvasHtmlNode, isCanvasLinkNode, isCanvasTextNode } from "./types";
 
 const SIDES: readonly string[] = ["top", "right", "bottom", "left"];
 const ENDS: readonly string[] = ["none", "arrow"];
@@ -181,16 +182,16 @@ function scanJsonLine(text: string): number | undefined {
 /**
  * 单个节点 → 领域对象。
  *
- * 已知类型（text/file/link/group）缺任何一个必填字段（id / x / y / width /
- * height，text 另需 `text`、file 另需 `file`、link 另需非空 `url`；group 无
- * 额外必填字段）都返回 `null`（调用方记 error 并跳过该项，不毁整篇）；未知类型
- * 只要求 `id` 与 `type` 是非空字符串，其余字段原样带走（见 `CanvasUnknownNode`
- * 的注释）。
+ * 已知类型（text/file/link/group/html）缺任何一个必填字段（id / x / y / width /
+ * height，text 另需 `text`、file 另需 `file`、link 另需非空 `url`、html 另需
+ * `html`（允许空串 = 新建的空白卡）；group 无额外必填字段）都返回 `null`
+ * （调用方记 error 并跳过该项，不毁整篇）；未知类型只要求 `id` 与 `type` 是
+ * 非空字符串，其余字段原样带走（见 `CanvasUnknownNode` 的注释）。
  */
 function parseNode(raw: Record<string, unknown>): CanvasNode | null {
   const { id, type } = raw;
   if (!isNonEmptyString(id) || !isNonEmptyString(type)) return null;
-  if (type === "text" || type === "file" || type === "link" || type === "group") {
+  if (type === "text" || type === "file" || type === "link" || type === "group" || type === "html") {
     const { x, y, width, height } = raw;
     if (!isFiniteNumber(x) || !isFiniteNumber(y) || !isFiniteNumber(width) || !isFiniteNumber(height)) return null;
     if (type === "text") {
@@ -206,6 +207,11 @@ function parseNode(raw: Record<string, unknown>): CanvasNode | null {
     if (type === "link") {
       if (!isNonEmptyString(raw.url)) return null;
       return { ...raw, id, type, x, y, width, height, url: raw.url } as CanvasLinkNode;
+    }
+    if (type === "html") {
+      // 空串合法：新建的空白 HTML 卡就是空内容（与 text 卡同一取舍）。
+      if (typeof raw.html !== "string") return null;
+      return { ...raw, id, type, x, y, width, height, html: raw.html } as CanvasHtmlNode;
     }
     return { ...raw, id, type, x, y, width, height } as CanvasGroupNode;
   }
@@ -288,13 +294,18 @@ export function parseCanvas(text: string): CanvasParseResult {
  * 节点 → 按范式字段序重建的普通对象。
  *
  * 已知类型：`id,type,x,y,width,height,类型字段` 固定在前（group 的 `label`、
- * link 的 `url` 排在几何之后；label 非字符串时退到未知字段区），其余未知字段
- * 按源对象插入序排在后面；未知类型：整体原样输出（保持源键序，一个字段都不动）。
+ * link 的 `url`、html 的 `html` 排在几何之后；label 非字符串时退到未知字段区），
+ * 其余未知字段按源对象插入序排在后面；未知类型：整体原样输出（保持源键序，
+ * 一个字段都不动）。
  */
 function serializeNode(node: CanvasNode): Record<string, unknown> {
   const raw = node as Record<string, unknown>;
   const known =
-    isCanvasTextNode(node) || isCanvasFileNode(node) || isCanvasLinkNode(node) || isCanvasGroupNode(node);
+    isCanvasTextNode(node) ||
+    isCanvasFileNode(node) ||
+    isCanvasLinkNode(node) ||
+    isCanvasGroupNode(node) ||
+    isCanvasHtmlNode(node);
   if (!known) return { ...raw };
   const out: Record<string, unknown> = {
     id: raw.id,
@@ -307,6 +318,7 @@ function serializeNode(node: CanvasNode): Record<string, unknown> {
   if (isCanvasTextNode(node)) out.text = raw.text;
   else if (isCanvasFileNode(node)) out.file = raw.file;
   else if (isCanvasLinkNode(node)) out.url = raw.url;
+  else if (isCanvasHtmlNode(node)) out.html = raw.html;
   else if (typeof raw.label === "string") out.label = raw.label;
   const emitted = new Set(Object.keys(out));
   for (const [key, value] of Object.entries(raw)) {
