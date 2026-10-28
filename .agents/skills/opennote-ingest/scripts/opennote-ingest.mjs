@@ -664,7 +664,10 @@ function collectHtmlResources(file, html, opts) {
   for (const match of text.matchAll(/\ssrcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
     for (const candidate of decodeEntities(match[1] ?? match[2] ?? "").split(/,\s+/)) add("", candidate.trim().split(/\s+/)[0] ?? "");
   }
-  scanCss(text, "");
+  // `url()` 只认 `<style>` 块与 style 属性（应用侧内联器的同一口径）——正文文本里出现
+  // `url(x.png)` 字样（比如代码示例）不是引用，全篇扫会把无关文件收进来、入库时白报「未被引用」。
+  for (const match of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)) scanCss(match[1], "");
+  for (const match of text.matchAll(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) scanCss(match[1] ?? match[2] ?? "", "");
   while (cssQueue.length) {
     const rel = cssQueue.shift();
     const css = fs.readFileSync(picked.get(rel), "utf8");
