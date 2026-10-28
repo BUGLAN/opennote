@@ -628,10 +628,11 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
    */
   const [bodies, setBodies] = useState<ReadonlyMap<string, string>>(() => new Map());
   /**
-   * HTML 页面条目的预览文档（正文 + 暂存资源按入库规则内联后的那一页），按条目 id 只留当前一条：
-   * 内联后可能有十几 MB，不进 `bodies` 那个多条缓存。
+   * HTML 页面条目的预览文档（正文 + 暂存资源按入库规则内联后的那一页），只留当前一条：
+   * 内联后可能有十几 MB，不进 `bodies` 那个多条缓存。缓存键 = `id@updatedAt`
+   * （`updatedAt` 来自 state.json，重试 / 失败等状态迁移会更新）——条目内容变了预览自动重做。
    */
-  const [htmlPreview, setHtmlPreview] = useState<{ id: string; html: string | null } | null>(null);
+  const [htmlPreview, setHtmlPreview] = useState<{ key: string; html: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
   /** 「保存到」的选择（`00` §6.14㉜）：只对当前条目生效，`folder: null` = 工作区根。 */
   const [folderPick, setFolderPick] = useState<{ id: string; folder: string | null } | null>(null);
@@ -802,18 +803,18 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
   // HTML 页面条目：预览页需要内联后的整页文档（资源在条目的 `resources/` 里）。
   useEffect(() => {
     if (!open || !selected || selected.format !== "html" || tab !== "preview") return;
-    const id = selected.entry.id;
-    if (htmlPreview?.id === id) return;
+    const key = `${selected.entry.id}@${selected.entry.updatedAt}`;
+    if (htmlPreview?.key === key) return;
     let alive = true;
-    void readInboxHtmlPreview(id)
+    void readInboxHtmlPreview(selected.entry.id)
       .catch(() => null)
       .then((html) => {
-        if (alive) setHtmlPreview({ id, html });
+        if (alive) setHtmlPreview({ key, html });
       });
     return () => {
       alive = false;
     };
-  }, [open, selected?.entry.id, selected?.format, tab, htmlPreview?.id]);
+  }, [open, selected?.entry.id, selected?.entry.updatedAt, selected?.format, tab, htmlPreview?.key]);
 
   // 打开时焦点落在左列表第一个条目上（mockup 520 行）。
   useEffect(() => {
@@ -1235,11 +1236,11 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
                   hidden={tab !== "preview"}
                 >
                   {isHtmlEntry ? (
-                    htmlPreview?.id === entry?.id && htmlPreview?.html ? (
+                    htmlPreview?.key === `${entry?.id}@${entry?.updatedAt}` && htmlPreview?.html ? (
                       <div className="inbox__html">
                         <HtmlFrame html={htmlPreview.html} title={entry?.title || "HTML 页面预览"} />
                       </div>
-                    ) : htmlPreview?.id === entry?.id ? (
+                    ) : htmlPreview?.key === `${entry?.id}@${entry?.updatedAt}` ? (
                       <p className="inbox__preview-empty">这一条没有可预览的页面。</p>
                     ) : (
                       <p className="inbox__preview-empty">正在准备页面预览…</p>
