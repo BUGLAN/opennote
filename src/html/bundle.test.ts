@@ -6,7 +6,6 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  htmlDocumentTitle,
   htmlPlainText,
   htmlResourceMime,
   inlineHtmlResources,
@@ -182,11 +181,6 @@ describe("inlineHtmlResources", () => {
 });
 
 describe("页面元信息", () => {
-  it("htmlDocumentTitle：取 <title> 文本，实体解码、空白折叠", () => {
-    expect(htmlDocumentTitle("<title>\n 季度 &amp; 报告 </title>")).toBe("季度 & 报告");
-    expect(htmlDocumentTitle("<h1>x</h1>")).toBeNull();
-  });
-
   it("htmlPlainText：脚本 / 样式 / 注释 / data: 都不进搜索文本", () => {
     const text = htmlPlainText(
       '<style>.a{}</style><script>var secret=1</script><!-- c --><h1>标题</h1><p>正文&nbsp;一</p><img src="data:image/png;base64,QUFB">',

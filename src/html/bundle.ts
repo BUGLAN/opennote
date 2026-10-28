@@ -527,13 +527,6 @@ function escapeStyleText(css: string): string {
 
 /* ============================== 元信息 ============================== */
 
-/** `<title>` 的文本（实体解码、空白折叠）；没有或为空返回 `null`。 */
-export function htmlDocumentTitle(html: string): string | null {
-  const match = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(html);
-  const text = match ? decodeEntities(match[1]).replace(/\s+/g, " ").trim() : "";
-  return text || null;
-}
-
 /**
  * 页面的纯文本（搜索用）：去掉注释、`<script>` / `<style>` / `<template>` / `<svg>` 整块，
  * 其余标签换成空白，实体解码、空白折叠。`data:` 里的 base64 随标签一起消失，不会污染搜索。
