@@ -26,6 +26,7 @@ const { existsSync, watch, readdirSync, readFileSync } = require('node:fs')
 const { spawn } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const path = require('node:path')
+const { fileURLToPath } = require('node:url')
 
 // `opennote://` 深链解析（00 号 §6.14㉛）。零 Electron 依赖的纯函数，可被单测直接
 // require —— 「路由与拒绝规则」不靠真机手点，见 electron/deeplink.cjs 的注释。
@@ -149,7 +150,31 @@ function cspPolicy() {
     "form-action 'none'",
     "frame-ancestors 'none'",
     "worker-src 'self' blob:",
+    // HTML 页面的沙箱宿主页（`dist/html-sandbox.html`，见 src/html/sandbox.ts）是唯一的子框架。
+    // file: 是 scheme 源：CSP 写不出「只许这一个文件」，所以另有 will-frame-navigate 守着子框架导航。
+    'frame-src file:',
   ].join('; ')
+}
+
+/**
+ * HTML 页面沙箱宿主页自己的 CSP —— `src/html/sandbox.ts` 的 `HTML_SANDBOX_CSP` 的**逐字副本**
+ * （`src/html/sandbox.test.ts` 钉住两边一致）。它只发给 `dist/html-sandbox.html` 这一个文件：
+ * 页面内容需要内联脚本，而应用本体的策略绝不放行内联脚本（见 cspPolicy）。
+ * 页面跑在 `<iframe sandbox="allow-scripts">` 里（不透明源），这份宽松策略碰不到应用数据。
+ */
+const HTML_SANDBOX_CSP =
+  "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob: https:; style-src 'unsafe-inline' data: blob: https:; img-src data: blob: https:; font-src data: blob: https:; media-src data: blob: https:; connect-src data: blob:; worker-src data: blob:; frame-src 'none'; object-src 'none'; form-action 'none'"
+
+/** 打包产物里的沙箱宿主页（只有它拿 HTML_SANDBOX_CSP）。 */
+const HTML_SANDBOX_PATH = path.join(app.getAppPath(), 'dist', 'html-sandbox.html')
+
+function isHtmlSandboxUrl(url) {
+  if (!isFileUrl(url)) return false
+  try {
+    return pathIdentity(path.resolve(fileURLToPath(url.split(/[?#]/)[0]))) === pathIdentity(HTML_SANDBOX_PATH)
+  } catch {
+    return false
+  }
 }
 /**
  * 与界面左上角印章同源的图标（`pnpm icons` 生成，见 scripts/make_icons.py）：
@@ -2688,7 +2713,7 @@ function installContentSecurityPolicy() {
       for (const key of Object.keys(responseHeaders)) {
         if (key.toLowerCase() === 'content-security-policy') delete responseHeaders[key]
       }
-      responseHeaders['Content-Security-Policy'] = [cspPolicy()]
+      responseHeaders['Content-Security-Policy'] = [isHtmlSandboxUrl(details.url) ? HTML_SANDBOX_CSP : cspPolicy()]
       callback({ responseHeaders })
     })
   } catch (error) {
@@ -2802,6 +2827,18 @@ function hardenWebContents(window) {
     if (isAppUrl(url)) return
     event.preventDefault()
     openExternalSafely(url)
+  })
+
+  // 子框架只许是 HTML 页面的沙箱宿主页（及其内部的锚点 / about:blank）。页面脚本自己
+  // `location.href = …` 想把框架带去别处（远端站点、本机任意 file://）一律拦下 —— 不替它打开
+  // 外部浏览器：那是脚本发起的，不是用户的点击（用户点链接走 postMessage + userActivation）。
+  window.webContents.on('will-frame-navigate', (details) => {
+    if (details.isMainFrame) return
+    const url = details.url || ''
+    if (url === 'about:blank' || url === 'about:srcdoc') return
+    if (isHtmlSandboxUrl(url)) return
+    if (DEV_URL && isAppUrl(url) && /\/html-sandbox\.html(?:[?#]|$)/.test(url)) return
+    details.preventDefault()
   })
 }
 

@@ -30,6 +30,15 @@ export async function noteToPortableMarkdown(note: Note, opts: { inlineAssets?: 
   return opts.inlineAssets ? out : out.split("](./").join("](");
 }
 
+/**
+ * HTML 页面的导出：原样下载这个文件（入库时资源已内联，拿走双击就能打开）。
+ * 扩展名跟着源文件（`.html` / `.htm`），不经过 Markdown 管线。
+ */
+export function exportHtmlPage(note: Note): void {
+  const ext = /\.htm$/i.test(note.id) ? ".htm" : ".html";
+  download(new Blob([note.content], { type: "text/html;charset=utf-8" }), `${sanitizeName(note.title)}${ext}`);
+}
+
 export async function exportNoteMarkdown(note: Note, opts: { inlineAssets?: boolean } = {}): Promise<void> {
   const markdown = await noteToPortableMarkdown(note, opts);
   download(new Blob([markdown], { type: "text/markdown;charset=utf-8" }), `${sanitizeName(note.title)}.md`);

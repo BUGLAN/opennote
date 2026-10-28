@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Opennote 的 HTML 页面沙箱宿主（`src/html/sandbox.ts` 的协议说明）。
+      它只做一件事：等父页面发来一篇文档，`document.write` 进来。
+      下面这条 CSP 是 `HTML_SANDBOX_CSP` 的副本（`src/html/sandbox.test.ts` 逐字钉住）。
+      本页总是以 `<iframe sandbox="allow-scripts">` 加载：不透明源，碰不到应用的任何数据。
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob: https:; style-src 'unsafe-inline' data: blob: https:; img-src data: blob: https:; font-src data: blob: https:; media-src data: blob: https:; connect-src data: blob:; worker-src data: blob:; frame-src 'none'; object-src 'none'; form-action 'none'" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Opennote HTML 页面</title>
+    <script>
+      (function () {
+        var done = false;
+        window.addEventListener('message', function (event) {
+          // 只认直接父页面；只渲染一次（换文档 = 父页面重建 iframe）。
+          if (done || event.source !== window.parent) return;
+          var data = event.data;
+          if (!data || data.type !== 'opennote:html:render' || typeof data.html !== 'string') return;
+          done = true;
+          document.open();
+          document.write(data.html);
+          document.close();
+        });
+        window.parent.postMessage({ type: 'opennote:html:ready' }, '*');
+      })();
+    </script>
+  </head>
+  <body></body>
+</html>

@@ -9,6 +9,7 @@ import {
   formatStamp,
   isCanvasPath,
   isHiddenPath,
+  isHtmlPath,
   isMarkdownPath,
   joinPath,
   normalizePath,
@@ -47,6 +48,8 @@ import { desktopBridge, type WorkspaceFileChange } from "../desktop/bridge";
 // 画布（JSON Canvas）的纯逻辑：解析/序列化与引用改写都住在 src/canvas，
 // 本文件只负责把它们接进「扫描 → 内存镜像 → 防抖落盘」的既有链路。
 import { parseCanvas, serializeCanvas } from "../canvas/jsonCanvas";
+// HTML 页面的纯文本（搜索用）：只取文字，不让内联的 base64 / 脚本污染检索。
+import { htmlPlainText } from "../html/bundle";
 import { canvasesReferencing as findCanvasRefs, rewriteFileRefs } from "../canvas/refs";
 import { sha256Hex } from "../lib/clip/hash";
 // 同步层（P0）：冲突账本与「有没有开同步」这个开关。**方向永远是 data/ → sync/**，
@@ -56,6 +59,7 @@ import { isSyncActive } from "../sync/mode";
 import { beginWrite, fileStates, type FileRecord, type FileStamp } from "./fileStates";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
 import {
+  isReadOnlyKind,
   noteKind,
   type Folder,
   type FolderChoice,
@@ -406,16 +410,26 @@ function makeFolder(path: string, mtimeMs: number): Folder {
   };
 }
 
+/**
+ * 「这个文件是笔记本里的一篇」：Markdown 笔记、画布、HTML 页面。扫描、外部变更、
+ * 树里的「文件 vs 目录」分派共用这一条，不在各处各写一遍 `isMarkdownPath || …`。
+ */
+function isNoteFilePath(path: string): boolean {
+  return isMarkdownPath(path) || isCanvasPath(path) || isHtmlPath(path);
+}
+
 function makeNote(path: string, content: string, mtimeMs: number, options: { starred?: boolean; trashed?: boolean } = {}): Note {
   const stamp = mtimeMs || Date.now();
   // 画布不是 Markdown：不按正文派生标题/标签/字数，正文也**不归一化行尾** ——
   // JSON Canvas 是机器读写的格式，content 必须永远是磁盘原文的镜像，
   // 否则「外部工具改一字节 → 重扫 → 行尾全变」会制造无穷无尽的伪冲突。
-  if (isCanvasPath(path)) {
+  // HTML 页面同一套口径（标题 = 文件名 stem、无标签、正文是磁盘原文镜像）：它是
+  // 浏览器读的格式，行尾归一化同样只会制造伪冲突；应用内也从不改写它（只读）。
+  if (isCanvasPath(path) || isHtmlPath(path)) {
     return {
       id: path,
       folderId: parentPath(path) || null,
-      kind: "canvas",
+      kind: isCanvasPath(path) ? "canvas" : "html",
       title: stripExtension(baseName(path)),
       titleOverride: null,
       content,
@@ -456,7 +470,7 @@ function makeNote(path: string, content: string, mtimeMs: number, options: { sta
 function refresh(note: Note, content: string): Note {
   // 画布：与 makeNote 的画布分支同一套口径（title=文件名 stem、tags 空、words 0、
   // content 原样），titleOverride 照常生效 —— 用户手动改的显示名不被重算顶回去。
-  if (noteKind(note) === "canvas") {
+  if (noteKind(note) !== "note") {
     return {
       ...note,
       content,
@@ -676,8 +690,8 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
     for (const entry of node.entries) {
       if (entry.kind !== "file") continue;
       const path = joinPath(node.path, entry.name);
-      // 画布与笔记同一待遇：一并读入内存（makeNote 按扩展名分派 kind）。
-      if (!isMarkdownPath(path) && !isCanvasPath(path)) continue;
+      // 画布、HTML 页面与笔记同一待遇：一并读入内存（makeNote 按扩展名分派 kind）。
+      if (!isNoteFilePath(path)) continue;
       pending.push({ path, size: entry.size, mtimeMs: entry.mtimeMs });
     }
   }
@@ -702,7 +716,7 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
         emit(child);
         continue;
       }
-      if (!isMarkdownPath(path) && !isCanvasPath(path)) continue;
+      if (!isNoteFilePath(path)) continue;
       const content = contents.get(path);
       if (content === undefined) continue;
       files += 1;
@@ -1084,9 +1098,9 @@ async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileCha
   if (backend !== target) return;
   // 画布与笔记同集：外部新建的 .canvas 若掉进下面的「目录」分支，会被当成
   // 文件夹节点挂进树里（exists() 对文件也答 true）。
-  const md = changes.filter((change) => isMarkdownPath(change.path) || isCanvasPath(change.path));
+  const md = changes.filter((change) => isNoteFilePath(change.path));
   const dirs = changes.filter(
-    (change) => !isMarkdownPath(change.path) && !isCanvasPath(change.path) && !isHiddenPath(change.path) && change.type !== "delete",
+    (change) => !isNoteFilePath(change.path) && !isHiddenPath(change.path) && change.type !== "delete",
   );
   if (md.length > PATH_REFRESH_LIMIT) {
     await rescanWorkspace();
@@ -1637,13 +1651,28 @@ const CANVAS_PLACEHOLDER = "未命名画布";
  * 差别只有扩展名（`.canvas`）与初始内容（`serializeCanvas(空文档)`）。
  */
 function createCanvasNote(options: { folderId?: Id | null; content?: string; title?: string; open?: boolean } = {}): Note {
+  return createFileNote(".canvas", CANVAS_PLACEHOLDER, {
+    ...options,
+    content: options.content ?? serializeCanvas({ nodes: [], edges: [] }),
+  });
+}
+
+/**
+ * 「非 Markdown 的一篇」的新建链路（画布、HTML 页面副本）：差别只在扩展名与初始内容，
+ * 占名 → preflight → 防抖落盘与 `createNote` 逐句同构。
+ */
+function createFileNote(
+  ext: string,
+  placeholder: string,
+  options: { folderId?: Id | null; content: string; title?: string; open?: boolean },
+): Note {
   const target = backend;
   const folderId = options.folderId ?? null;
-  const title = options.title ?? CANVAS_PLACEHOLDER;
-  const fileName = `${sanitizeName(title, CANVAS_PLACEHOLDER)}.canvas`;
+  const title = options.title ?? placeholder;
+  const fileName = `${sanitizeName(title, placeholder)}${ext}`;
   const taken = new Set(Object.keys(libraryStore.get().notes));
   const path = target ? uniquePath(joinPath(folderId ?? "", fileName), taken) : fileName;
-  const content = options.content ?? serializeCanvas({ nodes: [], edges: [] });
+  const content = options.content;
   const note = makeNote(path, content, Date.now());
   patchNotes((notes) => ({ ...notes, [note.id]: note }));
   markDirty(note.id);
@@ -1782,6 +1811,8 @@ export function shouldAutoRename(ctx: AutoRenameContext): string | null {
   // 条件 -2：画布没有「正文标题 → 文件名」语义（title 就是文件名 stem），自动改名
   // 对它无意义。稳定原因（不在瞬态表里）⇒ scheduleAutoRename 的预检直接放弃，不排定时器。
   if ((ctx.kind ?? "note") === "canvas") return "画布不参与自动改名";
+  // HTML 页面同理：标题就是文件名，而且应用内根本不会改它的正文。
+  if (ctx.kind === "html") return "HTML 页面不参与自动改名";
   // 条件 0 ★ 本次收窄的核心：只有**占位名出身**的笔记才在候选集里，其余笔记一律不动。
   // （`placeholderOrigin` 而不是「当前名字是占位名」：第一次自动改名之后名字就变了，
   //   按当前名字判定会让第二次改标题不再跟随 —— 那正是本次要修的缺陷。）
@@ -2126,6 +2157,9 @@ export function updateNoteContent(id: Id, content: string, options: { immediate?
   // 恢复时照旧只是把文件搬回去 —— 编辑不会因为「在回收站里」而丢。
   const inTrash = Boolean(state.trash[id]);
   const previous = state.notes[id] ?? state.trash[id];
+  // HTML 页面应用内只读：任何编辑入口（快照恢复、未来的批量替换…）走到这里一律拒收。
+  // 磁盘上的外部改动不经过本函数（重扫 / 外部变更走 refresh），照常读进来。
+  if (previous && isReadOnlyKind(previous)) return;
   // 画布正文不做行尾归一化（磁盘原文镜像），早退比较也要用同一口径，
   // 否则 CRLF 的画布每次都会被判成「变了」而白写一次盘。
   if (!previous || previous.content === (noteKind(previous) === "canvas" ? content : normalizeEol(content))) return;
@@ -2411,6 +2445,14 @@ export function duplicateNote(id: Id): Note | null {
   if (noteKind(note) === "canvas") {
     return createCanvasNote({ folderId: note.folderId, content: note.content, title: `${note.title} 副本` });
   }
+  // HTML 页面副本同理：保留原扩展名（`.html` / `.htm`），正文逐字节拷贝。
+  if (noteKind(note) === "html") {
+    return createFileNote(extName(note.id) || ".html", "未命名页面", {
+      folderId: note.folderId,
+      content: note.content,
+      title: `${note.title} 副本`,
+    });
+  }
   const copy = createNote({ folderId: note.folderId, content: note.content, title: `${note.title} 副本` });
   return copy;
 }
@@ -2448,7 +2490,8 @@ async function rebaseNoteAssets(
   if (fromNote === toNote) return nothing;
   // 画布里没有 Markdown 图片引用可重算（file 卡片指笔记、不指图片），
   // 把 JSON 正文送进 rebaseSharedAssetRefs 只会白读白写一次。
-  if (isCanvasPath(fromNote) || isCanvasPath(toNote)) return nothing;
+  // HTML 页面同理：入库时资源已内联，没有 `.assets/` 引用要跟着目录层数重算。
+  if (!isMarkdownPath(fromNote) || !isMarkdownPath(toNote)) return nothing;
   if (parentPath(fromNote) === parentPath(toNote)) return nothing;
   const content = await readOptionalText(target, toNote).catch(() => undefined);
   if (content === undefined) {
@@ -3450,7 +3493,7 @@ const PLAIN_CACHE_LIMIT = 400;
 function plainOf(note: Note): string {
   const cached = plainCache.get(note.id);
   if (cached !== undefined) return cached;
-  const text = stripMarkdown(note.content).toLowerCase();
+  const text = (noteKind(note) === "html" ? htmlPlainText(note.content) : stripMarkdown(note.content)).toLowerCase();
   plainCache.set(note.id, text);
   while (plainCache.size > PLAIN_CACHE_LIMIT) {
     const oldest = plainCache.keys().next();

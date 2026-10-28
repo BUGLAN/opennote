@@ -15,6 +15,7 @@ import {
   idForPath,
   isCanvasPath,
   isHiddenPath,
+  isHtmlPath,
   isMaterializable,
   isValidPathDocId,
   normalizeNfc,
@@ -168,6 +169,22 @@ describe("isCanvasPath / isMaterializable（画布进物化判据，同步与导
     expect(isMaterializable("src/main.ts")).toBe(false);
     expect(isMaterializable("package.json")).toBe(false);
     expect(isMaterializable("看布.canvasbak")).toBe(false);
+  });
+});
+
+describe("isHtmlPath / isMaterializable（HTML 页面进物化判据，散落的 css/js 不进）", () => {
+  it("`.html` / `.htm` 是 HTML 页面：大小写不敏感", () => {
+    expect(isHtmlPath("报告.html")).toBe(true);
+    expect(isHtmlPath("产出/报告.HTM")).toBe(true);
+    expect(isHtmlPath("报告.xhtml")).toBe(false); // XHTML 不在范围内（解析规则不同）
+    expect(isHtmlPath("报告.html.bak")).toBe(false);
+    expect(isHtmlPath("报告.md")).toBe(false);
+  });
+
+  it("isMaterializable 认 HTML 页面，但不认它可能引用的 css / js", () => {
+    expect(isMaterializable("产出/报告.html")).toBe(true);
+    expect(isMaterializable("产出/style.css")).toBe(false);
+    expect(isMaterializable("产出/app.js")).toBe(false);
   });
 });
 

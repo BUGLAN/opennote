@@ -3560,3 +3560,115 @@ mark.hit {
   cursor: default;
 }
 
+
+/* ------------------------------ HTML 页面（只读渲染） ------------------------------ */
+/*
+ * 只追加、不改既有规则。页面内容在沙箱 iframe 里，版式由页面自己决定；
+ * 这里只管外层容器、全屏按钮与载入 / 失败态。
+ */
+
+/* HTML 页面标签上的锁：保持「锁定」的样子（强调色），但不可点、悬停不变亮 —— 它不是置灰的
+   「不适用」（画布那种 --off），而是「恒为只读」。 */
+.tabbar__lock--fixed,
+.tabbar__lock--fixed:hover {
+  color: var(--accent);
+  background: transparent;
+  cursor: default;
+  opacity: 1;
+}
+
+/* 内容区：与 .canvas-pane 同一地位（.main 的 flex 子项）。 */
+.html-pane {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--paper);
+}
+
+/* 伪全屏（拿不到 Fullscreen API 的环境）：铺满窗口，盖住侧栏与标签栏。 */
+.html-pane.is-pseudo-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
+.html-pane:fullscreen {
+  background: #fff;
+}
+
+/* 页面默认按「白纸」写（浏览器缺省），不跟应用的暗色走：暗色主题下页面照样是它原本的样子。 */
+.html-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+  color-scheme: light;
+}
+
+.html-pane__frame {
+  position: absolute;
+  inset: 0;
+}
+
+.html-pane__loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  color: var(--ink-2);
+  font-size: var(--fs-md);
+}
+
+/* 右上角悬浮的全屏按钮：半透明纸底 + 细描边，压在页面之上但不抢眼；悬停才完全不透明。 */
+.html-pane__fullscreen {
+  position: absolute;
+  top: var(--s3);
+  right: var(--s3);
+  z-index: 2;
+  width: 30px;
+  height: 30px;
+  background: color-mix(in srgb, var(--paper-2) 82%, transparent);
+  border: 1px solid var(--rule);
+  box-shadow: var(--shadow-1);
+  opacity: 0.72;
+  backdrop-filter: blur(6px);
+}
+
+.html-pane__fullscreen:hover,
+.html-pane__fullscreen:focus-visible,
+.html-pane__fullscreen[aria-pressed="true"] {
+  opacity: 1;
+  background: var(--paper-2);
+}
+
+.html-frame__failed {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s5);
+  text-align: center;
+  line-height: 1.7;
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: var(--fs-md);
+}
+
+/* 收件箱预览里的 HTML 页面：铺满预览栏，与 .inbox__prose 同一个「整栏留给正文」的取舍。 */
+.inbox__html {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 240px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.inbox__html .html-frame {
+  position: absolute;
+  inset: 0;
+}

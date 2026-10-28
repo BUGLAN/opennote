@@ -46,6 +46,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "./Icons";
+import { HtmlFrame } from "../html/HtmlFrame";
 import { desktopBridge } from "../desktop/bridge";
 import { folderPathLabel, useLibrary } from "../data/library";
 import type { Folder, Id } from "../data/types";
@@ -63,6 +64,7 @@ import {
   discardInbox,
   inboxFailureMessage,
   readInboxDetail,
+  readInboxHtmlPreview,
   refreshInbox,
   startInboxWatch,
   useInboxDetails,
@@ -209,11 +211,11 @@ export function planPreviewImage(src: string, staged: ReadonlyMap<string, string
  * `target.folder = "../逃逸"`）会让它抛错**——这里必须接住，否则整块面板会渲染崩掉。
  * 非法时按根目录算一个只用于显示的文件名，并如实标记 `illegal`。
  */
-function safeRequestedPath(folder: string | null, title: string): { path: string; illegal: boolean } {
+function safeRequestedPath(folder: string | null, title: string, ext = ".md"): { path: string; illegal: boolean } {
   try {
-    return { path: requestedNotePath(folder, title), illegal: false };
+    return { path: requestedNotePath(folder, title, ext), illegal: false };
   } catch {
-    return { path: requestedNotePath(null, title), illegal: true };
+    return { path: requestedNotePath(null, title, ext), illegal: true };
   }
 }
 
@@ -625,6 +627,11 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
    * 详情栏内部（面板本身固定高度，见 `app.css` 的 `.dialog--tall`）。
    */
   const [bodies, setBodies] = useState<ReadonlyMap<string, string>>(() => new Map());
+  /**
+   * HTML 页面条目的预览文档（正文 + 暂存资源按入库规则内联后的那一页），按条目 id 只留当前一条：
+   * 内联后可能有十几 MB，不进 `bodies` 那个多条缓存。
+   */
+  const [htmlPreview, setHtmlPreview] = useState<{ id: string; html: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
   /** 「保存到」的选择（`00` §6.14㉜）：只对当前条目生效，`folder: null` = 工作区根。 */
   const [folderPick, setFolderPick] = useState<{ id: string; folder: string | null } | null>(null);
@@ -679,7 +686,9 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
    * 它必须**排在 effects 之前**：预览页的图片解析 effect 依赖渲染结果（`previewHtml`），
    * 而 hooks 不许出现在 `if (!open) return null` 之后。
    */
-  const previewHtml = useMemo(() => renderMarkdown(bodyText), [bodyText]);
+  const isHtmlEntry = selected?.format === "html";
+  // HTML 页面条目不走 markdown 管线：预览是沙箱里渲染的那一页（见下面的 `htmlPreview`）。
+  const previewHtml = useMemo(() => (isHtmlEntry ? "" : renderMarkdown(bodyText)), [isHtmlEntry, bodyText]);
 
   /* ---------------------------- 落点与说明句 ---------------------------- */
 
@@ -712,17 +721,18 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
     if (entry.status === "committed" && entry.notePath) {
       return { path: entry.notePath, illegal: false, folderMissing: false, sameName: false, editing: false };
     }
-    const requested = safeRequestedPath(effectiveFolder, entry.title || "无标题");
+    const requested = safeRequestedPath(effectiveFolder, entry.title || "无标题", selected?.format === "html" ? ".html" : ".md");
     const folderMissing = !requested.illegal && effectiveFolder !== null && !(effectiveFolder in library.folders);
     const sameName = requested.path in library.notes;
     const editing = Object.values(library.notes).some((note) => note.id === requested.path && library.dirty[note.id]);
     return { path: requested.path, illegal: requested.illegal, folderMissing, sameName, editing };
-  }, [entry?.id, entry?.status, entry?.notePath, effectiveFolder, entry?.title, library.folders, library.notes, library.dirty]);
+  }, [entry?.id, entry?.status, entry?.notePath, effectiveFolder, entry?.title, selected?.format, library.folders, library.notes, library.dirty]);
 
   const previous = useMemo(() => {
-    if (!entry || !entry.sourceUrl) return null;
+    // HTML 页面没有「追加到上一次剪藏」这回事（接收端一律新建），不给这条将来时提示。
+    if (!entry || !entry.sourceUrl || isHtmlEntry) return null;
     return findPreviousCapture(library.notes, entry.sourceUrl);
-  }, [entry?.id, entry?.sourceUrl, library.notes]);
+  }, [entry?.id, entry?.sourceUrl, isHtmlEntry, library.notes]);
 
   /** 落点说明句（优先级：非法 → 目录不存在 → 正在编辑 → 同网址剪藏过 → 同名另存 → 最终落点）。 */
   const hint = useMemo(() => {
@@ -739,9 +749,10 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
       return `这个网址之前剪藏过（${when}），入库时会追加到《${previous.title}》。`;
     }
     if (landing.sameName) return `同名文件已存在，入库时会另存为《${entry.title} 2》。`;
-    // 最终落点说明句：入库前明确「会存到哪」。
-    return effectiveFolder ? `入库到「${effectiveFolder}」。` : `入库到${INBOX_ROOT_LABEL}。`;
-  }, [entry?.id, entry?.status, entry?.title, effectiveFolder, landing, previous, now]);
+    // 最终落点说明句：入库前明确「会存到哪」。HTML 页面多说一句它入库后是什么（只读页面）。
+    const where = effectiveFolder ? `入库到「${effectiveFolder}」` : `入库到${INBOX_ROOT_LABEL}`;
+    return isHtmlEntry ? `${where}，成为一个只读的 HTML 页面。` : `${where}。`;
+  }, [entry?.id, entry?.status, entry?.title, effectiveFolder, landing, previous, isHtmlEntry, now]);
 
   /* -------------------------------- 副作用 ------------------------------- */
 
@@ -787,6 +798,22 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
       alive = false;
     };
   }, [open, selected?.entry.id, selected?.bodyText, bodies]);
+
+  // HTML 页面条目：预览页需要内联后的整页文档（资源在条目的 `resources/` 里）。
+  useEffect(() => {
+    if (!open || !selected || selected.format !== "html" || tab !== "preview") return;
+    const id = selected.entry.id;
+    if (htmlPreview?.id === id) return;
+    let alive = true;
+    void readInboxHtmlPreview(id)
+      .catch(() => null)
+      .then((html) => {
+        if (alive) setHtmlPreview({ id, html });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, selected?.entry.id, selected?.format, tab, htmlPreview?.id]);
 
   // 打开时焦点落在左列表第一个条目上（mockup 520 行）。
   useEffect(() => {
@@ -1207,7 +1234,17 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
                   tabIndex={0}
                   hidden={tab !== "preview"}
                 >
-                  {bodyText ? (
+                  {isHtmlEntry ? (
+                    htmlPreview?.id === entry?.id && htmlPreview?.html ? (
+                      <div className="inbox__html">
+                        <HtmlFrame html={htmlPreview.html} title={entry?.title || "HTML 页面预览"} />
+                      </div>
+                    ) : htmlPreview?.id === entry?.id ? (
+                      <p className="inbox__preview-empty">这一条没有可预览的页面。</p>
+                    ) : (
+                      <p className="inbox__preview-empty">正在准备页面预览…</p>
+                    )
+                  ) : bodyText ? (
                     <article
                       ref={previewRef}
                       className="prose inbox__prose"

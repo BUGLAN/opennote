@@ -14,6 +14,7 @@
  */
 
 import { assertSafeRelative, isMarkdownPath, sanitizeName } from "../../fs/paths";
+import { htmlResourceMime, normalizeResourcePath } from "../../html/bundle";
 import { normalizeEol } from "../utils";
 
 /* ============================== 常量与上限 ============================== */
@@ -44,6 +45,22 @@ export const ASSET_MIME_WHITELIST = [
   "image/svg+xml",
   "image/bmp",
 ] as const;
+
+/**
+ * 正文格式（通道级扩展，缺省 `markdown` = 契约冻结时的唯一形态）。
+ *
+ * `html`：正文是一篇完整的 HTML 文档，入库成 `.html` 页面（应用内只读渲染，`src/html/`）；
+ * 它引用的 CSS / JS / 图片 / 字体放在 `resources[]` 里，入库时内联成单文件。
+ * 不认识 `format` 的旧版应用会把它当 Markdown 入库 —— 这是扩展字段的固有代价，
+ * Skill 的 `--check` 会先报出应用版本。
+ */
+export const IMPORT_FORMATS = ["markdown", "html"] as const;
+export type ImportFormat = (typeof IMPORT_FORMATS)[number];
+
+/** HTML 页面的资源上限：条数 / 单件 / 合计（合计留在 16 MiB 请求上限之内，base64 膨胀 4/3）。 */
+export const MAX_HTML_RESOURCES = 256;
+export const MAX_HTML_RESOURCE_BYTES = 8 * 1024 * 1024;
+export const MAX_HTML_RESOURCES_TOTAL_BYTES = 8 * 1024 * 1024;
 
 export const IMPORT_CONFLICTS = ["new", "append", "skip", "overwrite"] as const;
 export type ImportConflict = (typeof IMPORT_CONFLICTS)[number];
@@ -358,6 +375,18 @@ export interface ImportAsset {
   bytes: Uint8Array | null;
 }
 
+/** HTML 页面的一份静态资源（`format: "html"` 时有效）。 */
+export interface ImportHtmlResource {
+  /** 相对 HTML 文档所在目录的 POSIX 路径（不许 `..` 越界、不许点开头的段，见 `resolveLocalRef`）。 */
+  path: string;
+  /** 由扩展名决定（`htmlResourceMime`），客户端给的 `mime` 只作参考。 */
+  mime: string;
+  dataBase64: string | null;
+  /** 外置形态：收件箱里是相对条目目录的路径。 */
+  file: string | null;
+  bytes: Uint8Array | null;
+}
+
 export interface ImportClient {
   name: ImportClientName;
   version: string;
@@ -388,6 +417,10 @@ export interface ImportEnvelope {
   conflictExplicit: boolean;
   tags: string[];
   assets: ImportAsset[];
+  /** 正文格式（缺省 `markdown`）。 */
+  format: ImportFormat;
+  /** `format: "html"` 的静态资源；Markdown 信封恒为空数组。 */
+  resources: ImportHtmlResource[];
   client: ImportClient;
   /** 校验阶段产生的非致命提示（已是 `IMP-Wxxx 文案` 形态）。 */
   warnings: string[];
@@ -638,6 +671,46 @@ function validateAssets(raw: unknown): ImportAsset[] {
   return assets;
 }
 
+function validateHtmlResources(raw: unknown): ImportHtmlResource[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) fail("IMP-4012", { field: "resources", reason: "type" });
+  if (raw.length > MAX_HTML_RESOURCES) fail("IMP-4013", { field: "resources", count: raw.length });
+  const resources: ImportHtmlResource[] = [];
+  const seen = new Set<string>();
+  let total = 0;
+  raw.forEach((item, index) => {
+    const field = `resources[${index}]`;
+    if (!isRecord(item)) fail("IMP-4012", { field, reason: "type" });
+    const rawPath = typeof item.path === "string" ? item.path.trim() : "";
+    // 与渲染/内联同一条判据：资源根之外、点开头的段、绝对路径一律不收。
+    const path = normalizeResourcePath(rawPath);
+    if (!path) fail("IMP-4012", { field: `${field}.path`, value: rawPath });
+    const mime = htmlResourceMime(path);
+    if (!mime) fail("IMP-4012", { field: `${field}.path`, value: path, reason: "type" });
+    if (seen.has(path)) fail("IMP-4012", { field: `${field}.path`, value: path, reason: "duplicate" });
+    seen.add(path);
+    const dataBase64 = asOptionalString(item.dataBase64);
+    const file = asOptionalString(item.file);
+    if (!dataBase64 && !file) fail("IMP-4012", { field, reason: "no-payload" });
+    let bytes: Uint8Array | null = null;
+    if (dataBase64) {
+      bytes = decodeBase64(dataBase64);
+      if (!bytes) fail("IMP-4012", { field: `${field}.dataBase64`, reason: "base64" });
+      if (bytes.byteLength > MAX_HTML_RESOURCE_BYTES) fail("IMP-4012", { field, reason: "size", bytes: bytes.byteLength });
+      total += bytes.byteLength;
+      if (total > MAX_HTML_RESOURCES_TOTAL_BYTES) fail("IMP-4013", { field: "resources", reason: "total" });
+    } else if (file) {
+      try {
+        assertSafeRelative(file);
+      } catch (error) {
+        fail("IMP-4012", { field: `${field}.file`, reason: error instanceof Error ? error.message : "unsafe" });
+      }
+    }
+    resources.push({ path, mime, dataBase64, file, bytes });
+  });
+  return resources;
+}
+
 /* ============================== 校验器主体 ============================== */
 
 function parseEnvelope(value: unknown): ImportEnvelope {
@@ -742,8 +815,25 @@ function parseEnvelope(value: unknown): ImportEnvelope {
   if (tagResult.dropped) warnings.push(warningText("IMP-W007"));
   if (tagResult.truncated) warnings.push(`标签超过 ${MAX_TAGS} 个，已截断。`);
 
-  // ⑨ assets：MIME 白名单、base64、单件与合计上限。
-  const assets = validateAssets(raw.assets);
+  // ⑨ format / assets / resources：Markdown 走附件（图片白名单），HTML 页面走资源（内联白名单）。
+  let format: ImportFormat = "markdown";
+  if (raw.format !== undefined && raw.format !== null) {
+    if (typeof raw.format !== "string" || !(IMPORT_FORMATS as readonly string[]).includes(raw.format)) {
+      fail("IMP-4003", { field: "format", value: raw.format });
+    }
+    format = raw.format as ImportFormat;
+  }
+  let assets = validateAssets(raw.assets);
+  let resources: ImportHtmlResource[] = [];
+  if (format === "html") {
+    resources = validateHtmlResources(raw.resources);
+    if (assets.length) {
+      warnings.push("HTML 页面不使用 assets（图片请放进 resources），已忽略。");
+      assets = [];
+    }
+  } else if (Array.isArray(raw.resources) && raw.resources.length) {
+    warnings.push("resources 只对 HTML 页面（format: html）有效，已忽略。");
+  }
 
   // ⑩ client：未知值归一到 `other`（不报错，向后兼容），只用于日志与 UI 展示。
   let clientName: ImportClientName = "manual";
@@ -766,6 +856,8 @@ function parseEnvelope(value: unknown): ImportEnvelope {
     conflictExplicit: raw.conflict !== undefined && raw.conflict !== null,
     tags: tagResult.tags,
     assets,
+    format,
+    resources,
     client: { name: clientName, version: clientVersion },
     warnings,
   };
@@ -841,6 +933,23 @@ export function serializeEnvelope(envelope: ImportEnvelope): Record<string, unkn
           ? { dataBase64: encodeBase64(asset.bytes) }
           : {}),
     })),
+    // Markdown 信封不写这两个字段：与扩展之前逐字节一致（既有夹具与旧版读者都不受影响）。
+    ...(envelope.format === "html"
+      ? {
+          format: envelope.format,
+          resources: envelope.resources.map((resource) => ({
+            path: resource.path,
+            mime: resource.mime,
+            ...(resource.dataBase64
+              ? { dataBase64: resource.dataBase64 }
+              : resource.bytes
+                ? { dataBase64: encodeBase64(resource.bytes) }
+                : resource.file
+                  ? { file: resource.file }
+                  : {}),
+          })),
+        }
+      : {}),
     client: { name: envelope.client.name, version: envelope.client.version },
   };
 }

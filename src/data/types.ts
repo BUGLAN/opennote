@@ -30,8 +30,11 @@ export interface FolderChoice {
   disabled?: boolean;
 }
 
-/** 笔记的种类：普通 Markdown 笔记，或 JSON Canvas 画布（`.canvas`）。 */
-export type NoteKind = "note" | "canvas";
+/**
+ * 笔记的种类：普通 Markdown 笔记、JSON Canvas 画布（`.canvas`），或 HTML 页面（`.html` / `.htm`，
+ * 应用内只读渲染，见 `src/html/`）。
+ */
+export type NoteKind = "note" | "canvas" | "html";
 
 export interface Note {
   id: Id;
@@ -65,7 +68,15 @@ export interface Note {
  * 「这篇是不是画布」的唯一判据，视图层与数据层共用。
  */
 export function noteKind(note: Pick<Note, "kind">): NoteKind {
-  return note.kind === "canvas" ? "canvas" : "note";
+  return note.kind === "canvas" || note.kind === "html" ? note.kind : "note";
+}
+
+/**
+ * 应用内不可修改的种类（目前只有 HTML 页面）：标签栏的锁固定为「锁定」且不可解锁，
+ * 数据层拒收对它的正文写入。磁盘上的外部改动照常被读进来（那不是「应用内修改」）。
+ */
+export function isReadOnlyKind(note: Pick<Note, "kind">): boolean {
+  return noteKind(note) === "html";
 }
 
 export type SnapshotReason = "auto" | "manual" | "restore" | "before-disk";

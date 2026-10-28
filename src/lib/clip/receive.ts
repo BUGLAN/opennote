@@ -58,7 +58,8 @@ import {
   type ImportProblem,
 } from "./envelope";
 import { renderAppended, renderMarkdown } from "./frontmatter";
-import { bodyHashOf, contentHashOf, sha256Ref, sourceHashOf } from "./hash";
+import { bodyHashOf, contentHashOf, sha256Hex, sha256Ref, sourceHashOf } from "./hash";
+import { inlineHtmlResources } from "../../html/bundle";
 import {
   allocateAssetPath,
   allocateNotePath,
@@ -446,9 +447,9 @@ export async function receiveEnvelope(raw: string | unknown): Promise<ImportRece
   if (!validation.ok) throw new ImportRejection(validation.problem);
   const backend = currentBackend();
   if (!backend) throw new ImportRejection(importProblem("IMP-4007"));
-  const envelope = await resolveExternalBody(backend, validation.envelope);
+  const envelope = await resolveHtmlResources(backend, await resolveExternalBody(backend, validation.envelope));
   const sourceHash = await sourceHashOf(envelope.source.url);
-  const bodyHash = await bodyHashOf(envelope.body);
+  const bodyHash = await bodyHashOf(await hashInputOf(envelope));
   const contentHash = await contentHashOf(sourceHash, bodyHash);
   const hashes: CommitHashes = { sourceHash, bodyHash, contentHash, warnings: [...envelope.warnings] };
   return enqueueCommit(() => runCommit(backend, envelope, hashes));
@@ -512,6 +513,46 @@ async function resolveExternalBody(backend: FileSystemBackend, envelope: ImportE
   return { ...envelope, body: checked.body, bodyFile: null, warnings: [...envelope.warnings, ...checked.warnings] };
 }
 
+/**
+ * HTML 页面的外置资源（`resources[].file`，相对工作区）读成字节 —— 与 `resolveAssetBytes`
+ * 同一种外置语义。收件箱通道在 `envelopeForReceiver()` 里已经全部转成 `dataBase64`，
+ * 这里兜的是「外部程序直接投信封、资源放在工作区里」的情况。
+ */
+async function resolveHtmlResources(backend: FileSystemBackend, envelope: ImportEnvelope): Promise<ImportEnvelope> {
+  if (envelope.format !== "html" || envelope.resources.every((resource) => resource.bytes)) return envelope;
+  const resources: ImportEnvelope["resources"] = [];
+  for (const [index, resource] of envelope.resources.entries()) {
+    if (resource.bytes || !resource.file) {
+      resources.push(resource);
+      continue;
+    }
+    try {
+      resources.push({ ...resource, bytes: await backend.readBytes(resource.file) });
+    } catch (error) {
+      throw new ImportRejection(
+        importProblem("IMP-4012", {
+          field: `resources[${index}].file`,
+          reason: error instanceof Error ? error.message : "read-failed",
+        }),
+      );
+    }
+  }
+  return { ...envelope, resources };
+}
+
+/**
+ * 去重哈希的输入：Markdown 就是正文；HTML 页面还要算上资源 —— 只改了 CSS 的第二次投递
+ * 不该被判成「同 URL 同正文」的 duplicate 而丢掉。
+ */
+async function hashInputOf(envelope: ImportEnvelope): Promise<string> {
+  if (envelope.format !== "html" || !envelope.resources.length) return envelope.body;
+  const parts: string[] = [];
+  for (const resource of [...envelope.resources].sort((a, b) => a.path.localeCompare(b.path))) {
+    parts.push(`${resource.path}:${resource.bytes ? await sha256Hex(resource.bytes) : ""}`);
+  }
+  return `${envelope.body}\n\u0000resources\n${parts.join("\n")}`;
+}
+
 interface CommitHashes {
   sourceHash: string;
   bodyHash: string;
@@ -557,6 +598,10 @@ async function runCommit(backend: FileSystemBackend, envelope: ImportEnvelope, h
     await logOnly(backend, envelope, "duplicate", byContent.path);
     return duplicateReceipt(envelope, byContent);
   }
+
+  // HTML 页面：判定链到第 2 步为止 —— 两篇 HTML 文档拼不成一篇（没有「追加」），
+  // 覆盖也不在本扩展的范围内（四道闸门是为 Markdown 前像设计的）。只剩「跳过」与「新建」。
+  if (envelope.format === "html") return commitHtmlPage(backend, envelope, hashes);
 
   // 第 3/4 步：同 `source.url`、哈希不同。
   // `lookupLatestBySourceUrl(null)` **刻意**返回 null：null 不是一种来源，只在第 2 步参与判定。
@@ -704,6 +749,79 @@ async function createNew(backend: FileSystemBackend, envelope: ImportEnvelope, h
     revertible: true,
     preimage: null,
     assets: assets.paths,
+    message: clipMessage(envelope),
+  };
+  await indexImport(backend, envelope, receipt, hashes, "created");
+  announce(receipt);
+  return receipt;
+}
+
+/* ============================== 落盘：HTML 页面 ============================== */
+
+/** 内联后的单文件页面上限（正文 8 MiB + 资源 8 MiB 的 base64 膨胀，留一点余量）。 */
+const MAX_HTML_PAGE_BYTES = 24 * 1024 * 1024;
+
+async function commitHtmlPage(backend: FileSystemBackend, envelope: ImportEnvelope, hashes: CommitHashes): Promise<ImportReceipt> {
+  const explicit = envelope.conflictExplicit ? envelope.conflict : null;
+  if (explicit === "skip") {
+    const byUrl = await lookupLatestBySourceUrl(envelope.source.url);
+    if (byUrl && (await backend.exists(byUrl.path))) return skippedReceipt(envelope, byUrl);
+  }
+  if (explicit === "append" || explicit === "overwrite") {
+    hashes.warnings.push("HTML 页面不支持追加或覆盖，已按新建入库。");
+  }
+  return createNewHtml(backend, envelope, hashes);
+}
+
+/**
+ * 把信封里的 HTML 与资源内联成**一个**文件（`src/html/bundle.ts`，与渲染/导入同一份规则）。
+ * 没被页面引用到的资源（例如脚本运行时 `fetch` 的数据文件）写不进单文件，如实给警告。
+ */
+async function bundleHtmlEnvelope(envelope: ImportEnvelope, warnings: string[]): Promise<string> {
+  const byPath = new Map(envelope.resources.map((resource) => [resource.path, resource]));
+  const result = await inlineHtmlResources(envelope.body, {
+    resolve: (path) => {
+      const resource = byPath.get(path);
+      return resource?.bytes ? { bytes: resource.bytes, mime: resource.mime } : null;
+    },
+  });
+  const unused = envelope.resources.filter((resource) => !result.inlined.includes(resource.path));
+  if (unused.length) {
+    warnings.push(`有 ${unused.length} 个资源没有被页面直接引用（例如脚本运行时加载的文件），没有写进页面。`);
+  }
+  if (result.missing.length) {
+    warnings.push(`页面引用的 ${result.missing.length} 个本地资源没有随附，打开时会缺失。`);
+  }
+  if (result.skipped.length) {
+    warnings.push(`有 ${result.skipped.length} 个资源格式不支持或超出体积上限，保留了原引用。`);
+  }
+  return result.html;
+}
+
+async function createNewHtml(backend: FileSystemBackend, envelope: ImportEnvelope, hashes: CommitHashes): Promise<ImportReceipt> {
+  const warnings = hashes.warnings;
+  const text = await bundleHtmlEnvelope(envelope, warnings);
+  if (utf8Bytes(text) > MAX_HTML_PAGE_BYTES) {
+    throw new ImportRejection(importProblem("IMP-4004", { field: "body", bytes: utf8Bytes(text), reason: "html-bundle" }));
+  }
+  const taken = new Set<string>(Object.keys(libraryStore.get().notes));
+  await ensureFolderDirs(backend, envelope.target.folder);
+  const path = await allocateNotePath(backend, requestedNotePath(envelope.target.folder, envelope.title, ".html"), taken);
+  try {
+    await backend.writeText(path, text);
+  } catch (error) {
+    throw new ImportRejection(importProblem("IMP-5001", { path, reason: errorMessage(error) }));
+  }
+  const receipt: ImportReceipt = {
+    ...baseReceipt(envelope, hashes),
+    status: "created",
+    path,
+    inboxId: null,
+    deduped: false,
+    dedupedBy: null,
+    revertible: true,
+    preimage: null,
+    assets: [],
     message: clipMessage(envelope),
   };
   await indexImport(backend, envelope, receipt, hashes, "created");

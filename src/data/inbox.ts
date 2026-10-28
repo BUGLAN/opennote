@@ -11,6 +11,9 @@
  *   state.json   { "status", "attempts", "lastError", "committedPath", "updatedAt" }
  * ```
  *
+ * HTML 页面条目（信封扩展 `format: "html"`）：正文外置为 `body.html`，静态资源按原相对路径
+ * 外置到 `resources/`（`resources[].file`），入库时由接收端内联成**单个** `.html` 文件。
+ *
  * 五态逐字：`pending` / `committing` / `committed` / `failed` / `discarded`。
  * 保留期逐字：`pending`·`committing` **不设期限**、`committed` **24 小时**、
  * `failed` **7 天**；`discarded` 不是保留期而是**销毁动作**——立即 `rm -r` 条目目录，
@@ -39,6 +42,7 @@ import {
 import { assertSafeRelative, baseName, joinPath, sanitizeName } from "../fs/paths";
 import type { FileSystemBackend } from "../fs/types";
 import { normalizeFolder } from "../lib/clip/envelope";
+import { inlineHtmlResources, normalizeResourcePath } from "../html/bundle";
 import { createStore, useStore } from "../lib/store";
 import { readImportIndex } from "./importLog";
 import { currentBackend, currentWorkspace, rescanWorkspace } from "./library";
@@ -59,7 +63,11 @@ export const INBOX_ROOT_LABEL = "笔记本根目录";
 const ENTRY_FILE = "entry.json";
 const STATE_FILE = "state.json";
 const BODY_FILE = "body.md";
+/** HTML 页面条目的外置正文（`format: "html"`）。 */
+const HTML_BODY_FILE = "body.html";
 const ASSETS_DIR = "assets";
+/** HTML 页面条目的资源目录（保留原相对路径，内联器按路径找）。 */
+const RESOURCES_DIR = "resources";
 
 /** 条目总量上限；达到上限时拒绝新投递（`IMP-4013`）。 */
 export const INBOX_LIMIT = 500;
@@ -94,6 +102,9 @@ const REFRESH_DEBOUNCE_MS = 450;
 /** 单个附件解码后 ≤ 8 MiB；数量 ≤ 32（`02` §2.7）。 */
 const MAX_ASSET_BYTES = 8 * 1024 * 1024;
 const MAX_ASSETS = 32;
+/** HTML 页面资源：条数与单件上限（与 `lib/clip/envelope.ts` 的 `MAX_HTML_RESOURCE*` 同值）。 */
+const MAX_RESOURCES = 256;
+const MAX_RESOURCE_BYTES = 8 * 1024 * 1024;
 
 /* ============================== 错误模型 =============================== */
 
@@ -204,6 +215,10 @@ export interface InboxDetail {
   bodyText: string;
   /** `entry.json` 的 `bodyFile`（外置正文的条目相对路径），没有则为 null。 */
   bodyFile: string | null;
+  /** 正文格式：`html` = HTML 页面条目（预览走沙箱渲染，入库成 `.html`）。 */
+  format: "markdown" | "html";
+  /** HTML 页面的资源（`path` 相对页面，`file` 相对条目目录）；Markdown 条目恒为空。 */
+  resources: Array<{ path: string; file: string; size: number }>;
 }
 
 const CLIENT_LABELS: Record<ImportClient["name"], string> = {
@@ -422,7 +437,9 @@ function hostOf(url: string): string {
  * 长度不在这里设限：正文本身已被契约的 8 MiB 上限（`IMP-4004`）与通道上限约束，
  * 而同一个渲染管线（`src/lib/markdown.ts`）本来就要渲染整篇笔记（`ReadingView`）。
  */
-function bodyOf(text: string): string {
+function bodyOf(text: string, format: InboxDetail["format"] = "markdown"): string {
+  // HTML 页面：原文就是要渲染的文档（`---` 开头不是 front-matter），只统一换行。
+  if (format === "html") return String(text || "").replace(/\r\n?/g, "\n");
   const flat = String(text || "").replace(/\r\n?/g, "\n").trim();
   if (!flat) return "";
   return flat.startsWith("---") ? flat.replace(/^---\n[\s\S]*?\n---\n?/, "").trim() : flat;
@@ -497,6 +514,20 @@ async function readDir(target: FileSystemBackend, dirName: string): Promise<Inbo
     assets.push({ name, file: resolved ? file : "", size: info?.size ?? 0 });
   }
 
+  const format: InboxDetail["format"] = envelope?.format === "html" ? "html" : "markdown";
+  const resources: InboxDetail["resources"] = [];
+  if (format === "html") {
+    for (const resource of envelope?.resources ?? []) {
+      if (!resource || typeof resource !== "object") continue;
+      const path = typeof resource.path === "string" ? normalizeResourcePath(resource.path) : null;
+      const file = typeof resource.file === "string" ? resource.file : "";
+      const resolved = file ? safeJoinWithin(dirName, file) : null;
+      if (!path) continue;
+      const info = resolved ? await target.stat(resolved).catch(() => null) : null;
+      resources.push({ path, file: resolved ? file : "", size: info?.size ?? 0 });
+    }
+  }
+
   const envelopeBroken = envelope === null;
   const status: InboxStatus = envelopeBroken ? "failed" : state.status;
   const lastError = envelopeBroken ? "IMP-4001" : state.lastError;
@@ -536,8 +567,10 @@ async function readDir(target: FileSystemBackend, dirName: string): Promise<Inbo
     clientVersion: typeof envelope?.client?.version === "string" && envelope.client.version ? envelope.client.version : null,
     external: clientName === "other",
     assets,
-    bodyText: bodyOf(inlineBody),
+    bodyText: bodyOf(inlineBody, format),
     bodyFile,
+    format,
+    resources,
   };
 }
 
@@ -751,7 +784,30 @@ async function withBody(target: FileSystemBackend, detail: InboxDetail): Promise
   const path = safeJoinWithin(detail.dirName, detail.bodyFile);
   if (!path) return detail;
   const text = await target.readText(path).catch(() => "");
-  return { ...detail, bodyText: bodyOf(text) };
+  return { ...detail, bodyText: bodyOf(text, detail.format) };
+}
+
+/**
+ * 收件箱里一条 HTML 页面的**预览文档**：正文 + 条目里暂存的资源，按入库时同一份规则
+ * （`html/bundle.ts`）内联成单文件 —— 用户在「预览」里看到的就是入库后会得到的那一页。
+ * 不是 HTML 条目、或读不到时返回 `null`。
+ */
+export async function readInboxHtmlPreview(id: string): Promise<string | null> {
+  const target = currentBackend();
+  if (!target) return null;
+  const found = await findDir(target, id);
+  if (!found || found.detail.format !== "html") return null;
+  const detail = await withBody(target, found.detail);
+  const byPath = new Map(detail.resources.filter((resource) => resource.file).map((resource) => [resource.path, resource.file]));
+  const result = await inlineHtmlResources(detail.bodyText, {
+    resolve: async (path) => {
+      const file = byPath.get(path);
+      const resolved = file ? safeJoinWithin(detail.dirName, file) : null;
+      const bytes = resolved ? await target.readBytes(resolved).catch(() => null) : null;
+      return bytes ? { bytes, mime: "" } : null;
+    },
+  });
+  return result.html;
 }
 
 export async function readInboxDetail(id: string): Promise<InboxDetail | null> {
@@ -858,6 +914,46 @@ async function stageAssets(
   return out;
 }
 
+/** HTML 页面的资源落到条目自己的 `resources/<原相对路径>`，返回归一后的 `resources[]`。 */
+async function stageResources(
+  target: FileSystemBackend,
+  dirName: string,
+  resources: ImportEnvelope["resources"],
+): Promise<NonNullable<ImportEnvelope["resources"]>> {
+  const list = resources ?? [];
+  if (list.length > MAX_RESOURCES) throw new InboxError("IMP-4013", inboxFailureMessage("IMP-4013"));
+  const out: NonNullable<ImportEnvelope["resources"]> = [];
+  for (const resource of list) {
+    if (!resource || typeof resource !== "object") continue;
+    const path = typeof resource.path === "string" ? normalizeResourcePath(resource.path) : null;
+    if (!path) throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+    let bytes: Uint8Array | null = null;
+    if (typeof resource.dataBase64 === "string" && resource.dataBase64) {
+      try {
+        bytes = decodeBase64(resource.dataBase64);
+      } catch {
+        throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+      }
+    } else if (typeof resource.file === "string" && resource.file) {
+      let relative: string;
+      try {
+        relative = assertSafeRelative(resource.file);
+      } catch {
+        throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+      }
+      bytes = await target.readBytes(relative).catch(() => null);
+    }
+    if (!bytes || bytes.byteLength > MAX_RESOURCE_BYTES) throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+    const relative = joinPath(RESOURCES_DIR, path);
+    const absolute = joinPath(entryDirPath(dirName), relative);
+    const parent = absolute.slice(0, absolute.lastIndexOf("/"));
+    await target.mkdir(parent).catch(() => undefined);
+    await target.writeBytes(absolute, bytes);
+    out.push({ path, ...(resource.mime ? { mime: resource.mime } : {}), file: relative });
+  }
+  return out;
+}
+
 /**
  * 投递一个信封到收件箱（`enqueueInbox`）。
  *
@@ -919,21 +1015,24 @@ export async function enqueueInbox(
   const source = { ...(envelope.source ?? {}) } as Record<string, unknown>;
   if (typeof source.url !== "string" && source.url !== null) source.url = meta.sourceUrl || null;
   if (typeof source.capturedAt !== "string" || !source.capturedAt) source.capturedAt = toIso(at);
+  const html = envelope.format === "html";
+  const bodyFile = html ? HTML_BODY_FILE : BODY_FILE;
   const envelopeOut: ImportEnvelope = {
     spec: "opennote.import/v1",
     importId,
     title: typeof envelope.title === "string" && envelope.title ? envelope.title : meta.title,
     body: null,
-    bodyFile: BODY_FILE,
+    bodyFile,
     source: source as unknown as ImportEnvelope["source"],
     target: { folder, notePath: envelope.target?.notePath ?? null },
     conflict: envelope.conflict,
     tags: Array.isArray(envelope.tags) ? envelope.tags.filter((tag): tag is string => typeof tag === "string") : meta.tags,
-    assets: await stageAssets(target, dirName, envelope.assets, folder),
+    assets: html ? [] : await stageAssets(target, dirName, envelope.assets, folder),
+    ...(html ? { format: "html" as const, resources: await stageResources(target, dirName, envelope.resources) } : {}),
     client: envelope.client,
     enqueuedAt: toIso(at),
   };
-  await target.writeText(joinPath(entryDirPath(dirName), BODY_FILE), body);
+  await target.writeText(joinPath(entryDirPath(dirName), bodyFile), body);
   await target.writeText(joinPath(entryDirPath(dirName), ENTRY_FILE), `${JSON.stringify(envelopeOut, null, 2)}\n`);
   await writeStateFile(target, dirName, emptyState(at));
 
@@ -1147,6 +1246,24 @@ async function envelopeForReceiver(
     throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
   }
   envelope.assets = assets;
+  if (envelope.format === "html") {
+    // 资源同理：`file` 相对条目目录，接收端会按工作区根解释它 —— 一律在这里转成 `dataBase64`。
+    const resources: NonNullable<ImportEnvelope["resources"]> = [];
+    for (const resource of envelope.resources ?? []) {
+      if (!resource || typeof resource !== "object" || typeof resource.path !== "string") {
+        throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+      }
+      if (typeof resource.dataBase64 === "string" && resource.dataBase64) {
+        resources.push(resource);
+        continue;
+      }
+      const path = typeof resource.file === "string" && resource.file ? safeJoinWithin(dirName, resource.file) : null;
+      const bytes = path ? await target.readBytes(path).catch(() => null) : null;
+      if (!bytes) throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+      resources.push({ path: resource.path, ...(resource.mime ? { mime: resource.mime } : {}), dataBase64: encodeBase64(bytes) });
+    }
+    envelope.resources = resources;
+  }
   return JSON.stringify(envelope);
 }
 
@@ -1296,6 +1413,8 @@ async function runCommit(
   // 条目里的**暂存副本**立刻删掉，别留孤儿/双份字节；重试或重复提交也就不会二次搬迁。
   if (settled === "committed") {
     await target.remove(joinPath(entryDirPath(found.dirName), ASSETS_DIR), { recursive: true }).catch(() => undefined);
+    // HTML 页面的资源已经内联进 `.html`：暂存的 `resources/` 同理立刻删掉。
+    await target.remove(joinPath(entryDirPath(found.dirName), RESOURCES_DIR), { recursive: true }).catch(() => undefined);
   }
   // 入库后界面必须 3 秒内可见：重扫工作区 + 重读收件箱。
   await rescanWorkspace();

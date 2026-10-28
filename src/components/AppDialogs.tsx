@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 /* 画布快照摘要需要解析 JSON Canvas：`canvas/types` 无三方依赖，静态 import 不破坏懒加载分包。 */
 import { parseCanvas } from "../canvas/types";
-import { ACCENTS, FONTS, THEMES, WIDTHS, noteKind, type Id, type Snapshot, type UiSettings } from "../data/types";
+import { ACCENTS, FONTS, THEMES, WIDTHS, isReadOnlyKind, noteKind, type Id, type Snapshot, type UiSettings } from "../data/types";
 import { hasLegacyData } from "../data/legacy";
 import { getLibrary, listSnapshots, restoreSnapshot, takeManualSnapshot } from "../data/library";
 import type { WorkspaceRecord } from "../data/workspaces";
@@ -674,6 +674,8 @@ export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void
    */
   const note = getLibrary().notes[noteId] ?? getLibrary().trash[noteId] ?? null;
   const canvasHistory = note !== null && noteKind(note) === "canvas";
+  /* HTML 页面应用内只读：历史可以看（外部改动前的版本会留档），但不能在应用内「恢复」回去。 */
+  const readOnlyHistory = note !== null && isReadOnlyKind(note);
 
   const load = () => {
     void listSnapshots(noteId).then((list) => {
@@ -712,9 +714,10 @@ export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void
           <button
             type="button"
             className="btn btn--primary"
-            disabled={!current}
+            disabled={!current || readOnlyHistory}
+            title={readOnlyHistory ? "HTML 页面在应用内只读，不能恢复历史版本" : undefined}
             onClick={async () => {
-              if (!current) return;
+              if (!current || readOnlyHistory) return;
               const ok = await askConfirm({
                 title: "恢复这个版本？",
                 message: `将用 ${formatDateTime(current.createdAt)} 的内容替换当前正文，现在的版本会先被存进历史。`,

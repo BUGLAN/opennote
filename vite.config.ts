@@ -224,6 +224,9 @@ function contentSecurityPolicyPlugin(): Plugin {
          */
         "connect-src 'self' https://api.github.com https://raw.githubusercontent.com",
         "media-src 'self' blob: data:",
+        // HTML 页面的沙箱宿主页（`public/html-sandbox.html`，同源静态文件）是唯一的子框架；
+        // 页面内容自己的策略在那份文件里，不继承这一条（见 src/html/sandbox.ts）。
+        "frame-src 'self'",
         "object-src 'none'",
         "base-uri 'none'",
         "form-action 'none'",

@@ -45,7 +45,9 @@ export type IconName =
   | "unlock"
   | "winMin"
   | "winMax"
-  | "winRestore";
+  | "winRestore"
+  | "expand"
+  | "shrink";
 
 const PATHS: Record<IconName, JSX.Element> = {
   file: (
@@ -243,6 +245,9 @@ const PATHS: Record<IconName, JSX.Element> = {
       <rect x="6.1" y="9.2" width="8.7" height="8.7" rx="1.7" />
     </>
   ),
+  /* HTML 页面右上角的全屏 / 退出全屏（四角向外 / 向内），与上面同一套 1.7 描边。 */
+  expand: <path d="M4.5 9V4.5H9M15 4.5h4.5V9M19.5 15v4.5H15M9 19.5H4.5V15" />,
+  shrink: <path d="M9 4.5V9H4.5M19.5 9H15V4.5M15 19.5V15h4.5M4.5 15H9v4.5" />,
 };
 
 export function Icon({

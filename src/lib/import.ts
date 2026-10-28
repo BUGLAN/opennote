@@ -5,6 +5,7 @@ import {
   baseName,
   isCanvasPath,
   isHiddenPath,
+  isHtmlPath,
   isImagePath,
   isMarkdownPath,
   joinPath,
@@ -27,6 +28,34 @@ import {
 import type { Id } from "../data/types";
 import { assetsDirFor, relativeAssetRef } from "../lib/clip/landing";
 import { normalizeEol, readFileAsText, uid } from "./utils";
+import { inlineHtmlResources } from "../html/bundle";
+
+/** 笔记类文件的落盘扩展名：画布与 HTML 页面保留自己的扩展名（丢了重扫后就不是它了），其余 `.md`。 */
+function noteExtOf(name: string): string {
+  if (isCanvasPath(name)) return ".canvas";
+  if (isHtmlPath(name)) return /\.htm$/i.test(name) ? ".htm" : ".html";
+  return ".md";
+}
+
+/**
+ * HTML 页面导入：同一批里（zip 内 / 一起选中的文件夹）被它相对引用的 CSS / JS / 图片 / 字体
+ * 内联进来，落成**单个** `.html`（与入库同一份规则，`html/bundle.ts`）。`read` 按批内路径取字节。
+ */
+async function bundleImportedHtml(
+  text: string,
+  htmlPath: string,
+  read: (path: string) => Promise<Uint8Array | null>,
+): Promise<string> {
+  const slash = htmlPath.lastIndexOf("/");
+  const dir = slash < 0 ? "" : htmlPath.slice(0, slash);
+  const result = await inlineHtmlResources(text, {
+    resolve: async (path) => {
+      const bytes = await read(dir ? `${dir}/${path}` : path).catch(() => null);
+      return bytes ? { bytes, mime: "" } : null;
+    },
+  });
+  return result.html;
+}
 
 export interface ImportResult {
   notes: number;
@@ -78,7 +107,7 @@ export async function importIntoWorkspace(
     return parent;
   };
 
-  /* ext 只有两种值：画布必须落 `.canvas`（扩展名丢了，重扫后就不是画布了），其余照旧 `.md`。 */
+  /* ext 见 `noteExtOf`：画布落 `.canvas`、HTML 页面落 `.html` / `.htm`，其余照旧 `.md`。 */
   const writeNote = async (content: string, folderId: Id | null, name: string, ext = ".md"): Promise<void> => {
     const dir = folderId ?? "";
     const requested = joinPath(dir, `${sanitizeName(name, "未命名")}${ext}`);
@@ -129,8 +158,9 @@ export async function importIntoWorkspace(
         return false;
       }
     });
-    // 画布与 md 同一条文本管线（读 string → writeNote），只多保一个 `.canvas` 扩展名。
-    const notes = safe.filter((entry) => isMarkdownPath(entry.name) || isCanvasPath(entry.name));
+    // 画布、HTML 页面与 md 同一条文本管线（读 string → writeNote），只多保一个扩展名。
+    const notes = safe.filter((entry) => isMarkdownPath(entry.name) || isCanvasPath(entry.name) || isHtmlPath(entry.name));
+    const byName = new Map(safe.map((entry) => [entry.name, entry]));
     const images = safe.filter((entry) => isImagePath(entry.name));
     const legacyPrefix = notes.length > 0 && notes.every((entry) => entry.name.startsWith("notes/")) ? "notes/" : "";
     const movedImages = new Map<string, string>();
@@ -168,15 +198,27 @@ export async function importIntoWorkspace(
         result.skipped += 1;
         continue;
       }
+      if (isHtmlPath(entry.name)) {
+        text = await bundleImportedHtml(text, entry.name, async (path) => {
+          const found = byName.get(path);
+          return found ? found.async("uint8array") : null;
+        });
+        await writeNote(text, folderId, stripExtension(fileName), noteExtOf(entry.name));
+        continue;
+      }
       const sourceDir = entry.name.slice(0, entry.name.lastIndexOf("/") + 1);
       for (const [original, destination] of movedImages) {
         if (original !== `${sourceDir}${ASSETS_DIR}/${baseName(original)}`) continue;
         text = text.split(`](./${ASSETS_DIR}/${baseName(original)})`)
           .join(`](./${ASSETS_DIR}/${baseName(destination)})`);
       }
-      await writeNote(text, folderId, stripExtension(fileName), isCanvasPath(entry.name) ? ".canvas" : ".md");
+      await writeNote(text, folderId, stripExtension(fileName), noteExtOf(entry.name));
     }
   };
+
+  // 一起选中的文件（含文件夹上传）按批内相对路径索引：HTML 页面要从里面找它引用的资源。
+  const relativeOf = (file: File) => (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+  const byRelative = new Map(files.map((file) => [relativeOf(file), file]));
 
   for (const file of files) {
     if (file.size > MAX_ENTRY_BYTES && !/\.zip$/i.test(file.name)) {
@@ -188,17 +230,23 @@ export async function importIntoWorkspace(
         await handleZip(file);
         continue;
       }
-      if (isMarkdownPath(file.name) || isCanvasPath(file.name)) {
-        const text = await readFileAsText(file);
+      if (isMarkdownPath(file.name) || isCanvasPath(file.name) || isHtmlPath(file.name)) {
+        let text = await readFileAsText(file);
         if (!text.trim()) {
           result.skipped += 1;
           continue;
         }
-        const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+        const relative = relativeOf(file);
+        if (isHtmlPath(file.name)) {
+          text = await bundleImportedHtml(text, relative, async (path) => {
+            const found = byRelative.get(path);
+            return found ? new Uint8Array(await found.arrayBuffer()) : null;
+          });
+        }
         const segments = relative.split("/").filter(Boolean);
         const fileName = segments.pop() ?? file.name;
         const folderId = await ensureFolder(segments);
-        await writeNote(text, folderId, stripExtension(fileName), isCanvasPath(file.name) ? ".canvas" : ".md");
+        await writeNote(text, folderId, stripExtension(fileName), noteExtOf(file.name));
         continue;
       }
       if (isImagePath(file.name) || file.type.startsWith("image/")) {

@@ -8,6 +8,7 @@ import {
   createFolder,
   createNote,
   currentBackend,
+  duplicateNote as duplicateLibraryNote,
   cycleTab,
   flushAll,
   flushForClose,
@@ -72,7 +73,7 @@ import { noteKind, type Id, type Snapshot, type ThemeId, type UiSettings } from 
 import { buildAppCommands, isEditableTarget, matchesShortcut } from "./lib/appCommands";
 import { useStore } from "./lib/store";
 import { askConfirm, askText } from "./lib/dialogs";
-import { exportNoteHtml, exportNoteMarkdown, exportWorkspaceZip } from "./lib/export";
+import { exportHtmlPage, exportNoteHtml, exportNoteMarkdown, exportWorkspaceZip } from "./lib/export";
 import { importIntoWorkspace, migrateLegacyData } from "./lib/import";
 import { copyImage } from "./lib/imageClipboard";
 import { extractHeadings, findCurrentHeading } from "./lib/outline";
@@ -119,6 +120,8 @@ import { setBridge } from "./editor/bridge";
 import { getActiveCanvasApi } from "./canvas/controller";
 import { parseCanvas } from "./canvas/types";
 import { findImageSource, unwrapSource } from "./editor/livePreview";
+/* HTML 页面：沙箱 iframe + 全屏按钮，零三方依赖，直接静态 import（见 src/html/sandbox.ts）。 */
+import { HtmlView } from "./html/HtmlView";
 
 /*
  * 画布视图的唯一渲染入口（React.lazy 动态 import；下面的离线预热会再动态 import
@@ -173,6 +176,8 @@ export default function App(): ReactNode {
   const activeLocked = activeId !== null && ui.lockedNotes.includes(activeId);
   /** 活跃标签是不是画布（回收站里打开的画布也算 —— kind 经 noteKind 归一化）。 */
   const activeIsCanvas = activeNote !== null && noteKind(activeNote) === "canvas";
+  /** 活跃标签是不是 HTML 页面：渲染视图、锁固定「锁定」且不可解锁（`isReadOnlyKind`）。 */
+  const activeIsHtml = activeNote !== null && noteKind(activeNote) === "html";
   const deferredContent = useDeferredValue(activeNote?.content ?? "");
   const hasWorkspace = Boolean(library.workspace);
   const bridge = useMemo(() => desktopBridge(), []);
@@ -210,7 +215,9 @@ export default function App(): ReactNode {
     [ui.tabs, library.notes, library.trash],
   );
 
-  const headings = useMemo(() => extractHeadings(deferredContent), [deferredContent]);
+  // 大纲只对 Markdown 笔记有意义：画布是 JSON、HTML 页面是标记，按 md 抽标题只会抽出噪声。
+  const activeIsNote = activeNote !== null && noteKind(activeNote) === "note";
+  const headings = useMemo(() => (activeIsNote ? extractHeadings(deferredContent) : []), [activeIsNote, deferredContent]);
   const currentHeading = useMemo(
     () => findCurrentHeading(headings, positionOfLine(deferredContent, cursor.line)),
     [headings, cursor.line, deferredContent],
@@ -1095,6 +1102,12 @@ export default function App(): ReactNode {
       notify("画布暂不支持导出/打印");
       return;
     }
+    // HTML 页面本身就是独立 HTML：三种导出一律原样下载这个文件（资源已内联，拿走就能打开）。
+    if (noteKind(activeNote) === "html") {
+      exportHtmlPage(activeNote);
+      notify("导出完成");
+      return;
+    }
     try {
       if (kind === "html") await exportNoteHtml(activeNote);
       else await exportNoteMarkdown(activeNote, { inlineAssets: kind === "md-inline" });
@@ -1182,7 +1195,9 @@ export default function App(): ReactNode {
         },
         duplicateNote: () => {
           if (!activeNote) return;
-          createNote({ folderId: activeNote.folderId, content: activeNote.content, title: `${activeNote.title} 副本` });
+          // 走数据层的 duplicateNote：它按种类保留扩展名（画布 `.canvas`、HTML 页面 `.html`），
+          // 直接 createNote 会把 JSON / HTML 装进一篇 `.md`。
+          duplicateLibraryNote(activeNote.id);
         },
         trashNote: () => {
           if (!activeNote) return;
@@ -1193,7 +1208,7 @@ export default function App(): ReactNode {
           if (!activeNote) return;
           try {
             await navigator.clipboard.writeText(activeNote.content);
-            notify("Markdown 已复制到剪贴板");
+            notify(noteKind(activeNote) === "html" ? "HTML 源码已复制到剪贴板" : "Markdown 已复制到剪贴板");
           } catch {
             notify("浏览器拒绝了剪贴板访问", { kind: "danger" });
           }
@@ -1202,6 +1217,11 @@ export default function App(): ReactNode {
           // 画布没有打印样式：不进 window.print()（与 exportNote 同一条守卫）。
           if (activeNote && noteKind(activeNote) === "canvas") {
             notify("画布暂不支持导出/打印");
+            return;
+          }
+          // HTML 页面在沙箱 iframe 里：window.print() 打的是应用外壳。导出后用浏览器打开再打印。
+          if (activeNote && noteKind(activeNote) === "html") {
+            notify("HTML 页面请先导出，再用浏览器打开打印");
             return;
           }
           window.print();
@@ -1422,13 +1442,15 @@ export default function App(): ReactNode {
             notes={library.notes}
             activeId={activeId}
             dirty={library.dirty}
-            locked={activeLocked && !activeIsCanvas}
-            lockDisabled={activeIsCanvas}
+            /* HTML 页面：锁固定显示「锁定」且不可点（应用内只读，不存在「解锁编辑」）。 */
+            locked={activeIsHtml || (activeLocked && !activeIsCanvas)}
+            lockDisabled={activeIsCanvas || activeIsHtml}
+            lockHint={activeIsHtml ? "HTML 页面只读，不能解锁编辑" : activeIsCanvas ? "画布不受只读锁" : null}
             onSelect={(id) => openNote(id)}
             onClose={closeTab}
             onToggleLock={() => {
-              // 只读锁是 md 编辑器概念：画布标签不适用（按钮同时置灰，双保险）。
-              if (!activeId || activeIsCanvas) return;
+              // 只读锁是 md 编辑器概念：画布标签不适用；HTML 页面恒为只读、不可解锁（按钮同时禁用，双保险）。
+              if (!activeId || activeIsCanvas || activeIsHtml) return;
               // 只读锁：锁定的笔记编辑器不收输入（EditorPane 里用 Compartment 切），
               // 状态随 `ui.lockedNotes` 落盘 —— 重启后还锁着，删掉的笔记残留 id 无副作用。
               const locked = ui.lockedNotes.includes(activeId);
@@ -1490,9 +1512,9 @@ export default function App(): ReactNode {
                   ? [
                       {
                         id: "export",
-                        label: "导出这篇笔记",
+                        label: noteKind(note) === "html" ? "导出这个页面" : "导出这篇笔记",
                         icon: "download" as const,
-                        run: () => void exportNoteMarkdown(note),
+                        run: () => (noteKind(note) === "html" ? exportHtmlPage(note) : void exportNoteMarkdown(note)),
                       },
                     ]
                   : []),
@@ -1602,14 +1624,19 @@ export default function App(): ReactNode {
 
         {/* 只读锁 = 阅读视图（0.4.0 用户反馈）：锁上时编辑器留在挂载状态（undo/光标都在），
             上面整篇渲染成文章排版 —— 读笔记就该是读文章，不是盯着一个不能打字的光标。 */}
-        {hasWorkspace && activeNote && activeLocked && !activeIsCanvas ? <ReadingView note={activeNote} /> : null}
+        {hasWorkspace && activeNote && activeLocked && activeIsNote ? <ReadingView note={activeNote} /> : null}
+
+        {/* HTML 页面标签：直接渲染页面（沙箱 iframe），右上角悬浮全屏按钮。key=id —— 换页面 =
+            卸载重建（全屏状态、iframe 里的页面状态都不该串到另一页）。 */}
+        {hasWorkspace && activeId && activeNote && activeIsHtml ? <HtmlView key={activeId} note={activeNote} /> : null}
 
         {/* 正文宽度拖拽条：铺在 .main 上、贴着正文栏左右边缘（见组件的文件头注释）。
             没有打开的笔记时不挂；只读锁时量的是阅读视图的 .reading。
             onWidthChange 里让活跃编辑器重新量一次 —— 只改 CSS 变量的话 CodeMirror
             的滚动锚点与行高表不会自己刷新，长文档拖宽后会停在旧的折行位置。 */}
         <ContentWidthHandles
-          enabled={Boolean(hasWorkspace && activeNote)}
+          /* HTML 页面铺满内容区（页面有自己的版式），正文栏宽度对它没有意义。 */
+          enabled={Boolean(hasWorkspace && activeNote && !activeIsHtml)}
           preset={ui.width}
           activeId={activeId}
           locked={activeLocked}
@@ -1623,6 +1650,7 @@ export default function App(): ReactNode {
         <StatusBar
           counts={counts}
           canvas={canvasStats}
+          htmlPage={activeIsHtml}
           cursor={cursor}
           settings={ui}
           locationLabel={locationLabel}
@@ -1758,7 +1786,7 @@ export default function App(): ReactNode {
         type="file"
         multiple
         hidden
-        accept=".canvas,.md,.markdown,.txt,.text,.zip,image/*"
+        accept=".canvas,.md,.markdown,.txt,.text,.html,.htm,.zip,image/*"
         onChange={(event) => {
           const files = event.target.files;
           if (files?.length) void importFiles(files);

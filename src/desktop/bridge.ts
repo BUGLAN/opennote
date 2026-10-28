@@ -61,6 +61,15 @@ export interface ImportAsset {
   file?: string;
 }
 
+/** HTML 页面的一份静态资源（`format: "html"`；`path` 相对 HTML 所在目录）。 */
+export interface ImportHtmlResource {
+  path: string;
+  mime?: string;
+  dataBase64?: string;
+  /** 通道级扩展：资源外置时的相对路径（收件箱条目里相对条目目录）。 */
+  file?: string;
+}
+
 export interface ImportClient {
   name: "chrome-extension" | "cli" | "mcp" | "share-target" | "manual" | "other";
   version: string;
@@ -79,6 +88,10 @@ export interface ImportEnvelope {
   conflict?: "new" | "append" | "skip" | "overwrite";
   tags?: string[];
   assets?: ImportAsset[];
+  /** 正文格式（扩展字段，缺省 `markdown`）；`html` = 入库成只读 HTML 页面。 */
+  format?: "markdown" | "html";
+  /** `format: "html"` 的静态资源（CSS / JS / 图片 / 字体…），入库时内联成单文件。 */
+  resources?: ImportHtmlResource[];
   client?: ImportClient;
   /** 收件箱条目附加字段。 */
   enqueuedAt?: string;

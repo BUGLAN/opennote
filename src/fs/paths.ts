@@ -29,6 +29,7 @@ export {
   idForPath,
   isCanvasPath,
   isHiddenPath,
+  isHtmlPath,
   isImagePath,
   isMarkdownPath,
   isMaterializable,

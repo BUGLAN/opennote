@@ -12,6 +12,11 @@ interface StatusBarProps {
    * （画布没有行列概念，残留上一次编辑器的值只会误导）。
    */
   canvas: { cards: number; edges: number } | null;
+  /**
+   * 活跃标签是 HTML 页面：度量槽位只写「HTML 页面 · 只读」—— 字数是标记的字数、
+   * 行列是上一个编辑器的残值，两个都只会误导。
+   */
+  htmlPage: boolean;
   cursor: CursorInfo;
   settings: UiSettings;
   locationLabel: string;
@@ -92,7 +97,12 @@ export function StatusBar(props: StatusBarProps): ReactNode {
             左侧那三段（存放位置 / 文件数 / 文件夹）留得更久。 */}
         <span className="statusbar__spacer" />
 
-        {settings.showWordCount ? (
+        {props.htmlPage ? (
+          <span className="statusbar__item statusbar__item--compact" title="HTML 页面在应用内只读渲染">
+            <Icon name="lock" size={12} />
+            HTML 页面 · 只读
+          </span>
+        ) : settings.showWordCount ? (
           props.canvas ? (
             <span className="statusbar__item statusbar__item--compact" title="画布统计">
               {props.canvas.cards.toLocaleString("zh-CN")} 张卡片 · {props.canvas.edges.toLocaleString("zh-CN")} 条连线
@@ -105,7 +115,7 @@ export function StatusBar(props: StatusBarProps): ReactNode {
           )
         ) : null}
 
-        {props.canvas ? null : (
+        {props.canvas || props.htmlPage ? null : (
           <span className="statusbar__item statusbar__item--cursor" title="光标位置">
             行 {props.cursor.line} · 列 {props.cursor.column}
             {props.cursor.selected ? ` · 选中 ${props.cursor.selected}` : ""}

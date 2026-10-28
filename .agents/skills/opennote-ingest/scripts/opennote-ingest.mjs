@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /**
- * opennote-ingest —— 把 Agent 生成的 Markdown 文档入库到本机 Opennote。
+ * opennote-ingest —— 把 Agent 生成的 Markdown 文档或 HTML 页面入库到本机 Opennote。
+ *
+ * HTML 页面（`.html` / `.htm`）走信封扩展 `format: "html"`：页面引用的本地 CSS / JS /
+ * 图片 / 字体等静态资源一起收进 `resources[]`（收件箱条目里外置到 `resources/<原相对路径>`），
+ * 用户点「导入」时由应用内联成**单个** `.html` 文件，应用内只读渲染。
  *
  * 两条通道，走的是同一份契约 `opennote.import/v1`
  * （`docs/import/02-接口契约-导入信封与通道.md`）：
@@ -47,6 +51,9 @@ const BODY_FILE = "body.md";
 const ENTRY_FILE = "entry.json";
 const STATE_FILE = "state.json";
 const ASSETS_DIR = "assets";
+/** HTML 页面条目：外置正文与资源目录（与 `src/data/inbox.ts` 的 `HTML_BODY_FILE` / `RESOURCES_DIR` 一致）。 */
+const HTML_BODY_FILE = "body.html";
+const RESOURCES_DIR = "resources";
 
 const MAX_TITLE = 200;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -72,6 +79,43 @@ const MIME_BY_EXT = {
   ".svg": "image/svg+xml",
   ".bmp": "image/bmp",
 };
+
+/**
+ * HTML 页面可内联的资源：扩展名 → MIME。**逐条镜像** `src/html/bundle.ts` 的
+ * `HTML_RESOURCE_MIME_BY_EXT`（应用只内联白名单里的格式；不在表里的收了也用不上）。
+ */
+const HTML_RESOURCE_MIME = {
+  ".css": "text/css",
+  ".js": "text/javascript",
+  ".mjs": "text/javascript",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".ico": "image/x-icon",
+  ".svg": "image/svg+xml",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".mp3": "audio/mpeg",
+  ".ogg": "audio/ogg",
+  ".wav": "audio/wav",
+  ".m4a": "audio/mp4",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".vtt": "text/vtt",
+  ".txt": "text/plain",
+  ".csv": "text/csv",
+};
+/** 与 `src/lib/clip/envelope.ts` 的 `MAX_HTML_RESOURCE*` 同值。 */
+const MAX_HTML_RESOURCES = 256;
+const MAX_HTML_RESOURCE_BYTES = 8 * 1024 * 1024;
+const MAX_HTML_RESOURCES_TOTAL = 8 * 1024 * 1024;
 
 const EXIT = {
   ok: 0,
@@ -207,18 +251,21 @@ const HELP = `opennote-ingest —— 把 Agent 生成的文档入库到 Opennote
   --folder <相对目录>        入库后的落点目录；默认空 = 笔记本根目录
                              逐段按契约校验（拒 ..、绝对路径、反斜杠、段内冒号、超 10 层、单段超 80 字）
   --title <标题>             仅单篇时使用；默认取 front-matter 的 title: 或正文首个 H1
+                             （HTML 页面：<title> > 首个 <h1> > 文件名）
   --tags <a,b>               追加标签（会与文档 front-matter 里的 tags 合并）
   --url <url>                来源 URL（生成物一般没有，留空即可）
   --source-title <t>         来源标题，默认写源文件路径（便于回溯）
   --site <s>  --author <a>  --published <iso>
   --attach <文件>            附件（图片），可重复；正文里用 ./assets/<文件名> 引用
   --auto-assets              自动把正文里指向本地存在文件的图片链接收成附件
+  --include <文件>           HTML 页面专用：额外随附的资源（页面同目录或子目录里的文件），可重复；
+                             页面里直接引用的 CSS / JS / 图片 / 字体会**自动**收集，不必列出
   --client-name <cli|mcp|manual|other>  默认 cli
   --import-id <幂等键>       覆盖内容哈希生成的 importId（排障 / 对接外部系统）
 
 批量
   --dir <目录>               批量源目录
-  --match <glob,...>         默认 *.md；支持 * 与 ?
+  --match <glob,...>         默认 *.md；支持 * 与 ?（HTML 页面一起入库：--match "*.md,*.html"）
   --recursive                递归子目录
   --exclude <glob,...>       额外排除（默认已排除 .opennote/**、node_modules/**、.git/**）
 
@@ -252,6 +299,7 @@ function parseArgs(argv) {
     author: null,
     published: null,
     attach: [],
+    include: [],
     autoAssets: false,
     clientName: "cli",
     importId: null,
@@ -290,6 +338,7 @@ function parseArgs(argv) {
       case "--published": opts.published = need(arg, i); i += 1; break;
       case "--attach": opts.attach.push(need(arg, i)); i += 1; break;
       case "--auto-assets": opts.autoAssets = true; break;
+      case "--include": opts.include.push(need(arg, i)); i += 1; break;
       case "--client-name": opts.clientName = need(arg, i); i += 1; break;
       case "--import-id": opts.importId = need(arg, i); i += 1; break;
       case "--dry-run": opts.dryRun = true; break;
@@ -490,9 +539,171 @@ function collectAssets(file, body, opts) {
   return assets;
 }
 
-/** 幂等键：内容确定性哈希 → 同一份文档重复投递不会产生第二条。 */
-function importIdOf({ title, body, folder, url }) {
-  const digest = sha256Hex(`${title}\n${folder}\n${url ?? ""}\n${body}`).slice(0, 16);
+/* ============================ HTML 页面 ============================== */
+
+function isHtmlFile(file) {
+  return /\.html?$/i.test(file);
+}
+
+const ENTITY = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00a0" };
+function decodeEntities(value) {
+  return String(value).replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, body) => {
+    if (body[0] === "#") {
+      const code = body[1] === "x" || body[1] === "X" ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+    }
+    return ENTITY[body.toLowerCase()] ?? whole;
+  });
+}
+
+/**
+ * 页面里的一条引用 → 资源根（页面所在目录）相对路径；不是本地资源返回 null。
+ * **逐条镜像** `src/html/bundle.ts` 的 `resolveLocalRef()`：带协议 / 协议相对 / 锚点不算，
+ * `..` 越过资源根、点开头的段一律拒绝（应用侧同样不会内联它们）。
+ */
+function resolveLocalRef(dir, ref) {
+  let value = decodeEntities(ref).trim();
+  if (!value) return null;
+  if (value.startsWith("#") || value.startsWith("//") || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) return null;
+  value = value.replace(/[?#].*$/, "");
+  if (!value) return null;
+  try {
+    value = decodeURIComponent(value);
+  } catch {
+    /* 坏的百分号编码：按字面路径找 */
+  }
+  if (value.includes("\0") || value.includes("\\")) return null;
+  const segments = value.startsWith("/") ? [] : dir.split("/").filter(Boolean);
+  for (const segment of value.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (!segments.length) return null;
+      segments.pop();
+      continue;
+    }
+    if (segment.startsWith(".")) return null;
+    segments.push(segment);
+  }
+  return segments.length ? segments.join("/") : null;
+}
+
+/** HTML 页面的标题：`--title` > `<title>` > 首个 `<h1>` 的文字 > 文件名。 */
+function htmlTitleOf(file, html, opts) {
+  const pick = (re) => {
+    const match = re.exec(html);
+    return match ? decodeEntities(match[1].replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim() : "";
+  };
+  return (opts.title || pick(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i) || pick(/<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/i) || path.basename(file).replace(/\.[^.]+$/, "")).trim();
+}
+
+/** HTML 页面 → 信封字段（正文就是整篇 HTML 原文，只去 BOM、统一换行）。 */
+function parseHtmlDocument(file, rawText, opts) {
+  const body = rawText.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  let title = htmlTitleOf(file, body, opts);
+  if (!title) throw new IngestError("IMP-4003", EXIT.validation, `无法从 ${file} 定出标题：请用 --title 指定。`);
+  if (title.length > MAX_TITLE) title = title.slice(0, MAX_TITLE);
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes > MAX_BODY_BYTES) {
+    throw new IngestError("IMP-4004", EXIT.validation, `页面超过 8 MiB（${bytes} 字节）：请把大图等资源拆成单独文件引用。`);
+  }
+  const { tags, dropped, truncated } = sanitizeTags(opts.tags ?? []);
+  const url = opts.url || null;
+  if (url && !/^https?:\/\//i.test(url)) {
+    throw new IngestError("IMP-4003", EXIT.validation, `来源 URL 必须是 http(s)（收到 ${url}）。`);
+  }
+  return {
+    format: "html",
+    title,
+    body,
+    tags,
+    adjustedTags: dropped,
+    truncatedTags: truncated,
+    url,
+    site: opts.site || null,
+    author: opts.author || null,
+    publishedAt: opts.published || null,
+    sourceTitle: opts.sourceTitle || path.resolve(file),
+  };
+}
+
+/**
+ * 收集 HTML 页面引用的本地资源（页面所在目录为资源根）：属性里的 `src` / `href` / `poster` /
+ * `srcset`、内联样式与 `<style>` 里的 `url()`，以及被引用 CSS 里的 `url()` / `@import`（递归）。
+ *
+ * 这里只负责「把可能用到的文件带上」——**多带少带只影响完整度，不影响正确性**：真正的改写由
+ * 应用侧 `inlineHtmlResources()` 按同一套规则做，没被引用到的资源会以警告报回。
+ * 脚本运行时才 `fetch` 的文件扫不出来，用 `--include` 显式带上。
+ */
+function collectHtmlResources(file, html, opts) {
+  const root = path.dirname(path.resolve(file));
+  const picked = new Map();
+  const missing = [];
+  const cssQueue = [];
+  const add = (fromDir, ref) => {
+    const rel = resolveLocalRef(fromDir, ref);
+    if (!rel || picked.has(rel)) return;
+    const ext = path.extname(rel).toLowerCase();
+    if (!HTML_RESOURCE_MIME[ext]) return;
+    const abs = path.join(root, ...rel.split("/"));
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+      if (!missing.includes(rel)) missing.push(rel);
+      return;
+    }
+    picked.set(rel, abs);
+    if (ext === ".css") cssQueue.push(rel);
+  };
+  const scanCss = (css, fromDir) => {
+    for (const match of css.matchAll(/@import\s+(?:url\(\s*(["']?)([^"')]+)\1\s*\)|(["'])([^"']+)\3)|url\(\s*(["']?)([^"')]*?)\5\s*\)/gi)) {
+      add(fromDir, match[2] ?? match[4] ?? match[6] ?? "");
+    }
+  };
+  const text = html.replace(/<!--[\s\S]*?-->/g, " ");
+  for (const match of text.matchAll(/\s(?:src|href|poster|xlink:href|data-src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi)) {
+    add("", match[1] ?? match[2] ?? match[3] ?? "");
+  }
+  for (const match of text.matchAll(/\ssrcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+    for (const candidate of decodeEntities(match[1] ?? match[2] ?? "").split(/,\s+/)) add("", candidate.trim().split(/\s+/)[0] ?? "");
+  }
+  scanCss(text, "");
+  while (cssQueue.length) {
+    const rel = cssQueue.shift();
+    const css = fs.readFileSync(picked.get(rel), "utf8");
+    scanCss(css, rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "");
+  }
+  for (const item of opts.include ?? []) {
+    const abs = path.resolve(item);
+    const rel = path.relative(root, abs).split(path.sep).join("/");
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+      throw new IngestError("IMP-4012", EXIT.validation, `--include 的文件必须在页面所在目录（或其子目录）里：${abs}`);
+    }
+    if (!resolveLocalRef("", rel)) throw new IngestError("IMP-4012", EXIT.validation, `--include 不能指向隐藏目录或越界路径：${abs}`);
+    if (!HTML_RESOURCE_MIME[path.extname(rel).toLowerCase()]) {
+      throw new IngestError("IMP-4012", EXIT.validation, `--include 的格式不支持（应用不会内联它）：${abs}`);
+    }
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) throw new IngestError("IMP-4012", EXIT.validation, `--include 的文件不存在：${abs}`);
+    picked.set(rel, abs);
+  }
+  if (picked.size > MAX_HTML_RESOURCES) {
+    throw new IngestError("IMP-4013", EXIT.validation, `页面资源超过 ${MAX_HTML_RESOURCES} 个。`);
+  }
+  const resources = [];
+  let total = 0;
+  for (const [rel, abs] of [...picked].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const bytes = fs.readFileSync(abs);
+    if (bytes.byteLength > MAX_HTML_RESOURCE_BYTES) {
+      throw new IngestError("IMP-4012", EXIT.validation, `资源过大（${rel}，${bytes.byteLength} 字节，单件上限 8 MiB）。`);
+    }
+    total += bytes.byteLength;
+    if (total > MAX_HTML_RESOURCES_TOTAL) throw new IngestError("IMP-4013", EXIT.validation, "页面资源合计超过 8 MiB。");
+    resources.push({ path: rel, mime: HTML_RESOURCE_MIME[path.extname(rel).toLowerCase()], bytes, file: path.posix.join(RESOURCES_DIR, rel) });
+  }
+  return { resources, missing };
+}
+
+/** 幂等键：内容确定性哈希 → 同一份文档重复投递不会产生第二条（HTML 页面连资源一起算）。 */
+function importIdOf({ title, body, folder, url, resources = [] }) {
+  const extra = resources.map((resource) => `${resource.path}:${sha256Hex(resource.bytes)}`).join("\n");
+  const digest = sha256Hex(`${title}\n${folder}\n${url ?? ""}\n${body}${extra ? `\n\0resources\n${extra}` : ""}`).slice(0, 16);
   return `agent-${digest}`;
 }
 
@@ -530,9 +741,10 @@ function normalizeFolderStrict(input) {
   return cleaned.join("/");
 }
 
-function buildEnvelope(doc, assets, opts, at) {
+function buildEnvelope(doc, assets, opts, at, resources = []) {
   const folder = normalizeFolderStrict(opts.folder);
-  const importId = importIdOf({ title: doc.title, body: doc.body, folder, url: doc.url });
+  const importId = importIdOf({ title: doc.title, body: doc.body, folder, url: doc.url, resources });
+  const html = doc.format === "html";
   return {
     spec: SPEC,
     importId,
@@ -552,6 +764,10 @@ function buildEnvelope(doc, assets, opts, at) {
     tags: doc.tags,
     // `entry.json` 里的附件形态：`{name, mime, file}`（相对条目目录）。字节由调用方另行持有。
     assets: assets.map((asset) => ({ name: asset.name, mime: asset.mime, file: asset.file })),
+    // HTML 页面：`format` + `resources[]`（`{path, mime, file}`，file 相对条目目录）。
+    ...(html
+      ? { format: "html", resources: resources.map((resource) => ({ path: resource.path, mime: resource.mime, file: resource.file })) }
+      : {}),
     client: { name: opts.clientName, version: SKILL_VERSION },
   };
 }
@@ -771,7 +987,7 @@ function writeFileAtomic(target, contents) {
   fs.renameSync(tmp, target);
 }
 
-function deliverToInbox(root, envelope, assets, opts) {
+function deliverToInbox(root, envelope, assets, opts, resources = []) {
   const inboxDir = path.join(root, INBOX_REL);
   const usage = inboxUsage(root);
   if (usage.total >= INBOX_LIMIT) {
@@ -817,23 +1033,31 @@ function deliverToInbox(root, envelope, assets, opts) {
   // 附件目录按需创建（与 `enqueueInbox()` 一致：没有附件就不留空目录）。
   if (assets.length) fs.mkdirSync(path.join(entryDir, ASSETS_DIR), { recursive: true });
   else fs.mkdirSync(entryDir, { recursive: true });
+  const html = envelope.format === "html";
+  const bodyFile = html ? HTML_BODY_FILE : BODY_FILE;
 
-  // ① 正文与附件先落地，② entry.json 最后写（它是「条目存在」的唯一判据）。
-  fs.writeFileSync(path.join(entryDir, BODY_FILE), envelope.body);
+  // ① 正文、附件与资源先落地，② entry.json 最后写（它是「条目存在」的唯一判据）。
+  fs.writeFileSync(path.join(entryDir, bodyFile), envelope.body);
   for (const asset of assets) {
     fs.writeFileSync(path.join(entryDir, ...asset.file.split("/")), asset.bytes);
+  }
+  for (const resource of resources) {
+    const target = path.join(entryDir, ...resource.file.split("/"));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, resource.bytes);
   }
   const entryOut = {
     spec: SPEC,
     importId,
     title: envelope.title,
     body: null,
-    bodyFile: BODY_FILE,
+    bodyFile,
     source: envelope.source,
     target: envelope.target,
     conflict: envelope.conflict,
     tags: envelope.tags,
     assets: envelope.assets,
+    ...(html ? { format: "html", resources: envelope.resources } : {}),
     client: envelope.client,
     enqueuedAt: at.toISOString(),
   };
@@ -852,9 +1076,16 @@ function deliverToInbox(root, envelope, assets, opts) {
   } catch (error) {
     throw new IngestError("IMP-5001", EXIT.internal, `写盘后回读失败：${error.message}`);
   }
-  const bodyOnDisk = fs.readFileSync(path.join(entryDir, BODY_FILE));
+  const bodyOnDisk = fs.readFileSync(path.join(entryDir, bodyFile));
   const expectedBytes = Buffer.byteLength(envelope.body, "utf8");
-  if (written.importId !== importId || written.title !== envelope.title || bodyOnDisk.byteLength !== expectedBytes) {
+  const resourcesOk = resources.every((resource) => {
+    try {
+      return fs.statSync(path.join(entryDir, ...resource.file.split("/"))).size === resource.bytes.byteLength;
+    } catch {
+      return false;
+    }
+  });
+  if (written.importId !== importId || written.title !== envelope.title || bodyOnDisk.byteLength !== expectedBytes || !resourcesOk) {
     throw new IngestError(
       "IMP-5001",
       EXIT.internal,
@@ -961,23 +1192,39 @@ function listSourceFiles(opts) {
 
 function envelopeFor(file, opts, at) {
   const raw = fs.readFileSync(file, "utf8");
-  const doc = parseDocument(file, raw, opts);
-  const assets = collectAssets(file, doc.body, opts);
-  const envelope = buildEnvelope(doc, assets, opts, at);
+  const html = isHtmlFile(file);
+  if (!html && opts.include.length) throw new IngestError("IMP-4003", EXIT.validation, "--include 只对 HTML 页面有效。");
+  const doc = html ? parseHtmlDocument(file, raw, opts) : parseDocument(file, raw, opts);
+  // HTML 页面不用 `assets[]`（图片也是资源）；Markdown 不用 `resources[]`。
+  const assets = html ? [] : collectAssets(file, doc.body, opts);
+  const collected = html ? collectHtmlResources(file, doc.body, opts) : { resources: [], missing: [] };
+  const envelope = buildEnvelope(doc, assets, opts, at, collected.resources);
   if (opts.importId) {
     if (!/^[A-Za-z0-9_-]{8,128}$/.test(opts.importId)) {
       throw new IngestError("IMP-4003", EXIT.validation, `--import-id 必须是 8–128 个 [A-Za-z0-9_-] 字符（收到 ${opts.importId}）。`);
     }
     envelope.importId = opts.importId;
   }
-  return { envelope, assets, doc, note: opts.channel === "bridge" ? stripForBridge(envelope, assets) : envelope, adjustedTags: doc.adjustedTags, truncatedTags: doc.truncatedTags };
+  return {
+    envelope,
+    assets,
+    resources: collected.resources,
+    missingResources: collected.missing,
+    doc,
+    note: opts.channel === "bridge" ? stripForBridge(envelope, assets, collected.resources) : envelope,
+    adjustedTags: doc.adjustedTags,
+    truncatedTags: doc.truncatedTags,
+  };
 }
 
-/** 桥直传形态：正文内联、附件转 base64（与 `serializeEnvelope()` 同形）。 */
-function stripForBridge(envelope, assets) {
+/** 桥直传形态：正文内联、附件与资源转 base64（与 `serializeEnvelope()` 同形）。 */
+function stripForBridge(envelope, assets, resources = []) {
   return {
     ...envelope,
     assets: assets.map((asset) => ({ name: asset.name, mime: asset.mime, dataBase64: asset.bytes.toString("base64") })),
+    ...(envelope.format === "html"
+      ? { resources: resources.map((resource) => ({ path: resource.path, mime: resource.mime, dataBase64: resource.bytes.toString("base64") })) }
+      : {}),
   };
 }
 
@@ -1073,11 +1320,11 @@ async function main() {
       const prepared = envelopeFor(file, opts, at);
       const bodyBytes = Buffer.byteLength(prepared.envelope.body, "utf8");
       if (opts.dryRun) {
-        results.push({ ok: true, action: "dry-run", file: label, importId: prepared.envelope.importId, title: prepared.envelope.title, target: prepared.envelope.target.folder, tags: prepared.envelope.tags, adjustedTags: prepared.adjustedTags, truncatedTags: prepared.truncatedTags, bodyBytes, assets: prepared.assets.map((asset) => asset.name), envelope: prepared.envelope });
+        results.push({ ok: true, action: "dry-run", file: label, importId: prepared.envelope.importId, title: prepared.envelope.title, format: prepared.doc.format ?? "markdown", target: prepared.envelope.target.folder, tags: prepared.envelope.tags, adjustedTags: prepared.adjustedTags, truncatedTags: prepared.truncatedTags, bodyBytes, assets: prepared.assets.map((asset) => asset.name), resources: prepared.resources.map((resource) => resource.path), missingResources: prepared.missingResources, envelope: prepared.envelope });
         continue;
       }
       if (opts.channel === "inbox") {
-        const outcome = deliverToInbox(resolved.root, prepared.envelope, prepared.assets, opts);
+        const outcome = deliverToInbox(resolved.root, prepared.envelope, prepared.assets, opts, prepared.resources);
         results.push({
           ok: true,
           action: outcome.skipped ? "skipped" : "queued",
@@ -1095,6 +1342,10 @@ async function main() {
           adjustedTags: prepared.adjustedTags,
           truncatedTags: prepared.truncatedTags,
           bodyBytes,
+          format: prepared.doc.format ?? "markdown",
+          // HTML 页面：随附了哪些资源、页面引用了却找不到哪些（找不到的入库后会缺失）。
+          resources: prepared.resources.map((resource) => resource.path),
+          missingResources: prepared.missingResources,
         });
       } else {
         const outcome = await deliverToBridge(bridgeContext.endpoint, bridgeContext.token, prepared.note, opts);

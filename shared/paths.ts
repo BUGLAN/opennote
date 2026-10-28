@@ -301,16 +301,25 @@ export function isCanvasPath(path: string): boolean {
 }
 
 /**
+ * HTML 页面（`.html` / `.htm`）：与 `.md`、`.canvas` 并列的第三种一等公民，应用内**只读渲染**
+ * （`src/html/`）。入库时 CSS / JS / 图片已内联成单文件（`src/html/bundle.ts`），所以同步与导入
+ * 只需要认这一个扩展名 —— 散落的 `.css` / `.js` **不**因此进物化判据（那正是下面说的源码污染）。
+ */
+export function isHtmlPath(path: string): boolean {
+  return /\.html?$/i.test(path);
+}
+
+/**
  * 「这个路径该不该被物化到本地」——**唯一产地**。
  *
- * 只认笔记、图片与画布；其余（源码、配置、CI…）只进基线账本、**永不落地**。
+ * 只认笔记、图片、画布与 HTML 页面；其余（源码、配置、CI…）只进基线账本、**永不落地**。
  * 这条判据曾经在 `planPull()` 里漏成「只要远端 sha 变了就下载」，后果不是多下几个文件，
  * 而是**把仓库源码写进笔记本、下一次推送又把它当成新笔记推回去**。
  *
  * 放在 `shared/` 是因为**导入与拉取必须共用同一条**，而它们在单仓下本来就该是同一份。
  */
 export function isMaterializable(path: string): boolean {
-  return isMarkdownPath(path) || isImagePath(path) || isCanvasPath(path);
+  return isMarkdownPath(path) || isImagePath(path) || isCanvasPath(path) || isHtmlPath(path);
 }
 
 export interface CaseFoldCollision {
