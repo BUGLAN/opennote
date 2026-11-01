@@ -6,6 +6,7 @@ import {
   type GithubSyncRequest,
 } from "../lib/github/dialog";
 import { Modal } from "./Overlays";
+import { Leaving, usePresence } from "./presence";
 
 /**
  * GitHub 的两个对话框：**导入**（地址 + 令牌 + 记住）与**同步**（变更清单 + 冲突 + 三个动作）。
@@ -17,9 +18,14 @@ import { Modal } from "./Overlays";
  * （需要令牌），而不是让用户点了才报错（那是本项目反复抓过的「假按钮」）。
  */
 export function GithubDialogHost(): ReactNode {
-  const request = useGithubDialogRequest();
+  // 关掉后多留一拍放退场动画（见 `presence.tsx`）。
+  const { value: request, leaving } = usePresence(useGithubDialogRequest());
   if (!request) return null;
-  return request.kind === "import" ? <GithubImportDialog key={request.id} request={request} /> : <GithubSyncDialog key={request.id} request={request} />;
+  return (
+    <Leaving leaving={leaving}>
+      {request.kind === "import" ? <GithubImportDialog key={request.id} request={request} /> : <GithubSyncDialog key={request.id} request={request} />}
+    </Leaving>
+  );
 }
 
 function GithubImportDialog({ request }: { request: GithubImportRequest }): ReactNode {

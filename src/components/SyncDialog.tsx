@@ -553,10 +553,11 @@ function StatusSection(): ReactNode {
             <div
               className="sync-progress__fill"
               style={{
-                width:
+                transform: `scaleX(${
                   ui.status.progress && ui.status.progress.total > 0
-                    ? `${Math.round((ui.status.progress.done / ui.status.progress.total) * 100)}%`
-                    : "30%",
+                    ? ui.status.progress.done / ui.status.progress.total
+                    : 0.3
+                })`,
               }}
             />
           </div>

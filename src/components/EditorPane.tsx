@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { EditorState, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
@@ -178,24 +178,36 @@ function EditorHost(props: EditorHostProps): ReactNode {
   }, []);
 
   /* 内容在外面变了（磁盘赢的采纳、快照恢复、导入、同步）：按**最小改动**替换，原光标夹进新文档。
-     隐藏的后台标签同样同步 —— 回到前台时看到的就是最新内容。
 
      为什么不是「整篇替换」：整篇替换会把 CM 的滚动锚点塌到文档开头，`measure()` 的补偿
      随即把视口拽回顶部（实测 4000 → 74，−3926px；Agent 一改文件，用户读的地方就没了）。
-     最小改动同时保住「视口位置」与「高度表里已量过的行高」，见 `editor/externalReplace.ts`。 */
-  useEffect(() => {
+     最小改动同时保住「视口位置」与「高度表里已量过的行高」，见 `editor/externalReplace.ts`。
+
+     **隐藏的后台标签不在这里改**，攒到成为活跃标签、CM 重新量过之后再落（见下面的激活
+     effect）。`display: none` 时 CM 量不到尺寸，`viewportIsAppropriate()` 一律放行：
+     改动落在旧视口里面时，映射后的视口会把新插进来的整段都包进去 —— 实测一篇短笔记在
+     后台被整篇改成 25 万字符，10503 行全部进了 DOM，之后它每变一次都要 ~140ms。 */
+  const applyExternalContent = useCallback(() => {
     const view = viewRef.current;
     if (!view) return;
+    const next = propsRef.current.content;
     const current = view.state.doc.toString();
-    if (props.content === expectedRef.current || props.content === current) return;
-    expectedRef.current = props.content;
-    const { changes, selection } = minimalReplace(current, props.content, view.state.selection.main);
+    if (next === expectedRef.current || next === current) return;
+    expectedRef.current = next;
+    const { changes, selection } = minimalReplace(current, next, view.state.selection.main);
     view.dispatch({
       changes,
       selection,
       annotations: Transaction.addToHistory.of(false),
     });
-  }, [props.content]);
+  }, []);
+
+  const hidden = !props.active || props.locked;
+  useEffect(() => {
+    if (!hidden) applyExternalContent();
+    // 依赖里不放 hidden：变成可见时由激活 effect 在量过之后再落，这里只管「可见期间内容变了」。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.content, applyExternalContent]);
 
   /* push appearance / mode settings into the editor state */
   useEffect(() => {
@@ -259,29 +271,46 @@ function EditorHost(props: EditorHostProps): ReactNode {
   }, []);
 
   /* 成为活跃标签：从 display:none 回到布局要重新量；焦点与状态栏光标跟上。
-     （旧「换文档后 view.focus()」的行为由这里承接——切换标签本来就是聚焦时刻。） */
+     （旧「换文档后 view.focus()」的行为由这里承接——切换标签本来就是聚焦时刻。）
+
+     后台期间攒下的外部改动在 CM 这次测量的 write 阶段之后再落：这时 `inView` 已经为真，
+     视口按真实可见区重算，只渲染屏幕上那几十行。测量期间不许 dispatch，所以排进微任务
+     （测量回调一结束就执行）。聚焦放在落改动之后 —— 不给用户在旧内容上敲字的机会，
+     否则那一下会把外部改动覆盖掉。 */
   useEffect(() => {
-    if (!props.active || props.locked) return;
+    if (hidden) return;
+    let cancelled = false;
     requestAnimationFrame(() => {
       const view = viewRef.current;
-      if (!view) return;
-      view.requestMeasure();
-      view.focus();
-      const range = view.state.selection.main;
-      const line = view.state.doc.lineAt(range.head);
-      propsRef.current.onCursor({
-        line: line.number,
-        column: range.head - line.from + 1,
-        selected: range.to - range.from,
+      if (!view || cancelled) return;
+      view.requestMeasure({
+        read: () => null,
+        write: () => {
+          queueMicrotask(() => {
+            if (cancelled || viewRef.current !== view) return;
+            applyExternalContent();
+            view.focus();
+            const range = view.state.selection.main;
+            const line = view.state.doc.lineAt(range.head);
+            propsRef.current.onCursor({
+              line: line.number,
+              column: range.head - line.from + 1,
+              selected: range.to - range.from,
+            });
+          });
+        },
       });
     });
-  }, [props.active, props.locked]);
+    return () => {
+      cancelled = true;
+    };
+  }, [hidden, applyExternalContent]);
 
   return (
     <div
       className={cn(
         "editor-host",
-        (!props.active || props.locked) && "editor-host--hidden",
+        hidden && "editor-host--hidden",
         props.settings.typewriter && "md-typewriter",
         props.settings.focus && "md-focus-mode",
         props.content === "" && "md-empty",

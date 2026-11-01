@@ -150,16 +150,28 @@
   overflow: hidden;
   border-right: 1px solid var(--rule);
   background: color-mix(in srgb, var(--paper-2) 62%, var(--paper));
+  /* 收起 / 展开只动 transform（与大纲同一套做法）；滑动那 220ms 它压在编辑器上面
+     （z 8：高过编辑器里的正文宽度把手 `.content-resize` 的 7，低于所有浮层）。 */
+  position: relative;
+  z-index: 8;
+  transition: transform var(--dur) var(--ease-out);
 }
 
 /*
  * 收起 = **只收起左栏本身**。头部（第 1 行）留在原地，于是：
  * - 左上角那个「展开侧栏」按钮一直在（旧行为是整条滑出去，把入口也带走了）；
  * - 编辑器与状态栏绕到头部下面占满整宽（见 `.main` 的收起规则）。
- * 移动端（≤820px）另说：那里整条是抽屉，`display` 要留着做滑入动画。
+ *
+ * 编辑器在切换的那一刻一次占满（只重排一次），侧栏叠在它左缘上滑出窗口；
+ * visibility 等动画走完才切，收起后不再绘制，`inert`（Sidebar.tsx）负责焦点。
+ * 以前是 `display: none`：瞬间消失，和大纲的滑动不是一套手感。
  */
 .sidebar.is-collapsed {
-  display: none;
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition:
+    transform var(--dur) var(--ease-out),
+    visibility 0s linear var(--dur);
 }
 
 /*
@@ -1463,11 +1475,27 @@ mark.hit {
   overflow: hidden;
   border-left: 1px solid var(--rule);
   background: color-mix(in srgb, var(--paper-2) 40%, var(--paper));
-  transition: margin-right var(--dur) var(--ease-out);
+  /* 收起动画只动 transform：网格列宽在切换的那一刻一次到位，编辑器只重排一次，
+     而不是 220ms 里每帧被挤宽 / 挤窄、CodeMirror 每帧重新折行。
+     position + z-index：滑出的那 220ms 它压在编辑器之上（与正文宽度把手 `.content-resize`
+     同为 7，DOM 顺序在后者胜出），仍低于所有浮层（40+）。 */
+  position: relative;
+  z-index: 7;
+  transition: transform var(--dur) var(--ease-out);
 }
 
+/*
+ * 负的 margin-left 让网格列立刻塌成 0（编辑器当即占满），盒子本身仍停在原处、
+ * 叠在编辑器右缘上，再由 translateX(100%) 滑出窗口。visibility 等动画走完才切，
+ * 收起后不再参与绘制。
+ */
 .outline.is-collapsed {
-  margin-right: calc(-1 * var(--outline-w));
+  margin-left: calc(-1 * var(--outline-w));
+  transform: translateX(100%);
+  visibility: hidden;
+  transition:
+    transform var(--dur) var(--ease-out),
+    visibility 0s linear var(--dur);
 }
 
 .outline__head {
@@ -1649,6 +1677,35 @@ mark.hit {
 }
 
 /* ============================== overlays =============================== */
+
+/*
+ * 退场（`components/presence.tsx`）：容器本身不参与布局；关掉的浮层多留 120ms 放完
+ * 退场动画，期间 inert（不接点击、不抢焦点）。退场比进场快、用 ease-in 方向的曲线 ——
+ * 东西「走了」就别拖。`pop-out` 动的是独立的 translate/scale，同 `pop` 的理由
+ * （对话框靠 transform 居中）。
+ */
+.presence {
+  display: contents;
+}
+
+.presence.is-leaving .scrim {
+  animation: fade-out var(--dur-fast) var(--ease) both;
+}
+
+.presence.is-leaving .dialog,
+.presence.is-leaving .palette,
+.presence.is-leaving .menu {
+  animation: pop-out var(--dur-fast) cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+.toast.is-leaving {
+  animation: sink var(--dur-fast) cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+/* 动作按钮自己把命中测试打开了（见 `.toast__action`），退场时要单独关掉。 */
+.toast.is-leaving .toast__action {
+  pointer-events: none;
+}
 
 .overlay-root {
   position: fixed;
@@ -2331,7 +2388,7 @@ mark.hit {
   gap: 6px;
   margin: 0;
   font-size: var(--fs-md);
-  color: var(--ink-1);
+  color: var(--ink);
 }
 
 .sync-dialog__row {
@@ -2398,29 +2455,7 @@ mark.hit {
   font-family: var(--font-mono, monospace);
   font-size: 12.5px;
   word-break: break-all;
-  color: var(--ink-1);
-}
-
-.sync-progress {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-}
-
-.sync-progress__bar {
-  flex: 1;
-  min-width: 0;
-  height: 6px;
-  border-radius: 99px;
-  background: var(--paper-4);
-  overflow: hidden;
-}
-
-.sync-progress__fill {
-  height: 100%;
-  border-radius: 99px;
-  background: var(--accent);
-  transition: width 0.25s ease;
+  color: var(--ink);
 }
 
 .sync-dialog__error {
@@ -3133,6 +3168,17 @@ mark.hit {
   display: none;
 }
 
+/*
+ * 右键菜单的遮罩只负责「点别处关菜单」：不压暗、不模糊。原生上下文菜单不会把整窗
+ * 糊掉，糊掉之后连「菜单是对哪一行弹的」都看不出来；每次右键还要整窗做一次 blur 合成。
+ * 窄屏抽屉的遮罩（`.scrim--drawer`）不受影响。
+ */
+.scrim--context {
+  background: transparent;
+  backdrop-filter: none;
+  animation: none;
+}
+
 @media (max-width: 1080px) {
   .outline {
     display: none;
@@ -3186,9 +3232,8 @@ mark.hit {
     transition: transform var(--dur) var(--ease-out);
   }
 
-  /* 桌面端的收起是 `display: none`；抽屉要的是滑走，所以这里把 display 与宽度都写回来。 */
+  /* 抽屉宽度固定（不跟 `--sidebar-w`），多推 2% 把投影也一起带出屏幕。 */
   .sidebar.is-collapsed {
-    display: flex;
     width: min(84vw, 320px);
     margin-left: 0;
     transform: translateX(-102%);
@@ -3379,10 +3424,12 @@ mark.hit {
   background: var(--paper-4);
   overflow: hidden;
 }
+/* 进度用 scaleX 而不是 width：只走合成层，不每帧重排对话框。 */
 .sync-progress__fill {
   height: 100%;
   background: var(--ink-3);
-  transition: width var(--dur) var(--ease);
+  transform-origin: left center;
+  transition: transform var(--dur) var(--ease);
 }
 
 /* 安静态：只有一颗图标，颜色比正文更淡 —— 它在，但不抢注意力 */

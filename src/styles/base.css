@@ -335,6 +335,43 @@ kbd {
   }
 }
 
+/*
+ * 退场：进场三件套的镜像（`rise` / `fade` / `pop` 倒过来）。不能拿原 keyframes 加
+ * `animation-direction: reverse` 凑：同名动画只改方向不会重新播放，元素会直接跳到透明。
+ * 由 `components/presence.tsx` 挂的 `.presence.is-leaving` 触发，见 app.css。
+ */
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes pop-out {
+  to {
+    opacity: 0;
+    translate: 0 -4px;
+    scale: 0.985;
+  }
+}
+
+@keyframes sink {
+  to {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* 「进行中」的圆点（导入接口的「启动中」芯片）。只动 opacity；降级后仍是一颗实心点。 */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
 @keyframes sheen {
   from {
     background-position: 200% 0;

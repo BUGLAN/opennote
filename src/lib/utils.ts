@@ -264,15 +264,77 @@ export interface Counts {
   minutes: number;
 }
 
-/** Mixed CJK/latin counting — what a Chinese writer expects from a word count. */
+/** 与正则 `\s` 同一集合（ECMAScript 的 WhiteSpace + LineTerminator）。 */
+function isWhitespaceCode(code: number): boolean {
+  if (code <= 0x20) return code === 0x20 || (code >= 0x09 && code <= 0x0d);
+  if (code < 0xa0) return false;
+  return (
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000 ||
+    code === 0xfeff
+  );
+}
+
+/** CJK 统一表意 / 扩展 A / 兼容表意、假名、谚文音节 —— 每个字算一个「字」。 */
+function isCjkCode(code: number): boolean {
+  return (
+    (code >= 0x4e00 && code <= 0x9fff) ||
+    (code >= 0x3400 && code <= 0x4dbf) ||
+    (code >= 0x3040 && code <= 0x30ff) ||
+    (code >= 0xac00 && code <= 0xd7af) ||
+    (code >= 0xf900 && code <= 0xfaff)
+  );
+}
+
+/** `[A-Za-z0-9'’-]`：拉丁词里的一个字符。 */
+function isLatinWordCode(code: number): boolean {
+  return (
+    (code >= 0x61 && code <= 0x7a) ||
+    (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x30 && code <= 0x39) ||
+    code === 0x27 ||
+    code === 0x2019 ||
+    code === 0x2d
+  );
+}
+
+/**
+ * Mixed CJK/latin counting — what a Chinese writer expects from a word count.
+ *
+ * 每次按键都会在 `refresh()` 里同步跑一遍（长笔记 25 万字符时曾占一次按键的 ~4ms），
+ * 所以去掉 Markdown 之后只做**一次**逐字扫描，不再是五遍全文正则；口径与原来逐字相同：
+ * 字符 = 非空白字符数，字 = CJK 单字数 + 拉丁词数（CJK 字本身也会切断拉丁词）。
+ */
 export function countText(md: string): Counts {
-  const text = stripMarkdown(md).replace(/\s+/g, " ").trim();
-  const cjk = (text.match(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/g) ?? [])
-    .length;
-  const latin = (text.replace(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/g, " ").match(/[A-Za-z0-9'’\-]+/g) ?? [])
-    .length;
+  const text = stripMarkdown(md);
+  let chars = 0;
+  let cjk = 0;
+  let latin = 0;
+  let inWord = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (isLatinWordCode(code)) {
+      chars += 1;
+      if (!inWord) latin += 1;
+      inWord = true;
+      continue;
+    }
+    inWord = false;
+    if (isCjkCode(code)) {
+      chars += 1;
+      cjk += 1;
+    } else if (!isWhitespaceCode(code)) {
+      chars += 1;
+    }
+  }
   const words = latin + cjk;
-  return { chars: text.replace(/\s/g, "").length, words, cjk, minutes: Math.max(1, Math.round(words / 300)) };
+  return { chars, words, cjk, minutes: Math.max(1, Math.round(words / 300)) };
 }
 
 /* -------------------------------------------------------------- formatting */

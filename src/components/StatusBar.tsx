@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
 import type { UiSettings } from "../data/types";
+import { useStore } from "../lib/store";
 import { cn } from "../lib/utils";
+import { cursorStore } from "./cursorStore";
 import { Icon } from "./Icons";
-import type { CursorInfo } from "./EditorPane";
 
 interface StatusBarProps {
   counts: { chars: number; words: number; minutes: number };
@@ -17,7 +18,6 @@ interface StatusBarProps {
    * 行列是上一个编辑器的残值，两个都只会误导。
    */
   htmlPage: boolean;
-  cursor: CursorInfo;
   settings: UiSettings;
   locationLabel: string;
   snapshotCount: number;
@@ -70,6 +70,17 @@ interface StatusBarProps {
  * 所有带文字的按钮都把文字包进 `.statusbar__label`：窄窗只丢这段文字、留图标 + `title`，
  * 所以每个按钮都必须同时给 `aria-label`（`Icon` 是 `aria-hidden`，文字一没按钮就没有可访问名）。
  */
+/** 行列读数自己订阅 `cursorStore`：光标移动只重渲染这一小段，不牵动整条状态栏。 */
+function CursorPosition(): ReactNode {
+  const cursor = useStore(cursorStore);
+  return (
+    <span className="statusbar__item statusbar__item--cursor" title="光标位置">
+      行 {cursor.line} · 列 {cursor.column}
+      {cursor.selected ? ` · 选中 ${cursor.selected}` : ""}
+    </span>
+  );
+}
+
 export function StatusBar(props: StatusBarProps): ReactNode {
   const { settings } = props;
   const inboxText = props.inboxPending ? `收件箱 ${props.inboxPending}` : "收件箱";
@@ -116,10 +127,7 @@ export function StatusBar(props: StatusBarProps): ReactNode {
         ) : null}
 
         {props.canvas || props.htmlPage ? null : (
-          <span className="statusbar__item statusbar__item--cursor" title="光标位置">
-            行 {props.cursor.line} · 列 {props.cursor.column}
-            {props.cursor.selected ? ` · 选中 ${props.cursor.selected}` : ""}
-          </span>
+          <CursorPosition />
         )}
       </div>
 

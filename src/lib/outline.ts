@@ -46,3 +46,29 @@ export function findCurrentHeading(headings: Heading[], cursorPos: number): numb
   }
   return current;
 }
+
+/** 光标所在行（含）往上最近的那个标题的下标；按行号算，不需要先把行号换成字符偏移。 */
+export function findHeadingAtLine(headings: Heading[], line: number): number {
+  let current = -1;
+  for (let index = 0; index < headings.length; index += 1) {
+    if (headings[index].line <= line) current = index;
+    else break;
+  }
+  return current;
+}
+
+/**
+ * 两份标题列表画成大纲是否一模一样：级别、文字、行号逐项相同。**不比 `pos`** ——
+ * 标题上方每敲一个字，下面所有标题的字符偏移都会变，但大纲一个像素都不用动。
+ * App 据此沿用上一份数组，大纲（上千个标题时）就不会每键整列重渲染。
+ */
+export function sameOutline(a: Heading[], b: Heading[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    const x = a[index];
+    const y = b[index];
+    if (x.line !== y.line || x.level !== y.level || x.text !== y.text) return false;
+  }
+  return true;
+}

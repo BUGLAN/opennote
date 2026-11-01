@@ -1,4 +1,4 @@
-import { lazy, Suspense, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useDeferredValue, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { EditorView } from "@codemirror/view";
 import {
   allTags,
@@ -71,12 +71,12 @@ import { desktopBridge, type ImportOutcome } from "./desktop/bridge";
 import { getUi, patchUi, setTheme as applyTheme, toggleAppearance, useUi } from "./data/ui";
 import { noteKind, type Id, type Snapshot, type ThemeId, type UiSettings } from "./data/types";
 import { buildAppCommands, isEditableTarget, matchesShortcut } from "./lib/appCommands";
-import { useStore } from "./lib/store";
+import { useStore, useStoreSelector } from "./lib/store";
 import { askConfirm, askText } from "./lib/dialogs";
 import { exportHtmlPage, exportNoteHtml, exportNoteMarkdown, exportWorkspaceZip } from "./lib/export";
 import { importIntoWorkspace, migrateLegacyData } from "./lib/import";
 import { copyImage } from "./lib/imageClipboard";
-import { extractHeadings, findCurrentHeading } from "./lib/outline";
+import { extractHeadings, findHeadingAtLine, sameOutline, type Heading } from "./lib/outline";
 import { copyPathToClipboard, noteAbsolutePath } from "./lib/notePath";
 import { notify } from "./lib/toast";
 import { useUpdateController } from "./lib/update";
@@ -98,7 +98,9 @@ import { collectLocalFiles, planPull, planPush, pullChanges, pushChanges, resolv
 import { GithubDialogHost } from "./components/GithubDialog";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { ContentWidthHandles } from "./components/ContentWidthHandles";
-import { EditorPane, type CursorInfo } from "./components/EditorPane";
+import { EditorPane } from "./components/EditorPane";
+import { cursorStore, reportCursor } from "./components/cursorStore";
+import { Presence } from "./components/presence";
 import { HistoryDialog, SettingsDialog, ShortcutsDialog, type SettingsSectionId } from "./components/AppDialogs";
 import { Icon } from "./components/Icons";
 import { InboxPanel } from "./components/InboxPanel";
@@ -143,11 +145,10 @@ export default function App(): ReactNode {
   // notebook's state.json, so it survives a reload (see `setSidebarTab`).
   const tab = ui.sidebarTab;
   const setTab = setSidebarTab;
-  const [cursor, setCursor] = useState<CursorInfo>({ line: 1, column: 1, selected: 0 });
   /*
-   * `cursor` 只服务状态栏显示，**不**下推到数据层：曾经有一条「光标还在标题那一行就不
-   * 自动改名」的判据，靠 `setEditorCursorLine` 把行号推给数据层 —— 真机实测（2026-10-09）
-   * 证明它在主场景里必然成立（打完标题光标必然停在标题行），功能一次都不会触发，已删除。
+   * 光标（`components/cursorStore.ts`）只服务状态栏行列与大纲的当前标题，**不**下推到
+   * 数据层：曾经有一条「光标还在标题那一行就不自动改名」的判据，靠 `setEditorCursorLine`
+   * 把行号推给数据层 —— 真机实测（2026-10-09）证明它在主场景里必然成立（打完标题光标必然停在标题行），功能一次都不会触发，已删除。
    * 「用户还在编辑标题」由 5 秒防抖保证，不需要光标位置。
    */
   const [palette, setPalette] = useState<null | "all" | "commands">(null);
@@ -217,11 +218,18 @@ export default function App(): ReactNode {
 
   // 大纲只对 Markdown 笔记有意义：画布是 JSON、HTML 页面是标记，按 md 抽标题只会抽出噪声。
   const activeIsNote = activeNote !== null && noteKind(activeNote) === "note";
-  const headings = useMemo(() => (activeIsNote ? extractHeadings(deferredContent) : []), [activeIsNote, deferredContent]);
-  const currentHeading = useMemo(
-    () => findCurrentHeading(headings, positionOfLine(deferredContent, cursor.line)),
-    [headings, cursor.line, deferredContent],
-  );
+  /*
+   * 结构没变（级别 / 文字 / 行号都一样）就沿用上一份数组：打字时标题的字符偏移一直在变，
+   * 每键换一个新数组会让大纲整列重渲染 —— 实测 1500 个标题的长文每键 ~170ms（dev），
+   * 而且大纲收起时也照算。因此大纲和命令面板一律**按行号**跳转，不读这里的 `pos`。
+   */
+  const headingsRef = useRef<Heading[]>([]);
+  const headings = useMemo(() => {
+    const next = activeIsNote ? extractHeadings(deferredContent) : [];
+    if (sameOutline(headingsRef.current, next)) return headingsRef.current;
+    headingsRef.current = next;
+    return next;
+  }, [activeIsNote, deferredContent]);
   const tags = useMemo(() => allTags(library), [library]);
   const workspaces = useMemo(() => listWorkspaces(), [registry]);
 
@@ -1088,9 +1096,11 @@ export default function App(): ReactNode {
     setScope({ kind: "folder", id: folder.id });
   };
 
-  const jumpToHeading = (pos: number) => {
+  /** 跳到某一行（标题）。按行号换算：`headings` 可能是沿用的旧数组，里面的 `pos` 不可信。 */
+  const jumpToHeading = (line: number) => {
     const view = viewRef.current;
     if (!view) return;
+    const pos = view.state.doc.line(Math.min(Math.max(1, line), view.state.doc.lines)).from;
     view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: "center" }) });
     view.focus();
   };
@@ -1347,7 +1357,7 @@ export default function App(): ReactNode {
       title: heading.text,
       sub: `本页 · H${heading.level}`,
       icon: "outline",
-      run: () => jumpToHeading(heading.pos),
+      run: () => jumpToHeading(heading.line),
     }));
 
     const tagEntries: PaletteEntry[] = tags.map(({ tag, count }) => ({
@@ -1580,7 +1590,7 @@ export default function App(): ReactNode {
           onDocChange={(id, doc) => {
             updateNoteContent(id, doc);
           }}
-          onCursor={(_id, value) => setCursor(value)}
+          onCursor={(_id, value) => reportCursor(value)}
           onComposing={(id, composing) => setEditorComposing(id, composing)}
           onEditorBlur={() => {
             // onFocusChange 模式的落盘点：编辑器失焦（切标签/点外部）就写。
@@ -1651,7 +1661,6 @@ export default function App(): ReactNode {
           counts={counts}
           canvas={canvasStats}
           htmlPage={activeIsHtml}
-          cursor={cursor}
           settings={ui}
           locationLabel={locationLabel}
           snapshotCount={snapshots.length}
@@ -1693,58 +1702,64 @@ export default function App(): ReactNode {
         />
       </div>
 
-      <Outline
+      <CursorOutline
         headings={headings}
-        currentIndex={currentHeading}
         open={ui.outlineOpen}
         onJump={jumpToHeading}
         onClose={() => patchUi({ outlineOpen: false })}
       />
 
-      {palette ? <CommandPalette mode={palette} entries={paletteEntries} onClose={() => setPalette(null)} /> : null}
-      {settingsOpen ? (
-        <SettingsDialog
-          settings={ui}
-          workspace={library.workspace}
-          stats={library.stats}
-          commands={commands}
-          onRunCommand={(id) => commandsRef.current.find((command) => command.id === id)?.run()}
-          onClose={() => {
-            setSettingsOpen(false);
-            setSettingsSection(null);
-          }}
-          onImport={() => fileInputRef.current?.click()}
-          onExport={() => void exportLibrary()}
-          onOpenLocalFolder={() => void openLocalFolder()}
-          onCloseWorkspace={() => void closeCurrentWorkspace()}
-          onMigrateLegacy={() => {
-            void migrateLegacyData()
-              .then((result) => notify(`已导入 ${result.notes} 条旧笔记`))
-              .catch((error) => notify(error instanceof Error ? error.message : "导入失败", { kind: "danger" }));
-          }}
-          onShortcuts={() => setShortcutsOpen(true)}
-          initialSection={settingsSection ?? undefined}
-          isDesktop={Boolean(bridge)}
-          updateStatus={update.status}
-          onCheckUpdate={update.check}
-          onUpdateAction={update.act}
-          onOpenInbox={() => {
-            setSettingsOpen(false);
-            setInboxOpen(true);
-          }}
-        />
-      ) : null}
-      {historyOpen && activeId ? (
-        <HistoryDialog
-          noteId={activeId}
-          onClose={() => {
-            setHistoryOpen(false);
-            void listSnapshots(activeId).then(setSnapshots);
-          }}
-        />
-      ) : null}
-      {shortcutsOpen ? <ShortcutsDialog onClose={() => setShortcutsOpen(false)} /> : null}
-      {syncOpen ? <SyncDialog workspace={library.workspace} onClose={() => setSyncOpen(false)} /> : null}
+      {/* 浮层统一套 Presence：关掉时多留 120ms 放退场动画（见 components/presence.tsx）。 */}
+      <Presence>
+        {palette ? <CommandPalette mode={palette} entries={paletteEntries} onClose={() => setPalette(null)} /> : null}
+      </Presence>
+      <Presence>
+        {settingsOpen ? (
+          <SettingsDialog
+            settings={ui}
+            workspace={library.workspace}
+            stats={library.stats}
+            commands={commands}
+            onRunCommand={(id) => commandsRef.current.find((command) => command.id === id)?.run()}
+            onClose={() => {
+              setSettingsOpen(false);
+              setSettingsSection(null);
+            }}
+            onImport={() => fileInputRef.current?.click()}
+            onExport={() => void exportLibrary()}
+            onOpenLocalFolder={() => void openLocalFolder()}
+            onCloseWorkspace={() => void closeCurrentWorkspace()}
+            onMigrateLegacy={() => {
+              void migrateLegacyData()
+                .then((result) => notify(`已导入 ${result.notes} 条旧笔记`))
+                .catch((error) => notify(error instanceof Error ? error.message : "导入失败", { kind: "danger" }));
+            }}
+            onShortcuts={() => setShortcutsOpen(true)}
+            initialSection={settingsSection ?? undefined}
+            isDesktop={Boolean(bridge)}
+            updateStatus={update.status}
+            onCheckUpdate={update.check}
+            onUpdateAction={update.act}
+            onOpenInbox={() => {
+              setSettingsOpen(false);
+              setInboxOpen(true);
+            }}
+          />
+        ) : null}
+      </Presence>
+      <Presence>
+        {historyOpen && activeId ? (
+          <HistoryDialog
+            noteId={activeId}
+            onClose={() => {
+              setHistoryOpen(false);
+              void listSnapshots(activeId).then(setSnapshots);
+            }}
+          />
+        ) : null}
+      </Presence>
+      <Presence>{shortcutsOpen ? <ShortcutsDialog onClose={() => setShortcutsOpen(false)} /> : null}</Presence>
+      <Presence>{syncOpen ? <SyncDialog workspace={library.workspace} onClose={() => setSyncOpen(false)} /> : null}</Presence>
       {/* UI-03：外部导入的待确认内容。入库走 L2 接收端，落盘始终在渲染层。 */}
       <InboxPanel
         open={inboxOpen}
@@ -1754,17 +1769,19 @@ export default function App(): ReactNode {
         }}
         onOpenNote={(path) => openNote(path)}
       />
-      {needsPermission ? (
-        <PermissionDialog
-          record={needsPermission}
-          onClose={() => setNeedsPermission(null)}
-          onGrant={async () => {
-            const record = needsPermission;
-            setNeedsPermission(null);
-            await openRecord(record, true);
-          }}
-        />
-      ) : null}
+      <Presence>
+        {needsPermission ? (
+          <PermissionDialog
+            record={needsPermission}
+            onClose={() => setNeedsPermission(null)}
+            onGrant={async () => {
+              const record = needsPermission;
+              setNeedsPermission(null);
+              await openRecord(record, true);
+            }}
+          />
+        ) : null}
+      </Presence>
       {busy ? (
         <div className="busy" role="status">
           <span className="busy__spinner" />
@@ -1967,15 +1984,12 @@ function focusCanvasNodeWhenReady(canvasId: string, nodeId: string, attempts = 5
   window.setTimeout(() => focusCanvasNodeWhenReady(canvasId, nodeId, attempts - 1), 100);
 }
 
-function positionOfLine(markdown: string, line: number): number {
-  if (line <= 1) return 0;
-  let offset = 0;
-  let current = 1;
-  while (current < line) {
-    const next = markdown.indexOf("\n", offset);
-    if (next < 0) return markdown.length;
-    offset = next + 1;
-    current += 1;
-  }
-  return offset;
+/**
+ * 大纲 + 「当前标题」：只订阅光标的**行号**，同一行里左右移动不重渲染；
+ * 光标状态不放在 App 上，换行也不会牵动整棵树（见 `components/cursorStore.ts`）。
+ */
+function CursorOutline({ headings, ...rest }: Omit<ComponentProps<typeof Outline>, "currentIndex">): ReactNode {
+  const line = useStoreSelector(cursorStore, (cursor) => cursor.line);
+  const currentIndex = useMemo(() => findHeadingAtLine(headings, line), [headings, line]);
+  return <Outline headings={headings} currentIndex={currentIndex} {...rest} />;
 }

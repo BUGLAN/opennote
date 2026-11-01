@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractHeadings, findCurrentHeading } from "./outline";
+import { extractHeadings, findCurrentHeading, findHeadingAtLine, sameOutline } from "./outline";
 
 describe("extractHeadings", () => {
   it("collects atx headings with levels and offsets", () => {
@@ -40,5 +40,36 @@ describe("findCurrentHeading", () => {
   it("returns -1 before the first heading", () => {
     const headings = extractHeadings("intro\n\n# a\n");
     expect(findCurrentHeading(headings, 0)).toBe(-1);
+  });
+});
+
+describe("findHeadingAtLine", () => {
+  it("returns the nearest heading at or above the line", () => {
+    const headings = extractHeadings("intro\n\n# a\n\ntext\n\n## b\n");
+    expect(findHeadingAtLine(headings, 1)).toBe(-1);
+    expect(findHeadingAtLine(headings, 3)).toBe(0);
+    expect(findHeadingAtLine(headings, 6)).toBe(0);
+    expect(findHeadingAtLine(headings, 7)).toBe(1);
+    expect(findHeadingAtLine(headings, 99)).toBe(1);
+  });
+});
+
+describe("sameOutline", () => {
+  const base = "# a\n\n正文\n\n## b\n";
+
+  it("ignores offset shifts from typing above a heading", () => {
+    // 同一行里多打了字：下面标题的 pos 变了，行号 / 文字 / 级别都没变 —— 大纲不用重画。
+    const before = extractHeadings(base);
+    const after = extractHeadings("# a\n\n正文多打了几个字\n\n## b\n");
+    expect(after[1].pos).not.toBe(before[1].pos);
+    expect(sameOutline(before, after)).toBe(true);
+  });
+
+  it("detects changed text, level, line and count", () => {
+    const before = extractHeadings(base);
+    expect(sameOutline(before, extractHeadings("# a\n\n正文\n\n## c\n"))).toBe(false);
+    expect(sameOutline(before, extractHeadings("# a\n\n正文\n\n### b\n"))).toBe(false);
+    expect(sameOutline(before, extractHeadings("# a\n\n正文\n\n\n## b\n"))).toBe(false);
+    expect(sameOutline(before, extractHeadings("# a\n"))).toBe(false);
   });
 });

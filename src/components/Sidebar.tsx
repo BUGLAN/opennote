@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   childFolders,
   collapseFolder,
@@ -101,7 +101,16 @@ export function currentFolderId(scope: Scope): Id | null {
   return scope.kind === "folder" ? scope.id : null;
 }
 
-export function Sidebar(props: SidebarProps): ReactNode {
+export function Sidebar(rawProps: SidebarProps): ReactNode {
+  /*
+   * `onOpenNote` 换成一个**引用稳定**、内部总是调最新回调的版本：App 每次渲染都递来新的
+   * 箭头函数，而 App 每敲一个字都会渲染一次 —— 不稳定的话 memo 过的 `NoteRow` 全部失效，
+   * 1000 篇笔记的展开树每键白重渲染 ~8ms（生产构建实测）。
+   */
+  const onOpenNoteRef = useRef(rawProps.onOpenNote);
+  onOpenNoteRef.current = rawProps.onOpenNote;
+  const openNote = useCallback((id: Id) => onOpenNoteRef.current(id), []);
+  const props: SidebarProps = { ...rawProps, onOpenNote: openNote };
   const { library, ui, scope, tab, activeId } = props;
   const [filter, setFilter] = useState("");
   const [query, setQuery] = useState("");
@@ -239,7 +248,8 @@ export function Sidebar(props: SidebarProps): ReactNode {
         </div>
       </div>
 
-      <aside className={cn("sidebar", !ui.sidebarOpen && "is-collapsed")}>
+      {/* 收起时 inert：窄屏抽屉只是平移到屏幕外，不加的话 Tab 仍会走进看不见的树里。 */}
+      <aside className={cn("sidebar", !ui.sidebarOpen && "is-collapsed")} inert={!ui.sidebarOpen}>
         <div className="sidebar__workspace">
         <button
           type="button"
@@ -914,7 +924,11 @@ interface NoteRowProps {
   setDropTarget?: (key: string | null) => void;
 }
 
-function NoteRow({
+/**
+ * memo：打字时只有正在编辑的那篇笔记对象会变（以及它第一次变脏时的 `dirty`），
+ * 其余行的 props 全部原样 —— 回调都是稳定引用（见 `Sidebar` 顶部的 `openNote`）。
+ */
+const NoteRow = memo(function NoteRow({
   note,
   depth,
   active,
@@ -1060,7 +1074,7 @@ function NoteRow({
       {dirty ? <span className="tree__meta" title="有未写入的改动">●</span> : null}
     </div>
   );
-}
+});
 
 function NoteList({
   library,

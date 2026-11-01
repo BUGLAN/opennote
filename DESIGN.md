@@ -116,13 +116,13 @@ motion:
   dur-fast: 120ms   # hover / 状态切换 / 菜单进场
   dur: 220ms        # 面板与弹层进场 / 侧栏滑动 / toast
   dur-slow: 460ms   # 首屏与空态进场
-  keyframes: ["rise", "fade", "pop", "pulse", "spin", "sheen（存在但禁止使用）"]
+  keyframes: ["rise", "fade", "pop", "pulse", "spin", "fade-out", "pop-out", "sink", "sheen（存在但禁止使用）"]
 
 layout:
   sidebar-w: 268px        # 展开态侧栏宽度的**默认值**；用户可在右边框拖拽（200–520px），真值由 applyUi() 写到 :root
   sidebar-w-min: 200px    # 拖拽下限（树行的「文件夹名 + 计数」还排得下）
   sidebar-w-max: 520px    # 拖拽上限（窗口最窄 900px 时编辑器不被挤没）
-  sidebar-collapsed: "display: none（只收身体；头部留在顶行，宽度不变）"
+  sidebar-collapsed: "translateX(-100%) 滑出 + 动画结束后 visibility: hidden（只收身体；头部留在顶行，宽度不变；编辑器在切换瞬间一次占满）"
   sidebar-w-overlay: "min(84vw, 320px)"   # ≤820px 时的抽屉宽度
   seal-icon: "public/seal/<accent>-<kind>.png · 22px 显示 / 96px 出图"
   outline-w: 232px
@@ -1226,7 +1226,7 @@ tokens.css  →  base.css  →  prose.css  →  editor.css  →  app.css
 
 ## Motion · 动效
 
-**总则：动效只用来解释「东西从哪来、到哪去」，不用来吸引注意。** 全部复用既有的 6 个 `@keyframes` 与 3 档时长。
+**总则：动效只用来解释「东西从哪来、到哪去」，不用来吸引注意。** 全部复用既有的 9 个 `@keyframes`（6 个进场 / 状态 + 3 个退场）与 3 档时长。
 
 ### 时长与缓动
 
@@ -1245,11 +1245,27 @@ tokens.css  →  base.css  →  prose.css  →  editor.css  →  app.css
 | `rise` | 从 `opacity: 0; translateY(6px)` 到无 | `.toast`、`.empty__inner`、`.busy`、启动页三层（错开 0 / 60ms / 120ms）、`.storage-notice` |
 | `fade` | 从 `opacity: 0` 到 1 | `.scrim`、`.scrim--menu` |
 | `pop` | 从 `opacity: 0; translate: 0 -6px; scale: .985` 到 1 | `.dialog`、`.palette`、`.menu`、`.workspace__menu` |
-| `pulse` | `opacity` 1 ↔ .35 | `.statusbar__dot.is-dirty`（1.8s）、`.status-chip.is-busy` 的圆点 |
+| `pulse` | `opacity` 1 ↔ .35 | 导入接口「启动中」芯片的圆点（`ImportApiPanel`，1.8s）、扩展 `.status-chip.is-busy` 的圆点 |
 | `spin` | `rotate(360deg)` | `.busy__spinner`（0.8s linear infinite）、`.statusbar__sync-spinner`（0.9s，状态栏同步中） |
+| `fade-out` | `opacity` 到 0 | 退场：`.scrim` |
+| `pop-out` | 到 `opacity: 0; translate: 0 -4px; scale: .985` | 退场：`.dialog`、`.palette`、`.menu` |
+| `sink` | 到 `opacity: 0; translateY(6px)` | 退场：`.toast` |
 | `sheen` | 背景位置扫光 | **存在但禁止使用** —— 扫光属于「SaaS 仪表盘」语言 |
 
 > `pop` **故意用独立的 `translate` / `scale` 属性**而不是 `transform` —— 因为对话框靠 `transform: translate(-50%,-50%)` 居中，若 `pop` 动 `transform` 会把居中覆盖掉。改这个动画时不要退回去用 `transform`。
+
+### 退场
+
+浮层关闭不再瞬间消失：`components/presence.tsx` 的 `<Presence>` / `usePresence` 把刚关掉的浮层多留 `--dur-fast`，挂上 `.presence.is-leaving` 与 `inert`（不接点击、不抢焦点、不响应 Esc），放完退场动画再卸载。退场比进场短、用 ease-in 方向的曲线（`cubic-bezier(0.4, 0, 1, 1)`）。
+
+- **不能拿进场 keyframes 加 `animation-direction: reverse` 凑**：同名动画只改方向不会重新播放，元素直接跳到透明。所以退场有自己的三个 keyframes。
+- **重新打开是新实例**：退场途中又打开同一个浮层，`generation` 加一做 key，状态归零，不会把正在淡出的旧实例捡回来。
+- **`prefers-reduced-motion` 下不留**：直接卸载。
+- 收件箱面板（`InboxPanel`）常驻挂载、自带焦点归还，暂不走这套。
+
+### 面板收起（侧栏 / 大纲）
+
+两者同一套做法：**只动 `transform`**。网格列 / 编辑器宽度在切换的那一刻一次到位（编辑器只重排一次），面板叠在编辑器边缘上滑进滑出；`visibility: hidden` 延后 `--dur` 再切，收起后不绘制；`inert` 管焦点。**不要**改回动 `margin` / `width`：那会让编辑器在 220ms 里每帧变宽、CodeMirror 每帧重新折行。
 
 ### 明确禁止
 

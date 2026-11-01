@@ -372,7 +372,18 @@ function SaveToPicker({
     const flip = below < 340 && box.top > below;
     // 右侧可用宽度：从触发器左边缘到窗口右边缘（留 12px 呼吸位）。
     const maxWidth = Math.max(240, window.innerWidth - box.left - 12);
-    setRect({ left: box.left, top: flip ? box.top - 4 : box.bottom + 4, width: box.width, maxWidth, flip });
+    const next = { left: box.left, top: flip ? box.top - 4 : box.bottom + 4, width: box.width, maxWidth, flip };
+    // 位置没变就沿用旧对象：React 据此跳过重渲染（滚动时绝大多数事件都是这种情况）。
+    setRect((prev) =>
+      prev &&
+      prev.left === next.left &&
+      prev.top === next.top &&
+      prev.width === next.width &&
+      prev.maxWidth === next.maxWidth &&
+      prev.flip === next.flip
+        ? prev
+        : next,
+    );
   }, []);
 
   // 展开时定位；展开期间跟着滚动/改尺寸重算（不然浮层会留在原地，和触发器脱开）。
@@ -382,11 +393,27 @@ function SaveToPicker({
       return;
     }
     place();
-    window.addEventListener("scroll", place, true);
-    window.addEventListener("resize", place);
+    /*
+     * 捕获阶段的 scroll 会收到页面上**每一个**滚动容器的事件，包括浮层自己的候选列表；
+     * 每个都同步量一次 getBoundingClientRect 再 setState，滚列表就是逐帧重渲染。
+     * 所以：浮层内部的滚动直接忽略（触发器没动），其余的一帧最多量一次。
+     */
+    let frame: number | null = null;
+    const schedule = (event: Event) => {
+      if (event.type === "scroll" && event.target instanceof Node && popupRef.current?.contains(event.target)) return;
+      if (frame === null) {
+        frame = requestAnimationFrame(() => {
+          frame = null;
+          place();
+        });
+      }
+    };
+    window.addEventListener("scroll", schedule, true);
+    window.addEventListener("resize", schedule);
     return () => {
-      window.removeEventListener("scroll", place, true);
-      window.removeEventListener("resize", place);
+      if (frame !== null) cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", schedule);
     };
   }, [open, place]);
 

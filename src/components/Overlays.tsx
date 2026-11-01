@@ -16,9 +16,10 @@ import { folderChoiceTrail, folderChoiceTree, type FolderChoiceNode } from "../d
 import { highlightRanges, substringRanges } from "../lib/fuzzy";
 import { getUi } from "../data/ui";
 import type { Id } from "../data/types";
-import { dismissToast, useToasts } from "../lib/toast";
+import { dismissToast, useToasts, type ToastItem } from "../lib/toast";
 import { cn } from "../lib/utils";
 import { Icon, type IconName } from "./Icons";
+import { EXIT_MS, Leaving, usePresence } from "./presence";
 
 /* ============================== context menu ============================ */
 
@@ -58,7 +59,9 @@ export function closeMenu(): void {
 }
 
 export function MenuHost(): ReactNode {
-  const menu = useStore(menuStore);
+  const live = useStore(menuStore);
+  // 关掉后多留一拍放退场动画；期间 `menu` 仍是最后那份菜单（容器 inert，点不到）。
+  const { value: menu, leaving } = usePresence(live);
   const ref = useRef<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
@@ -71,7 +74,7 @@ export function MenuHost(): ReactNode {
   }, [menu]);
 
   useEffect(() => {
-    if (!menu) return;
+    if (!live) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeMenu();
     };
@@ -81,13 +84,13 @@ export function MenuHost(): ReactNode {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", closeMenu);
     };
-  }, [menu]);
+  }, [live]);
 
   if (!menu) return null;
 
   return (
-    <>
-      <div className="scrim--menu" style={{ display: "block" }} onMouseDown={closeMenu} onContextMenu={(e) => e.preventDefault()} />
+    <Leaving leaving={leaving}>
+      <div className="scrim--menu scrim--context" style={{ display: "block" }} onMouseDown={closeMenu} onContextMenu={(e) => e.preventDefault()} />
       <div className="menu" ref={ref} role="menu" style={{ left: menu.x, top: menu.y }}>
         {menu.items.map((item) => (
           <div key={item.id}>
@@ -108,7 +111,7 @@ export function MenuHost(): ReactNode {
           </div>
         ))}
       </div>
-    </>
+    </Leaving>
   );
 }
 
@@ -135,8 +138,12 @@ export function Modal({
    */
   tall?: boolean;
 }): ReactNode {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      // 正在退场（`Presence` 把容器设成 inert）的对话框不再响应：紧接着弹出的下一个
+      // 对话框也挂在 window 上，否则这一下 Esc 会把新的那个一起关掉。
+      if (rootRef.current?.closest("[inert]")) return;
       if (event.key === "Escape") {
         event.stopPropagation();
         onClose();
@@ -147,7 +154,7 @@ export function Modal({
   }, [onClose]);
 
   return (
-    <div className="overlay-root">
+    <div className="overlay-root" ref={rootRef}>
       <div className="scrim" onMouseDown={onClose} />
       <div
         className={cn("dialog", settings ? "dialog--settings" : wide && "dialog--wide", tall && "dialog--tall")}
@@ -171,7 +178,8 @@ export function Modal({
 /* ============================ prompt / confirm ========================== */
 
 export function DialogHost(): ReactNode {
-  const request = useDialogRequest();
+  // 关掉后多留一拍放退场动画（容器 inert）；`request` 期间仍是刚关掉的那一份。
+  const { value: request, leaving } = usePresence(useDialogRequest());
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -191,20 +199,22 @@ export function DialogHost(): ReactNode {
   // 换一次请求就重新按初始高亮项初始化 —— 与 `ConflictDialogHost` 同一写法）。
   if (request.kind === "folder") {
     return (
-      <FolderDialog
-        key={request.id}
-        title={request.title}
-        message={request.message}
-        note={request.note}
-        choices={request.choices}
-        value={request.value}
-        confirmLabel={request.confirmLabel}
-        onResolve={(choice) => {
-          request.resolve(choice);
-          dialogStore.set(null);
-        }}
-        onClose={closeDialog}
-      />
+      <Leaving leaving={leaving}>
+        <FolderDialog
+          key={request.id}
+          title={request.title}
+          message={request.message}
+          note={request.note}
+          choices={request.choices}
+          value={request.value}
+          confirmLabel={request.confirmLabel}
+          onResolve={(choice) => {
+            request.resolve(choice);
+            dialogStore.set(null);
+          }}
+          onClose={closeDialog}
+        />
+      </Leaving>
     );
   }
 
@@ -220,61 +230,63 @@ export function DialogHost(): ReactNode {
   };
 
   return (
-    <Modal
-      title={request.title}
-      onClose={closeDialog}
-      footer={
-        <>
-          <div className="spacer" />
-          <button type="button" className="btn" onClick={closeDialog} autoFocus={request.danger === true}>
-            {request.cancelLabel ?? "取消"}
-          </button>
-          <button
-            type="button"
-            className={cn("btn", "btn--primary", request.danger && "btn--danger")}
-            onClick={submit}
-          >
-            {request.confirmLabel ?? "确定"}
-          </button>
-        </>
-      }
-    >
-      {request.message ? <p className="dialog__message">{request.message}</p> : null}
-      {request.rows && request.rows.length > 0 ? (
-        <dl className="dialog__rows">
-          {request.rows.map((row) => (
-            <div className="dialog__row" key={row.k}>
-              <dt>{row.k}</dt>
-              <dd>{row.v}</dd>
-            </div>
-          ))}
-        </dl>
-      ) : null}
-      {request.kind === "prompt" ? (
-        <div style={{ marginTop: request.message ? 14 : 0 }}>
-          {request.label ? (
-            <label className="muted" style={{ display: "block", fontSize: 12.5, marginBottom: 6 }} htmlFor="dialog-input">
-              {request.label}
-            </label>
-          ) : null}
-          <input
-            id="dialog-input"
-            ref={inputRef}
-            className="field"
-            value={value}
-            placeholder={request.placeholder}
-            onChange={(event) => setValue(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                submit();
-              }
-            }}
-          />
-        </div>
-      ) : null}
-      {request.note ? <p className="dialog__note">{request.note}</p> : null}
-    </Modal>
+    <Leaving leaving={leaving}>
+      <Modal
+        title={request.title}
+        onClose={closeDialog}
+        footer={
+          <>
+            <div className="spacer" />
+            <button type="button" className="btn" onClick={closeDialog} autoFocus={request.danger === true}>
+              {request.cancelLabel ?? "取消"}
+            </button>
+            <button
+              type="button"
+              className={cn("btn", "btn--primary", request.danger && "btn--danger")}
+              onClick={submit}
+            >
+              {request.confirmLabel ?? "确定"}
+            </button>
+          </>
+        }
+      >
+        {request.message ? <p className="dialog__message">{request.message}</p> : null}
+        {request.rows && request.rows.length > 0 ? (
+          <dl className="dialog__rows">
+            {request.rows.map((row) => (
+              <div className="dialog__row" key={row.k}>
+                <dt>{row.k}</dt>
+                <dd>{row.v}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+        {request.kind === "prompt" ? (
+          <div style={{ marginTop: request.message ? 14 : 0 }}>
+            {request.label ? (
+              <label className="muted" style={{ display: "block", fontSize: 12.5, marginBottom: 6 }} htmlFor="dialog-input">
+                {request.label}
+              </label>
+            ) : null}
+            <input
+              id="dialog-input"
+              ref={inputRef}
+              className="field"
+              value={value}
+              placeholder={request.placeholder}
+              onChange={(event) => setValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+            />
+          </div>
+        ) : null}
+        {request.note ? <p className="dialog__note">{request.note}</p> : null}
+      </Modal>
+    </Leaving>
   );
 }
 
@@ -547,13 +559,44 @@ function FolderDialog({
 
 /* ================================= toasts =============================== */
 
+type RenderedToast = ToastItem & { leaving?: boolean };
+
+/**
+ * 在上一轮画出来的列表上合入最新的 toast：仍在的原位更新，刚被关掉的原位标成 leaving
+ * （放完 `sink` 再删），新来的接在末尾。这样退场那一条不会先跳到别处再消失。
+ */
+function mergeToasts(previous: RenderedToast[], current: ToastItem[]): RenderedToast[] {
+  const live = new Map(current.map((toast) => [toast.id, toast]));
+  const merged: RenderedToast[] = previous.map((toast) => live.get(toast.id) ?? (toast.leaving ? toast : { ...toast, leaving: true }));
+  for (const toast of current) if (!previous.some((item) => item.id === toast.id)) merged.push(toast);
+  return merged;
+}
+
 export function Toasts(): ReactNode {
   const toasts = useToasts();
-  if (!toasts.length) return null;
+  const [rendered, setRendered] = useState<RenderedToast[]>(toasts);
+  const [source, setSource] = useState(toasts);
+  // 渲染期同步（React 的「据 props 调整 state」写法）：store 一变当场合并，不晚一帧。
+  if (source !== toasts) {
+    setSource(toasts);
+    setRendered(mergeToasts(rendered, toasts));
+  }
+  useEffect(() => {
+    if (!rendered.some((toast) => toast.leaving)) return;
+    const timer = window.setTimeout(() => setRendered((list) => list.filter((toast) => !toast.leaving)), EXIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [rendered]);
+
+  if (!rendered.length) return null;
   return (
     <div className="toast-root">
-      {toasts.map((toast) => (
-        <div key={toast.id} className={cn("toast", toast.kind === "danger" && "toast--danger")} role="status">
+      {rendered.map((toast) => (
+        <div
+          key={toast.id}
+          className={cn("toast", toast.kind === "danger" && "toast--danger", toast.leaving && "is-leaving")}
+          role="status"
+          aria-hidden={toast.leaving || undefined}
+        >
           {/*
            * 消息恒单行（.toast__msg 省略三件套），动作按钮恒宽（.toast__action 的 flex:none）——
            * 长标题不会再把药丸撑成两行板砖，也不会把「撤销」挤成竖排两个字。
