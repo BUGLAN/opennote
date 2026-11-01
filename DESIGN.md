@@ -1194,13 +1194,15 @@ tokens.css  →  base.css  →  prose.css  →  editor.css  →  app.css
 | 插件/收件箱空态 | 40px | `--radius` 8px | 23px | `inset 0 0 0 1.5px …` | — |
 | 启动页 `.boot__seal` | 46px | 11px | 26px | `inset 0 0 0 1.5px rgba(255,255,255,.35)` | `+ --shadow-2` |
 | 整屏空态 `.empty__seal` | 52px | 12px | 30px | `inset 0 0 0 1.5px …` | `+ --shadow-2` |
-| 应用图标 | 64 视框 | rx 13 | 40 | 内框 inset 4.5, rx 10, 描边 `#fbf8f3` @ .45 | 见 `public/favicon.svg` |
+| 应用图标（favicon / PWA / Windows `.ico`） | 64 视框（满幅） | rx 13 | 40 | 内框 inset 4.5, rx 10, 描边 `#fbf8f3` @ .45 | 见 `public/favicon.svg` |
+| 应用图标（macOS `.icns` / Dock PNG） | 1024 画布，身体 824×824 | 身体 rx 185.4 | 62% 身体 | 内框/描边按身体缩放 | Apple 图标网格 + 投影（`MAC_*`），见 `build/icon-mac.png` |
 
 统一规则：
 - 底 = `--accent`，字 = `--accent-ink`，字族 = `--font-serif`（**不是** `--font-display`：印章要的是宋体的方正，不是 Fraunces 的柔和）。
 - 印章本身就是「强调色出现的地方」，**不要**再给它加渐变、投影色或旋转。
 - **侧栏左上角那枚是图标资源，不是 CSS 画的方块**：`public/seal/<accent>-<kind>.png`（4 套强调色 × 明/暗 = 8 个），由 `pnpm icons` 生成，颜色由 `scripts/make_icons.py` **直接解析 `tokens.css`** 得到并烘焙进 PNG。界面按 `data-accent` + 主题明暗挑文件（`lib/sealIcon.ts` 的 `sealIconUrl(accent, kind)`，路径写成 `./seal/...` 相对形式，桌面版 `file://` 也解析得到）。为什么不用 CSS：`<span>記</span>` + 背景色的形状取决于机器上有没有宋体，也不和窗口/任务栏图标共用同一个绘制源。**改了强调色令牌就要重跑 `pnpm icons`**，否则界面一套色、图标另一套色。
-- 图标资源由 `pnpm icons` 从 `scripts/make_icons.py` 生成（favicon / PWA 图标 / 多尺寸 `build/icon.ico` / 侧栏印章集）。应用图标那三份的 `#b23a2e` 是**唯一写死的品牌色**（构建期 PNG 生成器没法读 CSS 变量）；侧栏印章集不写死任何颜色。
+- 图标资源由 `pnpm icons` 从 `scripts/make_icons.py` 生成（favicon / PWA 图标 / 多尺寸 `build/icon.ico` / macOS 的 `.icns` 与 Dock 位图 / 侧栏印章集）。应用图标那三份的 `#b23a2e` 是**唯一写死的品牌色**（构建期 PNG 生成器没法读 CSS 变量）；侧栏印章集不写死任何颜色。
+- **macOS 那两份不是满幅**：`build/icon.icns` 与 `build/icon-mac.png` 走 Apple 的 App Icon 网格 —— 1024 画布里印章身体只占 824×824（四周 100px 留白）、圆角 185.4，外加 σ15 / 向下偏移 10 / 18% 黑的投影（Apple 自身的投影比第三方更宽更淡）；favicon / `.ico` / PWA 图标仍是满幅。为什么必须分开：macOS 在 Dock / Finder / ⌘Tab 里按「身体 + 留白」对齐图标，满幅图会比邻居大一圈（实测 Apple 自家 Notes / Calendar / Safari 的 256 档与 Claude / PyCharm / VS Code 的 1024 档，实心身体都折合 824/1024（1024 上是 100..924））；Windows 任务栏与 PWA 没有这个要求，铺满反而更饱满。参数与自检见 `scripts/make_icons.py` 的 `MAC_*` / `verify_mac_icon()`，运行时 Dock 位图由 `electron/main.cjs` 的 `DOCK_ICON_CANDIDATES` 读取。
 
 ### 图标
 
@@ -1909,7 +1911,7 @@ live preview 会在「源码态 ↔ 渲染态」之间按块换形态，而两�
 | `electron/main.cjs` | 窗口尺寸与最小尺寸、无边框标题栏（`titleBarStyle` / `titleBarOverlay` / macOS 红绿灯位置）、`--titlebar-inset` 的由来 |
 | `src/components/Icons.tsx` | 39 个图标名字与 `Icon` 的几何契约 |
 | `src/lib/toast.ts` | toast 的两档时长与最多 4 条的堆叠上限 |
-| `scripts/make_icons.py` / `public/favicon.svg` | 品牌印章的几何与唯一的「品牌色字面值」 |
+| `scripts/make_icons.py` / `public/favicon.svg` | 品牌印章的几何、唯一的「品牌色字面值」，以及 macOS 图标网格（`MAC_*`：824/1024 身体、rx 185.4、投影） |
 | `docs/import/03-UI设计规范-剪藏与导入.md` | `S-C1…S-C8` 控件状态通例、断点与最小尺寸、对比度实测表、逐界面状态编号 |
 
 ---

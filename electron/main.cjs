@@ -179,20 +179,22 @@ function isHtmlSandboxUrl(url) {
 /**
  * 与界面左上角印章同源的图标（`pnpm icons` 生成，见 scripts/make_icons.py）：
  *   · Windows/Linux：`build/icon.ico` —— 窗口 + 任务栏 + Alt-Tab，打包后 exe 内嵌同一份；
- *   · macOS：**直接复用已经生成好的那张 512 位图**（`public/icon-512.png`，与 .ico 是
- *     同一份 art），打包后 Vite 会把它拷进 `dist/`，所以两个位置都找一遍。
+ *   · macOS：`build/icon-mac.png` —— 按 Apple 图标网格出的那一份（1024 画布、身体
+ *     824、带投影，见 make_icons.py 的 MAC_* 常量）。
  *
- * 为什么不给 macOS 现画一张：绘制依赖系统 CJK 字体，而 macOS 的 Songti 路径随版本搬过家
+ * 为什么 macOS 不直接用 PWA 的 `public/icon-512.png`：那张是**满幅**美术（印章铺满
+ * 整张画布），而 macOS 原生 App 的图标身体恒为 824/1024、四周留白。用满幅图，Dock /
+ * Finder / ⌘Tab 里就会比邻居大一圈 —— 「macOS 图标看起来不对」的根因就是这个。
+ *
+ * 也不能在这里现画：绘制依赖系统 CJK 字体，而 macOS 的 Songti 路径随版本搬过家
  * （`/System/Library/Fonts/` → `Supplemental/`），取不到时会静默落到 Pillow 自带、
  * 不含中日韩字形的兜底字体，画出一个「缺字方框」—— 真踩过：Dock 图标成了白框叉。
- * 生成物本来就是同一颗印章，直接拿来用最稳。
+ * 所以图标全部在 `pnpm icons` 里生成并提交，运行时只负责读文件。
  */
 const WINDOW_ICON = path.join(app.getAppPath(), 'build', 'icon.ico')
-const DOCK_ICON_CANDIDATES = [
-  path.join(app.getAppPath(), 'dist', 'icon-512.png'), // 打包后：Vite 把 public/ 拷进 dist/
-  path.join(app.getAppPath(), 'public', 'icon-512.png'), // 开发：源目录
-]
-/** 实际存在的那张 Dock 图标；都没有则返回 null（保持系统默认，绝不设成空白）。 */
+/** 打包后 `build/icon-mac.png` 由 electron-builder 的 files 收进 asar（见 electron-builder.yml）。 */
+const DOCK_ICON_CANDIDATES = [path.join(app.getAppPath(), 'build', 'icon-mac.png')]
+/** 实际存在的那张 Dock 图标；没有则返回 null（保持系统默认，绝不设成空白）。 */
 function dockIconPath() {
   return DOCK_ICON_CANDIDATES.find((candidate) => existsSync(candidate)) || null
 }
@@ -3098,7 +3100,7 @@ app.whenReady().then(async () => {
     if (!readyLogged) {
       readyLogged = true
       const iconNote = IS_MAC
-        ? (dockIconPath() ?? '未找到 icon-512.png（保持系统默认图标）')
+        ? (dockIconPath() ?? '未找到 build/icon-mac.png（保持系统默认图标）')
         : (existsSync(WINDOW_ICON) ? WINDOW_ICON : 'exe 内嵌图标')
       const frameNote = mainWindow && !mainWindow.isDestroyed()
         ? `窗口=${mainWindow.getBounds().height}px 内容=${mainWindow.getContentBounds().height}px`

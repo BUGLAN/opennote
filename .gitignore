@@ -1,4 +1,7 @@
 node_modules
+# `pnpm icons` 是 Python 脚本，import 一次就会留下字节码缓存
+__pycache__/
+*.pyc
 dist
 dist-clip
 dist-ssr

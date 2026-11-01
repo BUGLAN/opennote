@@ -129,7 +129,8 @@ pnpm package:mac      # macOS：出 .app + DMG + ZIP → release/Opennote-<版�
 ## 桌面版（Electron）
 
 - **没有窗口菜单栏**：桌面端不显示「文件 / 编辑 / 视图 / 帮助」那条原生横条，这些操作全部收进应用内的 **设置**（状态栏齿轮按钮，或 `Ctrl/⌘ + ,`），分成外观 / 文件 / 编辑 / 视图 / 帮助五类，按钮直接取自界面同一份命令注册表，和命令面板、快捷键完全一致。
-- 应用图标与界面左上角的印章同源：`pnpm icons` 会从同一份绘制代码生成 `public/favicon.svg`、PWA 图标、`build/icon.ico`（多尺寸，打包时由 `electron-builder.yml` 的 `win.icon` 内嵌进 exe）、`build/icon.icns`（macOS 用，由系统 `iconutil` 出 16→1024 共 10 档），以及界面左上角用的 `public/seal/<强调色>-<明暗>.png` 一套 8 个 —— 那套的颜色直接解析 `tokens.css`，所以**改了强调色要重跑一次 `pnpm icons`**。
+- 应用图标与界面左上角的印章同源：`pnpm icons` 会从同一份绘制代码生成 `public/favicon.svg`、PWA 图标、`build/icon.ico`（多尺寸，打包时由 `electron-builder.yml` 的 `win.icon` 内嵌进 exe），以及界面左上角用的 `public/seal/<强调色>-<明暗>.png` 一套 8 个 —— 那套的颜色直接解析 `tokens.css`，所以**改了强调色要重跑一次 `pnpm icons`**。
+- **macOS 的图标是另一套画布**：`build/icon.icns`（打包用）与 `build/icon-mac.png`（Electron 运行时 Dock 用）按 Apple 的 App Icon 网格出 —— 1024 画布里身体 824×824 居中、圆角 185.4、带一圈投影，而不是像 favicon / `.ico` 那样把印章铺满整张画布。满幅图在 Dock / Finder / ⌘Tab 里会比别的 App 大一圈（原生 App 的身体恒为 824/1024）。网格与阴影（σ15 / 向下 10 / 18% 黑，贴 Apple 模板的调子）参数写在 `scripts/make_icons.py` 的 `MAC_*` 常量里，`verify_mac_icon()` 生成时会自检，退回满幅就直接报错。
 - 安全基线保持默认：`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，所有 IPC 文件操作都必须落在你选定的笔记本目录内（`../../../package.json` 这类路径会被拒绝并报「路径越界」）。
 - preload 只暴露一层薄接口（`window.opennote`），渲染进程拿不到 Node 能力。macOS 上会保留一份只含系统角色的最小菜单（否则 ⌘C/⌘V/⌘Q 不生效），Windows/Linux 直接置空。
 - 打包目标只有免安装 zip（便携、无需安装器）。想要 NSIS 安装包，把 `electron-builder.yml` 里 `win.target` 换成 `nsis` 即可。当前 zip 151 MB（Electron 本体占大头，`app.asar` 只有 11 MB）；发布流程见 [RELEASING.md](RELEASING.md)。

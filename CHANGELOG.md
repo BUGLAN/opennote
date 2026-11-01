@@ -20,6 +20,20 @@
 
 ### 修复
 
+- **macOS 的图标比所有 App 大一圈（Dock / Finder / ⌘Tab）**：`build/icon.icns` 与运行时
+  Dock 用的 `public/icon-512.png` 都是「印章铺满整张画布」的美术（alpha 实心 0..1024），
+  而 macOS 原生 App 的图标身体恒为 **824/1024**（四周 100px 留白）再加一圈投影 —— 实测
+  本机 Claude / PyCharm / VS Code 的 1024 档与 Apple 自家 Notes / Calendar / Safari 的
+  256 档：实心身体都折合 824/1024（1024 上是 `100..924`），投影则是「向下偏几像素、
+  `alpha>0` 外溢 20–48px」这个量级（Apple 自家更宽更淡，第三方普遍更硬更深）。
+  现在 `pnpm icons` 为 macOS 单独出一套画布：身体 824、
+  圆角 185.4（Apple 模板值）、高斯 σ15 + 向下偏移 10 + 18% 黑的投影（比第三方常见做法
+  更宽更淡，贴 Apple 模板的观感）；先按 4 倍超采样再 LANCZOS 降到每一档（旧图是原生
+  尺寸直画，16/32 档圆角有锯齿）。`build/icon.icns` 换成这套，新增
+  `build/icon-mac.png` 给 Electron 运行时 `app.dock.setIcon`（打包时由
+  `electron-builder.yml` 的 `files` 收进 asar），并加 `verify_mac_icon()` 自检：
+  四角必须透明、身体占比必须 ≈0.8047，否则直接报错退出。Windows `.ico`、
+  PWA / favicon 仍是满幅美术（没有这个网格要求），本次没有改动它们的绘制代码。
 - **导入收件箱卡在「正在入库…」，而且这条条目再也处理不掉**（用户真机截图：笔记其实已经
   入库，界面一直转圈）。两处独立成因，都在数据层修掉：
   - **并发刷新把新状态盖回旧的**。`refreshInbox()` 原来的并发护栏是「只让最后一次**开始**的

@@ -6,8 +6,15 @@
   public/icon-192.png         PWA 图标
   public/icon-512.png         PWA 图标（含 maskable）
   public/apple-touch-icon.png iOS 主屏图标
-  build/icon.ico              Windows 打包与窗口图标（多尺寸）
-  build/icon.icns             macOS 打包图标（多尺寸；见 write_icns）
+  build/icon.ico              Windows 打包与窗口图标（多尺寸；满幅美术）
+  build/icon.icns             macOS 打包图标（多尺寸；Apple 图标网格，见 write_icns）
+  build/icon-mac.png          macOS 运行时 Dock 图标（Electron app.dock.setIcon；
+                              与 .icns 同一份 Apple 网格美术）
+
+上面两类「应用图标」不是同一张图：favicon / PWA / .ico 是**满幅**的（印章铺满
+整张画布），macOS 的 .icns 与 icon-mac.png 是 **Apple 图标网格**（身体 824/1024
+居中 + 投影，见下方 MAC_* 常量）。macOS 的 Dock / Finder / ⌘Tab 按「身体 + 留白」
+对齐图标，满幅图在那里会比邻居大一圈；Windows 任务栏与 PWA 没有这个要求。
   public/seal/<accent>-<kind>.png
                               侧栏左上角那枚印章：4 套强调色 × 明/暗 = 8 个文件。
                               颜色**逐字从 src/styles/tokens.css 读**（见 read_accent_tokens），
@@ -28,7 +35,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
 PUBLIC = ROOT / "public"
@@ -195,6 +202,110 @@ def draw_accent_seal(size: int, accent: str, ink: str) -> Image.Image:
     return image
 
 
+# ── macOS 图标画布 ─────────────────────────────────────────────────────────
+#
+# macOS 的 Dock / Finder / ⌘Tab / 启动台**不是**铺满画布的：Apple 的 App Icon
+# 模板把印章身体放在 824×824 的居中区域（四边 100px 留白），圆角 185.4，身体
+# 外面还有一圈投影。本机实测（Claude / PyCharm / VS Code 的 1024 档 icns，
+# 以及 Apple 自家 Notes / Calendar / Safari 的 256 档；实心 = alpha>=250，投影 = alpha>0）：
+#   · 实心身体 100..924，即 824/1024 = 0.8047（连续边界同一比例，不是抗锯齿造成的）；
+#   · 投影外溢 ≈ 左 30 / 上 20 / 右 30 / 下 40；
+#   · 拟合阴影 ≈ 高斯 σ15 + 向下偏移 10 + 18% 黑（贴着 Apple 模板的观感：
+#     Apple 自己的阴影比多数第三方更宽更淡，σ15/18% 比 σ10/30% 更接近）。
+# 满幅美术（Opennote 之前就是 0..1024）在 Dock 里会比邻居大一圈 —— 这是 macOS
+# 图标最典型的错法，也是这次要修的那条。Windows 任务栏 / PWA 没有这个网格要求，
+# 所以 .ico 与 public/icon-*.png 保持原来的满幅美术，不要跟着改。
+MAC_CANVAS = 1024
+MAC_BODY = 824
+MAC_RADIUS = 185.4
+MAC_SHADOW_SIGMA = 15.0
+MAC_SHADOW_DY = 10.0
+MAC_SHADOW_ALPHA = 0.18
+# 运行时 Dock 位图的边长（Dock 最大 128px@2x，512 已经绰绰有余）。
+MAC_DOCK_SIZE = 512
+# Pillow 的圆角矩形与文字都不抗锯齿：按目的大小直画，16/32 档的圆角就是锯齿。
+# 母版按 4 倍画，再 LANCZOS 缩到每一档。
+MAC_SUPERSAMPLE = 4
+
+_mac_master_cache: Image.Image | None = None
+
+
+def mac_master() -> Image.Image:
+    """macOS 图标母版（1024 画布的 4 倍超采样）。调用方缩放到目标档位。"""
+    global _mac_master_cache
+    if _mac_master_cache is not None:
+        return _mac_master_cache
+
+    k = MAC_SUPERSAMPLE
+    canvas = MAC_CANVAS * k
+    body = MAC_BODY * k
+    left = (MAC_CANVAS - MAC_BODY) // 2 * k
+    box = (left, left, left + body - 1, left + body - 1)
+    radius = MAC_RADIUS * k
+
+    image = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+
+    # 投影是**画进图里**的，不是系统加的：没有它，图标在浅色 Finder 背景上像一张
+    # 贴纸浮着；做得太重又和系统图标不在一个调子上（实测 Apple 模板约 σ15 / 偏移
+    # 10 / 18% 黑；VSCode 一类第三方更深更硬，但「更宽更淡」才是 Apple 的调子）。
+    mask = Image.new("L", (canvas, canvas), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(box, radius=radius, fill=255)
+    shadow = mask.filter(ImageFilter.GaussianBlur(MAC_SHADOW_SIGMA * k))
+    shadow_layer = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+    shadow_layer.putalpha(shadow.point(lambda v: round(v * MAC_SHADOW_ALPHA)))
+    image.alpha_composite(shadow_layer, (0, round(MAC_SHADOW_DY * k)))
+
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle(box, radius=radius, fill=SEAL)
+
+    # 印章内部几何仍是 64 视框那套比例（内框 4.5 / 圆角 10 / 描边 1.2 / 字 62%），
+    # 只是把「身体」当作 64 单位来缩放 —— 与侧栏那枚、favicon 是同一份几何。
+    unit = body / 64
+    inset = 4.5 * unit
+    draw.rounded_rectangle(
+        (box[0] + inset, box[1] + inset, box[2] - inset, box[3] - inset),
+        radius=round(10 * unit),
+        outline=INNER_RULE,
+        width=max(1, round(1.2 * unit)),
+    )
+
+    font = load_font(round(body * 0.62))
+    glyph = draw.textbbox((0, 0), GLYPH, font=font)
+    x = left + (body - (glyph[2] - glyph[0])) / 2 - glyph[0]
+    y = left + (body - (glyph[3] - glyph[1])) / 2 - glyph[1] - body * 0.015
+    draw.text((x, y), GLYPH, font=font, fill=PAPER)
+
+    _mac_master_cache = image
+    return image
+
+
+def draw_mac_icon(size: int) -> Image.Image:
+    """macOS 某档图标（Apple 图标网格 + 投影）：从超采样母版降采样。"""
+    return mac_master().resize((size, size), Image.LANCZOS)
+
+
+def verify_mac_icon() -> None:
+    """自检：macOS 图标必须留白。退回满幅就报错，绝不静默交付。"""
+    master = mac_master()
+    alpha = master.split()[-1]
+    solid = alpha.point(lambda v: 255 if v >= 250 else 0).getbbox()
+    if solid is None:
+        raise SystemExit("macOS 图标自检失败：整张图都是透明的")
+    ratio = (solid[2] - solid[0]) / master.width
+    expected = MAC_BODY / MAC_CANVAS
+    if abs(ratio - expected) > 0.01:
+        raise SystemExit(
+            f"macOS 图标自检失败：实心身体占画布 {ratio:.4f}，应 ≈{expected:.4f}"
+            "（满幅会让 Dock 里的图标比其它 App 大一圈）"
+        )
+    corners = [
+        alpha.getpixel(corner)
+        for corner in ((0, 0), (master.width - 1, 0), (0, master.height - 1), (master.width - 1, master.height - 1))
+    ]
+    if any(corners):
+        raise SystemExit(f"macOS 图标自检失败：四角应完全透明，实际 {corners}")
+
+
 def write_favicon_svg(path: Path) -> None:
     """站点图标用 SVG text：体积小，且能跟随系统 CJK 字体渲染。"""
     path.write_text(
@@ -220,7 +331,7 @@ ICNS_SIZES = ((16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256, 1), 
 
 
 def write_icns() -> None:
-    """生成 `build/icon.icns`（16→1024 共 10 档）。
+    """生成 `build/icon.icns`（16→1024 共 10 档，Apple 图标网格）。
 
     只在 macOS 上做：`iconutil` 是系统自带的，其它平台没有也不需要一个 macOS 图标。
     跳过时**明确打印**，不静默成功 —— 免得在 Windows 上以为 `.icns` 更新过了。
@@ -234,12 +345,23 @@ def write_icns() -> None:
         iconset.mkdir()
         for base, scale in ICNS_SIZES:
             suffix = "@2x" if scale == 2 else ""
-            draw_seal(base * scale).save(iconset / f"icon_{base}x{base}{suffix}.png")
+            draw_mac_icon(base * scale).save(iconset / f"icon_{base}x{base}{suffix}.png")
         subprocess.run(
             ["iconutil", "-c", "icns", str(iconset), "-o", str(BUILD / "icon.icns")],
             check=True,
         )
-    print(f"build/icon.icns 已生成（{len(ICNS_SIZES)} 档，16→1024）")
+    print(f"build/icon.icns 已生成（{len(ICNS_SIZES)} 档，16→1024，Apple 图标网格）")
+
+
+def write_mac_dock_png() -> None:
+    """生成 `build/icon-mac.png`：Electron 运行时 `app.dock.setIcon` 用的那张。
+
+    为什么要单独一张：开发模式跑的是 Electron 自己的 app bundle，不显式设就显示
+    Electron 默认图标；而这张必须和 `.icns` 是**同一份 macOS 网格美术**，否则开发/
+    打包两种形态的 Dock 图标大小不一致。放 `build/` 而不是 `public/`：这是桌面端
+    运行时资源，不该进 PWA 的 manifest 与 Service Worker 预缓存。
+    """
+    draw_mac_icon(MAC_DOCK_SIZE).save(BUILD / "icon-mac.png")
 
 
 def main() -> None:
@@ -255,6 +377,11 @@ def main() -> None:
     sizes = [16, 24, 32, 48, 64, 128, 256]
     icons = [draw_seal(size) for size in sizes]
     icons[-1].save(BUILD / "icon.ico", format="ICO", sizes=[(size, size) for size in sizes])
+
+    # macOS 的两份是另一套画布（Apple 图标网格）。先自检再落盘：宁可报错退出，
+    # 也不把「满幅」图标写进 .icns / Dock 位图。
+    verify_mac_icon()
+    write_mac_dock_png()
     write_icns()
 
     # 侧栏左上角的印章：4 套强调色 × 明/暗。图标固定 8 个文件，界面按
@@ -265,7 +392,10 @@ def main() -> None:
     for (accent, kind), (base, ink) in sorted(tokens.items()):
         draw_accent_seal(SEAL_ICON_SIZE, base, ink).save(seal_dir / f"{accent}-{kind}.png")
 
-    print(f"icons written to public/, public/seal/ ({len(tokens)} 个印章)、build/icon.ico 与 build/icon.icns")
+    print(
+        f"icons written to public/, public/seal/ ({len(tokens)} 个印章)、build/icon.ico、"
+        "build/icon.icns 与 build/icon-mac.png"
+    )
 
 
 if __name__ == "__main__":
