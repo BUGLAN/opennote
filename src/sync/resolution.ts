@@ -8,7 +8,16 @@
  * | 动作 | 做什么 | 红线约束怎么守 |
  * | --- | --- | --- |
  * | 采用远端 | `provider.read` → `writeLocal` → 基线对齐远端 | 与引擎拉取同一条路径（`writeLocal` 会解密），绝不把密文写盘 |
+ * | 采用远端（远端已删） | `removeLocal` → 账本去掉这一条 | 与引擎「远端删了 → 删本地」同一形状 |
  * | 保留本地 | `provider.put`（CAS 基准 = 当前远端哈希）→ 基线对齐这次写入 | 是**用户显式选择**的覆盖（界面上写明「用我的版本覆盖远端」），不是静默默认 |
+ * | 保留本地（本地已删） | `provider.delete`（同样以当前远端为 CAS 基准）→ 账本去掉这一条 | 同上：用户点的就是「按我这边，删掉远端」 |
+ *
+ * ## 两个出口都必须真的能走通
+ *
+ * 引擎遇到冲突会在账本记下 `pendingConflict`，并**挡住**这条路径的推/删（H1）。
+ * 所以这里任何一个出口「如实失败」都等于把这条路径永久卡死 —— 再同步多少轮也解不开。
+ * 删除类冲突（一边已经没有这一条）因此不是报错，而是按用户选的那一边**执行删除**。
+ * 成功之后 `pendingConflict` 一定被清掉（整条重写或整条去掉）。
  *
  * 裁决之后**必须再同步一轮**（调用方负责）：这一轮把另一端也带到收敛状态，
  * 并把墓碑/检查点补齐 —— 这两个函数自己不做「同步」，它们只改本地这一侧的事实。
@@ -79,7 +88,15 @@ export async function resolveConflictWithRemote(session: SyncSession, path: stri
   const did = session.deps.didOf(path);
   const remote = await session.provider.read(did);
   if (remote === null) {
-    return { path, ok: false, error: "远端已经没有这一条了。直接「立即同步」一次，会按远端删除处理。" };
+    /*
+     * 远端已经删了（冲突类型「远端已删 · 本地改过」）。用户选「用远端」= 接受这次删除：
+     * 删掉本地、账本去掉这一条（与引擎的拉取删除同一形状，`bid` 保留）。
+     * 以前这里「如实失败」—— 而引擎因为 `pendingConflict` 挡着这条路径，
+     * 「立即同步」也不会再处理它，用户就永远解不开。
+     */
+    await session.deps.removeLocal(path);
+    delete session.ledger.files[path];
+    return { path, ok: true };
   }
   // 与引擎拉取同一约定：writeLocal 负责 E2EE 解密；基线用 hashOfLocal（磁盘字节）。
   await session.deps.writeLocal(path, remote.bytes);
@@ -98,10 +115,8 @@ export async function resolveConflictWithRemote(session: SyncSession, path: stri
 export async function resolveConflictWithLocal(session: SyncSession, path: string): Promise<ResolutionOutcome> {
   const locals = await session.deps.listLocal();
   const file = locals.find((item) => item.path === path);
-  if (!file) {
-    return { path, ok: false, error: "本地已经没有这一条了。直接「立即同步」一次，会按本地删除处理。" };
-  }
   const did = session.deps.didOf(path);
+  if (!file) return resolveDeletedLocally(session, path, did);
   const bytes = await session.deps.readLocal(path);
   let result = await session.provider.put({
     did,
@@ -129,5 +144,24 @@ export async function resolveConflictWithLocal(session: SyncSession, path: strin
     imported: true,
     syncedAt: Date.now(),
   };
+  return { path, ok: true };
+}
+
+/**
+ * 「保留本地」而本地已经删了（冲突类型「本地已删 · 远端改过」）：用户的意思是**把远端也删掉**。
+ *
+ * CAS 与 `resolveConflictWithLocal` 同一套：先用账本里的基准，撞了就以服务端当前值重试一次。
+ * 走 `provider.delete`（逻辑删除、留墓碑），另一端下一轮按「远端删除」收敛。
+ */
+async function resolveDeletedLocally(session: SyncSession, path: string, did: string): Promise<ResolutionOutcome> {
+  let result = await session.provider.delete({ did, baseHash: session.ledger.files[path]?.remoteHash ?? null });
+  if ("conflict" in result && result.conflict.current) {
+    result = await session.provider.delete({ did, baseHash: result.conflict.current.hash });
+  }
+  if ("conflict" in result) {
+    return { path, ok: false, error: "远端在我们读取之后又变了。请「立即同步」一次拿到最新状态再试。" };
+  }
+  // 两边都没有了（`gone` 也算：别人已经删过）⇒ 账本去掉这一条，下一轮空转。
+  delete session.ledger.files[path];
   return { path, ok: true };
 }

@@ -7,7 +7,8 @@
  * 2. 「保留本地」用 CAS 覆盖远端 —— 即使账本里的基准已过期（以服务端返回的
  *    当前值重试一次，因为用户的意图就是覆盖）；
  * 3. 裁决只改**这一端**的事实：另一端仍处于冲突，要它自己裁决后才收敛；
- * 4. 远端已经没有那一条 ⇒ 如实失败，不猜。
+ * 4. 一边已经删了（删除类冲突）⇒ 按用户选的那一边把删除执行到底，并清掉待裁决标记。
+ *    引擎会挡住挂着冲突的路径，所以任何一个出口「如实失败」都等于永久卡死。
  */
 import { describe, expect, it } from "vitest";
 import { idForPath } from "../../shared/paths";
@@ -96,14 +97,31 @@ describe("采用远端", () => {
     expect(again!.conflicts).toHaveLength(0);
   });
 
-  it("远端已经没有那一条 ⇒ 如实失败", async () => {
+  it("远端已删 · 本地改过 ⇒「用远端」= 删掉本地、清标记，下一轮空转", async () => {
     const provider = createMemoryProvider();
-    const a = sessionFor(memoryBackend({ "notes/x.md": "A" }), provider);
+    const backendA = memoryBackend({ "notes/x.md": "base" });
+    const a = sessionFor(backendA, provider);
     await a.syncNow();
-    await provider.delete({ did: a.deps.didOf("notes/x.md"), baseHash: null });
-    const outcome = await resolveConflictWithRemote(a, "notes/x.md");
-    expect(outcome.ok).toBe(false);
-    expect(outcome.error).toContain("远端");
+    const backendB = memoryBackend({});
+    const b = sessionFor(backendB, provider);
+    await b.syncNow();
+
+    await backendA.remove("notes/x.md");
+    await a.syncNow();
+    await backendB.write("notes/x.md", new TextEncoder().encode("B 改过"));
+    const conflicted = await b.syncNow();
+    expect(conflicted!.conflicts.map((item) => item.kind)).toEqual(["deleted-remotely-modified-locally"]);
+    expect(b.ledger.files["notes/x.md"]?.pendingConflict).toBeDefined();
+
+    const outcome = await resolveConflictWithRemote(b, "notes/x.md");
+    expect(outcome.ok).toBe(true);
+    expect(backendB.snapshot()["notes/x.md"]).toBeUndefined();
+    expect(b.ledger.files["notes/x.md"]).toBeUndefined();
+
+    const again = await b.syncNow();
+    expect(again!.conflicts).toHaveLength(0);
+    expect(again!.pushed).toBe(0);
+    expect(await provider.read(b.deps.didOf("notes/x.md"))).toBeNull();
   });
 });
 
@@ -130,6 +148,39 @@ describe("保留本地（显式覆盖远端）", () => {
     expect(settledB!.conflicts).toHaveLength(0);
     expect(settledA!.pushed).toBe(0);
     expect(settledB!.pushed).toBe(0);
+  });
+});
+
+describe("保留本地 · 本地已删", () => {
+  it("本地已删 · 远端改过 ⇒「用我的」= 远端也删掉（墓碑）、清标记，另一端随后收敛", async () => {
+    const provider = createMemoryProvider();
+    const backendA = memoryBackend({ "notes/x.md": "base" });
+    const a = sessionFor(backendA, provider);
+    await a.syncNow();
+    const backendB = memoryBackend({});
+    const b = sessionFor(backendB, provider);
+    await b.syncNow();
+
+    await backendA.write("notes/x.md", new TextEncoder().encode("A 改过"));
+    await a.syncNow();
+    await backendB.remove("notes/x.md");
+    const conflicted = await b.syncNow();
+    expect([...conflicted!.conflicts, ...conflicted!.pushConflicts].map((item) => item.kind)).toEqual([
+      "deleted-locally-modified-remotely",
+    ]);
+
+    const outcome = await resolveConflictWithLocal(b, "notes/x.md");
+    expect(outcome.ok).toBe(true);
+    expect(await provider.read(b.deps.didOf("notes/x.md"))).toBeNull();
+    expect(b.ledger.files["notes/x.md"]).toBeUndefined();
+
+    const settledB = await b.syncNow();
+    expect(settledB!.conflicts).toHaveLength(0);
+    expect(settledB!.pushConflicts).toHaveLength(0);
+    // A 自己没再改 ⇒ 按「远端删除」把本地也删掉。
+    const settledA = await a.syncNow();
+    expect(settledA!.deleted).toBe(1);
+    expect(backendA.snapshot()["notes/x.md"]).toBeUndefined();
   });
 });
 
