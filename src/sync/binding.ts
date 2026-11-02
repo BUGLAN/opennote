@@ -38,6 +38,17 @@ export interface WorkspaceSyncBindingOptions {
   onPhase?: (phase: BindingPhase) => void;
   onStatus?: (status: ReturnType<SyncController["status"]>) => void;
   log?: (line: string) => void;
+  /**
+   * attach **抛错**之后多久重试（指数增长，带上限）。默认 5000ms 起、120000ms 封顶。
+   *
+   * 抛错多半是暂时的：开机时网络还没起来，E2EE 的解锁请求（`/v1/account/unlock`）
+   * 直接失败。以前这里回到 idle 就再也不动了 —— 整场会话都不同步，
+   * 用户改的东西全都停在本机，直到重开笔记本或改一次同步设置。
+   */
+  retryBaseDelayMs?: number;
+  retryMaxDelayMs?: number;
+  setTimeoutFn?: (fn: () => void, ms: number) => unknown;
+  clearTimeoutFn?: (handle: unknown) => void;
 }
 
 export interface WorkspaceSyncBinding {
@@ -64,57 +75,36 @@ export function createWorkspaceSyncBinding(options: WorkspaceSyncBindingOptions)
    * 那一次 attach 看到 `running === true`（新那一轮设的），就**误以为自己是当前的**。
    */
   let generation = 0;
+  const setTimer = options.setTimeoutFn ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
+  const clearTimer = options.clearTimeoutFn ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  const retryBase = options.retryBaseDelayMs ?? 5000;
+  const retryMax = options.retryMaxDelayMs ?? 120_000;
+  /** attach 抛错后的重试定时器与已重试次数（见 `retryBaseDelayMs`）。 */
+  let retryHandle: unknown = null;
+  let retryAttempt = 0;
 
   const publish = (next: BindingPhase): void => {
     phase = next;
     options.onPhase?.(next);
   };
 
-  return {
-    async start() {
-      // 先停掉上一个（切工作区 / 重新开始），并让在途的那次作废。
-      this.stop();
-      const mine = ++generation;
-      publish("attaching");
+  const clearRetry = (): void => {
+    if (retryHandle === null) return;
+    clearTimer(retryHandle);
+    retryHandle = null;
+  };
 
-      let result: AttachResult;
-      try {
-        result = await options.attach();
-      } catch (error) {
-        // 接不上（例如 E2EE 缺密钥）**不是**要吞掉的异常：
-        // `attachWorkspaceSync` 会为「能预期」的情况返回 ok:false，
-        // 走到这里的是**真的意外**，如实记下来。
-        options.log?.(`[binding] attach 抛错：${String(error)}`);
-        if (mine === generation) publish("idle");
-        return;
-      }
-
-      // ★ 回来时先看代次：变了说明这已经不是当前那一次了（用户切走了 / 又重开了）。
-      if (mine !== generation) {
-        options.log?.("[binding] attach 回来时代次已变，丢弃这次结果（切了工作区）");
-        // 万一它已经建出了 controller，也要收干净 —— 否则它会一直跑着而没人能关掉它。
-        if (result.ok) result.controller.stop();
-        return;
-      }
-
-      if (!result.ok) {
-        skipReason = result.reason;
-        current = null;
-        publish("skipped");
-        return;
-      }
-
-      skipReason = null;
-      current = result.controller;
-      if (options.onStatus) options.onStatus(current.status());
-      current.start();
-      publish("attached");
-
+  const binding: WorkspaceSyncBinding = {
+    start() {
+      // 外部调用（打开工作区 / 改配置 / 导入密钥）= 新的一次，退避从头算。
+      retryAttempt = 0;
+      return attempt();
     },
 
     stop() {
       // +1 ⇒ 任何在途的 attach 回来时都会看到代次变了。
       generation += 1;
+      clearRetry();
       if (current) {
         current.stop();
         current = null;
@@ -127,4 +117,56 @@ export function createWorkspaceSyncBinding(options: WorkspaceSyncBindingOptions)
     reason: () => skipReason,
     controller: () => current,
   };
+
+  async function attempt(): Promise<void> {
+    // 先停掉上一个（切工作区 / 重新开始），并让在途的那次作废。
+    binding.stop();
+    const mine = ++generation;
+    publish("attaching");
+
+    let result: AttachResult;
+    try {
+      result = await options.attach();
+    } catch (error) {
+      // 接不上（例如 E2EE 缺密钥）**不是**要吞掉的异常：
+      // `attachWorkspaceSync` 会为「能预期」的情况返回 ok:false，
+      // 走到这里的是**真的意外**，如实记下来。
+      options.log?.(`[binding] attach 抛错：${String(error)}`);
+      if (mine !== generation) return;
+      publish("idle");
+      const delay = Math.min(retryBase * 2 ** retryAttempt, retryMax);
+      retryAttempt += 1;
+      options.log?.(`[binding] ${delay}ms 后重新接上（第 ${retryAttempt} 次）`);
+      retryHandle = setTimer(() => {
+        retryHandle = null;
+        if (mine !== generation) return;
+        void attempt();
+      }, delay);
+      return;
+    }
+
+    // ★ 回来时先看代次：变了说明这已经不是当前那一次了（用户切走了 / 又重开了）。
+    if (mine !== generation) {
+      options.log?.("[binding] attach 回来时代次已变，丢弃这次结果（切了工作区）");
+      // 万一它已经建出了 controller，也要收干净 —— 否则它会一直跑着而没人能关掉它。
+      if (result.ok) result.controller.stop();
+      return;
+    }
+
+    if (!result.ok) {
+      skipReason = result.reason;
+      current = null;
+      publish("skipped");
+      return;
+    }
+
+    skipReason = null;
+    retryAttempt = 0;
+    current = result.controller;
+    if (options.onStatus) options.onStatus(current.status());
+    current.start();
+    publish("attached");
+  }
+
+  return binding;
 }

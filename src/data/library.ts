@@ -79,6 +79,7 @@ import { activeWorkspaceRecord, resolveBackend, setActiveWorkspace, type Workspa
  * 见 `src/fs/writeLog.ts` 模块头（含本次缺陷的完整证据链）。
  */
 import { observeWrites } from "../fs/writeObserver";
+import { reportUnknownWorkspaceWrite, reportWorkspaceWrite } from "../fs/writeLog";
 
 /* ============================================================================
    The vault: a folder on disk, mirrored in memory for instant search and
@@ -870,10 +871,17 @@ function startWatching(root: string): void {
         if (!sameRoot(root, watchedRoot)) return;
         const target = backend;
         const changes = typeof changed === "string" ? null : (changed?.changes ?? null);
+        /*
+         * 外部改动同样是「有字节落盘了」，要告诉同步层 —— 否则用别的编辑器 / Finder /
+         * git 改过的文件只会刷新界面，**不会推上去**（直到下一次碰巧有应用内保存）。
+         * 主进程已滤掉应用自己经 IPC 写的路径，这里不会把同步自己的拉取再报一遍。
+         */
         if (!target || !changes || changes.length === 0) {
+          reportUnknownWorkspaceWrite();
           scheduleWatchRescan();
           return;
         }
+        reportWorkspaceWrite({ paths: changes.map((change) => change.path), content: true });
         queuePathRefresh(target, changes);
       }),
     );
@@ -887,7 +895,10 @@ function startWatching(root: string): void {
     typeof document !== "undefined"
   ) {
     const onFocus = () => {
-      if (document.visibilityState === "visible") scheduleWatchRescan();
+      if (document.visibilityState !== "visible") return;
+      scheduleWatchRescan();
+      // 不在前台期间文件可能被别的应用改过（同上：同步层自己核对本地再决定推不推）。
+      reportUnknownWorkspaceWrite();
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onFocus);

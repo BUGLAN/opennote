@@ -257,6 +257,45 @@ describe("§5.3 · 本地写之后去抖推一次", () => {
     expect(timers.queued[0]!.ms).toBe(1200);
   });
 
+  it("★ 持续写入不会把推送无限顺延：从第一次写起，最迟 `localWriteMaxWaitMs` 必推", () => {
+    const timers = fakeTimers();
+    let t = 0;
+    const runner = createSyncRunner({
+      syncOnce: async () => result(),
+      ...timers,
+      now: () => t,
+      localWriteDebounceMs: 1200,
+      localWriteMaxWaitMs: 5000,
+    });
+    runner.scheduleAfterLocalWrite();
+    t = 1000;
+    runner.scheduleAfterLocalWrite();
+    expect(timers.queued[0]!.ms).toBe(1200);
+    // 每次都在去抖到点前又写一次（自动保存每 450ms 一次就是这样）：只剩 500ms 就到最长等待。
+    t = 4500;
+    runner.scheduleAfterLocalWrite();
+    expect(timers.queued).toHaveLength(1);
+    expect(timers.queued[0]!.ms).toBe(500);
+  });
+
+  it("推过一次之后，最长等待从下一串写入重新算", async () => {
+    const timers = fakeTimers();
+    let t = 0;
+    const runner = createSyncRunner({
+      syncOnce: async () => result(),
+      ...timers,
+      now: () => t,
+      localWriteDebounceMs: 1200,
+      localWriteMaxWaitMs: 5000,
+    });
+    runner.scheduleAfterLocalWrite();
+    timers.flush();
+    await settle();
+    t = 60_000;
+    runner.scheduleAfterLocalWrite();
+    expect(timers.queued[0]!.ms).toBe(1200);
+  });
+
   it("到点之后真的跑一次同步", async () => {
     const timers = fakeTimers();
     let calls = 0;
@@ -501,3 +540,57 @@ describe("★ 失败之后自动重试（指数退避）", () => {
   });
 });
 
+
+/* ============================================================================
+   ★ 补跑期间到来的请求不丢
+   ============================================================================ */
+
+describe("★ 补跑期间到来的请求不丢", () => {
+  it("★ 第二轮进行中又来一次请求 ⇒ 第二轮跑完**再跑一轮**（以前会被静默丢掉）", async () => {
+    const sync = controllable();
+    const runner = createSyncRunner({ syncOnce: sync.syncOnce });
+    const first = runner.request("startup");
+    await settle();
+    void runner.request("local-write"); // 第一轮期间 ⇒ 合并成补跑
+    sync.open();
+    await settle();
+    expect(sync.calls).toBe(2); // 补跑开始了
+    void runner.request("local-write"); // 补跑期间又保存了一次
+    sync.open();
+    await settle();
+    expect(sync.calls).toBe(3);
+    sync.open();
+    await first;
+    expect(sync.calls).toBe(3);
+  });
+
+  it("失败之后不接着空转（交给自动重试），也不吞掉单飞状态", async () => {
+    let calls = 0;
+    let release: (() => void) | null = null;
+    const runner = createSyncRunner({
+      syncOnce: async () => {
+        calls += 1;
+        await new Promise<void>((resolve) => (release = resolve));
+        throw new Error("坏了");
+      },
+    });
+    const first = runner.request("startup");
+    await settle();
+    void runner.request("local-write");
+    release!();
+    await first;
+    expect(calls).toBe(1);
+  });
+
+  it("同步进行中收到「已是最新」⇒ 不抢先把状态改成 idle", async () => {
+    const sync = controllable();
+    const runner = createSyncRunner({ syncOnce: sync.syncOnce });
+    const running = runner.request("startup");
+    await settle();
+    runner.noteUpToDate();
+    expect(runner.status().phase).toBe("syncing");
+    sync.open();
+    await running;
+    expect(runner.status().phase).toBe("idle");
+  });
+});

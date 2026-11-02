@@ -132,3 +132,36 @@ describe("读 / 写 / 删", () => {
     void vi;
   });
 });
+
+describe("★ 被忽略的目录整棵不扫（`skipDir`）", () => {
+  it("不往 `.git` / `.opennote` 里走：不列、不计数，里面读不到也不算「扫描不完整」", async () => {
+    const listed: string[] = [];
+    const { backend } = fakeBackend(
+      {
+        "": [dir(".git"), dir(".opennote"), dir("notes"), file("a.md")],
+        notes: [file("b.md")],
+      },
+      { throwOn: [".git"] },
+    );
+    const spy = backend.list;
+    (backend as { list: FileSystemBackend["list"] }).list = async (relPath: string) => {
+      listed.push(relPath);
+      return spy(relPath);
+    };
+    const files = createBackendSyncFiles({
+      backend,
+      skipDir: (path) => path === ".git" || path === ".opennote",
+    });
+    const scan = await files.listWithIssues!();
+    expect(scan.entries.map((entry) => entry.path)).toEqual(["a.md", "notes", "notes/b.md"]);
+    expect(scan.unreadable).toEqual([]);
+    expect(listed).toEqual(["", "notes"]);
+  });
+
+  it("★ 忽略目录里的大量条目不再撞 `MAX_SYNC_ENTRIES`（以前历史快照攒多了，每轮同步都直接抛错）", async () => {
+    const many = Array.from({ length: 50 }, (_, index) => file(`snap-${index}.md`));
+    const { backend } = fakeBackend({ "": [dir(".opennote"), file("a.md")], ".opennote": many });
+    const files = createBackendSyncFiles({ backend, maxEntries: 10, skipDir: (path) => path === ".opennote" });
+    await expect(files.list()).resolves.toHaveLength(1);
+  });
+});

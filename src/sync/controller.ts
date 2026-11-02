@@ -44,6 +44,14 @@ export interface SyncControllerOptions {
    */
   syncOnStart?: boolean;
   /**
+   * 本地有没有还没推上去的改动（只扫本地，不发请求）。
+   *
+   * 「连上后游标一致」只说明**远端**没动。不给它的话，那条路会把整轮同步跳过 ——
+   * 应用关着时改过的文件、上次退出前没来得及推的保存，都会一直停在本机，
+   * 直到下一次碰巧有别的触发。给了它，游标一致时先问一句：本地干净才真跳过。
+   */
+  hasLocalChanges?: () => Promise<boolean>;
+  /**
    * 流多久还没连上，就退回「启动先同步一轮」。默认 5000ms。
    *
    * 为什么必须有这道兜底：跳过启动同步的**唯一依据**是流会发来 `ready`。
@@ -100,8 +108,24 @@ export function createSyncController(options: SyncControllerOptions): SyncContro
           void options.runner.request("signal");
         },
         () => {
-          options.log?.("[sync] 连上后核对：已是最新，跳过同步");
-          options.runner.noteUpToDate();
+          const check = options.hasLocalChanges;
+          if (!check) {
+            options.log?.("[sync] 连上后核对：已是最新，跳过同步");
+            options.runner.noteUpToDate();
+            return;
+          }
+          void check()
+            .catch(() => true) // 查不清就按「有改动」处理：宁可白跑一轮，不可漏推
+            .then((dirty) => {
+              if (!running) return;
+              if (dirty) {
+                options.log?.("[sync] 连上后核对：远端已是最新，但本地有未推送的改动，同步一轮");
+                void options.runner.request("startup");
+                return;
+              }
+              options.log?.("[sync] 连上后核对：已是最新，跳过同步");
+              options.runner.noteUpToDate();
+            });
         },
       );
       /*

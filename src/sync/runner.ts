@@ -78,6 +78,13 @@ export interface SyncRunnerDeps {
   /** 本地写之后等多久才推（去抖）。默认 1200ms。 */
   localWriteDebounceMs?: number;
   /**
+   * 去抖的**最长等待**：从第一次本地写起算，最迟多久必须推一次。默认 10000ms。
+   *
+   * 没有它，持续编辑（自动保存每 450ms 落一次盘，间隔都小于去抖）会让去抖被无限顺延 ——
+   * 写了几分钟一个字都没推上去，另一台设备看到的就是「改了没同步」。
+   */
+  localWriteMaxWaitMs?: number;
+  /**
    * 一轮失败之后**多久自动重试**（指数增长，带上限）。默认 5000ms 起、120000ms 封顶。
    *
    * ## 为什么必须有这条（而不是「等下一个信号」）
@@ -128,6 +135,8 @@ export interface SyncRunner {
 
 /** 默认去抖：1200ms。比自动保存的 450ms 长一些，让一次连续编辑只推一次。 */
 const DEFAULT_DEBOUNCE_MS = 1200;
+/** 去抖最长等待：10 秒（见 `localWriteMaxWaitMs`）。 */
+const DEFAULT_DEBOUNCE_MAX_WAIT_MS = 10_000;
 
 /** 自动重试：首次 5 秒，之后翻倍，2 分钟封顶（见 `retryBaseDelayMs`）。 */
 const DEFAULT_RETRY_BASE_MS = 5000;
@@ -156,6 +165,7 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
   const setTimer = deps.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimeoutFn ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   const debounceMs = deps.localWriteDebounceMs ?? DEFAULT_DEBOUNCE_MS;
+  const debounceMaxWaitMs = Math.max(debounceMs, deps.localWriteMaxWaitMs ?? DEFAULT_DEBOUNCE_MAX_WAIT_MS);
   const retryBase = deps.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_MS;
   const retryMax = deps.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_MS;
 
@@ -169,6 +179,8 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
   /** 进行中时又来了请求 ⇒ 跑完再来一次（**只记一次**，不排队）。 */
   let pendingAgain = false;
   let debounceHandle: unknown = null;
+  /** 这一串去抖里**第一次**本地写的时间（算最长等待用）；没有挂着的去抖时为 null。 */
+  let debounceFirstAt: number | null = null;
   /** 自动重试的定时器（`retryHandle`）与已经重试过几次（决定退避长度）。 */
   let retryHandle: unknown = null;
   let retryAttempt = 0;
@@ -242,6 +254,8 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
     noteUpToDate(): void {
       // 只把「上次同步时间」推到现在：我们确实刚和服务端核对过，内容也一致。
       lastSyncedAt = now();
+      // 正在跑的那一轮会自己发布结束状态；这里抢先发 idle 会让界面在同步中途显示「已同步」。
+      if (inFlight) return;
       publish({ phase: "idle", lastSyncedAt, conflicts });
     },
 
@@ -272,12 +286,20 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
       inFlight = (async () => {
         try {
           let last: SyncOnceResult | null = null;
-          // 先跑一次；如果期间又有人请求，就再跑一次（最多两轮，避免活锁）。
-          last = await runOnce();
-          if (pendingAgain) {
+          /*
+           * 先跑一次；期间又有人请求，就接着再跑，直到跑完一轮期间**没有**新请求为止。
+           *
+           * ★ 以前是「最多两轮」，然后在 finally 里把 `pendingAgain` 清掉 ——
+           * 第二轮期间到来的请求（典型：第二轮还在推，用户又保存了一次）被**静默丢弃**，
+           * 而去抖定时器早已触发过、不会再来：这次保存要等下一个不相干的触发才推上去。
+           * 不会活锁：只有真的又来了请求才多跑一轮，而同步自己的写入已经被静默。
+           *
+           * 失败时停下来：可重试的失败已经排了自动重试，接着空转只会连撞同一堵墙。
+           */
+          do {
             pendingAgain = false;
             last = await runOnce();
-          }
+          } while (pendingAgain && last !== null && !disposed);
           return last;
         } finally {
           inFlight = null;
@@ -290,10 +312,15 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
     scheduleAfterLocalWrite() {
       if (disposed) return;
       if (debounceHandle !== null) clearTimer(debounceHandle);
+      const at = now();
+      if (debounceFirstAt === null) debounceFirstAt = at;
+      // 去抖可以顺延，但不能越过最长等待（见 `localWriteMaxWaitMs`）。
+      const delay = Math.max(0, Math.min(debounceMs, debounceFirstAt + debounceMaxWaitMs - at));
       debounceHandle = setTimer(() => {
         debounceHandle = null;
-        void this.request("local-write");
-      }, debounceMs);
+        debounceFirstAt = null;
+        void api.request("local-write");
+      }, delay);
     },
 
     dispose() {
@@ -302,6 +329,7 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
         clearTimer(debounceHandle);
         debounceHandle = null;
       }
+      debounceFirstAt = null;
       clearRetry();
     },
   };

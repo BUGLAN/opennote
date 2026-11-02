@@ -19,7 +19,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { idForPath } from "../../shared/paths";
-import { fetchWholeTree, runBounded, syncOnce, syncOnceIncremental, type EngineLocalFile, type SyncEngineDeps } from "./engine";
+import { fetchWholeTree, hasPendingLocalChanges, runBounded, syncOnce, syncOnceIncremental, type EngineLocalFile, type SyncEngineDeps } from "./engine";
 import type { SyncProvider } from "./provider-types";
 import { createSyncLedger, type SyncLedger } from "./state";
 import { createMemoryProvider, type MemoryProvider } from "./providers/memory";
@@ -1016,5 +1016,39 @@ describe("★ N1 · 用户手工把本地改回远端那一版 ⇒ 冲突自动�
     const idle = await syncOnce({ provider, ledger: harness.ledger, deps: harness.deps });
     expect(idle.pushed).toBe(0);
     expect(idle.pulled).toBe(0);
+  });
+});
+
+/* ============================================================================
+   ★ 本地有没有没推上去的改动（不发请求）
+   ============================================================================ */
+
+describe("★ `hasPendingLocalChanges`：游标一致时决定还要不要同步", () => {
+  it("刚同步完 ⇒ 干净；改一篇 / 新建 / 删一篇 ⇒ 都算有改动", async () => {
+    const h = await makeHarness({ seedLocal: { "a.md": "A", "b.md": "B" } });
+    await syncOnce({ provider: h.provider, ledger: h.ledger, deps: h.deps });
+    expect(await hasPendingLocalChanges(h.ledger, h.deps)).toBe(false);
+
+    await h.writeLocalFile("a.md", "A2");
+    expect(await hasPendingLocalChanges(h.ledger, h.deps)).toBe(true);
+    await syncOnce({ provider: h.provider, ledger: h.ledger, deps: h.deps });
+
+    await h.writeLocalFile("c.md", "C");
+    expect(await hasPendingLocalChanges(h.ledger, h.deps)).toBe(true);
+    await syncOnce({ provider: h.provider, ledger: h.ledger, deps: h.deps });
+
+    h.deleteLocalFile("b.md");
+    expect(await hasPendingLocalChanges(h.ledger, h.deps)).toBe(true);
+  });
+
+  it("被忽略的路径与挂着未裁决冲突的路径不算（同步也不会推它们，算进来只会白跑）", async () => {
+    const h = await makeHarness({ seedLocal: { "a.md": "A" }, ignore: (path) => path.startsWith(".opennote/") });
+    await syncOnce({ provider: h.provider, ledger: h.ledger, deps: h.deps });
+    await h.writeLocalFile(".opennote/sync.json", "{}");
+    expect(await hasPendingLocalChanges(h.ledger, h.deps)).toBe(false);
+
+    await h.writeLocalFile("a.md", "A-本地改");
+    h.ledger.files["a.md"]!.pendingConflict = { kind: "both-modified", localId: "x", remoteId: "y", at: 0 };
+    expect(await hasPendingLocalChanges(h.ledger, h.deps)).toBe(false);
   });
 });

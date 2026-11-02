@@ -946,6 +946,31 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   };
 }
 
+/**
+ * 本地有没有**还没推上去**的改动（只看本地扫描 + 账本，**不发任何请求**）。
+ *
+ * 给「连上后游标一致 ⇒ 跳过同步」那条路用：游标只说明**远端**没动，
+ * 说明不了本机 —— 应用关着时用别的编辑器改过、上次退出时去抖还没触发、
+ * 上一轮推送失败后就关了窗口……这些改动都只在磁盘上，跳过同步它们就永远停在本机。
+ *
+ * 判定与 `syncOnce` 的推送计划同源（`planPush` + 同一套忽略规则）；
+ * 挂着未裁决冲突的路径不算 —— 同步也不会推它们，算进来只会白跑一轮。
+ */
+export async function hasPendingLocalChanges(ledger: SyncLedger, deps: SyncEngineDeps): Promise<boolean> {
+  const isIgnored = deps.isIgnored ?? (() => false);
+  const localFiles = (await deps.listLocal()).filter((file) => !isIgnored(file.path));
+  const baselineView: BaselineLike = {
+    files: Object.fromEntries(Object.entries(ledger.files).filter(([path]) => !isIgnored(path))),
+  };
+  const plan = planPush(baselineView, localFiles);
+  const pushable = (path: string): boolean => ledger.files[path]?.pendingConflict === undefined;
+  return (
+    plan.added.length > 0 ||
+    plan.modified.some((file) => pushable(file.path)) ||
+    plan.deleted.some(pushable)
+  );
+}
+
 /** 分配一个新的 bid（`state.ts` 的分配逻辑在这里用一次，保持 `nextBid` 单调）。 */
 function allocateBid(ledger: SyncLedger, path: string): number {
   const bid = ledger.nextBid;

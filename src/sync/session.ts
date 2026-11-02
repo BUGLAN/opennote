@@ -32,7 +32,7 @@
  */
 
 import type { CryptoMode } from "../../shared/contract";
-import { syncOnceIncremental, type SyncEngineDeps, type SyncOnceResult } from "./engine";
+import { hasPendingLocalChanges, syncOnceIncremental, type SyncEngineDeps, type SyncOnceResult } from "./engine";
 import { createIgnoreRules, type IgnoreRules } from "./ignore";
 import { createSyncRunner, type SyncProgress, type SyncRunner, type SyncStatus } from "./runner";
 import type { SyncProvider } from "./provider-types";
@@ -101,6 +101,8 @@ export interface SyncSession {
   readonly ledger: SyncLedger;
   /** 手动同步一次（`enabled: false` 时直接返回 `null`）。 */
   syncNow(): Promise<SyncOnceResult | null>;
+  /** 本地有没有还没推上去的改动（只扫本地，不发请求；`enabled: false` 时恒为 false）。 */
+  hasLocalChanges(): Promise<boolean>;
   status(): SyncStatus;
   dispose(): void;
 }
@@ -205,6 +207,10 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
     async syncNow() {
       if (!options.config.enabled) return null;
       return runner.request("manual");
+    },
+    async hasLocalChanges() {
+      if (!options.config.enabled) return false;
+      return hasPendingLocalChanges(options.ledger, deps);
     },
     status: () => runner.status(),
     dispose: () => runner.dispose(),

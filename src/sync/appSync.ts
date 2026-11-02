@@ -140,6 +140,8 @@ let currentRecord: WorkspaceRecord | null = null;
 let currentBackend: FileSystemBackend | null = null;
 /** 当前接上的会话（冲突裁决与「保存后去抖」都要用它）。 */
 let activeSession: SyncSession | null = null;
+/** 每次 attach（与关工作区）+1：只有最新那次 attach 的结果才能接管 `activeSession`。 */
+let attachToken = 0;
 /** 「有字节落盘」的订阅退订句柄（见 `subscribeWorkspaceWrites`）。 */
 let writeUnsubscribed: (() => void) | null = null;
 /**
@@ -276,6 +278,9 @@ function handleSynced(
 async function attachCurrent(): Promise<AttachResult> {
   const record = currentRecord;
   const backend = currentBackend;
+  const token = ++attachToken;
+  // 旧会话的 runner 已被绑定层停掉（dispose 后不再响应），别再往它身上挂写入通知。
+  activeSession = null;
   if (!record || !backend) return { ok: false, reason: "disabled", message: "没有打开的笔记本" };
   const config = normalizeSyncConfig(record.sync);
 
@@ -396,6 +401,13 @@ async function attachCurrent(): Promise<AttachResult> {
         logs: [...prev.logs, line.replace(/^\[(binding|sync|stream)\] /, "")].slice(-40),
       })),
   });
+  /*
+   * ★ 迟到的结果不许接管（绑定层按代次停掉它的 controller，但这里的模块状态它管不到）：
+   * 切工作区 / 改配置时两次 attach 交错，慢的那次后回来会把 `activeSession` 换成一个
+   * **已被停掉**的会话 —— 之后每次保存都排进一个 dispose 过的 runner，再也不推送；
+   * 关掉工作区之后才回来的那次还会把「同步开着」重新打开。
+   */
+  if (token !== attachToken) return result;
   if (result.ok) {
     activeSession = result.session;
     // 库层的「外部改动」处置要看这个开关（开着同步 ⇒ 两边都改是冲突，不是磁盘赢）。
@@ -427,6 +439,7 @@ export function closeWorkspaceSync(): void {
   currentRecord = null;
   currentBackend = null;
   activeSession = null;
+  attachToken += 1;
   unsubscribeWorkspaceWrites();
   binding.stop();
   setSyncActive(false);
@@ -469,10 +482,41 @@ function subscribeWorkspaceWrites(): void {
   const rules = createDefaultIgnoreRules();
   writeUnsubscribed = onWorkspaceWrite((write) => {
     if (!write.content) return;
+    // 说不出路径的外部改动：没法按路径过滤，先核对本地有没有真改动再决定推不推。
+    if (write.pathsUnknown) {
+      void checkLocalChangesAndSchedule();
+      return;
+    }
     // 全是忽略路径（账本 / 元数据 / 收件箱暂存）⇒ 这一批与同步范围无关。
     if (write.paths.every((path) => shouldSkipEntry(rules, normalizePath(path), false))) return;
     activeSession?.runner.scheduleAfterLocalWrite();
   });
+}
+
+/** 正在核对本地（聚焦 + visibilitychange 常常一起来，不必扫两遍）。 */
+let localCheckRunning = false;
+
+/**
+ * 外部改动但路径未知时：只扫本地（有哈希缓存，不发请求），真有未推改动才排一次推送。
+ *
+ * 不直接排推送是因为浏览器 / 手机每次回到前台都会来这么一下 —— 无条件推一轮
+ * 就是每次切回来都白发两三个请求。
+ */
+async function checkLocalChangesAndSchedule(): Promise<void> {
+  const session = activeSession;
+  if (!session || localCheckRunning) return;
+  // 正在同步：直接排一次，单飞会把它合并成「这一轮跑完再来一轮」。
+  if (session.runner.status().phase === "syncing") {
+    session.runner.scheduleAfterLocalWrite();
+    return;
+  }
+  localCheckRunning = true;
+  try {
+    const dirty = await session.hasLocalChanges().catch(() => true);
+    if (dirty && activeSession === session) session.runner.scheduleAfterLocalWrite();
+  } finally {
+    localCheckRunning = false;
+  }
 }
 
 /** 退订写入通知（关工作区 / 登出）。没开同步的笔记本一个监听都不该留。 */

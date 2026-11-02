@@ -37,6 +37,17 @@ export interface BackendSyncFilesOptions {
   backend: FileSystemBackend;
   maxDepth?: number;
   maxEntries?: number;
+  /**
+   * 这个目录（工作区相对路径）是否整棵不进同步 —— 给了就**不往里走**。
+   *
+   * 不剪枝的话，`.git/objects`、`node_modules`、`.opennote/history` 这些反正会被忽略的目录
+   * 每轮都要整棵遍历一遍：慢不说，条目数还会撞上 `MAX_SYNC_ENTRIES` ——
+   * 历史快照只增不减，撞上之后**每一轮同步都直接抛错**，改什么都推不上去。
+   * 它们里面读不到的子目录也会被误报成「扫描不完整」，把正常的删除推断挂起。
+   *
+   * 判定必须与引擎的忽略规则同源（调用方传 `ignore.ts` 的判定），否则剪掉的就不只是被忽略的。
+   */
+  skipDir?: (path: string) => boolean;
 }
 
 /** 把工作区相对路径拼起来（永远用 `/`，与 did 的规范化一致）。 */
@@ -88,6 +99,8 @@ async function listAll(options: BackendSyncFilesOptions): Promise<ScanResult> {
     for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
       const path = joinPath(current.path, entry.name);
       const isDir = entry.kind === "directory";
+      // 整棵被忽略的目录：不列、不计数、不往下走（见 `skipDir`）。
+      if (isDir && options.skipDir?.(path) === true) continue;
       /*
        * ★ size / mtime 必须带下去：哈希缓存（`hashCache.ts`）靠它们判「这个文件没变」，
        * 少了它们就只能每个文件读一遍重算哈希 —— 「改一个字扫全库」的根因之一。

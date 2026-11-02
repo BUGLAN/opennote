@@ -37,6 +37,7 @@ import { createSyncSession, type SyncSession } from "./session";
 import type { SyncOnceResult } from "./engine";
 import { createSyncStream, type EventStreamLike } from "./stream";
 import { createBackendSyncFiles } from "./backendFiles";
+import { createIgnoreRules, shouldSkipEntry } from "./ignore";
 import { getDeviceId } from "./device";
 import type { SyncLedger } from "./state";
 import type { HashCache } from "./hashCache";
@@ -206,11 +207,16 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
   const cursorStore = options.cursorStore;
   const cursorKey = `${config.notebookId}|${options.record.location}`;
   const knownCursor = knownCursorFor(options.ledger, cursorStore, cursorKey);
+  const scanRules = createIgnoreRules(options.gitignoreText ?? "");
   const session = createSyncSession({
     config,
     ledger: options.ledger,
     provider,
-    backend: createBackendSyncFiles({ backend: options.backend }),
+    backend: createBackendSyncFiles({
+      backend: options.backend,
+      // 与会话里引擎用的是同一份 `.gitignore` + 内置集：被忽略的目录整棵不扫。
+      skipDir: (path) => shouldSkipEntry(scanRules, path, true),
+    }),
     notebookId: config.notebookId,
     ...(options.gitignoreText === undefined ? {} : { gitignoreText: options.gitignoreText }),
     ...(options.hashCache === undefined ? {} : { hashCache: options.hashCache }),
@@ -245,6 +251,7 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
       stream.start();
       return stream;
     },
+    hasLocalChanges: () => session.hasLocalChanges(),
     ...(options.log === undefined ? {} : { log: options.log }),
   });
 
