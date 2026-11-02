@@ -11,7 +11,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
-import { AccountStore, newAccountId, newAuthTokenForTests } from "../auth/accounts";
+import type { AccountStore } from "../auth/accounts";
+import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
 import { NotebookStore } from "../notebooks";
 import { createNotebookRoutes } from "./notebooks";
 import { loadConfig, type ServerConfig } from "../config";
@@ -47,7 +48,7 @@ interface World {
 function makeWorld(): World {
   const db = openDatabase({ path: ":memory:" });
   const fake = new FakeCouch();
-  const accounts = new AccountStore(db);
+  const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
   const config = loadConfig(ENV);
   const couch = couchClient(fake);
@@ -63,14 +64,8 @@ function makeWorld(): World {
     config,
     app,
     account() {
-      const token = newAuthTokenForTests();
-      const row = accounts.create({
-        accountId: newAccountId(),
-        authToken: token,
-        wrappedEncRoot: "wrapped-fake-0001",
-        bootstrapCode: accounts.createBootstrapCode().code,
-      });
-      return { id: row.id, token };
+      const { id, token } = seedAccount(accounts);
+      return { id, token };
     },
   };
 }

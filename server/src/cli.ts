@@ -1,39 +1,31 @@
 /**
- * 运维 CLI（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §4.12）。
+ * 运维 CLI（`docs/执行-同步重写-2026-11-02.md`「身份模型」）。
  *
- * ## 它是「根信任」的**唯一**运维通道
+ * ## 它是「根信任」的运维通道
  *
- * 控制台在管理员密钥丢失时**进不去**（密钥即身份：没有密钥就没有账号）。
- * 所以必须有一条不走 HTTP、不需要任何已有凭据的通道 —— 那就是这个文件。
+ * 管理员全都忘了密码、控制台进不去时，必须有一条不走 HTTP、不需要任何已有凭据的通道 ——
+ * 能登上这台服务器的人就是根信任。
  *
- * ## ★ 红线 3 在这里的具体形状：**CLI 绝不接触密钥**
+ * ## 密码不经过命令行
  *
- * 文档 §1.5、§4.12、§11.3 反复强调同一件事（§11.3 风险表里把它列为「高」影响项）：
- *
- * > CLI 如果顺手生成了管理员的账号密钥，服务端就知道了它 ⇒ 管理员自己的笔记本 E2EE 直接失效。
- *
- * 所以这个文件里**没有、也不许有**：
- *   - `accountKey` / `authToken` / `encRoot` / `wrappedEncRoot` 的**生成**
- *   - 写这些字段（除了 `list-accounts` 的**只读**用途，而它连读都不读它们）
- *
- * 它只做一件事：**发一个一次性引导码**，然后由**客户端**去生成密钥并注册。
- * 这条纪律有一条用例钉住（`cli.test.ts`：断言 CLI 源码里不出现密钥生成调用，
- * 且输出里不含任何密钥材料）—— 光靠注释是拦不住后来者的。
+ * `create-admin` / `reset-password` **不收密码参数**：命令行参数会进 shell 历史和进程列表。
+ * 它们只打印一条一次性的「设置密码」链接（24 小时有效），由本人在浏览器里设密码。
  *
  * ## 输出纪律
  *
- * 引导码 / 邀请码**只在 stdout 出现一次**，**不写日志、不落盘**。
- * 所有诊断信息走 stderr，于是 `... bootstrap-admin > code.txt` 得到的文件里
- * 只有那一个码，不会混进日志行。
+ * 链接 / 邀请码**只在 stdout 出现一次**，不写日志、不落盘。诊断信息走 stderr，
+ * 于是 `… create-admin a@b.com > link.txt` 得到的文件里只有那一条链接。
+ *
+ * 服务端仍然没有任何加解密能力（红线 3）：CLI 不碰 `wrapped_enc_root`。
  */
 
-import { AccountStore } from "./auth/accounts";
+import { AccountError, AccountStore, accountLabel, type AccountRow } from "./auth/accounts";
 import { loadConfig, ConfigError, type ServerConfig } from "./config";
 import { openDatabase } from "./db";
 import { CouchClient } from "./couch/client";
 import { NotebookStore } from "./notebooks";
 
-/** 命令签名：`argv` 是**去掉 `node script`** 之后的部分（即 `["bootstrap-admin"]`）。 */
+/** 命令签名：`argv` 是**去掉 `node script`** 之后的部分（即 `["create-admin", "a@b.com"]`）。 */
 export interface CliContext {
   out: (line: string) => void;
   err: (line: string) => void;
@@ -63,7 +55,8 @@ export interface CliDeps {
 }
 
 export const CLI_COMMANDS = [
-  "bootstrap-admin",
+  "create-admin",
+  "reset-password",
   "setup-couch-user",
   "create-invite",
   "list-accounts",
@@ -76,23 +69,23 @@ export const CLI_COMMANDS = [
 export type CliCommand = (typeof CLI_COMMANDS)[number];
 
 /** 用法（每条都带一句「什么时候用它」——运维急的时候不该去翻文档）。 */
-export const USAGE = `opennote-server 运维 CLI（§4.12）
+export const USAGE = `opennote-server 运维 CLI
 
 用法：node dist/cli.js <命令> [参数]
 
 命令：
-  bootstrap-admin              发一个**一次性管理员引导码**（★ 唯一能在密钥丢失时救回管理入口的办法）
-                               码只在 stdout 出现一次，不写日志、不落盘。**本命令不生成任何密钥。**
+  create-admin <邮箱>          建一个管理员账号，打印一次性「设置密码」链接（24 小时有效）
+                               正常情况下第一个管理员在网页 /admin 初始化；这个命令用于救急
+  reset-password <邮箱|id>     打印一次性「重置密码」链接，并让该账号所有设备下线
   setup-couch-user             在 CouchDB 的 _users 里建/更新运行时专用账号（★ 首次部署必须先跑这个）
                                否则每个笔记本请求都会 401 —— 因为 _security.members 里写的那个
                                「专用账号」在 CouchDB 里根本不是一条配置，而是一条 _users 文档。
-  create-invite [--max-uses N] [--days N]
-                               应急生成注册邀请码（正常情况用控制台）
-  list-accounts                列出账号（id / 标签 / 状态 / 用量）—— **不含任何密钥材料**
-  disable-account <accountId>  禁用账号（应急止血）
-  grant-admin <accountId>      把一个**已有**账号提升为管理员
-                               （引导码只能建新账号；这个是给「已有账号要接管」用的）
-  revoke-admin <accountId>     取消管理员；**不允许取消最后一个活跃管理员**
+  create-invite [--email 邮箱] [--admin] [--max-uses N] [--days N]
+                               应急生成邀请链接（正常情况用控制台）
+  list-accounts                列出账号（id / 邮箱 / 状态 / 用量）—— 不含密码哈希与令牌
+  disable-account <邮箱|id>    停用账号并让它所有设备下线（应急止血）
+  grant-admin <邮箱|id>        把一个已有账号提升为管理员
+  revoke-admin <邮箱|id>       取消管理员；**不允许取消最后一个活跃管理员**
   recompute-quota [--account <accountId>]
                                从账本重算配额缓存
 
@@ -174,8 +167,10 @@ export async function runCli(argv: readonly string[], deps: CliDeps = {}): Promi
   }
 
   switch (command as CliCommand) {
-    case "bootstrap-admin":
-      return bootstrapAdmin(context);
+    case "create-admin":
+      return await createAdmin(context, positional[1]);
+    case "reset-password":
+      return resetPassword(context, positional[1]);
     case "setup-couch-user":
       return await setupCouchUser(context);
     case "create-invite":
@@ -196,52 +191,31 @@ export async function runCli(argv: readonly string[], deps: CliDeps = {}): Promi
 /**
  * 提权 / 降权（`grant-admin` / `revoke-admin`）。
  *
- * ## 为什么这两条**只在 CLI 里**
- *
- * 和 `bootstrap-admin` 完全同一个理由（§4.12）：引导码不通过 HTTP 暴露，是因为
- * 一旦暴露，「任何一次管理员账号泄露」就升级成「能无限造管理员」。
- * 提权是同一件事的另一半 —— 它能把普通账号**变成**那个能造管理员的人。
- *
- * 所以：管理员的增减只走**根信任通道**（能登上这台服务器的人），
- * 控制台里没有、也不该有「设为管理员」按钮。
- *
- * ## 两条约束（`AccountStore.setAdmin` 里守，这里只负责翻译成人话）
- *
- * - 不能降掉**最后一个活跃管理员** —— 否则控制台永久进不去
- * - 提权/降权都写审计（谁在什么时候把谁变成了管理员，这件事必须可追）
+ * 控制台里管理员也能做这件事；CLI 这一份是给「没有任何管理员能登录」时用的根信任通道。
+ * 不能降掉**最后一个活跃管理员**（`AccountStore.setAdmin` 守），提权/降权都写审计。
  */
-export function setAdmin(context: CliContext, accountId: string | undefined, isAdmin: boolean): number {
-  if (!accountId) {
-    context.err(`用法：${isAdmin ? "grant-admin" : "revoke-admin"} <accountId>`);
-    context.err("先用 list-accounts 找到目标账号 id。");
+export function setAdmin(context: CliContext, who: string | undefined, isAdmin: boolean): number {
+  if (!who) {
+    context.err(`用法：${isAdmin ? "grant-admin" : "revoke-admin"} <邮箱|accountId>`);
     return 1;
   }
-
-  const target = context.accounts.findById2(accountId);
-  if (!target) {
-    context.err(`账号不存在：${accountId}`);
-    context.err("注意：这里要的是 **accountId**（16 字节十六进制），不是 label。");
-    return 1;
-  }
-
+  const target = findAccount(context, who);
+  if (!target) return 1;
+  const accountId = target.id;
   const result = context.accounts.setAdmin(accountId, isAdmin);
   if (!result.ok) {
     if (result.reason === "last-admin") {
       context.err("拒绝：这是最后一个**活跃**管理员。");
-      context.err("降掉它会让控制台永久进不去 —— 那时只能再跑一次 bootstrap-admin");
-      context.err("注册一个全新账号，旧账号的数据要靠手工移交。");
-      context.err("要换人，请先 grant-admin 另一个账号，再 revoke-admin 这个。");
+      context.err("降掉它会让控制台永久进不去。要换人，请先 grant-admin 另一个账号，再 revoke-admin 这个。");
       return 1;
     }
-    context.err(`账号不存在：${accountId}`);
+    context.err(`账号不存在：${who}`);
     return 1;
   }
-
   if (!result.changed) {
-    context.out(`账号 ${accountId} 的 is_admin 已经是 ${isAdmin ? "1" : "0"}，未改动。`);
+    context.out(`${accountLabel(target)} 的管理员身份已经是「${isAdmin ? "是" : "否"}」，未改动。`);
     return 0;
   }
-
   context.notebooks.audit({
     actorId: null,
     action: isAdmin ? "cli_grant_admin" : "cli_revoke_admin",
@@ -249,37 +223,69 @@ export function setAdmin(context: CliContext, accountId: string | undefined, isA
     ip: null,
     detail: "via CLI",
   });
-  context.out(`${isAdmin ? "已提升为管理员" : "已取消管理员"}：${accountId}`);
+  context.out(`${isAdmin ? "已提升为管理员" : "已取消管理员"}：${accountLabel(target)}`);
   context.err("");
-  context.err(isAdmin ? "这个账号现在可以打开 /panel 的管理区块了。" : "这个账号下一次请求起就没有管理员权限（无需重新登录）。");
+  context.err(isAdmin ? "这个账号现在可以登录 /admin 控制台了。" : "这个账号下一次请求起就没有管理员权限（无需重新登录）。");
   return 0;
 }
 
-/**
- * ★ 核心命令：打印一个一次性管理员引导码。
- *
- * **它不生成任何密钥。** 只写 `bootstrap_codes` 一行（`code_hash` + 过期时间），
- * 明文码只在 stdout 出现这一次。
- *
- * 附带告诉运维**下一步该做什么** —— 这一步很容易漏（拿到码之后不知道往哪填），
- * 而漏掉的后果是「码过期了才发现没用上」。
- */
-export function bootstrapAdmin(context: CliContext): number {
-  const { code, expiresAt } = context.accounts.createBootstrapCode();
-  const minutes = Math.round((expiresAt - Date.now()) / 60000);
+/** 邮箱或 accountId → 账号；找不到时把原因写到 stderr 并返回 null。 */
+function findAccount(context: CliContext, who: string): AccountRow | null {
+  const row = who.includes("@") ? context.accounts.findByEmail(who) : context.accounts.findById(who);
+  if (!row) {
+    context.err(`账号不存在：${who}`);
+    context.err("先用 list-accounts 看看有哪些账号。");
+  }
+  return row;
+}
 
-  context.out(code);
-  // 说明走 **stderr**，于是 `> code.txt` 里只有码本身。
+/**
+ * 建管理员（救急用；正常情况第一个管理员在 `/admin` 初始化）。
+ *
+ * 账号建出来**没有密码**，stdout 打印一次性「设置密码」链接 —— 密码由本人在浏览器里设，
+ * 不经过命令行。
+ */
+export async function createAdmin(context: CliContext, email: string | undefined): Promise<number> {
+  if (!email) {
+    context.err("用法：create-admin <邮箱>");
+    return 1;
+  }
+  let row: AccountRow;
+  try {
+    row = await context.accounts.create({ email, isAdmin: true });
+  } catch (error) {
+    if (error instanceof AccountError) {
+      context.err(`没建成：${error.message}`);
+      if (error.rejection === "email-taken") context.err("这个邮箱已有账号：要让它成为管理员用 grant-admin，要重设密码用 reset-password。");
+      return 1;
+    }
+    throw error;
+  }
+  context.notebooks.audit({ actorId: null, action: "cli_create_admin", target: row.id, ip: null, detail: "via CLI" });
+  return printPasswordLink(context, row, "设置密码");
+}
+
+/** 打印一次性「重置密码」链接，并让这个账号所有设备下线。 */
+export function resetPassword(context: CliContext, who: string | undefined): number {
+  if (!who) {
+    context.err("用法：reset-password <邮箱|accountId>");
+    return 1;
+  }
+  const row = findAccount(context, who);
+  if (!row) return 1;
+  const revoked = context.accounts.revokeAllSessions(row.id);
+  context.notebooks.audit({ actorId: null, action: "cli_reset_password", target: row.id, ip: null, detail: `revokedSessions=${revoked}` });
+  return printPasswordLink(context, row, "重置密码");
+}
+
+function printPasswordLink(context: CliContext, row: AccountRow, what: string): number {
+  const { code, expiresAt } = context.accounts.createPasswordReset({ accountId: row.id, createdBy: null });
+  context.out(`${context.config.externalBaseUrl}/reset/${code}`);
+  // 说明走 stderr，于是 `> link.txt` 里只有链接本身。
   context.err("");
-  context.err("★ 一次性管理员引导码（只显示这一次，不写日志、不落盘）");
-  context.err(`  有效期：约 ${minutes} 分钟（${new Date(expiresAt).toISOString()}）`);
-  context.err("");
-  context.err("下一步（在**客户端**上做，密钥只在那里生成）：");
-  context.err(`  1. 打开 ${context.config.externalBaseUrl}`);
-  context.err("  2. 选择「创建新账号」，把上面那串码粘进去");
-  context.err("  3. 客户端会生成账号密钥并**让你抄下来** —— 那串密钥就是你的账号，丢了就没了");
-  context.err("");
-  context.err("本命令**没有**、也不会生成任何账号密钥（红线 3 / §1.5）。");
+  context.err(`★ ${accountLabel(row)} 的一次性「${what}」链接（只显示这一次，不写日志、不落盘）`);
+  context.err(`  有效期至 ${new Date(expiresAt).toISOString()}，用过即失效。`);
+  context.err("  在浏览器里打开它设好密码，然后用客户端或 /admin 登录。");
   return 0;
 }
 
@@ -335,30 +341,39 @@ export async function setupCouchUser(context: CliContext): Promise<number> {
   }
 }
 
-/** 应急生成注册邀请码（正常情况用控制台）。 */
+/** 应急生成邀请链接（正常情况用控制台）。 */
 export function createInvite(context: CliContext, flags: Map<string, string>): number {
   const maxUses = clampInt(flags.get("max-uses"), 1, 1, 1000);
   const days = clampInt(flags.get("days"), 7, 1, 365);
-    /*
-   * `createdBy: null` —— **CLI 发码时通常还没有任何账号**（那正是这条命令存在的场景）。
-   * 第一版写成 `"cli"` 这个字符串，结果撞上 `created_by REFERENCES accounts(id)`
-   * 的外键：一个不存在的账号 id。修法不是「随便找个账号 id 塞进去」，而是承认
-   * 「谁发的」这个问题在 CLI 场景下**没有答案**，于是迁移 2 把该列改成可空。
-   */
-  const created = context.accounts.createInvite({ createdBy: null, expiresInSeconds: days * 86400, maxUses });
-
-  context.out(created.code);
+  // `createdBy: null` —— CLI 发码时可能还没有任何账号（迁移 2 因此把该列改成可空）。
+  let created: { code: string; maxUses: number };
+  try {
+    created = context.accounts.createInvite({
+      createdBy: null,
+      email: flags.get("email") ?? null,
+      grantAdmin: flags.get("admin") === "true",
+      expiresInSeconds: days * 86400,
+      maxUses,
+    });
+  } catch (error) {
+    if (error instanceof AccountError) {
+      context.err(`没建成：${error.message}`);
+      return 1;
+    }
+    throw error;
+  }
+  context.out(`${context.config.externalBaseUrl}/join/${created.code}`);
   context.err("");
-  context.err(`注册邀请码（可用 ${created.maxUses} 次，${days} 天后过期，只显示这一次）`);
-  context.err("客户端用它在「创建新账号」里注册；密钥仍由客户端生成。");
+  context.err(`邀请链接（可用 ${created.maxUses} 次，${days} 天后过期，只显示这一次）`);
+  context.err("对方在浏览器里打开它设好密码，再用客户端登录。");
   return 0;
 }
 
 /**
  * 列出账号。
  *
- * ⚠️ **只读且只读安全字段** —— 刻意不打印 `auth_hash` / `wrapped_enc_root`。
- * 打印它们没有任何运维价值（服务端自己也解不开 `wrapped_enc_root`），
+ * ⚠️ **只读且只读安全字段** —— 刻意不打印 `password_hash` 与会话令牌。
+ * 打印它们没有任何运维价值，
  * 却会让一次「随手 `list-accounts > 工单附件`」变成一次凭据泄露。
  */
 export function listAccounts(context: CliContext): number {
@@ -367,13 +382,14 @@ export function listAccounts(context: CliContext): number {
     context.out("（还没有任何账号）");
     return 0;
   }
-  context.out(["accountId", "label", "status", "admin", "notebooks", "createdAt"].join("\t"));
+  context.out(["accountId", "email", "name", "status", "admin", "notebooks", "createdAt"].join("\t"));
   for (const row of rows) {
     const quota = context.notebooks.quotaOf(row.id);
     context.out(
       [
         row.id,
-        row.label ?? "-",
+        row.email ?? "-",
+        row.display_name ?? "-",
         row.status,
         row.is_admin === 1 ? "yes" : "no",
         String(quota.notebooks),
@@ -382,26 +398,23 @@ export function listAccounts(context: CliContext): number {
     );
   }
   context.out("");
-  context.out(`共 ${rows.length} 个账号。（刻意不显示 auth_hash / wrapped_enc_root —— 它们没有运维价值，只会带来泄露风险）`);
+  context.out(`共 ${rows.length} 个账号。（不显示密码哈希与会话令牌 —— 它们没有运维价值，只会带来泄露风险）`);
   return 0;
 }
 
-/** 禁用账号（应急止血）。 */
-export function disableAccount(context: CliContext, accountId: string | undefined): number {
-  if (!accountId) {
-    context.err("用法：disable-account <accountId>");
+/** 停用账号（应急止血）：所有设备立刻下线，数据保留。 */
+export function disableAccount(context: CliContext, who: string | undefined): number {
+  if (!who) {
+    context.err("用法：disable-account <邮箱|accountId>");
     return 1;
   }
-  const target = context.accounts.findById2(accountId);
-  if (!target) {
-    context.err(`账号不存在：${accountId}`);
-    return 1;
-  }
-  context.accounts.setStatus(accountId, "disabled");
-  context.out(`已禁用 ${accountId}`);
-  // 说清「禁用 ≠ 删号」：数据保留，可以再启用；也是提醒运维别以为数据没了。
-  context.err("注意：这是**禁用**（数据保留、可用 enable 恢复），不是删除。");
-  context.err("它**不能**吊销已泄露的账号密钥 —— 唯一的吊销手段是让该账号轮换密钥。");
+  const target = findAccount(context, who);
+  if (!target) return 1;
+  context.accounts.setStatus(target.id, "disabled");
+  context.notebooks.audit({ actorId: null, action: "cli_disable_account", target: target.id, ip: null, detail: "via CLI" });
+  context.out(`已停用 ${accountLabel(target)}（${target.id}）`);
+  // 说清「停用 ≠ 删号」：数据保留，可以在控制台重新启用。
+  context.err("这是**停用**：它所有设备已经下线，数据保留，可以在控制台重新启用。");
   return 0;
 }
 

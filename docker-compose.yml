@@ -93,7 +93,7 @@ services:
       PORT: "8787"
       EXTERNAL_BASE_URL: ${EXTERNAL_BASE_URL:?EXTERNAL_BASE_URL 必填}
       # 启动时自检：与 shared/contract.ts 不一致就拒绝启动（挡住「镜像比自己以为的旧」）。
-      PROTOCOL_VERSION_EXPECTED: ${PROTOCOL_VERSION_EXPECTED:-1}
+      PROTOCOL_VERSION_EXPECTED: ${PROTOCOL_VERSION_EXPECTED:-2}
 
       COUCH_URL: http://couchdb:5984
       # 运行时用专用账号（**不是 admin**）。只在建库/置备时才用下面的 admin。

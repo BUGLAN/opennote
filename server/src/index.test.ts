@@ -11,6 +11,7 @@
  * 它证明的是**这一层**：配置 → 开库 → 迁移 → 装配 → 监听 → 能回话 → 能干净关闭。
  */
 import { afterEach, describe, expect, it } from "vitest";
+import { PROTOCOL_VERSION } from "../../shared/contract";
 import { mkdtempSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,7 +60,7 @@ describe("真起一个服务器（§4.6 / §4.8）", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { ok: boolean; protocolVersion: number; couchVersion: string | null };
     expect(body.ok).toBe(true);
-    expect(body.protocolVersion).toBe(1);
+    expect(body.protocolVersion).toBe(PROTOCOL_VERSION);
     // CouchDB 地址是故意指到不存在的端口的 ⇒ 这里**必须**是 null 而不是抛错。
     // （健康检查要能在「CouchDB 坏了」时也回话 —— 否则控制台连"哪里坏了"都看不到。）
     expect(body.couchVersion).toBeNull();

@@ -17,7 +17,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
-import { AccountStore, newAccountId, newAuthTokenForTests } from "../auth/accounts";
+import type { AccountStore } from "../auth/accounts";
+import { PROTOCOL_VERSION } from "../../../shared/contract";
+import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
+import { SettingsStore } from "../settings";
 import { NotebookStore } from "../notebooks";
 import { createAdminRoutes } from "./admin";
 import { loadConfig, type ServerConfig } from "../config";
@@ -56,7 +59,7 @@ interface World {
 function makeWorld(options: { startedAt?: number } = {}): World {
   const db = openDatabase({ path: ":memory:" });
   const fake = new FakeCouch();
-  const accounts = new AccountStore(db);
+  const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
   const config = loadConfig(ENV);
   const couch = couchClient(fake);
@@ -68,20 +71,14 @@ function makeWorld(options: { startedAt?: number } = {}): World {
       notebooks,
       config,
       couch,
+      settings: new SettingsStore(db, config),
       audit: (event) => notebooks.audit(event),
       ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
     }),
   );
   const create = (isAdmin: boolean): { id: string; token: string } => {
-    const token = newAuthTokenForTests();
-    const row = accounts.create({
-      accountId: newAccountId(),
-      authToken: token,
-      wrappedEncRoot: "wrapped-fake-0001",
-      isAdmin,
-      bootstrapCode: accounts.createBootstrapCode().code,
-    });
-    return { id: row.id, token };
+    const { id, token } = seedAccount(accounts, { isAdmin });
+    return { id, token };
   };
   return { fake, accounts, notebooks, config, app, admin: () => create(true), member: () => create(false) };
 }
@@ -194,8 +191,8 @@ describe("禁用 / 启用", () => {
     });
     expect(response.status).toBe(204);
     // 账号行还在（数据保留）。
-    expect(world.accounts.findById2(member.id)?.status).toBe("disabled");
-    expect(() => world.accounts.authenticate(member.token)).toThrow(/已被禁用/);
+    expect(world.accounts.findById(member.id)?.status).toBe("disabled");
+    expect(() => world.accounts.authenticate(member.token)).toThrow(/已被停用/);
   });
 
   it("**不能禁用自己**（否则控制台永久失去管理入口）", async () => {
@@ -207,7 +204,7 @@ describe("禁用 / 启用", () => {
       body: JSON.stringify({ status: "disabled" }),
     });
     expect(response.status).toBe(400);
-    expect(world.accounts.findById2(admin.id)?.status).toBe("active");
+    expect(world.accounts.findById(admin.id)?.status).toBe("active");
   });
 
   it("status 只认 active / disabled", async () => {
@@ -262,7 +259,7 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
     expect(world.notebooks.findById(shared.id)?.owner_id).toBe(bob.id);
     expect(world.notebooks.resolveMembership(shared.id, bob.id)?.role).toBe("owner");
     // Alice 的账号没了。
-    expect(world.accounts.findById2(alice.id)).toBeNull();
+    expect(world.accounts.findById(alice.id)).toBeNull();
   });
 
   it("**不能删自己**", async () => {
@@ -270,7 +267,7 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
     const admin = world.admin();
     const response = await call(world, `/v1/admin/accounts/${admin.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
     expect(response.status).toBe(400);
-    expect(world.accounts.findById2(admin.id)).not.toBeNull();
+    expect(world.accounts.findById(admin.id)).not.toBeNull();
   });
 });
 
@@ -284,8 +281,10 @@ describe("邀请码", () => {
       body: JSON.stringify({ maxUses: 3 }),
     });
     expect(response.status).toBe(201);
-    const body = (await response.json()) as { code: string; maxUses: number; expiresAt: number | null };
-    expect(body.code).toMatch(/^inv_[0-9a-f]{48}$/);
+    const body = (await response.json()) as { code: string; url: string; maxUses: number; expiresAt: number | null };
+    expect(body.code).toMatch(/^join_[0-9a-f]{48}$/);
+    // 给管理员转发的是整条链接（服务器地址 + /join/ + 码）。
+    expect(body.url).toBe(`${world.config.externalBaseUrl}/join/${body.code}`);
     expect(body.maxUses).toBe(3);
     expect(body.expiresAt).toBeGreaterThan(Date.now());
 
@@ -332,7 +331,7 @@ describe("服务器信息与审计", () => {
     const admin = world.admin();
     world.member();
     const body = (await (await call(world, "/v1/admin/server", { headers: { authorization: `Bearer ${admin.token}` } })).json()) as Record<string, unknown>;
-    expect(body.protocolVersion).toBe(1);
+    expect(body.protocolVersion).toBe(PROTOCOL_VERSION);
     expect(body.couchVersion).toBe("3.3.3-fake");
     expect(body.accountCount).toBe(2);
     expect(body.uptimeSeconds).toBeGreaterThanOrEqual(59);
@@ -342,7 +341,7 @@ describe("服务器信息与审计", () => {
     const world = makeWorld();
     const admin = world.admin();
     const db = openDatabase({ path: ":memory:" });
-    const accounts = new AccountStore(db);
+    const accounts = testAccountStore(db);
     const notebooks = new NotebookStore(db);
     const app = new Hono();
     app.route(
@@ -351,6 +350,7 @@ describe("服务器信息与审计", () => {
         accounts: world.accounts,
         notebooks: world.notebooks,
         config: world.config,
+        settings: new SettingsStore(world.accounts.db, world.config),
         couch: new (await import("../couch/client")).CouchClient({
           baseUrl: "http://couchdb:5984",
           user: "u",

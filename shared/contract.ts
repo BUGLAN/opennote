@@ -31,11 +31,14 @@ import { z } from "zod";
  * 都必须是这一个（§10.1 F3 会断言三处一致）。
  *
  * 改动纪律：任何**破坏性**的线上形状变更都要 +1，并同时提升客户端的最低可接受版本。
+ *
+ * v2（2026-11-02）：账号从「密钥即身份」换成邮箱 + 密码 + 会话令牌（`docs/执行-同步重写-2026-11-02.md`）。
+ * 文件协议本身没变，但 v1 客户端已经无法登录，所以一起抬高最低版本。
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** 客户端能接受的最低协议版本；服务端报出更低的版本时拒绝同步并提示升级。 */
-export const MIN_SUPPORTED_PROTOCOL_VERSION = 1;
+export const MIN_SUPPORTED_PROTOCOL_VERSION = 2;
 
 /* --------------------------------------------------------------- 基础形状 */
 
@@ -130,22 +133,15 @@ export const contentIdSchema = z.string().regex(/^[0-9a-f]{64}$/, "内容标识�
 /* ------------------------------------------------------------------ 账号 */
 
 /**
- * 注册请求（§1.5 流程 ①）。
- *
- * **客户端生成一切密钥材料**，这里只上传「公开的 `accountId`」「派生出的 `authToken`」
- * 「用 `wrapKey` 包好的 `encRoot`」。服务端**永远拿不到** `accountKey` / `wrapKey` / `encRoot`。
- *
- * ⚠️ `wrappedEncRoot` 是密文（服务端解不开），所以这里不做形状之外的语义校验。
+ * 旧的「密钥即身份」注册请求。服务端 v2 已不再接受；客户端的旧注册流程在「设置 → 同步」
+ * 阶段（⑤）随 `src/sync/onboarding.ts` 一起删除，在那之前保留形状让客户端能编译。
  */
 export const accountCreateRequestSchema = z.object({
   accountId: accountIdSchema,
   authToken: z.string().min(32).max(256),
   wrappedEncRoot: z.string().min(16).max(4096),
-  /** 一次性管理员引导码（CLI 生成）—— 与邀请码二选一，**必须有其一**。 */
   bootstrapCode: z.string().min(8).max(256).optional(),
-  /** 注册邀请码（管理员在控制台生成）。 */
   inviteCode: z.string().min(8).max(256).optional(),
-  /** 可选备注名（纯装饰，不参与鉴权、不唯一）。 */
   label: z.string().max(120).optional(),
 });
 export type AccountCreateRequest = z.infer<typeof accountCreateRequestSchema>;
@@ -158,40 +154,91 @@ export const quotaSchema = z.object({
 });
 export type Quota = z.infer<typeof quotaSchema>;
 
-export const accountCreateResponseSchema = z.object({
+export const emailSchema = z.string().trim().min(3).max(254);
+export const passwordSchema = z.string().min(1).max(256);
+export const displayNameSchema = z.string().trim().max(80);
+
+/** 设备的操作系统（设备列表显示「macOS · 桌面端」用）。 */
+export const deviceOsSchema = z.enum(["macos", "windows", "linux", "android", "ios", "other"]);
+export type DeviceOs = z.infer<typeof deviceOsSchema>;
+
+/** 登录时一并登记的设备信息。设备名在登录表单里就填好，不再出现「未命名设备」。 */
+export const deviceDescriptorSchema = z.object({
+  deviceId: deviceIdSchema,
+  name: z.string().trim().min(1).max(120),
+  platform: platformSchema,
+  os: deviceOsSchema.optional(),
+  clientVersion: z.string().max(40).optional(),
+});
+export type DeviceDescriptor = z.infer<typeof deviceDescriptorSchema>;
+
+/** `POST /v1/auth/login`。 */
+export const loginRequestSchema = z.object({
+  email: emailSchema,
+  password: passwordSchema,
+  device: deviceDescriptorSchema,
+});
+export type LoginRequest = z.infer<typeof loginRequestSchema>;
+
+/** `POST /v1/auth/setup`：零账号时建第一个管理员（网页初始化页用）。 */
+export const setupRequestSchema = z.object({
+  email: emailSchema,
+  password: passwordSchema,
+  displayName: displayNameSchema.optional(),
+});
+export type SetupRequest = z.infer<typeof setupRequestSchema>;
+
+/** `GET /v1/me`：当前登录的账号。 */
+export const meSchema = z.object({
   accountId: accountIdSchema,
+  email: z.string().nullable(),
+  displayName: z.string().nullable(),
   isAdmin: z.boolean(),
-  protocolVersion: z.number().int().positive(),
-});
-export type AccountCreateResponse = z.infer<typeof accountCreateResponseSchema>;
-
-/** 解锁响应（§1.5 流程 ②）：新设备用 `accountKey` 换回 `wrappedEncRoot` 自己解。 */
-export const accountUnlockResponseSchema = z.object({
-  accountId: accountIdSchema,
-  wrappedEncRoot: z.string().min(16).max(4096),
   quota: quotaSchema,
-  protocolVersion: z.number().int().positive(),
+  loginMethods: z.object({ password: z.boolean() }),
+  /** 这次请求用的会话属于哪台设备（控制台会话为 null）。 */
+  deviceId: deviceIdSchema.nullable(),
 });
-export type AccountUnlockResponse = z.infer<typeof accountUnlockResponseSchema>;
+export type Me = z.infer<typeof meSchema>;
 
-/** 轮换（§1.5 流程 ③）：**零重加密** —— `encRoot` 不变，只换包着它的壳。 */
-export const accountRotateRequestSchema = z.object({
-  newAuthToken: z.string().min(32).max(256),
-  newWrappedEncRoot: z.string().min(16).max(4096),
+/** 登录 / 接受邀请成功：不透明令牌（明文只出现这一次）+ 账号。 */
+export const sessionResponseSchema = z.object({
+  token: z.string().min(16),
+  me: meSchema,
 });
-export type AccountRotateRequest = z.infer<typeof accountRotateRequestSchema>;
+export type SessionResponse = z.infer<typeof sessionResponseSchema>;
 
-export const accountInfoSchema = z.object({
-  accountId: accountIdSchema,
-  isAdmin: z.boolean(),
-  label: z.string().nullable(),
-  quota: quotaSchema,
+export const meUpdateRequestSchema = z.object({ displayName: displayNameSchema.nullable() });
+export type MeUpdateRequest = z.infer<typeof meUpdateRequestSchema>;
+
+export const passwordChangeRequestSchema = z.object({
+  currentPassword: z.string().max(256),
+  newPassword: passwordSchema,
 });
-export type AccountInfo = z.infer<typeof accountInfoSchema>;
+export type PasswordChangeRequest = z.infer<typeof passwordChangeRequestSchema>;
+
+/** `GET /v1/auth/invites/:code`：`/join` 页显示的邀请内容。 */
+export const inviteInfoSchema = z.object({
+  email: z.string().nullable(),
+  grantAdmin: z.boolean(),
+  quotaBytes: z.number().int().nonnegative(),
+  expiresAt: z.number().int().nonnegative().nullable(),
+});
+export type InviteInfo = z.infer<typeof inviteInfoSchema>;
+
+export const inviteAcceptRequestSchema = z.object({
+  email: emailSchema,
+  password: passwordSchema,
+  displayName: displayNameSchema.optional(),
+});
+export type InviteAcceptRequest = z.infer<typeof inviteAcceptRequestSchema>;
+
+export const passwordResetInfoSchema = z.object({ email: z.string().nullable() });
+export const passwordResetRequestSchema = z.object({ password: passwordSchema });
 
 /* ------------------------------------------------------------------ 设备 */
 
-/** 设备登记（§4.3：`devices` **不是凭据**，只是账本）。 */
+/** 旧的设备登记接口（`POST /v1/devices`）。v2 起设备在登录时登记，这个接口只刷新信息。 */
 export const deviceRegisterRequestSchema = z.object({
   deviceId: deviceIdSchema,
   name: z.string().max(120).optional(),
@@ -199,12 +246,17 @@ export const deviceRegisterRequestSchema = z.object({
 });
 export type DeviceRegisterRequest = z.infer<typeof deviceRegisterRequestSchema>;
 
+/** `GET /v1/me/devices` 的一行。`active = false` 表示已被移除（会话全部吊销）。 */
 export const deviceInfoSchema = z.object({
   deviceId: deviceIdSchema,
   name: z.string().nullable(),
   platform: platformSchema.nullable(),
+  os: deviceOsSchema.nullable(),
+  clientVersion: z.string().nullable(),
   createdAt: z.number().int().nonnegative(),
   lastSeenAt: z.number().int().nonnegative().nullable(),
+  current: z.boolean(),
+  active: z.boolean(),
 });
 export type DeviceInfo = z.infer<typeof deviceInfoSchema>;
 
@@ -408,6 +460,12 @@ export const healthResponseSchema = z.object({
   minSupportedProtocolVersion: z.number().int().positive(),
   webBuildHash: z.string().nullable(),
   couchVersion: z.string().nullable(),
+  /** 这台服务器接受哪些登录方式（客户端据此决定显不显示「使用 GitHub 登录」）。 */
+  auth: z.object({ password: z.boolean(), github: z.boolean() }),
+  /** 谁可以注册：仅限邀请 / 开放 / 关闭。 */
+  registration: z.enum(["invite", "open", "closed"]),
+  /** 零账号：需要先在 `/admin` 初始化。 */
+  setupRequired: z.boolean(),
 });
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
@@ -446,7 +504,9 @@ export type ClientStatsRequest = z.infer<typeof clientStatsRequestSchema>;
 
 export const adminAccountSummarySchema = z.object({
   accountId: accountIdSchema,
-  label: z.string().nullable(),
+  email: z.string().nullable(),
+  displayName: z.string().nullable(),
+  loginMethods: z.object({ password: z.boolean() }),
   status: z.enum(["active", "disabled"]),
   isAdmin: z.boolean(),
   quota: quotaSchema,

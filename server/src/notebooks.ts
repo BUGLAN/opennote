@@ -178,7 +178,7 @@ export class NotebookStore {
   listMembers(notebookId: string): { accountId: string; role: Role; label: string | null }[] {
     const rows = this.db
       .prepare(
-        `SELECT m.account_id AS accountId, m.role AS role, a.label AS label FROM memberships m
+        `SELECT m.account_id AS accountId, m.role AS role, COALESCE(a.display_name, a.email) AS label FROM memberships m
          JOIN accounts a ON a.id = m.account_id
          WHERE m.notebook_id = ? ORDER BY m.created_at ASC`,
       )
@@ -755,46 +755,77 @@ export class NotebookStore {
   /* ---------------------------------------------------------------- 设备 */
 
   /**
-   * 设备登记（**幂等**：同一 `deviceId` 重复登记只刷新 `last_seen_at`）。
+   * 设备登记（**幂等**：同一 `deviceId` 重复登记只刷新信息与 `last_seen_at`）。
    *
-   * ⚠️ 这里**没有**「踢掉某台设备」—— 一个账号密钥所有设备共用，没有每设备凭据，
-   * 所以 `devices` 是**只读账本**（§1.5 代价 3）。唯一的吊销手段是轮换账号密钥。
+   * 传进来为空的字段**不覆盖**已有值（`COALESCE`）：某次登记拿不到机器名时，
+   * 不能把之前存好的名字冲成 NULL（`docs/待办-服务端同步能力清单-2026-10-23.md` 第 2 条）。
+   * 设备的凭据是会话（`sessions.device_id`），这里只是账本；重新登录会清掉 `revoked_at`。
    */
   upsertDevice(input: {
     deviceId: string;
     accountId: string;
     name: string | null;
     platform: string | null;
+    os?: string | null;
+    clientVersion?: string | null;
     now?: number;
     ip?: string | null;
   }): void {
     const now = input.now ?? Date.now();
     this.db
       .prepare(
-        `INSERT INTO devices (id, account_id, name, platform, created_at, last_seen_at, last_ip)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform, last_seen_at = excluded.last_seen_at, last_ip = excluded.last_ip`,
+        `INSERT INTO devices (id, account_id, name, platform, os, client_version, created_at, last_seen_at, last_ip, revoked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+         ON CONFLICT(id) DO UPDATE SET
+           name = COALESCE(excluded.name, devices.name),
+           platform = COALESCE(excluded.platform, devices.platform),
+           os = COALESCE(excluded.os, devices.os),
+           client_version = COALESCE(excluded.client_version, devices.client_version),
+           last_seen_at = excluded.last_seen_at,
+           last_ip = COALESCE(excluded.last_ip, devices.last_ip),
+           revoked_at = NULL`,
       )
-      .run(input.deviceId, input.accountId, input.name, input.platform, now, now, input.ip ?? null);
+      .run(input.deviceId, input.accountId, input.name, input.platform, input.os ?? null, input.clientVersion ?? null, now, now, input.ip ?? null);
   }
 
-  /** 列出某个账号的设备（控制台「我的设备」页 —— **只读**）。 */
-  listDevices(accountId: string): { deviceId: string; name: string | null; platform: string | null; createdAt: number; lastSeenAt: number | null }[] {
+  /** 移除设备：只在账本上标记（真正的吊销是 `AccountStore.revokeDeviceSessions`）。 */
+  markDeviceRevoked(accountId: string, deviceId: string, now = Date.now()): boolean {
+    const result = this.db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ? AND account_id = ?").run(now, deviceId, accountId);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  /** 列出某个账号的设备（客户端「设置 → 同步 → 设备」与控制台用户详情）。 */
+  listDevices(accountId: string): {
+    deviceId: string;
+    name: string | null;
+    platform: string | null;
+    os: string | null;
+    clientVersion: string | null;
+    createdAt: number;
+    lastSeenAt: number | null;
+    revokedAt: number | null;
+  }[] {
     const rows = this.db
       .prepare("SELECT * FROM devices WHERE account_id = ? ORDER BY created_at ASC")
       .all(accountId) as unknown as {
       id: string;
       name: string | null;
       platform: string | null;
+      os: string | null;
+      client_version: string | null;
       created_at: number;
       last_seen_at: number | null;
+      revoked_at: number | null;
     }[];
     return rows.map((row) => ({
       deviceId: row.id,
       name: row.name,
       platform: row.platform,
+      os: row.os,
+      clientVersion: row.client_version,
       createdAt: row.created_at,
       lastSeenAt: row.last_seen_at,
+      revokedAt: row.revoked_at,
     }));
   }
 
@@ -821,7 +852,7 @@ export class NotebookStore {
     const rows = this.db
       .prepare(
         `SELECT n.id, n.name, n.owner_id, n.crypto_mode, n.created_at,
-                a.label AS owner_label,
+                COALESCE(a.display_name, a.email) AS owner_label,
                 (SELECT COUNT(*) FROM memberships m WHERE m.notebook_id = n.id) AS member_count,
                 -- ★ 体积取 notebook_usage（服务端自己记账的**库级**占用），
                 -- 不是 quota_usage（账号级缓存，且从来没被更新过 —— 服务端那份实现
@@ -900,7 +931,7 @@ export class NotebookStore {
   }[] {
     const rows = this.db
       .prepare(
-        `SELECT d.id, d.account_id, d.name, d.platform, d.created_at, d.last_seen_at, a.label AS account_label
+        `SELECT d.id, d.account_id, d.name, d.platform, d.created_at, d.last_seen_at, COALESCE(a.display_name, a.email) AS account_label
            FROM devices d
            LEFT JOIN accounts a ON a.id = d.account_id
           ORDER BY COALESCE(d.last_seen_at, d.created_at) DESC`,
@@ -940,10 +971,14 @@ export class NotebookStore {
     maxUses: number;
     uses: number;
     revokedAt: number | null;
+    email: string | null;
+    grantAdmin: boolean;
+    quotaBytes: number | null;
+    acceptedBy: string | null;
   }[] {
     const rows = this.db
       .prepare(
-        `SELECT i.code_hash, i.created_by, i.created_at, i.expires_at, i.max_uses, i.uses, i.revoked_at, a.label AS creator_label
+        `SELECT i.*, COALESCE(a.display_name, a.email) AS creator_label
            FROM invites i
            LEFT JOIN accounts a ON a.id = i.created_by
           ORDER BY i.created_at DESC`,
@@ -956,6 +991,10 @@ export class NotebookStore {
       max_uses: number;
       uses: number;
       revoked_at: number | null;
+      email: string | null;
+      grant_admin: number;
+      quota_bytes: number | null;
+      accepted_by: string | null;
       creator_label: string | null;
     }[];
     return rows.map((row) => ({
@@ -967,6 +1006,10 @@ export class NotebookStore {
       maxUses: row.max_uses,
       uses: row.uses,
       revokedAt: row.revoked_at,
+      email: row.email,
+      grantAdmin: row.grant_admin === 1,
+      quotaBytes: row.quota_bytes,
+      acceptedBy: row.accepted_by,
     }));
   }
 

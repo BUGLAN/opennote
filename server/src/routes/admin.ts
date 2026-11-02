@@ -19,8 +19,7 @@
  *
  * ## 管理接口**不返回**的东西
  *
- * - 任何 `auth_hash`（它是 `sha256(authToken)` —— 泄露了就能直接冒充，虽然反推不出令牌，
- *   但它本身就是「用户名」那一半）
+ * - 任何 `password_hash` 与会话的 `token_hash`
  * - 任何 `wrapped_enc_root`（**服务端自己也解不开**，但没必要发出去）
  * - 任何明文路径 / 笔记内容（那在 CouchDB 里，管理接口不碰）
  *
@@ -28,12 +27,13 @@
  */
 
 import { Hono } from "hono";
-import { adminAccountSummarySchema, adminServerInfoSchema, parseContract, type Quota } from "../../../shared/contract";
+import { adminAccountSummarySchema, adminServerInfoSchema, emailSchema, parseContract } from "../../../shared/contract";
 import { AccountError, AccountStore, type AccountRow } from "../auth/accounts";
 import type { CouchClient } from "../couch/client";
 import type { NotebookStore } from "../notebooks";
 import type { ServerConfig } from "../config";
-import { bearerToken } from "./account";
+import type { SettingsStore } from "../settings";
+import { accountErrorResponse, bearerToken, quotaOf } from "./auth";
 
 export interface AdminRoutesDeps {
   accounts: AccountStore;
@@ -41,6 +41,7 @@ export interface AdminRoutesDeps {
   config: ServerConfig;
   /** 运行时客户端（报 CouchDB 版本用）。 */
   couch: CouchClient;
+  settings: SettingsStore;
   audit?: (event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null }) => void;
   /** 进程启动时间（算 uptime；测试可注入）。 */
   startedAt?: number;
@@ -81,15 +82,9 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     return row;
   };
 
-  const quotaFor = (accountId: string): Quota => {
-    const usage = deps.notebooks.quotaOf(accountId);
-    return {
-      bytesUsed: usage.bytesUsed,
-      bytesLimit: deps.config.defaultAccountQuotaBytes,
-      notebooks: usage.notebooks,
-      notebooksLimit: deps.config.defaultAccountQuotaNotebooks,
-    };
-  };
+  const joinUrl = (code: string): string => `${deps.config.externalBaseUrl}/join/${code}`;
+  const resetUrl = (code: string): string => `${deps.config.externalBaseUrl}/reset/${code}`;
+  const now = (): number => deps.now?.() ?? Date.now();
 
   /* -------------------------------------------------------------- 账号 */
 
@@ -104,10 +99,12 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
         adminAccountSummarySchema,
         {
           accountId: row.id,
-          label: row.label,
+          email: row.email,
+          displayName: row.display_name,
+          loginMethods: { password: row.password_hash !== null },
           status: row.status === "disabled" ? "disabled" : "active",
           isAdmin: row.is_admin === 1,
-          quota: quotaFor(row.id),
+          quota: quotaOf(deps, row),
           createdAt: row.created_at,
           lastSeenAt: row.last_seen_at,
         },
@@ -139,13 +136,55 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
   });
 
   /** 删账号（级联：独占笔记本的库真删；有共享成员的**移交**，§7.1）。 */
+  /** 改配额 / 角色 / 显示名。`quotaBytes: null` = 跟随服务默认值。 */
+  routes.patch("/accounts/:id", async (c) => {
+    const admin = requireAdmin(c as never);
+    if (admin instanceof Response) return admin;
+    const accountId = c.req.param("id");
+    if (!deps.accounts.findById(accountId)) return json({ error: "账号不存在", code: "not-found" }, 404);
+    const raw = (await c.req.json().catch(() => null)) as { quotaBytes?: unknown; isAdmin?: unknown; displayName?: unknown } | null;
+    if (raw === null || typeof raw !== "object") return json({ error: "请求体必须是对象", code: "bad-request" }, 400);
+
+    if ("quotaBytes" in raw) {
+      const quota = raw.quotaBytes;
+      if (quota !== null && !(typeof quota === "number" && Number.isInteger(quota) && quota >= 0)) {
+        return json({ error: "quotaBytes 必须是非负整数或 null", code: "bad-request" }, 400);
+      }
+      deps.accounts.setQuota(accountId, quota as number | null);
+      deps.audit?.({ actorId: admin.id, action: "set_quota", target: accountId, ip: null, detail: String(quota) });
+    }
+    if (typeof raw.isAdmin === "boolean") {
+      const result = deps.accounts.setAdmin(accountId, raw.isAdmin);
+      if (!result.ok) return json({ error: "不能取消最后一个管理员（会让控制台永久进不去）", code: "last-admin" }, 409);
+      if (result.changed) deps.audit?.({ actorId: admin.id, action: raw.isAdmin ? "grant_admin" : "revoke_admin", target: accountId, ip: null, detail: null });
+    }
+    if (raw.displayName === null || typeof raw.displayName === "string") {
+      deps.accounts.setDisplayName(accountId, raw.displayName === null ? null : raw.displayName.slice(0, 80));
+    }
+    return new Response(null, { status: 204 });
+  });
+
+  /** 发重置密码链接（服务器不发邮件：链接由管理员转交）。 */
+  routes.post("/accounts/:id/password-reset", (c) => {
+    const admin = requireAdmin(c as never);
+    if (admin instanceof Response) return admin;
+    try {
+      const created = deps.accounts.createPasswordReset({ accountId: c.req.param("id"), createdBy: admin.id, now: now() });
+      deps.audit?.({ actorId: admin.id, action: "create_password_reset", target: c.req.param("id"), ip: null, detail: null });
+      return json({ code: created.code, url: resetUrl(created.code), expiresAt: created.expiresAt }, 201);
+    } catch (error) {
+      if (error instanceof AccountError) return accountErrorResponse(error);
+      throw error;
+    }
+  });
+
   routes.delete("/accounts/:id", async (c) => {
     const admin = requireAdmin(c as never);
     if (admin instanceof Response) return admin;
     const accountId = c.req.param("id");
     if (accountId === admin.id) return json({ error: "不能删除自己（会让你失去管理入口）", code: "bad-request" }, 400);
 
-    const target = deps.accounts.findById2(accountId);
+    const target = deps.accounts.findById(accountId);
     if (!target) return json({ error: "账号不存在", code: "not-found" }, 404);
 
     /*
@@ -193,22 +232,53 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
    * （与引导码同一条纪律，§4.12）。这一点必须写进控制台文案，否则运维会以为
    * 「以后还能再查一次」。
    */
+  routes.get("/invites", (c) => {
+    const admin = requireAdmin(c as never);
+    if (admin instanceof Response) return admin;
+    return json({ invites: deps.notebooks.listInvites() }, 200);
+  });
+
+  /**
+   * 生成邀请链接。可选：绑定邮箱（绑定后只能用一次）、授予管理员、单独的配额、有效期、次数。
+   * 明文码只在这个响应里出现一次。
+   */
   routes.post("/invites", async (c) => {
     const admin = requireAdmin(c as never);
     if (admin instanceof Response) return admin;
-    const raw = (await c.req.json().catch(() => null)) as { expiresInSeconds?: unknown; maxUses?: unknown; label?: unknown } | null;
+    const raw = (await c.req.json().catch(() => null)) as {
+      email?: unknown;
+      grantAdmin?: unknown;
+      quotaBytes?: unknown;
+      expiresInSeconds?: unknown;
+      maxUses?: unknown;
+    } | null;
     const expiresInSeconds =
       typeof raw?.expiresInSeconds === "number" && Number.isFinite(raw.expiresInSeconds) && raw.expiresInSeconds > 0
         ? Math.min(raw.expiresInSeconds, 365 * 24 * 3600)
         : DEFAULT_INVITE_TTL_SECONDS;
     const maxUses = typeof raw?.maxUses === "number" && Number.isFinite(raw.maxUses) && raw.maxUses > 0 ? Math.min(Math.floor(raw.maxUses), 1000) : 1;
+    const email = typeof raw?.email === "string" && raw.email.trim() !== "" ? emailSchema.safeParse(raw.email) : null;
+    if (email && !email.success) return json({ error: "邮箱格式不对", code: "bad-request" }, 400);
+    const quotaBytes = typeof raw?.quotaBytes === "number" && Number.isInteger(raw.quotaBytes) && raw.quotaBytes >= 0 ? raw.quotaBytes : null;
 
-    const created = deps.accounts.createInvite({ createdBy: admin.id, expiresInSeconds, maxUses });
-    deps.audit?.({ actorId: admin.id, action: "create_invite", target: null, ip: null, detail: `maxUses=${maxUses}` });
-    return json({ code: created.code, expiresAt: created.expiresAt, maxUses: created.maxUses }, 201);
+    try {
+      const created = deps.accounts.createInvite({
+        createdBy: admin.id,
+        email: email?.data ?? null,
+        grantAdmin: raw?.grantAdmin === true,
+        quotaBytes,
+        expiresInSeconds,
+        maxUses,
+        now: now(),
+      });
+      deps.audit?.({ actorId: admin.id, action: "create_invite", target: email?.data ?? null, ip: null, detail: `maxUses=${created.maxUses}${raw?.grantAdmin === true ? ",admin" : ""}` });
+      return json({ code: created.code, url: joinUrl(created.code), expiresAt: created.expiresAt, maxUses: created.maxUses }, 201);
+    } catch (error) {
+      if (error instanceof AccountError) return accountErrorResponse(error);
+      throw error;
+    }
   });
 
-  /** 作废邀请码。 */
   routes.delete("/invites/:code", (c) => {
     const admin = requireAdmin(c as never);
     if (admin instanceof Response) return admin;
@@ -217,6 +287,42 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     const changed = deps.accounts.revokeInvite(code);
     deps.audit?.({ actorId: admin.id, action: "revoke_invite", target: null, ip: null, detail: changed ? "revoked" : "already-revoked-or-unknown" });
     return new Response(null, { status: 204 });
+  });
+
+  /* ------------------------------------------------------------ 服务设置 */
+
+  routes.get("/settings", (c) => {
+    const admin = requireAdmin(c as never);
+    if (admin instanceof Response) return admin;
+    return json(deps.settings.all(), 200);
+  });
+
+  routes.patch("/settings", async (c) => {
+    const admin = requireAdmin(c as never);
+    if (admin instanceof Response) return admin;
+    const raw = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (raw === null || typeof raw !== "object") return json({ error: "请求体必须是对象", code: "bad-request" }, 400);
+    const patch: Parameters<SettingsStore["set"]>[0] = {};
+    if ("registration" in raw) {
+      if (raw.registration !== "invite" && raw.registration !== "open" && raw.registration !== "closed") {
+        return json({ error: "registration 必须是 invite / open / closed", code: "bad-request" }, 400);
+      }
+      patch.registration = raw.registration;
+    }
+    if ("passwordLogin" in raw) {
+      if (typeof raw.passwordLogin !== "boolean") return json({ error: "passwordLogin 必须是布尔值", code: "bad-request" }, 400);
+      patch.passwordLogin = raw.passwordLogin;
+    }
+    if ("defaultQuotaBytes" in raw) {
+      const value = raw.defaultQuotaBytes;
+      if (!(typeof value === "number" && Number.isInteger(value) && value >= 0)) {
+        return json({ error: "defaultQuotaBytes 必须是非负整数", code: "bad-request" }, 400);
+      }
+      patch.defaultQuotaBytes = value;
+    }
+    const next = deps.settings.set(patch, now());
+    deps.audit?.({ actorId: admin.id, action: "update_settings", target: null, ip: null, detail: Object.keys(patch).join(",") });
+    return json(next, 200);
   });
 
   /* ---------------------------------------------------------- 服务器信息 */
@@ -283,16 +389,12 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     );
   });
 
-  /* ---------------------------------------------------------- 冒烟用夹具 */
-
   /*
-   * ⚠️ **这里刻意没有「生成引导码」的 HTTP 端点。**
+   * ⚠️ **这里刻意没有「直接建管理员」的 HTTP 端点。**
    *
-   * 引导码只能由 **CLI** 生成（`pnpm cli:server bootstrap-admin`，直连数据库、明文只打印一次）。
-   * 暴露成 HTTP 端点的后果是：任何一次管理员账号泄露 ⇒「能无限造管理员」。
-   * §4.12 把引导码放在 CLI 里正是为了这个。
-   *
-   * 需要它的话看 `cli.ts` 的 `bootstrapAdmin()`（它直接调 `AccountStore.createBootstrapCode()`）。
+   * 第一个管理员走零账号时的 `POST /v1/auth/setup`；之后要么邀请时勾「管理员」，
+   * 要么由已有管理员 `PATCH /accounts/:id { isAdmin: true }`。管理员全丢了的根信任通道
+   * 是 CLI（`create-admin` / `reset-password`），直连数据库，不走 HTTP。
    */
 
   return routes;

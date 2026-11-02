@@ -152,6 +152,9 @@ describe("syncinfo 与 health（协议 + 加密模式的双重闸门）", () => 
       minSupportedProtocolVersion: MIN_SUPPORTED_PROTOCOL_VERSION,
       webBuildHash: null,
       couchVersion: null,
+      auth: { password: true, github: false },
+      registration: "invite",
+      setupRequired: false,
     });
     expect(parsed.ok).toBe(true);
     expect(parsed.webBuildHash).toBeNull();

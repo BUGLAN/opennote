@@ -32,6 +32,7 @@
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import {
+  MIN_SUPPORTED_PROTOCOL_VERSION,
   changesResponseSchema,
   clientStatsRequestSchema,
   filesBatchRequestSchema,
@@ -46,7 +47,8 @@ import { CouchError, type CouchClient, type CouchDocument } from "../couch/clien
 import { DESIGN_DOC_ID } from "../couch/design";
 import type { NotebookRow, NotebookStore } from "../notebooks";
 import type { ServerConfig } from "../config";
-import { bearerToken } from "./account";
+import type { SettingsStore } from "../settings";
+import { bearerToken } from "./auth";
 
 export interface V1RoutesDeps {
   accounts: AccountStore;
@@ -56,6 +58,8 @@ export interface V1RoutesDeps {
   couch: CouchClient;
   /** admin 客户端（只在**首次**建库/改 `_design` 时用，§4.5）。 */
   couchAdmin: CouchClient;
+  /** 服务设置（health 要报登录方式与注册方式）。测试里可以不给，按默认值报。 */
+  settings?: SettingsStore;
   audit?: (event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null }) => void;
 }
 
@@ -248,9 +252,13 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       {
         ok: true,
         protocolVersion: deps.config.protocolVersionExpected,
-        minSupportedProtocolVersion: 1,
+        minSupportedProtocolVersion: MIN_SUPPORTED_PROTOCOL_VERSION,
         webBuildHash: process.env.OPENNOTE_WEB_BUILD_HASH ?? null,
         couchVersion,
+        // 客户端在「服务器地址」失焦时读这三项，决定显示哪些登录方式、要不要提示去初始化。
+        auth: { password: deps.settings?.get("passwordLogin") ?? true, github: false },
+        registration: deps.settings?.get("registration") ?? "invite",
+        setupRequired: deps.accounts.needsSetup(),
       },
       200,
     );

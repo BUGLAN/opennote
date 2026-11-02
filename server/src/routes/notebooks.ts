@@ -39,7 +39,7 @@ import type { CouchClient } from "../couch/client";
 import { NotebookError, NotebookStore, assertNotebookQuota, type NotebookRow } from "../notebooks";
 import { DEFAULT_REVS_LIMIT, ProvisioningError, provisionNotebook } from "../provisioning";
 import type { ServerConfig } from "../config";
-import { bearerToken } from "./account";
+import { bearerToken } from "./auth";
 
 export interface NotebookRoutesDeps {
   accounts: AccountStore;

@@ -18,7 +18,8 @@ import { NotebookError, NotebookStore, assertNotebookQuota } from "./notebooks";
 import { ProvisioningError, inspectNotebook, provisionNotebook } from "./provisioning";
 import type { CouchClient } from "./couch/client";
 import { FakeCouch, couchClient } from "./couch/fakeCouch.test-helper";
-import { AccountStore, newAccountId, newAuthTokenForTests } from "./auth/accounts";
+import type { AccountStore } from "./auth/accounts";
+import { seedAccount, testAccountStore } from "./auth/testAccounts.test-helper";
 import { databaseNameFor } from "./couch/design";
 
 /*
@@ -46,19 +47,13 @@ beforeEach(() => {
 function makeWorld(): { db: DatabaseSync; accounts: AccountStore; notebooks: NotebookStore; fake: FakeCouch; couch: CouchClient } {
   const db = openDatabase({ path: ":memory:" });
   const fake = new FakeCouch();
-  return { db, accounts: new AccountStore(db), notebooks: new NotebookStore(db), fake, couch: couchClient(fake) };
+  return { db, accounts: testAccountStore(db), notebooks: new NotebookStore(db), fake, couch: couchClient(fake) };
 }
 
-/** 建一个账号（走引导码，与真实注册同一条路径）。 */
-function makeAccount(accounts: AccountStore): { id: string; token: string } {
-  const token = newAuthTokenForTests();
-  const row = accounts.create({
-    accountId: newAccountId(),
-    authToken: token,
-    wrappedEncRoot: "wrapped-fake",
-    bootstrapCode: accounts.createBootstrapCode().code,
-  });
-  return { id: row.id, token };
+/** 建一个已登录的账号（直接种行，见 `testAccounts.test-helper.ts`）。 */
+function makeAccount(accounts: AccountStore): { id: string; token: string; email: string } {
+  const { id, token, email } = seedAccount(accounts);
+  return { id, token, email };
 }
 
 describe("§4.4 · 授权：越权是 404，不是 403", () => {
@@ -137,7 +132,8 @@ describe("§4.4 · 授权：越权是 404，不是 403", () => {
     const alice = makeAccount(accounts);
     const notebook = notebooks.create({ ownerId: alice.id, name: "我的", cryptoMode: "none" });
     expect(notebooks.resolveMembership(notebook.id, alice.id)).not.toBeNull();
-    expect(notebooks.listMembers(notebook.id)).toEqual([{ accountId: alice.id, role: "owner", label: null }]);
+    // label = 显示名，没有就用邮箱（v4 起账号都有邮箱）。
+    expect(notebooks.listMembers(notebook.id)).toEqual([{ accountId: alice.id, role: "owner", label: alice.email }]);
   });
 });
 
@@ -565,7 +561,7 @@ describe("删账号的编排（三个入口共用一条，§7.1）", () => {
     // 设备行清掉了。
     expect(notebooks.listDevices(alice.id)).toEqual([]);
     // 账号行本身**还**在（那是 `AccountStore.delete` 的事，两个系统分开）。
-    expect(accounts.findById2(alice.id)).not.toBeNull();
+    expect(accounts.findById(alice.id)).not.toBeNull();
     // 这一步不抛 ⇒ 调用方接着删账号行时外键不会挡路。
     expect(() => accounts.delete(alice.id)).not.toThrow();
   });
