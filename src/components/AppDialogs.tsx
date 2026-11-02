@@ -285,7 +285,7 @@ export function SettingsDialog({
                 「写完标题 5 秒后自动改名」的总开关（方案 #20）。
                 只对**文件名还是占位名**的笔记生效：只有「无标题」「未命名」「untitled」
                 这类名字才在候选集里，其余笔记本来就不会被自动改名。
-                默认开；关掉不会撤销已经改过的名字，只是之后不再跟随。
+                只改一次：改完名字就不再是占位名，之后文件名固定。默认开；关掉不会撤销已经改过的名字。
               */}
               <SettingRow label="占位名笔记自动改名" hint="写完标题 5 秒后，把「无标题」这类文件名改成标题">
                 <div className="switch-row">
@@ -295,12 +295,12 @@ export function SettingsDialog({
                       checked={settings.autoTitleFromPlaceholder}
                       onChange={(event) => patchUi({ autoTitleFromPlaceholder: event.target.checked })}
                     />
-                    自动跟随正文标题
+                    用第一个标题命名
                   </label>
                 </div>
                 <p className="dialog__note">
                   只有还叫「无标题」「未命名」的笔记会被改名，改的是文件名，正文一个字都不动；
-                  其他笔记的文件名一律不动。改过名的笔记（含你手动重命名过的）不再自动跟随。
+                  其他笔记的文件名一律不动。每篇只改一次，之后想改名请手动重命名。
                 </p>
               </SettingRow>
 

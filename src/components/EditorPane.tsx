@@ -3,6 +3,7 @@ import { EditorState, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import { imageUrlStore } from "../data/assets";
+import { onIdsRemapped } from "../data/library";
 import type { Id, UiSettings } from "../data/types";
 import { minimalReplace } from "../editor/externalReplace";
 import { editorSettingsField, refreshDecorations, setEditorSettings, type EditorSettings } from "../editor/settings";
@@ -100,7 +101,10 @@ export function attachCompositionReporter(host: CompositionEventHost, report: (c
 }
 
 interface EditorHostProps {
-  /** 本实例的笔记 id。`key={id}` 保证它**永不改变**——id 变了就是卸载重建。 */
+  /**
+   * 本实例的笔记 id。重命名 / 移动时**会变**（实例的 key 跟着标签走，不跟路径走），
+   * 所以凡是用到它的地方都要读最新值（`propsRef` 或放进 effect 依赖）。
+   */
   id: Id;
   active: boolean;
   content: string;
@@ -222,7 +226,7 @@ function EditorHost(props: EditorHostProps): ReactNode {
         imageMode: props.settings.imageMode,
         showMarks: props.settings.showMarks,
         // 空态传空串：粘贴时 `insertFileSnippets()` 如实提示「附件没有落点」，
-        // 而不是拿空路径去派生出一个 `未命名.assets/`。实例的笔记路径永不改变（key={id}）。
+        // 而不是拿空路径去派生出一个 `未命名.assets/`。改名后 `props.id` 变了，这里重新下推。
         notePath: props.id,
       }),
     });
@@ -326,7 +330,38 @@ function EditorHost(props: EditorHostProps): ReactNode {
  * {@link EditorHost}，并向上汇报「活跃实例」（App 的 `viewRef`）。
  */
 export function EditorPane(props: EditorPaneProps): ReactNode {
-  const viewsRef = useRef(new Map<Id, EditorView>());
+  /** 实例表：按**实例 key** 存（不是笔记 id —— 改名时 id 变、实例不变）。 */
+  const viewsRef = useRef(new Map<string, EditorView>());
+
+  /**
+   * 笔记 id → 实例 key。key 在标签第一次渲染时发放，之后**跟着路径走**：重命名、移动、
+   * 自动改名都只把映射搬到新 id，React 看到的 key 不变 ⇒ 实例不重建，光标、滚动、
+   * undo 都留着（以前 `key={id}`，停笔 5 秒自动改名后继续打字会落到文档开头）。
+   */
+  const keysRef = useRef(new Map<Id, string>());
+  const keySeqRef = useRef(0);
+  const keyOf = (id: Id): string => {
+    let key = keysRef.current.get(id);
+    if (!key) {
+      key = `editor-${(keySeqRef.current += 1)}`;
+      keysRef.current.set(id, key);
+    }
+    return key;
+  };
+  useEffect(
+    () =>
+      onIdsRemapped((replace) => {
+        const next = new Map<Id, string>();
+        for (const [id, key] of keysRef.current) next.set(replace(id), key);
+        keysRef.current = next;
+      }),
+    [],
+  );
+  /* 关掉的标签不留映射：同一路径以后再开是一篇「新」笔记，应当拿新实例。 */
+  useEffect(() => {
+    const open = new Set(props.tabs);
+    for (const id of [...keysRef.current.keys()]) if (!open.has(id)) keysRef.current.delete(id);
+  }, [props.tabs]);
 
   /**
    * 实例表的**版本号**。存在的唯一理由是让下面的上报 effect 能感知「实例表变了」。
@@ -346,7 +381,8 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
   /* 活跃实例上报。依赖 tabs：关闭活跃标签时（tabs 与 activeId 同一次提交里变化）
      子组件的注销/登记 effect 先跑，这里读到的是刷新后的实例表。 */
   useEffect(() => {
-    const view = props.activeId != null ? (viewsRef.current.get(props.activeId) ?? null) : null;
+    const activeKey = props.activeId != null ? keysRef.current.get(props.activeId) : undefined;
+    const view = activeKey ? (viewsRef.current.get(activeKey) ?? null) : null;
     props.onActiveViewChange(view);
     if (import.meta.env.DEV) {
       // handy for debugging the live-preview tree from the console
@@ -378,9 +414,10 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
         const note = props.getNote(id);
         // 笔记没了（外部删除、清空回收站）：不留实例 —— React 卸载旧 host（销毁它的视图）。
         if (!note) return null;
+        const key = keyOf(id);
         return (
           <EditorHost
-            key={id}
+            key={key}
             id={id}
             active={id === props.activeId}
             content={note.content}
@@ -394,11 +431,11 @@ export function EditorPane(props: EditorPaneProps): ReactNode {
             // 注册/注销都要**抬高版本号**：实例比 activeId 晚就绪是真实存在的路径
             // （见 `registryVersion` 的注释），不抬的话 `viewRef` 会一直停在 null。
             onReady={(view) => {
-              viewsRef.current.set(id, view);
+              viewsRef.current.set(key, view);
               setRegistryVersion((n) => n + 1);
             }}
             onCleanup={() => {
-              viewsRef.current.delete(id);
+              viewsRef.current.delete(key);
               setRegistryVersion((n) => n + 1);
             }}
             getTitles={props.getTitles}

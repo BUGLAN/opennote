@@ -39,10 +39,8 @@ export type NoteKind = "note" | "canvas" | "html";
 export interface Note {
   id: Id;
   folderId: Id | null;
-  /** Denormalised title, kept in sync with the content (or with `titleOverride`). */
+  /** Display name: always the file name without its extension (never derived from the content). */
   title: string;
-  /** Set when the user renames a note from the tree; wins over the derived title. */
-  titleOverride: string | null;
   content: string;
   createdAt: number;
   updatedAt: number;

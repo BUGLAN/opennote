@@ -224,10 +224,9 @@ describe("扫描与身份", () => {
     const ctx: AutoRenameContext = {
       id: "未命名画布.canvas",
       stem: "未命名画布",
-      placeholderOrigin: true,
+      placeholderName: true,
       kind: "canvas",
       content: "## 标题\n",
-      titleOverride: null,
       trashed: false,
       createdAt: now - 60_000,
       now,
@@ -236,7 +235,6 @@ describe("扫描与身份", () => {
       locked: false,
       lastAutoRenameAt: null,
       explicitRenamedAt: null,
-      pinnedAt: null,
       inFlight: false,
       autoTitleFromPlaceholder: true,
     };

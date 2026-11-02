@@ -67,34 +67,6 @@ export function splitFrontMatter(md: string): { front: string; body: string; bod
   return { front: match[1], body: md.slice(consumed.length), bodyLineOffset: newlines };
 }
 
-/** Typora-style title: the first heading, else the first non-empty line. */
-export function deriveTitle(md: string, fallback = "无标题"): string {
-  const { body } = splitFrontMatter(md);
-  let fence: string | null = null;
-  for (const rawLine of body.split("\n")) {
-    const line = rawLine.trim();
-    const fenceMatch = /^(```+|~~~+)/.exec(line);
-    if (fenceMatch) {
-      const marker = fenceMatch[1][0];
-      if (fence === null) fence = marker;
-      else if (fence === marker) fence = null;
-      continue;
-    }
-    if (fence !== null) continue;
-    if (!line) continue;
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) {
-      const text = cleanInline(heading[2]);
-      if (text) return text.slice(0, TITLE_LIMIT);
-      continue;
-    }
-    if (/^(>|\||-{3,}|\*{3,}|_{3,})/.test(line)) continue;
-    const text = cleanInline(line);
-    if (text) return text.slice(0, TITLE_LIMIT);
-  }
-  return fallback;
-}
-
 /* ------------------------------------------- placeholder names & auto titles */
 
 /**
@@ -115,9 +87,9 @@ export function isPlaceholderName(name: string): boolean {
 }
 
 /**
- * 一篇笔记「该叫什么名字」的**唯一依据**：正文里第一个真正的标题行（H1–H6）。
+ * 占位名笔记自动改名时「该叫什么名字」的**唯一依据**：正文里第一个真正的标题行（H1–H6）。
+ * （显示名不从正文派生 —— 标题就是文件名，见 `library.ts` 的 `titleOf`。）
  *
- * 与 `deriveTitle()` 的关键差别（也是这个函数存在的理由）：
  *   1. 认 H1–H6 —— 用户手上 5 篇占位笔记里 H1 是 **0** 篇（3 篇 h2），只认 H1 = 功能没做；
  *   2. **绝不把「正文首行」当标题** —— `无标题.md` 全文只有一行图片，`cleanInline()`
  *      会把图片语法洗成 alt 文本，产出 `3f1c9589….png.md` 这种垃圾文件名。
@@ -160,12 +132,12 @@ function scanPlaceholderTitle(md: string): { title: string | null; line: number 
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
       const text = cleanInline(heading[2]);
-      // `# ** **` / 只有 `#` 后跟 inline 标记的行：不是标题，接着往下找（与 `deriveTitle` 同款）。
+      // `# ** **` / 只有 `#` 后跟 inline 标记的行：不是标题，接着往下找。
       if (text) return { title: text.slice(0, TITLE_LIMIT), line: lineNumber };
       continue;
     }
     if (/^(>|\||-{3,}|\*{3,}|_{3,})/.test(line)) continue;
-    // ★ 与 `deriveTitle()` 的差别就在这一行：普通正文行**不返回**，继续找真标题行。
+    // ★ 普通正文行**不返回**，继续找真标题行（不拿首行兜底）。
   }
   return { title: null, line: null };
 }

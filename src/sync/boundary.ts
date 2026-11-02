@@ -6,7 +6,6 @@
  *
  * | 文件 / 目录 | 是否跨端 | 为什么 |
  * | --- | --- | --- |
- * | `state.json` 的 `titleOverrides` | ⚠️ 语义上要同步，**但键还是路径**（见下） | 用户在某个设备上改的显示名应当跟着走 |
  * | `state.json` 的 `expanded` / `lastOpened` / `ui.*` | ❌ | 设备本地界面态，重扫时会被本地覆盖 |
  * | `trash/` | ❌ | 回收站是**设备本地**的中间态 |
  * | `history/` | ❌ | 历史快照同理；且它天然只描述本机发生过的改动 |
@@ -24,9 +23,7 @@
  *   - `isSyncableMetaPath()` 把「哪些元数据路径永不跨端」写成可判定的函数；
  *   - `assertSafeSyncPayload()` 在**任何要落盘/外发**的入口拦住密钥材料与 `did` 映射。
  *
- * **`titleOverrides` 的已知缺口**：键是**路径**，两端各自改名会漂移（A 把 `a.md` 改名成
- * `b.md`、B 改 `titleOverride["a.md"]` → 两边对不上）。文档要求「改成按稳定 ID 关联」，
- * 那是 P1 建 `sync.json` 账本时一并做的改动，**这里先如实标记为已知缺口**，不假装已解决。
+ * 显示名不在这张表里：标题就是文件名，跟着文件本身同步（曾经的 `titleOverrides` 已删除）。
  */
 
 import { META_DIR, normalizePath } from "../fs/paths";
