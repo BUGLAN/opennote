@@ -3,7 +3,7 @@
  * 大小写、空查询。
  */
 import { describe, expect, it } from "vitest";
-import { searchCanvas } from "./search";
+import { canvasPlainText, searchCanvas } from "./search";
 import type { CanvasDocument } from "./types";
 
 const doc: CanvasDocument = {
@@ -55,5 +55,18 @@ describe("searchCanvas", () => {
     const matches = search("评");
     expect(matches.map((m) => `${m.kind}:${m.id}`)).toEqual(["node:g1", "edge:e1"]);
     expect(search("e").map((m) => m.id)).toEqual(["l1"]);
+  });
+});
+
+describe("canvasPlainText", () => {
+  it("取文本卡/网址/分组名/HTML 纯文本/边标签，跳过文件卡与未知节点，空白折成一个空格", () => {
+    const text = canvasPlainText(JSON.stringify(doc));
+    expect(text).toBe("先把问题列出来 https://example.com/PR 评审组 状态板 服务正常 展开评审");
+    expect(text).not.toContain("系统设计");
+    expect(text).not.toContain("embed");
+  });
+
+  it("读不出的 JSON 返回空串", () => {
+    expect(canvasPlainText("{ not json")).toBe("");
   });
 });

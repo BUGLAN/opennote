@@ -7,6 +7,7 @@
  */
 import type { CanvasDocument } from "./types";
 import { isCanvasFileNode, isCanvasGroupNode, isCanvasHtmlNode, isCanvasLinkNode, isCanvasTextNode } from "./types";
+import { parseCanvas } from "./jsonCanvas";
 import { htmlPlainText } from "../html/bundle";
 
 export interface CanvasSearchMatch {
@@ -63,4 +64,22 @@ export function searchCanvas(
     if (hit(edge.label, needle)) matches.push({ id: edge.id, kind: "edge", label: snippet(edge.label ?? "", needle) });
   }
   return matches;
+}
+
+/**
+ * 一篇画布的可搜索纯文本（全局搜索用，与 `searchCanvas` 同一匹配面，去掉文件卡 ——
+ * 引用别的笔记不等于画布「写了」那些字）：文本卡文字、网页卡 url、分组名、
+ * HTML 卡纯文本、边标签，按文档顺序以空格连成一行。读不出的 JSON 返回空串。
+ */
+export function canvasPlainText(content: string): string {
+  const { doc } = parseCanvas(content);
+  const parts: string[] = [];
+  for (const node of doc.nodes) {
+    if (isCanvasTextNode(node)) parts.push(node.text);
+    else if (isCanvasLinkNode(node)) parts.push(node.url);
+    else if (isCanvasGroupNode(node)) parts.push(node.label ?? "");
+    else if (isCanvasHtmlNode(node)) parts.push(htmlPlainText(node.html));
+  }
+  for (const edge of doc.edges) parts.push(edge.label ?? "");
+  return parts.join(" ").replace(/\s+/g, " ").trim();
 }

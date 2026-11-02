@@ -165,7 +165,7 @@ describe("isCanvasPath / isMaterializable（画布进物化判据，同步与导
     expect(isMaterializable("notes/a.md")).toBe(true);
     expect(isMaterializable("assets/pic.png")).toBe(true);
     expect(isMaterializable("notes/看板.canvas")).toBe(true);
-    // 曾经的缺口（docs/canvas/00 §7.2）：画布推得上去、拉不下来，就是因为这里不认它
+    // 曾经的缺口：画布推得上去、拉不下来，就是因为这里不认它
     expect(isMaterializable("src/main.ts")).toBe(false);
     expect(isMaterializable("package.json")).toBe(false);
     expect(isMaterializable("看布.canvasbak")).toBe(false);

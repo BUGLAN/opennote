@@ -19,15 +19,32 @@
   color: var(--ink);
 }
 
+/* 画布容器可聚焦（tabIndex=-1，接快捷键与剪贴板事件），聚焦本身不画框 */
+.canvas-root:focus {
+  outline: none;
+}
+
 .canvas-host {
   position: absolute;
   inset: 0;
 }
 
+/*
+ * React Flow 自带皮肤的默认色是写死的（缩放框 #3367d9 蓝、框选蓝点线、归属标识
+ * 白底……），不随主题与强调色走。凡是它留了变量的，一律在这里换成令牌。
+ */
 .canvas-flow {
   background: var(--paper);
   --xy-connectionline-stroke: var(--accent);
   --xy-connectionline-stroke-width: 2;
+  --xy-edge-stroke: var(--ink-3);
+  --xy-edge-stroke-selected: var(--accent);
+  --xy-handle-background-color: var(--paper-2);
+  --xy-handle-border-color: var(--ink-3);
+  --xy-resize-background-color: var(--accent);
+  --xy-selection-background-color: var(--accent-soft);
+  --xy-selection-border: 1px solid var(--accent-line);
+  --xy-attribution-background-color: transparent;
 }
 
 .canvas-flow .react-flow__pane {
@@ -42,12 +59,6 @@
 .canvas-flow .react-flow__background circle {
   fill: var(--ink-3);
   opacity: 0.45;
-}
-
-/* 框选矩形 */
-.canvas-flow .react-flow__selection {
-  background: var(--accent-soft);
-  border: 1px solid var(--accent-line);
 }
 
 /* React Flow 归属标识（开源用法要求保留，样式收敛到不抢眼） */
@@ -78,18 +89,24 @@
   color: var(--ink);
 }
 
+/*
+ * 选中 = 卡片自己那条边框换成实色强调色，再贴一圈同色 1px 把它加粗成 2px ——
+ * 两层同色同不透明度，看上去就是**一条**边框。不要再用「半透明描边 + 淡色光环」：
+ * 两种深浅并排，读起来是内外两道框。
+ */
 .react-flow__node.selected .canvas-card {
-  border-color: var(--accent-line);
-  box-shadow: var(--shadow-2), 0 0 0 2px var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-2), 0 0 0 1px var(--accent);
 }
 
-/* 有强调色的卡：描边与顶部标题条着色，选中态也不丢自己的颜色（ring 仍给选中信号） */
+/* 有强调色的卡：描边与顶部标题条着色，选中态沿用自己的颜色加粗（同上，一条边框） */
 .canvas-card.is-colored {
   border-color: var(--card-accent, var(--rule-strong));
 }
 
 .react-flow__node.selected .canvas-card.is-colored {
-  border-color: var(--card-accent, var(--accent-line));
+  border-color: var(--card-accent, var(--accent));
+  box-shadow: var(--shadow-2), 0 0 0 1px var(--card-accent, var(--accent));
 }
 
 .canvas-card.is-colored::before {
@@ -207,7 +224,11 @@
 
 /* ---- 连线桩 ---------------------------------------------------------
  * 可视 10px；::before 外扩命中区到 44px（触控目标的下限）。四边各一个，
- * 相邻两个的命中区不会互相重叠（卡片最小边长 ≥ 110px）。 */
+ * 相邻两个的命中区不会互相重叠（卡片最小边长 ≥ 110px）。
+ *
+ * 平时收起（每张卡四个小圈，满屏都是）：悬停卡片、卡片选中、正在拖连线时才亮出。
+ * 收起只是透明，命中区仍在 —— 指针移到卡片上它就出现，不存在「点不到」。
+ * 不能用 .connectionindicator 做强调：React Flow 给所有可连的桩常挂这个类。 */
 
 .canvas-flow .react-flow__handle.canvas-handle {
   width: 10px;
@@ -215,10 +236,22 @@
   border-radius: 50%;
   background: var(--paper-2);
   border: 1.5px solid var(--ink-3);
+  opacity: 0;
+  transition:
+    opacity var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+.canvas-flow .react-flow__node:hover .canvas-handle,
+.canvas-root:not(.is-multi-select) .canvas-flow .react-flow__node.selected .canvas-handle,
+.canvas-root.is-connecting .canvas-flow .canvas-handle {
+  opacity: 1;
 }
 
 .canvas-flow .react-flow__handle.canvas-handle:hover,
-.canvas-flow .react-flow__handle.canvas-handle.connectionindicator {
+.canvas-flow .react-flow__handle.canvas-handle.connectingfrom,
+.canvas-flow .react-flow__handle.canvas-handle.connectingto {
   border-color: var(--accent);
   background: var(--accent-soft);
 }
@@ -468,6 +501,12 @@
   color: var(--ink);
 }
 
+.canvas-tools__sep {
+  width: 1px;
+  margin: var(--s1) 0;
+  background: var(--rule);
+}
+
 /* ---- 引用笔记选择器 --------------------------------------------------- */
 
 .canvas-picker {
@@ -653,7 +692,7 @@
 }
 
 /* ---- 分组框 ------------------------------------------------------------
- * 虚线描边圆角容器（MVP 容器语义：可拖动/缩放/删除/连线，子节点不随动）。 */
+ * 虚线描边圆角容器（可拖动/缩放/删除/连线；拖动时框内卡片随动）。 */
 
 .canvas-card--group {
   background: color-mix(in srgb, var(--paper-3) 55%, transparent);
@@ -667,9 +706,15 @@
   border-color: var(--card-accent, var(--rule-strong));
 }
 
+/* 分组是虚线框：选中只给虚线换色，外面再套实线圈就成了一虚一实两道框 */
 .react-flow__node.selected .canvas-card--group {
-  border-color: var(--accent-line);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: none;
+}
+
+.react-flow__node.selected .canvas-card--group.is-colored {
+  border-color: var(--card-accent, var(--accent));
+  box-shadow: none;
 }
 
 .canvas-card__group-label {
@@ -814,8 +859,8 @@
   width: 10px;
   height: 10px;
   border-radius: 3px;
-  background: var(--accent);
-  border: 1.5px solid var(--paper-2);
+  background: var(--paper-2);
+  border: 1.5px solid var(--accent);
 }
 
 .canvas-flow .react-flow__resize-control.handle::before {
@@ -826,9 +871,11 @@
   background: transparent;
 }
 
-/* 边线把手保持可拖但不抢眼（默认的实色线在纸面上太重） */
+/* 边线把手保持可拖但不画线：选中信号由卡片自己的描边 + 光环给出，
+   再叠一圈缩放线就成了「卡片框 + 缩放框」两层边框。 */
 .canvas-flow .react-flow__resize-control.line {
   background: transparent;
+  border-color: transparent;
 }
 
 /* ---- MiniMap / Controls（@xyflow/react 自带件，令牌化 + 触控命中 ≥44px） */
@@ -843,8 +890,9 @@
   --xy-minimap-background-color: var(--paper-2);
   --xy-minimap-mask-background-color: color-mix(in srgb, var(--ink) 18%, transparent);
   --xy-minimap-mask-stroke-color: transparent;
-  --xy-minimap-node-background-color: var(--ink-3);
-  --xy-minimap-node-stroke-color: var(--paper-2);
+  /* 半透明：分组与框里的卡在小地图上叠出层次，浅色主题下也不再是一片实心深块 */
+  --xy-minimap-node-background-color: color-mix(in srgb, var(--ink-3) 38%, transparent);
+  --xy-minimap-node-stroke-color: transparent;
 }
 
 .canvas-flow .react-flow__controls {

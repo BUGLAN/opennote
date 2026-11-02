@@ -6,6 +6,8 @@
  * 不需要把剪贴板提升到应用状态。
  */
 import type { CanvasDocument, CanvasEdge, CanvasNode } from "./types";
+import { isCanvasFileNode, isCanvasGroupNode, isCanvasHtmlNode, isCanvasLinkNode, isCanvasTextNode } from "./types";
+import { htmlPlainText } from "../html/bundle";
 
 /** 剪贴板载荷：一组节点 + 连接这些节点的边。 */
 export interface CanvasClipboard {
@@ -14,10 +16,40 @@ export interface CanvasClipboard {
 }
 
 let storage: CanvasClipboard | null = null;
+/**
+ * 复制时一并写进系统剪贴板的纯文本。粘贴时拿系统剪贴板的文本与它比对：相同
+ * = 系统剪贴板还是这次复制的内容，粘内部载荷（卡片原样带连线）；不同 = 用户
+ * 后来在别处复制了东西，按系统内容建卡。不靠自定义 MIME，平台差异少一层。
+ */
+let systemText = "";
 
 /** 深拷贝写入（之后视图层的任何改动都碰不到剪贴板里的内容）。 */
-export function setClipboard(payload: CanvasClipboard): void {
+export function setClipboard(payload: CanvasClipboard, text = ""): void {
   storage = { nodes: payload.nodes.map((node) => clone(node)), edges: payload.edges.map((edge) => clone(edge)) };
+  systemText = text;
+}
+
+/** 上一次内部复制写进系统剪贴板的文本（没复制过为空串）。 */
+export function getClipboardSystemText(): string {
+  return systemText;
+}
+
+/**
+ * 载荷的可读文本（写进系统剪贴板，粘到别的应用里有意义）：按节点顺序取文本卡
+ * 文字、网页卡网址、分组名、文件卡路径、HTML 卡纯文本，空行分隔。
+ */
+export function clipboardPlainText(payload: CanvasClipboard): string {
+  const parts: string[] = [];
+  for (const node of payload.nodes) {
+    let text = "";
+    if (isCanvasTextNode(node)) text = node.text;
+    else if (isCanvasLinkNode(node)) text = node.url;
+    else if (isCanvasGroupNode(node)) text = node.label ?? "";
+    else if (isCanvasFileNode(node)) text = node.file;
+    else if (isCanvasHtmlNode(node)) text = htmlPlainText(node.html);
+    if (text.trim()) parts.push(text.trim());
+  }
+  return parts.join("\n\n");
 }
 
 /** 读出的是**副本**；空剪贴板返回 null。 */

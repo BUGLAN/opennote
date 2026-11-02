@@ -59,7 +59,10 @@ export interface CanvasLinkNode extends CanvasNodeBase {
   url: string;
 }
 
-/** 分组框：虚线容器，`label` 可选；不建模子节点归属（MVP 容器语义）。 */
+/**
+ * 分组框：虚线容器，`label` 可选。规范不建模子节点归属 —— 「完整框在里面」
+ * 即子节点（几何判定，拖分组时随动），落盘形态与 Obsidian 一致。
+ */
 export interface CanvasGroupNode extends CanvasNodeBase {
   type: "group";
   label?: string;

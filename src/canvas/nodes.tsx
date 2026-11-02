@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
-import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
+import { Handle, NodeResizer, Position, useStore, type Node, type NodeProps, type ReactFlowState } from "@xyflow/react";
 import {
   isCanvasColorPreset,
   isCanvasFileNode,
@@ -26,6 +26,8 @@ export const NODE_MIN_HEIGHT = 80;
  */
 export interface CanvasCardCallbacks {
   editText(id: string, text: string): void;
+  /** 这张卡是不是刚建出来、应当挂载即进入编辑（领走一次，之后恒为 false）。 */
+  takeAutoEdit(id: string): boolean;
   openNote(id: string): void;
   getNoteInfo(id: string): { title: string; exists: boolean } | null;
   /** 网页卡打开外链（桌面走主进程 openExternal，浏览器 window.open）。 */
@@ -59,6 +61,15 @@ function SideHandles(): ReactNode {
       <Handle id="left" type="source" position={Position.Left} className="canvas-handle" />
     </>
   );
+}
+
+/**
+ * 缩放柄只给「独选」的卡：一次选中一片卡片时，每张都挂四个角柄满屏都是，
+ * 而多选状态下也没有「一起缩放」这回事。
+ */
+function CardResizer({ selected }: { selected: boolean }): ReactNode {
+  const sole = useStore(selectedCountUpTo2) === 1;
+  return <NodeResizer isVisible={selected && sole} minWidth={NODE_MIN_WIDTH} minHeight={NODE_MIN_HEIGHT} />;
 }
 
 /** 预设色 → 卡片上的修饰类（色值由 canvas.css 的令牌给出，这里只有编号）。 */
@@ -99,6 +110,11 @@ export function TextCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
   const [draft, setDraft] = useState(text);
   const areaRef = useRef<HTMLTextAreaElement | null>(null);
 
+  // 双击空白 / 拖线建出的新卡：挂载即进编辑（effect 而非 useState 初值 —— StrictMode 下初值会算两次）
+  useEffect(() => {
+    if (data.cb.takeAutoEdit(node.id)) setEditing(true);
+  }, [data.cb, node.id]);
+
   useEffect(() => {
     if (editing) areaRef.current?.focus();
   }, [editing]);
@@ -110,7 +126,7 @@ export function TextCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
 
   return (
     <div ref={accentRef} className={cn("canvas-card", "canvas-card--text", colorClass(color), selected && "is-selected")}>
-      <NodeResizer isVisible={selected} minWidth={NODE_MIN_WIDTH} minHeight={NODE_MIN_HEIGHT} />
+      <CardResizer selected={selected} />
       <SideHandles />
       {editing ? (
         <textarea
@@ -187,7 +203,7 @@ export function FileCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
         data.cb.openNote(file);
       }}
     >
-      <NodeResizer isVisible={selected} minWidth={NODE_MIN_WIDTH} minHeight={NODE_MIN_HEIGHT} />
+      <CardResizer selected={selected} />
       <SideHandles />
       {imageReady ? (
         <>
@@ -244,6 +260,7 @@ export function LinkCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
         if (url) data.cb.openLink(url);
       }}
     >
+      <CardResizer selected={selected} />
       <SideHandles />
       <svg className="canvas-card__glyph" viewBox="0 0 16 16" aria-hidden="true">
         <circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
@@ -259,7 +276,10 @@ export function LinkCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
   );
 }
 
-/** 分组框：虚线描边圆角容器；左上 label 双击就地编辑。MVP 容器语义（子节点不随动）。 */
+/**
+ * 分组框：虚线描边圆角容器；左上 label 双击就地编辑。容器语义：拖动分组时，
+ * 完整框在里面的卡片跟着走（判定见 `geometry.ts` 的 `groupChildren`，由视图层执行）。
+ */
 export function GroupCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNode {
   const node = data.source;
   const color = typeof node.color === "string" ? node.color : undefined;
@@ -280,7 +300,7 @@ export function GroupCard({ data, selected }: NodeProps<CanvasCardNode>): ReactN
 
   return (
     <div ref={accentRef} className={cn("canvas-card", "canvas-card--group", colorClass(color), selected && "is-selected")}>
-      <NodeResizer isVisible={selected} minWidth={NODE_MIN_WIDTH} minHeight={NODE_MIN_HEIGHT} />
+      <CardResizer selected={selected} />
       <SideHandles />
       {editing ? (
         <input
@@ -313,6 +333,15 @@ export function GroupCard({ data, selected }: NodeProps<CanvasCardNode>): ReactN
       )}
     </div>
   );
+}
+
+/** 选中节点数，数到 2 即停（HtmlCard 只关心「是不是独选」，不必每次扫完整个画布）。 */
+function selectedCountUpTo2(state: ReactFlowState): number {
+  let count = 0;
+  for (const node of state.nodes) {
+    if (node.selected && ++count === 2) break;
+  }
+  return count;
 }
 
 /** HTML 卡标题：`<title>` > 首个 `<h1>` 的文字 > 「HTML」（内容变了标题跟着变）。 */
@@ -356,7 +385,9 @@ export function HtmlCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
     const text = htmlPlainText(html);
     return text.length > 140 ? `${text.slice(0, 140)}…` : text;
   }, [html]);
-  const live = selected && !editing && html.trim() !== "";
+  // 只在「独选」时挂预览：框选一片 HTML 卡不该同时起一排 iframe（最多一个活跃预览）
+  const soleSelection = useStore(selectedCountUpTo2) === 1;
+  const live = selected && soleSelection && !editing && html.trim() !== "";
 
   return (
     <div
@@ -368,7 +399,7 @@ export function HtmlCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
         setEditing(true);
       }}
     >
-      <NodeResizer isVisible={selected} minWidth={NODE_MIN_WIDTH} minHeight={NODE_MIN_HEIGHT} />
+      <CardResizer selected={selected} />
       <SideHandles />
       {editing ? (
         <textarea

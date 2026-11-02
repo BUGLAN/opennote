@@ -50,6 +50,7 @@ import { parseCanvas, serializeCanvas } from "../canvas/jsonCanvas";
 // HTML 页面的纯文本（搜索用）：只取文字，不让内联的 base64 / 脚本污染检索。
 import { htmlPlainText } from "../html/bundle";
 import { canvasesReferencing as findCanvasRefs, rewriteFileRefs } from "../canvas/refs";
+import { canvasPlainText } from "../canvas/search";
 import { sha256Hex } from "../lib/clip/hash";
 // 同步层（P0）：冲突账本与「有没有开同步」这个开关。**方向永远是 data/ → sync/**，
 // 不许反过来（`src/sync/*` 不 import `data/*`），否则两边互相 import 成环。
@@ -3296,10 +3297,21 @@ const plainCache = new Map<Id, string>();
 /** Bound the body cache so a huge notebook cannot grow it without limit (D05). */
 const PLAIN_CACHE_LIMIT = 400;
 
+/**
+ * 一条笔记参与搜索的正文（未转小写）：HTML 页面认文字不认标记，画布取卡片里的
+ * 文字（JSON 语法本身不进索引），其余按 Markdown 去标记。片段也从这里截。
+ */
+function searchableText(note: Note): string {
+  const kind = noteKind(note);
+  if (kind === "html") return htmlPlainText(note.content);
+  if (kind === "canvas") return canvasPlainText(note.content);
+  return stripMarkdown(note.content);
+}
+
 function plainOf(note: Note): string {
   const cached = plainCache.get(note.id);
   if (cached !== undefined) return cached;
-  const text = (noteKind(note) === "html" ? htmlPlainText(note.content) : stripMarkdown(note.content)).toLowerCase();
+  const text = searchableText(note).toLowerCase();
   plainCache.set(note.id, text);
   while (plainCache.size > PLAIN_CACHE_LIMIT) {
     const oldest = plainCache.keys().next();
@@ -3329,9 +3341,6 @@ export function searchNotes(query: string, options: { limit?: number; sort?: Sor
   const raw: { note: Note; score: number; position: number }[] = [];
 
   for (const note of Object.values(state.notes)) {
-    // 画布整体不参与搜索（标题也不算）：JSON 里搜出一串语法噪音没有意义，
-    // 画布内容的检索是另一件事。顺带保证了 plainCache 里永远不会有画布条目。
-    if (noteKind(note) === "canvas") continue;
     const title = note.title.toLowerCase();
     const tags = note.tags.join(" ").toLowerCase();
     const body = plainOf(note);
@@ -3360,7 +3369,11 @@ export function searchNotes(query: string, options: { limit?: number; sort?: Sor
   }
 
   const buildSnippet = (note: Note, position: number): string => {
-    const text = stripMarkdown(splitFrontMatter(note.content).body).replace(/\s+/g, " ").trim();
+    const text = (
+      noteKind(note) === "note" ? stripMarkdown(splitFrontMatter(note.content).body) : searchableText(note)
+    )
+      .replace(/\s+/g, " ")
+      .trim();
     if (!text) return "";
     if (position < 0) return text.slice(0, 96);
     const start = Math.max(0, position - 34);
@@ -3663,6 +3676,20 @@ export async function saveImage(
   if (!isMarkdownPath(notePath)) {
     throw new Error(`saveImage 的第三参必须是笔记路径（如 归档/foo.md），收到的是「${notePath || "(空)"}」`);
   }
+  const path = await saveImageAsset(blob, suggestedName);
+  // 引用从**笔记所在目录**算到附件路径（`relativeAssetRef`，唯一产地），不在这里手拼一层前缀：
+  // 笔记嵌在 `操作系统/产品/` 里就该是 `../../.assets/x.png`，少一层就是裂图。
+  // 目标串再过一次 `markdownRef`：路径带空格时写成 `<…>`，否则会被**空格截断**、图片不渲染。
+  return { path, markdown: markdownRef(relativeAssetRef(notePath, path)) };
+}
+
+/**
+ * 把一张图写进共享附件目录，返回**工作区根相对路径**（`.assets/<uuid>.png`）。
+ * `saveImage` 的落盘那一半；画布拖入图片也走这里 —— 画布的 file 卡存的正是这种
+ * 根相对路径，不需要按笔记目录换算引用。永久删除时 `sharedAssetFilesIn` 认得
+ * 画布 JSON 里的 `".assets/…"`，所以画布引用的图不会被别的笔记的清算误删。
+ */
+export async function saveImageAsset(blob: Blob, suggestedName: string): Promise<string> {
   const target = requireBackend();
   const dir = assetsDirFor();
   /*
@@ -3674,10 +3701,7 @@ export async function saveImage(
   const candidate = joinPath(dir, await assetFinalName(bytes, suggestedName));
   const path = await reuseOrDedupe(target, candidate, bytes);
   if (!(await target.exists(path))) await target.writeBytes(path, bytes);
-  // 引用从**笔记所在目录**算到附件路径（`relativeAssetRef`，唯一产地），不在这里手拼一层前缀：
-  // 笔记嵌在 `操作系统/产品/` 里就该是 `../../.assets/x.png`，少一层就是裂图。
-  // 目标串再过一次 `markdownRef`：路径带空格时写成 `<…>`，否则会被**空格截断**、图片不渲染。
-  return { path, markdown: markdownRef(relativeAssetRef(notePath, path)) };
+  return path;
 }
 
 /**

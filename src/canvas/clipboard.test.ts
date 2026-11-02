@@ -2,7 +2,17 @@
  * 剪贴板纯逻辑测试：选区收集（边随动）、副本 id 重生成、坐标偏移、深拷贝隔离。
  */
 import { describe, expect, it } from "vitest";
-import { clipboardBounds, collectSelection, getClipboard, materializeClipboard, setClipboard, type ClipboardIdGen } from "./clipboard";
+import {
+  clipboardBounds,
+  clipboardPlainText,
+  collectSelection,
+  getClipboard,
+  getClipboardSystemText,
+  materializeClipboard,
+  setClipboard,
+  type CanvasClipboard,
+  type ClipboardIdGen,
+} from "./clipboard";
 import type { CanvasDocument } from "./types";
 
 /** 确定 id 序列的生成器：测试里不依赖随机。 */
@@ -124,5 +134,28 @@ describe("clipboardBounds", () => {
 
   it("空载荷返回 null", () => {
     expect(clipboardBounds({ nodes: [], edges: [] })).toBeNull();
+  });
+});
+
+describe("clipboardPlainText / 系统剪贴板标记", () => {
+  it("按节点顺序取可读文本，空行分隔；空文字的节点跳过", () => {
+    const payload = {
+      nodes: [
+        { id: "t", type: "text", x: 0, y: 0, width: 1, height: 1, text: " 第一张 " },
+        { id: "e", type: "text", x: 0, y: 0, width: 1, height: 1, text: "  " },
+        { id: "l", type: "link", x: 0, y: 0, width: 1, height: 1, url: "https://example.com" },
+        { id: "f", type: "file", x: 0, y: 0, width: 1, height: 1, file: "读书/a.md" },
+        { id: "h", type: "html", x: 0, y: 0, width: 1, height: 1, html: "<p>页面</p>" },
+      ],
+      edges: [],
+    } as CanvasClipboard;
+    expect(clipboardPlainText(payload)).toBe("第一张\n\nhttps://example.com\n\n读书/a.md\n\n页面");
+  });
+
+  it("setClipboard 记下写进系统剪贴板的文本，粘贴时据此判断系统剪贴板有没有被别处覆盖", () => {
+    setClipboard({ nodes: [], edges: [] }, "标记文本");
+    expect(getClipboardSystemText()).toBe("标记文本");
+    setClipboard({ nodes: [], edges: [] });
+    expect(getClipboardSystemText()).toBe("");
   });
 });

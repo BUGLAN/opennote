@@ -210,13 +210,26 @@ describe("扫描与身份", () => {
     expect(testBackend.files.get("看板 副本.canvas")).toBe(copy?.content);
   });
 
-  it("searchNotes 对画布整体跳过（标题也不参与搜索）", () => {
+  it("searchNotes 搜得到画布：标题与卡片文字参与，JSON 语法与文件卡引用不参与", () => {
     const canvas = getLibrary().notes["看板.canvas"];
-    updateNoteContent(canvas!.id, canvasDoc("zzz独特needle.md"), { immediate: true });
-    expect(searchNotes("看板")).toEqual([]);
+    const content = serializeCanvas({
+      nodes: [
+        { id: "card1", type: "file", x: 0, y: 0, width: 240, height: 120, file: "zzz独特needle.md" },
+        { id: "card2", type: "text", x: 0, y: 200, width: 240, height: 120, text: "本周**评审**要点" },
+      ],
+      edges: [{ id: "e1", fromNode: "card1", toNode: "card2", label: "延伸阅读" }],
+    });
+    updateNoteContent(canvas!.id, content, { immediate: true });
+    expect(searchNotes("看板").map((hit) => hit.note.id)).toEqual(["看板.canvas"]);
+    const hit = searchNotes("评审")[0];
+    expect(hit?.note.id).toBe("看板.canvas");
+    expect(hit?.snippet).toContain("本周**评审**要点");
+    expect(searchNotes("延伸阅读").map((entry) => entry.note.id)).toEqual(["看板.canvas"]);
+    // 文件卡只是引用别的笔记，路径不算画布写下的字；JSON 键名也不进索引
     expect(searchNotes("zzz独特needle")).toEqual([]);
+    expect(searchNotes("fromNode")).toEqual([]);
     // 对照：普通笔记仍可搜到（证明不是搜索坏了）。
-    expect(searchNotes("内容").map((hit) => hit.note.id)).toEqual(["a.md"]);
+    expect(searchNotes("内容").map((entry) => entry.note.id)).toEqual(["a.md"]);
   });
 
   it("shouldAutoRename 拦画布；编辑画布不会排自动改名定时器", () => {

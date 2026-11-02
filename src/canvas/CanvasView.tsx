@@ -15,27 +15,34 @@ import {
   type Connection,
   type EdgeChange,
   type EdgeMarker,
+  type FinalConnectionState,
   type NodeChange,
+  type NodePositionChange,
   type Viewport,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import "../styles/canvas.css";
-import { getCanvasViewport, setCanvasViewport } from "../data/library";
+import { imageNameForPaste, isImageName } from "../data/assets";
+import { getCanvasViewport, saveImageAsset, setCanvasViewport } from "../data/library";
 import { askText } from "../lib/dialogs";
 import { extractHeadings } from "../lib/outline";
 import { notify } from "../lib/toast";
+import { cn } from "../lib/utils";
 import { desktopBridge } from "../desktop/bridge";
 import { registerActiveCanvas, unregisterActiveCanvas } from "./controller";
 import { newCanvasEdgeId, newCanvasNodeId } from "./ids";
 import { createUndoHistory } from "./history";
 import {
   clipboardBounds,
+  clipboardPlainText,
   collectSelection,
   getClipboard,
+  getClipboardSystemText,
   materializeClipboard,
   setClipboard,
   type CanvasClipboard,
 } from "./clipboard";
+import { classifyPastedText, groupBoundsAround, groupChildren, placeForConnectionDrop, type CanvasRect } from "./geometry";
 import { searchCanvas, type CanvasSearchMatch } from "./search";
 import { CanvasCardEdgeView, type CanvasCardEdge } from "./edges";
 import { FileCard, GroupCard, HtmlCard, LinkCard, TextCard, UnknownCard, type CanvasCardCallbacks, type CanvasCardNode } from "./nodes";
@@ -80,7 +87,11 @@ export interface CanvasViewProps {
   getNoteContent?(id: string): string | null;
 }
 
-const nodeTypes = { text: TextCard, file: FileCard, group: GroupCard, link: LinkCard, html: HtmlCard, canvasUnknown: UnknownCard };
+/*
+ * 分组的渲染 key 不叫 "group"：React Flow 给 .react-flow__node-group 自带一套默认皮肤
+ * （实线黑框、浅灰底、10px 内边距、3px 圆角），会叠在分组卡外面。
+ */
+const nodeTypes = { text: TextCard, file: FileCard, canvasGroup: GroupCard, link: LinkCard, html: HtmlCard, canvasUnknown: UnknownCard };
 const edgeTypes = { canvasCard: CanvasCardEdgeView };
 
 /** 新卡默认尺寸（JSON Canvas 的宽高是节点数据的一部分，落盘可见）。 */
@@ -111,6 +122,16 @@ interface CanvasMenuState {
   count: number;
 }
 
+/**
+ * 粘贴文字建卡的高度估算：按卡宽约 16 个汉字一行折行，行高约 22px，
+ * 夹在默认高度与 480 之间（再长就让卡内滚动，不建一张顶天立地的卡）。
+ */
+function estimateTextCardHeight(text: string): number {
+  let lines = 0;
+  for (const line of text.split("\n")) lines += Math.max(1, Math.ceil(line.length / 16));
+  return Math.min(480, Math.max(NEW_TEXT_CARD_SIZE.height, 40 + lines * 22));
+}
+
 /** 坐标取两位小数：拖动落定的浮点误差不再无限累进，往返序列化保持稳定。 */
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
@@ -125,10 +146,10 @@ function fieldNumber(value: unknown): number | undefined {
 }
 
 /** 契约节点类型 → 本视图的渲染组件 key。未知类型一律走占位卡片。 */
-function nodeKindOf(node: CanvasNode): "text" | "file" | "group" | "link" | "html" | "canvasUnknown" {
+function nodeKindOf(node: CanvasNode): "text" | "file" | "canvasGroup" | "link" | "html" | "canvasUnknown" {
   if (node.type === "text") return "text";
   if (node.type === "file") return "file";
-  if (node.type === "group") return "group";
+  if (node.type === "group") return "canvasGroup";
   if (node.type === "link") return "link";
   if (node.type === "html") return "html";
   return "canvasUnknown";
@@ -143,7 +164,21 @@ function toFlowNode(node: CanvasNode, cb: CanvasCardCallbacks, selected: boolean
     width: fieldNumber(raw.width),
     height: fieldNumber(raw.height),
     selected: selected || undefined,
+    // 分组压到连线层下面：React Flow 默认线在所有节点之下，分组的半透明底色会把
+    // 框里卡片之间的连线整片罩淡。卡片仍在连线之上（同 Obsidian）；分组之间照旧按数组序。
+    zIndex: isCanvasGroupNode(node) ? -1 : undefined,
     data: { source: node, cb },
+  };
+}
+
+/** 运行时节点的几何（实测尺寸优先，与 docFromFlow 落盘同一口径）。 */
+function rectOf(node: CanvasCardNode): CanvasRect {
+  return {
+    id: node.id,
+    x: node.position.x,
+    y: node.position.y,
+    width: node.measured?.width ?? node.width ?? 0,
+    height: node.measured?.height ?? node.height ?? 0,
   };
 }
 
@@ -155,16 +190,19 @@ function toFlowNodes(doc: CanvasDocument, selected: Set<string>, cb: CanvasCardC
  * 边的箭头端 → React Flow marker 描述（渲染语义：fromEnd 缺省 none、toEnd 缺省
  * arrow，见 effectiveEdgeEnds）。marker 颜色吃 CSS 变量字符串：预设色引用
  * canvas.css 的令牌，非预设色原样传值 —— marker 定义渲染在流 DOM 内部的 <defs>
- * 里，:root 级令牌照样级联得到。
+ * 里，:root 级令牌照样级联得到。颜色规则与 canvas.css 的线色一致：有自己颜色的
+ * 边始终用它；无色边平时 ink-3，选中时随线一起变强调色（箭头不能落在后面）。
  */
-function edgeMarkers(edge: CanvasEdge): { markerStart?: EdgeMarker; markerEnd?: EdgeMarker } {
+function edgeMarkers(edge: CanvasEdge, selected: boolean): { markerStart?: EdgeMarker; markerEnd?: EdgeMarker } {
   const ends = effectiveEdgeEnds(edge);
   const color =
     typeof edge.color === "string"
       ? isCanvasColorPreset(edge.color)
         ? `var(--canvas-c-${edge.color})`
         : edge.color
-      : "var(--ink-3)";
+      : selected
+        ? "var(--accent)"
+        : "var(--ink-3)";
   const out: { markerStart?: EdgeMarker; markerEnd?: EdgeMarker } = {};
   if (ends.fromEnd === "arrow") out.markerStart = { type: MarkerType.ArrowClosed, color, orient: "auto" };
   if (ends.toEnd === "arrow") out.markerEnd = { type: MarkerType.ArrowClosed, color, orient: "auto" };
@@ -180,7 +218,6 @@ function toFlowEdge(edge: CanvasEdge, selected: boolean, onLabelChange: (id: str
     targetHandle: edge.toSide ?? null,
     type: "canvasCard",
     selected: selected || undefined,
-    ...edgeMarkers(edge),
     data: { source: edge, onLabelChange },
   };
 }
@@ -229,6 +266,21 @@ function docFromFlow(nodes: CanvasCardNode[], edges: CanvasCardEdge[]): CanvasDo
       return next;
     }),
   };
+}
+
+/**
+ * 问一个网页卡网址（新建与「修改网址」共用）：只收 http(s)，别的协议在打开时
+ * 也会被主进程拒掉，不如在入口就说清楚。取消或不合法返回 null。
+ */
+async function askLinkUrl(title: string, value: string): Promise<string | null> {
+  const answer = await askText({ title, label: "网址", value, placeholder: "https://example.com" });
+  if (answer == null) return null;
+  const url = answer.trim();
+  if (!/^https?:\/\//i.test(url)) {
+    notify("网址需要以 http:// 或 https:// 开头");
+    return null;
+  }
+  return url;
 }
 
 /** 键盘快捷键守卫：焦点在输入控件里时不拦截（编辑中的 textarea 不归画布管）。 */
@@ -327,8 +379,16 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
     [applyAndEmit],
   );
 
+  /** 刚建出、挂载即进入编辑的文本卡 id（双击空白 / 拖线建卡），卡片挂载时领走一次。 */
+  const pendingEditRef = useRef<string | null>(null);
+
   const cardCallbacks = useMemo<CanvasCardCallbacks>(
     () => ({
+      takeAutoEdit: (id) => {
+        if (pendingEditRef.current !== id) return false;
+        pendingEditRef.current = null;
+        return true;
+      },
       editText: (id, text) =>
         applyAndEmit((nodes) => [
           nodes.map((node) =>
@@ -405,11 +465,20 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
   const [colorMenuOpen, setColorMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [subpathTarget, setSubpathTarget] = useState<{ nodeId: string; file: string } | null>(null);
+  /** 正在拖一条连线（新建或重连）：期间所有卡片亮出连线桩，方便找落点。 */
+  const [connecting, setConnecting] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIndex, setSearchIndex] = useState(0);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
+  /** 指针在画布上的最后位置（屏幕坐标）：系统粘贴落在指针处；离开画布即清空。 */
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  /** 正在拖边的端点重连：React Flow 会在 onReconnectEnd 之前先调 onConnectEnd，靠它区分。 */
+  const reconnectingRef = useRef(false);
+  /** 本次拖动里跟着分组走的子节点（拖动开始时按几何算一次，落定清空）。 */
+  const dragChildrenRef = useRef<Set<string> | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   /** 以一份文本重建流状态（外部内容到达 / 撤销 / 重做共用），返回范式化后的文本。 */
@@ -525,8 +594,54 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
   }, [instance, props.canvasId]);
 
   /* ---- 增删改：一切结构性变更都走 applyAndEmit → serializeCanvas → onContentChange ---- */
+  /* ---- 分组是容器：拖分组时，完整框在里面的卡片跟着走 ---- */
+  const onNodeDragStart = useCallback(
+    (_event: MouseEvent | TouchEvent | ReactMouseEvent, _node: CanvasCardNode, dragged: CanvasCardNode[]) => {
+      const groupIds = new Set(dragged.filter((node) => isCanvasGroupNode(node.data.source)).map((node) => node.id));
+      if (groupIds.size === 0) {
+        dragChildrenRef.current = null;
+        return;
+      }
+      const children = groupChildren(
+        nodesRef.current.map(rectOf),
+        groupIds,
+        new Set(dragged.map((node) => node.id)),
+      );
+      dragChildrenRef.current = children.size > 0 ? children : null;
+    },
+    [],
+  );
+
+  const onNodeDragStop = useCallback(() => {
+    dragChildrenRef.current = null;
+  }, []);
+
+  /** 拖动中的位移同步给分组子节点：同一次拖动所有被拖节点位移相同，取任一个算增量。 */
+  const withGroupChildren = useCallback((changes: NodeChange<CanvasCardNode>[]): NodeChange<CanvasCardNode>[] => {
+    const children = dragChildrenRef.current;
+    if (!children) return changes;
+    const lead = changes.find(
+      (change): change is NodePositionChange => change.type === "position" && change.position != null && !children.has(change.id),
+    );
+    if (!lead?.position) return changes;
+    const byId = new Map(nodesRef.current.map((node) => [node.id, node]));
+    const before = byId.get(lead.id);
+    if (!before) return changes;
+    const dx = lead.position.x - before.position.x;
+    const dy = lead.position.y - before.position.y;
+    if (dx === 0 && dy === 0) return changes;
+    const follow: NodePositionChange[] = [];
+    for (const id of children) {
+      const node = byId.get(id);
+      if (!node) continue;
+      follow.push({ type: "position", id, position: { x: node.position.x + dx, y: node.position.y + dy }, dragging: lead.dragging });
+    }
+    return [...changes, ...follow];
+  }, []);
+
   const onNodesChange = useCallback(
-    (changes: NodeChange<CanvasCardNode>[]) => {
+    (incoming: NodeChange<CanvasCardNode>[]) => {
+      const changes = withGroupChildren(incoming);
       const nodes = applyNodeChanges(changes, nodesRef.current);
       nodesRef.current = nodes;
       setRfNodes(nodes);
@@ -535,7 +650,7 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
       const removed = changes.some((change) => change.type === "remove");
       if (dragSettled || resizeSettled || removed) emit();
     },
-    [emit],
+    [emit, withGroupChildren],
   );
 
   const onEdgesChange = useCallback(
@@ -631,21 +746,14 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
         const groups = fresh.filter((node) => isCanvasGroupNode(node.data.source));
         const rest = fresh.filter((node) => !isCanvasGroupNode(node.data.source));
         const freshEdges = materialized.edges.map((edge) => toFlowEdge(edge, true, onLabelChange));
-        return [[...groups, ...nodes, ...rest], [...edges, ...freshEdges]];
+        // 选区换成贴出来的这一批（原件取消选中，紧接着拖动/删除才落在副本上）
+        const kept = nodes.map((node) => (node.selected ? { ...node, selected: false } : node));
+        const keptEdges = edges.map((edge) => (edge.selected ? { ...edge, selected: false } : edge));
+        return [[...groups, ...kept, ...rest], [...keptEdges, ...freshEdges]];
       });
     },
     [applyAndEmit, cardCallbacks, flowCenter, onLabelChange],
   );
-
-  const copySelection = useCallback(() => {
-    const payload = selectionPayload();
-    if (payload) setClipboard(payload);
-  }, [selectionPayload]);
-
-  const pasteClipboard = useCallback(() => {
-    const payload = getClipboard();
-    if (payload) insertPayload(payload, "center");
-  }, [insertPayload]);
 
   const duplicateSelection = useCallback(() => {
     const payload = selectionPayload();
@@ -772,25 +880,63 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
         y: Math.round(center.y - height / 2),
       };
       applyAndEmit((nodes, edges) => {
-        // 分组垫底（数组序 = z 序），其余追加。
+        // 分组垫底（数组序 = z 序），其余追加；选区只留新卡（连着粘贴几次不会越选越多）。
         const flow = toFlowNode(placed, cardCallbacks, true);
-        return [isCanvasGroupNode(placed) ? [flow, ...nodes] : [...nodes, flow], edges];
+        const rest = nodes.map((item) => (item.selected ? { ...item, selected: false } : item));
+        return [isCanvasGroupNode(placed) ? [flow, ...rest] : [...rest, flow], edges];
       });
     },
     [applyAndEmit, cardCallbacks, flowCenter],
   );
 
-  const addTextCard = useCallback(() => {
-    const id = newCanvasNodeId(nodesRef.current.map((node) => node.id));
-    addNodeAtCenter({
-      id,
-      type: "text",
-      x: 0,
-      y: 0,
-      ...NEW_TEXT_CARD_SIZE,
-      text: "",
-    } satisfies CanvasTextNode);
-  }, [addNodeAtCenter]);
+  /** 新建文本卡：空卡建出来直接进编辑（不用再双击一次）；带文字的（粘贴）按行数估个高度。 */
+  const addTextCard = useCallback(
+    (at?: { x: number; y: number }, text = "") => {
+      const id = newCanvasNodeId(nodesRef.current.map((node) => node.id));
+      if (!text) pendingEditRef.current = id;
+      addNodeAtCenter(
+        {
+          id,
+          type: "text",
+          x: 0,
+          y: 0,
+          width: NEW_TEXT_CARD_SIZE.width,
+          height: text ? estimateTextCardHeight(text) : NEW_TEXT_CARD_SIZE.height,
+          text,
+        } satisfies CanvasTextNode,
+        at,
+      );
+    },
+    [addNodeAtCenter],
+  );
+
+  /* ---- 从连线桩拖到空白处松手：就地建一张文本卡并连上 ---- */
+  const onConnectEnd = useCallback(
+    (event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
+      setConnecting(false);
+      if (reconnectingRef.current || state.isValid || !state.fromNode) return;
+      const point = "changedTouches" in event ? event.changedTouches[0] : event;
+      if (!point) return;
+      // 只认松手在空白画布上：落在别的卡片、小地图、缩放按钮上都不建卡
+      const under = document.elementFromPoint(point.clientX, point.clientY);
+      if (!(under instanceof Element) || !under.closest(".react-flow__pane")) return;
+      const fromNode = state.fromNode.id;
+      const fromSide = (state.fromHandle?.id ?? state.fromPosition ?? "right") as CanvasNodeSide;
+      const flowPoint = instance.screenToFlowPosition({ x: point.clientX, y: point.clientY });
+      const placed = placeForConnectionDrop(fromSide, flowPoint, NEW_TEXT_CARD_SIZE);
+      const nodeId = newCanvasNodeId(nodesRef.current.map((node) => node.id));
+      const edgeId = newCanvasEdgeId(edgesRef.current.map((edge) => edge.id));
+      const card: CanvasTextNode = { id: nodeId, type: "text", x: placed.x, y: placed.y, ...NEW_TEXT_CARD_SIZE, text: "" };
+      const edge: CanvasEdge = { id: edgeId, fromNode, fromSide, toNode: nodeId, toSide: placed.toSide };
+      pendingEditRef.current = nodeId;
+      // 建卡 + 连线是一次变更（一步撤销）
+      applyAndEmit((nodes, edges) => [
+        [...nodes.map((node) => (node.selected ? { ...node, selected: false } : node)), toFlowNode(card, cardCallbacks, true)],
+        [...edges, toFlowEdge(edge, false, onLabelChange)],
+      ]);
+    },
+    [applyAndEmit, cardCallbacks, instance, onLabelChange],
+  );
 
   const addFileCard = useCallback(
     (noteId: string, at?: { x: number; y: number }) => {
@@ -834,31 +980,61 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
     } satisfies CanvasHtmlNode);
   }, [addNodeAtCenter]);
 
+  const placeLinkCard = useCallback(
+    (url: string, at?: { x: number; y: number }) => {
+      const id = newCanvasNodeId(nodesRef.current.map((node) => node.id));
+      addNodeAtCenter(
+        {
+          id,
+          type: "link",
+          x: 0,
+          y: 0,
+          ...NEW_LINK_CARD_SIZE,
+          url,
+        } satisfies CanvasLinkNode,
+        at,
+      );
+    },
+    [addNodeAtCenter],
+  );
+
   const addLinkCard = useCallback(() => {
     void (async () => {
-      const answer = await askText({
-        title: "新建网页卡",
-        label: "网址",
-        value: "https://",
-        placeholder: "https://example.com",
-      });
-      if (answer == null) return;
-      const url = answer.trim();
-      if (!/^https:\/\//i.test(url)) {
-        notify("网址需要以 http:// 或 https:// 开头");
-        return;
-      }
-      const id = newCanvasNodeId(nodesRef.current.map((node) => node.id));
-      addNodeAtCenter({
-        id,
-        type: "link",
-        x: 0,
-        y: 0,
-        ...NEW_LINK_CARD_SIZE,
-        url,
-      } satisfies CanvasLinkNode);
+      const url = await askLinkUrl("新建网页卡", "https://");
+      if (url != null) placeLinkCard(url);
     })();
-  }, [addNodeAtCenter]);
+  }, [placeLinkCard]);
+
+  /* ---- 框选 → 打包成分组：新分组恰好框住所选，垫在最底层 ---- */
+  const groupSelection = useCallback(() => {
+    const picked = nodesRef.current.filter((node) => node.selected);
+    const bounds = groupBoundsAround(picked.map(rectOf));
+    if (!bounds) return;
+    const id = newCanvasNodeId(nodesRef.current.map((node) => node.id));
+    const group: CanvasGroupNode = { id, type: "group", ...bounds };
+    applyAndEmit((nodes, edges) => [
+      [toFlowNode(group, cardCallbacks, true), ...nodes.map((node) => (node.selected ? { ...node, selected: false } : node))],
+      edges.map((edge) => (edge.selected ? { ...edge, selected: false } : edge)),
+    ]);
+  }, [applyAndEmit, cardCallbacks]);
+
+  const selectAll = useCallback(() => {
+    const nodes = nodesRef.current.map((node) => (node.selected ? node : { ...node, selected: true }));
+    const edges = edgesRef.current.map((edge) => (edge.selected ? edge : { ...edge, selected: true }));
+    nodesRef.current = nodes;
+    edgesRef.current = edges;
+    setRfNodes(nodes);
+    setRfEdges(edges);
+  }, []);
+
+  /* ---- 空白处双击：就地建一张文本卡并进入编辑 ---- */
+  const onHostDoubleClick = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (!(event.target instanceof Element) || !event.target.classList.contains("react-flow__pane")) return;
+      addTextCard(instance.screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+    },
+    [addTextCard, instance],
+  );
 
   /* ---- 侧栏笔记拖入（拖拽契约见 CANVAS_NOTE_DRAG_MIME） ---- */
   const onHostDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
@@ -869,21 +1045,116 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
     }
   }, []);
 
+  /** 系统拖进来的图片：写进共享附件目录，按落点逐张建图片卡（错开一点，不叠成一张）。 */
+  const dropImageFiles = useCallback(
+    async (images: File[], at: { x: number; y: number }) => {
+      let index = 0;
+      for (const file of images) {
+        try {
+          const path = await saveImageAsset(file, file.name || imageNameForPaste(file));
+          addFileCard(path, { x: at.x + index * PASTE_OFFSET, y: at.y + index * PASTE_OFFSET });
+          index += 1;
+        } catch (error) {
+          notify("图片没有存进笔记本：" + (error instanceof Error ? error.message : String(error)), { kind: "danger" });
+        }
+      }
+    },
+    [addFileCard],
+  );
+
   const onHostDrop = useCallback(
     (event: ReactDragEvent<HTMLDivElement>) => {
+      const position = instance.screenToFlowPosition({ x: event.clientX, y: event.clientY });
       const noteId = event.dataTransfer.getData(CANVAS_NOTE_DRAG_MIME);
-      if (!noteId) return;
+      if (!noteId) {
+        // 不含图片就不拦：放给 App 的全局拖入导入（Markdown 等照旧进笔记本）。
+        // 含图片则由画布接管 —— preventDefault 让全局那条跳过，其余文件如实告知被忽略。
+        const files = Array.from(event.dataTransfer.files);
+        const images = files.filter((file) => isImageName(file.name, file.type));
+        if (images.length === 0) return;
+        event.preventDefault();
+        if (images.length < files.length) notify("画布只接图片，其余文件已忽略");
+        void dropImageFiles(images, position);
+        return;
+      }
       event.preventDefault();
       const info = propsRef.current.getNoteInfo(noteId);
       if (!info || !info.exists) {
         notify("拖入的笔记在当前工作区里不存在");
         return;
       }
-      const position = instance.screenToFlowPosition({ x: event.clientX, y: event.clientY });
       addFileCard(noteId, position);
     },
-    [addFileCard, instance],
+    [addFileCard, dropImageFiles, instance],
   );
+
+  /** 系统粘贴的落点：指针在画布上就落在指针处，否则视口中心。 */
+  const pastePoint = useCallback((): { x: number; y: number } => {
+    const pointer = pointerRef.current;
+    return pointer ? instance.screenToFlowPosition(pointer) : flowCenter();
+  }, [flowCenter, instance]);
+
+  /*
+   * ---- 复制 / 剪切 / 粘贴：走 copy / cut / paste 事件，不拦 Ctrl+C/V 的 keydown ----
+   * 拦了 keydown，浏览器就不再派发剪贴板事件、也读不到系统剪贴板。焦点在画布里
+   * （.canvas-root 可聚焦，点空白处也算）且不在输入控件里时才接管。
+   */
+  useEffect(() => {
+    const owns = (): boolean => {
+      const root = rootRef.current;
+      const active = document.activeElement;
+      return root != null && active != null && root.contains(active) && !isEditableTarget(active);
+    };
+    /** 页面上有选中的文字（比如 HTML 卡的说明行）就让浏览器照常复制文字。 */
+    const hasTextSelection = () => {
+      const selection = window.getSelection();
+      return selection != null && !selection.isCollapsed;
+    };
+    const copyOut = (event: ClipboardEvent): boolean => {
+      const payload = selectionPayload();
+      if (!payload || payload.nodes.length === 0) return false;
+      const text = clipboardPlainText(payload);
+      setClipboard(payload, text);
+      event.clipboardData?.setData("text/plain", text);
+      event.preventDefault();
+      return true;
+    };
+    const onCopy = (event: ClipboardEvent) => {
+      if (owns() && !hasTextSelection()) copyOut(event);
+    };
+    const onCut = (event: ClipboardEvent) => {
+      if (owns() && !hasTextSelection() && copyOut(event)) deleteSelection();
+    };
+    const onPaste = (event: ClipboardEvent) => {
+      if (!owns()) return;
+      event.preventDefault();
+      const data = event.clipboardData;
+      const internal = getClipboard();
+      const images = data ? Array.from(data.files).filter((file) => isImageName(file.name, file.type)) : [];
+      if (images.length > 0) {
+        void dropImageFiles(images, pastePoint());
+        return;
+      }
+      const text = data?.getData("text/plain") ?? "";
+      // 系统剪贴板还是上次画布内复制的那份 → 粘卡片本身（带连线、颜色、尺寸）
+      if (internal && text === getClipboardSystemText()) {
+        insertPayload(internal, "center");
+        return;
+      }
+      const pasted = classifyPastedText(text);
+      if (pasted?.kind === "link") placeLinkCard(pasted.url, pastePoint());
+      else if (pasted?.kind === "text") addTextCard(pastePoint(), pasted.text);
+      else if (internal) insertPayload(internal, "center");
+    };
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("cut", onCut);
+    document.addEventListener("paste", onPaste);
+    return () => {
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("cut", onCut);
+      document.removeEventListener("paste", onPaste);
+    };
+  }, [addTextCard, deleteSelection, dropImageFiles, insertPayload, pastePoint, placeLinkCard, selectionPayload]);
 
   /* ---- 画布内搜索 ---- */
   const noteTitleForSearch = useCallback(
@@ -960,14 +1231,14 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
         event.preventDefault();
         event.stopPropagation();
         redo();
-      } else if (key === "c") {
+      } else if (key === "a") {
         event.preventDefault();
         event.stopPropagation();
-        copySelection();
-      } else if (key === "v") {
+        selectAll();
+      } else if (key === "g") {
         event.preventDefault();
         event.stopPropagation();
-        pasteClipboard();
+        groupSelection();
       } else if (key === "d") {
         event.preventDefault();
         event.stopPropagation();
@@ -978,7 +1249,7 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
         openSearch();
       }
     },
-    [copySelection, duplicateSelection, openSearch, pasteClipboard, redo, undo],
+    [duplicateSelection, groupSelection, openSearch, redo, selectAll, undo],
   );
 
   /* ---- 菜单目标与动作 ---- */
@@ -992,6 +1263,10 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
   const menuFileSubpath =
     menuTargetNode && menuTargetNode.data.source.type === "file"
       ? (menuTargetNode.data.source as CanvasFileNode).subpath ?? null
+      : null;
+  const menuLinkUrl =
+    menuTargetNode && menuTargetNode.data.source.type === "link"
+      ? (menuTargetNode.data.source as CanvasLinkNode).url
       : null;
   const menuTargetEdge =
     menu?.edgeId != null ? edgesRef.current.find((edge) => edge.id === menu.edgeId) : undefined;
@@ -1072,6 +1347,15 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
     [setSubpath],
   );
 
+  const editLinkUrl = useCallback(
+    async (nodeId: string, current: string) => {
+      const url = await askLinkUrl("修改网址", current);
+      if (url == null || url === current) return;
+      patchNodeField(nodeId, (source) => ({ ...(source as CanvasLinkNode), url }));
+    },
+    [patchNodeField],
+  );
+
   const subpathHeadings = useMemo(() => {
     if (!subpathTarget) return [];
     const content = propsRef.current.getNoteContent?.(subpathTarget.file);
@@ -1079,31 +1363,77 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
   }, [subpathTarget]);
 
   const isEmpty = rfNodes.length === 0 && rfEdges.length === 0;
+  /* 箭头随选中态变色：选中散落在多条路径里改（拖选、全选、搜索跳转……），
+     在交给 React Flow 之前统一按当前状态派生，状态本身不存 marker。 */
+  const displayEdges = useMemo(
+    () => rfEdges.map((edge) => (edge.data ? { ...edge, ...edgeMarkers(edge.data.source, edge.selected === true) } : edge)),
+    [rfEdges],
+  );
+  /* 多选时连线桩不跟着每张卡亮出来（满屏小圈），只在悬停的那张上出现 */
+  let selectedNodes = 0;
+  for (const node of rfNodes) if (node.selected && ++selectedNodes > 1) break;
+  const rootClass = cn("canvas-root", connecting && "is-connecting", selectedNodes > 1 && "is-multi-select");
 
   return (
-    <div className="canvas-root" onKeyDown={onCanvasKeyDown}>
-      <div className="canvas-host" ref={hostRef} onDragOver={onHostDragOver} onDrop={onHostDrop}>
+    <div
+      ref={rootRef}
+      className={rootClass}
+      /* 可聚焦：点空白处焦点也落在画布里，快捷键与剪贴板事件才归画布 */
+      tabIndex={-1}
+      onKeyDown={onCanvasKeyDown}
+      onPointerDown={(event) => {
+        const root = rootRef.current;
+        if (!root || isEditableTarget(event.target)) return;
+        if (!root.contains(document.activeElement)) root.focus({ preventScroll: true });
+      }}
+    >
+      <div
+        className="canvas-host"
+        ref={hostRef}
+        onDragOver={onHostDragOver}
+        onDrop={onHostDrop}
+        onDoubleClick={onHostDoubleClick}
+        onPointerMove={(event) => {
+          pointerRef.current = { x: event.clientX, y: event.clientY };
+        }}
+        onPointerLeave={() => {
+          pointerRef.current = null;
+        }}
+      >
         <ReactFlow
           nodes={rfNodes}
-          edges={rfEdges}
+          edges={displayEdges}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          onConnectStart={() => setConnecting(true)}
+          onConnectEnd={onConnectEnd}
+          onNodeDragStart={onNodeDragStart}
+          onNodeDragStop={onNodeDragStop}
           onMoveEnd={onMoveEnd}
           onNodeContextMenu={onNodeContextMenu}
           onPaneContextMenu={onPaneContextMenu}
           onSelectionContextMenu={onSelectionContextMenu}
           onEdgeContextMenu={onEdgeContextMenu}
           onReconnect={onReconnect}
-          onReconnectStart={() => setMenu(null)}
+          onReconnectStart={() => {
+            reconnectingRef.current = true;
+            setConnecting(true);
+            setMenu(null);
+          }}
+          onReconnectEnd={() => {
+            reconnectingRef.current = false;
+          }}
           defaultViewport={initial.viewport ?? { x: 0, y: 0, zoom: 1 }}
           fitView={initial.viewport == null && initial.hadNodes}
           connectionMode={ConnectionMode.Loose}
           deleteKeyCode={DELETE_KEYS}
           /* 双击是卡片编辑 / 打开笔记的手势，双击缩放必须让位 */
           zoomOnDoubleClick={false}
+          /* z 序 = 数组序（JSON Canvas 规范）：选中不抬层，否则选中的分组会盖住框里的卡片 */
+          elevateNodesOnSelect={false}
           minZoom={0.2}
           onlyRenderVisibleElements
           className="canvas-flow"
@@ -1152,11 +1482,21 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
       {/* 常驻建卡条：空画布有大引导，有内容后靠这条轻量工具条保持入口可达。 */}
       {!isEmpty && (
         <div className="canvas-tools" role="toolbar" aria-label="新建">
-          <button type="button" className="canvas-tools__btn" title="新建卡片" onClick={addTextCard}>
+          <button type="button" className="canvas-tools__btn" title="新建卡片（也可在空白处双击）" onClick={() => addTextCard()}>
             新建卡片
           </button>
           <button type="button" className="canvas-tools__btn" title="引用笔记" onClick={() => setPickerOpen(true)}>
             引用笔记
+          </button>
+          <span className="canvas-tools__sep" aria-hidden="true" />
+          <button type="button" className="canvas-tools__btn" title="新建分组（选中卡片后 Ctrl+G 直接打包）" onClick={addGroupCard}>
+            分组
+          </button>
+          <button type="button" className="canvas-tools__btn" title="新建网页卡" onClick={addLinkCard}>
+            网页
+          </button>
+          <button type="button" className="canvas-tools__btn" title="新建 HTML 卡" onClick={addHtmlCard}>
+            HTML
           </button>
         </div>
       )}
@@ -1165,9 +1505,9 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
         <div className="canvas-empty">
           <div className="canvas-empty__card">
             <p className="canvas-empty__title">这块画布还是空的</p>
-            <p className="canvas-empty__hint">建一张卡片，或把一篇已有笔记引用进来</p>
+            <p className="canvas-empty__hint">建一张卡片，或把一篇已有笔记引用进来；也可以直接粘贴文字、网址或截图</p>
             <div className="canvas-empty__actions">
-              <button type="button" className="canvas-btn canvas-btn--primary" onClick={addTextCard}>
+              <button type="button" className="canvas-btn canvas-btn--primary" onClick={() => addTextCard()}>
                 新建卡片
               </button>
               <button type="button" className="canvas-btn" onClick={() => setPickerOpen(true)}>
@@ -1289,6 +1629,20 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
               {menuFileSubpath ? `指向标题（${menuFileSubpath}）…` : "指向标题…"}
             </button>
           )}
+          {menuLinkUrl != null && (
+            <button
+              type="button"
+              role="menuitem"
+              className="canvas-menu__item"
+              onClick={() => {
+                const nodeId = menu.nodeId!;
+                setMenu(null);
+                void editLinkUrl(nodeId, menuLinkUrl);
+              }}
+            >
+              修改网址…
+            </button>
+          )}
           {menu.edgeId != null && menuEdgeEnds && (
             <>
               <button
@@ -1346,7 +1700,7 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
           {menu.nodeId == null && menu.edgeId == null && (
             <>
               {/* 空白处右键：最常用的两种卡片放在最前，其次才是分组/网页卡。 */}
-              <button type="button" role="menuitem" className="canvas-menu__item" onClick={() => { setMenu(null); addTextCard(); }}>
+              <button type="button" role="menuitem" className="canvas-menu__item" onClick={() => { setMenu(null); addTextCard(instance.screenToFlowPosition({ x: menu.x, y: menu.y })); }}>
                 新建卡片
               </button>
               <button type="button" role="menuitem" className="canvas-menu__item" onClick={() => { setMenu(null); setPickerOpen(true); }}>
@@ -1367,6 +1721,9 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
           )}
           {rfNodes.some((node) => node.selected) && (
             <>
+              <button type="button" role="menuitem" className="canvas-menu__item" onClick={() => { setMenu(null); groupSelection(); }}>
+                打包成分组
+              </button>
               <button type="button" role="menuitem" className="canvas-menu__item" onClick={() => { setMenu(null); restackSelection("front"); }}>
                 移到最前
               </button>
