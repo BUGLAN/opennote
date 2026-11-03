@@ -66,3 +66,6 @@ boot-code.txt
 
 # 同步重写的界面原型（`docs/sync/mockups/`）：设计过程产物，只在本地看，不进库。
 docs/sync/mockups/
+
+# claude
+.claude/
