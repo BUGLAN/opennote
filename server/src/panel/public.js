@@ -189,7 +189,13 @@ function nextSteps(email, isAdmin) {
       h("dt", { text: "邮箱" }),
       h("dd", { class: "break", text: email }),
     ),
-    isAdmin ? h("div", { class: "row mt" }, h("a", { class: "btn btn--sm", href: "/admin", text: "进入控制台" })) : null,
+    h(
+      "div",
+      { class: "row mt" },
+      // 装了桌面端 / 手机端的话，深链直接打开「设置 → 同步」并预填服务器与邮箱（不会自动登录）。
+      h("a", { class: "btn btn--sm btn--primary", href: "opennote://sync/sign-in?" + new URLSearchParams({ server, email }).toString(), text: "在 Opennote 中打开" }),
+      isAdmin ? h("a", { class: "btn btn--sm", href: "/admin", text: "进入控制台" }) : null,
+    ),
   );
 }
 

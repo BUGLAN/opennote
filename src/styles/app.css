@@ -3719,3 +3719,350 @@ mark.hit {
   position: absolute;
   inset: 0;
 }
+
+/* ─── 设置 → 同步（docs/sync/mockups/02-settings-sync.html）─────────────────────
+   取代 SyncDialog。版式照原型；颜色、字号、间距全部用既有令牌，不新增设计令牌。
+   强调色只给「需要你处理」：待处理冲突、待解锁、需要重新登录。 */
+
+.sync-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  min-width: 0;
+}
+.sync-pane--flow > * {
+  width: 100%;
+  max-width: 440px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.sync-pane--flow > h3,
+.sync-pane--flow > .dialog__message {
+  text-align: center;
+}
+.sync-pane h3 {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0;
+}
+.sync-hero {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+.sync-hero--attn {
+  border-color: var(--accent-line);
+  background: color-mix(in srgb, var(--accent-soft) 45%, var(--paper));
+}
+.sync-hero__icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--rule-strong);
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--ink-2);
+  background: var(--paper-2);
+}
+.sync-hero--attn .sync-hero__icon {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+.sync-hero__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sync-hero__title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+.sync-hero__sub {
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+.sync-progress {
+  height: 4px;
+  border-radius: 99px;
+  background: var(--paper-4);
+  overflow: hidden;
+}
+.sync-progress > i {
+  display: block;
+  height: 100%;
+  background: var(--ink-2);
+  border-radius: inherit;
+  transition: width var(--dur) var(--ease);
+}
+.sync-section-h {
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 10px 0 0;
+  font-weight: 600;
+}
+.sync-list {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--paper-2);
+}
+.sync-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--rule);
+  font-size: var(--fs-md);
+  min-width: 0;
+}
+.sync-row:last-child {
+  border-bottom: none;
+}
+.sync-row__main {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sync-row__main small {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  margin-top: 1px;
+}
+.sync-row__icon {
+  color: var(--ink-3);
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+}
+.sync-row--empty {
+  color: var(--ink-3);
+  font-size: var(--fs-sm);
+}
+.sync-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 7px;
+  border-radius: 99px;
+  border: 1px solid var(--rule-strong);
+  font-size: 11px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  flex: none;
+}
+.sync-tag--solid {
+  background: var(--paper-3);
+  border-color: transparent;
+}
+.sync-tag--accent {
+  border-color: var(--accent-line);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.sync-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.sync-choices .choice {
+  text-align: left;
+  align-items: start;
+}
+.sync-choices .choice > span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sync-choices .choice small {
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.sync-steps {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.sync-steps b {
+  color: var(--ink);
+  font-weight: 600;
+}
+.sync-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sync-lab {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+.sync-lab .field {
+  width: 100%;
+}
+.sync-hint {
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.sync-hint--ok {
+  color: var(--ok);
+}
+.sync-hint--bad {
+  color: var(--danger);
+}
+.sync-error {
+  font-size: var(--fs-sm);
+  color: var(--danger);
+}
+.sync-callout {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--ink-3);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+  background: var(--paper);
+}
+.sync-callout--attn {
+  border-left-color: var(--accent);
+}
+.sync-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+}
+.sync-divider::before,
+.sync-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+.sync-row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+.sync-row-actions .grow {
+  flex: 1;
+}
+.sync-code6 {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin: 6px 0;
+}
+.sync-code6 > span,
+.sync-code6 > input {
+  width: 40px;
+  height: 50px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 600;
+  background: var(--paper);
+  color: var(--ink);
+}
+.sync-code6 > input:focus-visible {
+  outline: none;
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.sync-check {
+  margin: 4px auto;
+  padding: 8px 16px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--ink);
+  text-align: center;
+  width: fit-content;
+}
+.sync-kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 14px;
+  font-size: var(--fs-sm);
+  margin: 0;
+}
+.sync-kv dt {
+  color: var(--ink-3);
+}
+.sync-kv dd {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.sync-diag summary {
+  cursor: pointer;
+  color: var(--ink-3);
+  font-size: var(--fs-sm);
+}
+.sync-diag pre {
+  margin: 6px 0 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sync-spin {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: sync-spin 0.9s linear infinite;
+  display: inline-block;
+  flex: none;
+}
+@keyframes sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.sync-gh {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+.settings__tab .sync-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: 6px;
+  vertical-align: 2px;
+}
+@media (max-width: 760px) {
+  .sync-choices {
+    grid-template-columns: 1fr;
+  }
+}

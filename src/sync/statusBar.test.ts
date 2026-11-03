@@ -19,9 +19,6 @@ function state(patch: Partial<SyncUiState>): SyncUiState {
     last: null,
     error: null,
     logs: [],
-    hasKey: true,
-    accountId: null,
-    storage: null,
     ...patch,
   };
 }
@@ -69,7 +66,7 @@ describe("状态栏同步位", () => {
   it("有冲突 ⇒ warn，并且写清「只有你能解决」", () => {
     const info = syncStatusBarInfo(state({ status: { phase: "idle", lastSyncedAt: 1, conflicts: 3 } }), true);
     expect(info?.tone).toBe("warn");
-    expect(info?.label).toBe("3 处冲突待处理");
+    expect(info?.label).toBe("3 篇待处理");
   });
 
   it("删除被暂缓 ⇒ warn（不然用户只觉得「我删的又回来了」）", () => {
@@ -93,10 +90,15 @@ describe("状态栏同步位", () => {
     expect(info?.label).toBe("2 条删除已暂缓");
   });
 
-  it("没有密钥 ⇒ warn（这条只有用户自己能解决）", () => {
-    const info = syncStatusBarInfo(state({ hasKey: false }), true);
-    expect(info?.tone).toBe("warn");
-    expect(info?.label).toBe("未导入密钥");
+  it("开着同步但没登录 ⇒ warn；登录失效 / 账号停用 ⇒ error（只有用户自己能解决）", () => {
+    expect(syncStatusBarInfo(state({ reason: "signed-out" }), true)?.label).toBe("未登录同步");
+    expect(syncStatusBarInfo(state({ status: idle }), true, { needsSignIn: true, disabled: false })).toMatchObject({ tone: "error", label: "需要重新登录" });
+    expect(syncStatusBarInfo(state({ status: { phase: "signed-out", lastSyncedAt: 1 } }), true)?.label).toBe("需要重新登录");
+    expect(syncStatusBarInfo(state({ status: idle }), true, { needsSignIn: false, disabled: true })?.label).toBe("账号已被停用");
+  });
+
+  it("加密笔记本还没解锁 ⇒ warn「待解锁」", () => {
+    expect(syncStatusBarInfo(state({ reason: "locked" }), true)).toMatchObject({ tone: "warn", label: "待解锁" });
   });
 
   it("离线 / 失败 ⇒ 都要说话（沉默会被读成「同步好了」）", () => {

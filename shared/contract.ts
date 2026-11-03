@@ -132,20 +132,6 @@ export const contentIdSchema = z.string().regex(/^[0-9a-f]{64}$/, "内容标识�
 
 /* ------------------------------------------------------------------ 账号 */
 
-/**
- * 旧的「密钥即身份」注册请求。服务端 v2 已不再接受；客户端的旧注册流程在「设置 → 同步」
- * 阶段（⑤）随 `src/sync/onboarding.ts` 一起删除，在那之前保留形状让客户端能编译。
- */
-export const accountCreateRequestSchema = z.object({
-  accountId: accountIdSchema,
-  authToken: z.string().min(32).max(256),
-  wrappedEncRoot: z.string().min(16).max(4096),
-  bootstrapCode: z.string().min(8).max(256).optional(),
-  inviteCode: z.string().min(8).max(256).optional(),
-  label: z.string().max(120).optional(),
-});
-export type AccountCreateRequest = z.infer<typeof accountCreateRequestSchema>;
-
 export const quotaSchema = z.object({
   bytesUsed: z.number().int().nonnegative(),
   bytesLimit: z.number().int().nonnegative(),

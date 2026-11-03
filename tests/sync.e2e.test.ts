@@ -32,7 +32,8 @@
  * 4. E2EE 模式两设备互同步 + 服务端库里**看不到明文**；
  * 5. 冲突：两边都改 → 只报不猜；
  * 6. 多账号隔离：B 拿不到 A 的任何东西（404 不可区分）；
- * 7. 401 → `key-rotated` 独立状态与指定文案；
+ * 7. 401 → `signed-out` 独立状态与「需要重新登录」；
+ * 10. 加密口令：第一台设备设口令、第二台设备用口令解锁、第三台设备用配对码拿到 encRoot（真实 X25519）；
  * 8. （真实 CouchDB 模式）置备验收：`_design`/`_security`/`_revs_limit` 真实落在库上；
  * 9. （真实 CouchDB 模式）`/v1/events` SSE：另一设备写入 → 本设备收到 `change` 信号。
  *
@@ -56,6 +57,7 @@ import { AccountStore } from "../server/src/auth/accounts";
 import { NotebookStore } from "../server/src/notebooks";
 
 import { createSyncLedger, readSyncLedger, writeSyncLedger } from "../src/sync/state";
+import { createPairingKeys, createVault, openFromPeer, openVault, pairingSecrets, sealForPeer } from "../src/sync/vault";
 import { createSyncSession } from "../src/sync/session";
 import { createOpenNoteProvider } from "../src/sync/providers/opennote";
 import { deriveNotebookKey } from "../src/sync/accountKey";
@@ -300,10 +302,9 @@ interface AccountMaterial {
   email: string;
   password: string;
   authToken: string;
-  /**
-   * 端到端加密的根密钥。客户端生成、服务端永远拿不到。
-   * 跨设备的转交（加密口令解锁 / 配对码）是阶段 ④ 的事；这里由测试直接交给第二台设备。
-   */
+  /** 加密口令（第一台设备设的；其它设备用它解锁）。 */
+  passphrase: string;
+  /** 端到端加密的根密钥。第一台设备生成并用口令包好上传；服务端永远拿不到明文。 */
   encRoot: Uint8Array;
 }
 
@@ -332,18 +333,26 @@ async function registerAccount(base: string): Promise<AccountMaterial> {
   const email = `e2e-${accountCounter}-${Date.now()}@example.test`;
   const password = "e2e-password-123";
   const row = await world.accounts.create({ email, password });
-  return {
-    accountId: row.id,
-    email,
-    password,
-    authToken: await login(base, email, password),
-    encRoot: crypto.getRandomValues(new Uint8Array(32)),
-  };
+  const authToken = await login(base, email, password);
+  // 第一台设备设加密口令：本机生成 encRoot、用口令包好上传（真实 `vault.ts` + `PUT /v1/me/encryption`）。
+  const passphrase = "e2e-passphrase";
+  const vault = await createVault(passphrase, row.id);
+  const put = await fetch(`${base}/v1/me/encryption`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${authToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ wrappedEncRoot: vault.wrappedEncRoot, kdf: vault.kdf, expected: null }),
+  });
+  expect(put.status).toBe(200);
+  return { accountId: row.id, email, password, authToken, passphrase, encRoot: vault.encRoot };
 }
 
-/** 同一账号的另一台设备：自己登录拿令牌；encRoot 暂由测试转交（见 `AccountMaterial.encRoot`）。 */
+/** 同一账号的另一台设备：自己登录拿令牌，再用加密口令解开服务端存的那份 encRoot。 */
 async function loginOnAnotherDevice(base: string, account: AccountMaterial): Promise<{ authToken: string; encRoot: Uint8Array }> {
-  return { authToken: await login(base, account.email, account.password), encRoot: account.encRoot };
+  const authToken = await login(base, account.email, account.password);
+  const response = await fetch(`${base}/v1/me/encryption`, { headers: { authorization: `Bearer ${authToken}` } });
+  const state = (await response.json()) as { configured: true; wrappedEncRoot: string; kdf: Parameters<typeof openVault>[2] };
+  expect(state.configured).toBe(true);
+  return { authToken, encRoot: await openVault(account.passphrase, state.wrappedEncRoot, state.kdf, account.accountId) };
 }
 
 async function createNotebook(base: string, authToken: string, name: string, cryptoMode: "none" | "user-key"): Promise<string> {
@@ -536,7 +545,7 @@ describe("E2EE：两台设备互相同步，库里看不到明文", () => {
     const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "E2EE1", "user-key");
 
-    // A 是第一台设备（手里有 encRoot）；B 登录后拿到同一份 encRoot（阶段 ④ 前由测试转交）。
+    // A 是第一台设备（设口令时生成了 encRoot）；B 登录后用加密口令解开同一份。
     const aToken = account.authToken;
     const encRoot = account.encRoot;
     const notebookKeyA = deriveNotebookKey(encRoot, notebookId);
@@ -692,17 +701,16 @@ describe("多账号隔离", () => {
 });
 
 /* ============================================================================
-   ⑥ 401 → key-rotated 独立状态
+   ⑥ 401 → signed-out 独立状态
    ============================================================================ */
 
 describe("401 语义", () => {
-  it("令牌失效 → runner 进 key-rotated,文案是指定的那句", async () => {
+  it("令牌失效 → runner 进 signed-out，文案是「需要重新登录」", async () => {
     const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "轮换", "none");
     const a = await world.device({ cryptoMode: "none", authToken: account.authToken, notebookId });
 
     // 登出（等价于在另一台设备上「移除这台设备」）：令牌立即失效。
-    // 客户端的文案还是「密钥已被轮换」，阶段 ⑤ 改成「需要重新登录」。
     await fetch(`${world.base}/v1/auth/logout`, {
       method: "POST",
       headers: { authorization: `Bearer ${account.authToken}` },
@@ -712,9 +720,59 @@ describe("401 语义", () => {
     a.session.runner = a.session.runner; // runner 由 session 内部持有;通过 status() 读取
     await a.session.syncNow().catch(() => undefined);
     const status = a.session.status();
-    expect(status.phase).toBe("key-rotated");
+    expect(status.phase).toBe("signed-out");
     const text = describeSyncStatus(status);
-    expect(text.label).toContain("此设备的密钥已被轮换");
+    expect(text.label).toContain("需要重新登录");
+  });
+});
+
+/* ============================================================================
+   加密口令与配对（阶段 ④）：真实 HTTP + 真实 X25519
+   ============================================================================ */
+
+describe("配对码：新设备拿到自己的会话与同一个 encRoot", () => {
+  it("A 发码 → C 认领 → 两边校验码一致 → A 确认 → C 解开的 encRoot 与 A 的相同，服务端只见密文", async () => {
+    const account = await registerAccount(world.base);
+    const aKeys = await createPairingKeys();
+    const created = await (
+      await fetch(`${world.base}/v1/pairing`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${account.authToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: aKeys.publicKey }),
+      })
+    ).json() as { id: string; code: string };
+
+    const cKeys = await createPairingKeys();
+    const claim = await (
+      await fetch(`${world.base}/v1/pairing/claim`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: created.code, publicKey: cKeys.publicKey, device: { deviceId: newDeviceId(), name: "新手机", platform: "android" } }),
+      })
+    ).json() as { id: string; claimToken: string; publicKey: string };
+
+    const seen = await (await fetch(`${world.base}/v1/pairing/${created.id}`, { headers: { authorization: `Bearer ${account.authToken}` } })).json() as { publicKey: string };
+    const onA = await pairingSecrets({ own: aKeys, peerPublicKey: seen.publicKey, initiatorPublicKey: aKeys.publicKey, claimantPublicKey: seen.publicKey });
+    const onC = await pairingSecrets({ own: cKeys, peerPublicKey: claim.publicKey, initiatorPublicKey: claim.publicKey, claimantPublicKey: cKeys.publicKey });
+    expect(onA.check).toBe(onC.check);
+
+    const sealed = sealForPeer(onA.key, account.encRoot, account.accountId);
+    await fetch(`${world.base}/v1/pairing/${created.id}/approve`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${account.authToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ sealed }),
+    });
+    const result = await (
+      await fetch(`${world.base}/v1/pairing/${created.id}/result`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ claimToken: claim.claimToken }),
+      })
+    ).json() as { status: string; token: string; sealed: string; me: { accountId: string } };
+    expect(result.status).toBe("done");
+    const encRoot = openFromPeer(onC.key, result.sealed, result.me.accountId);
+    expect(Buffer.from(encRoot).equals(Buffer.from(account.encRoot))).toBe(true);
+    expect((await fetch(`${world.base}/v1/me`, { headers: { authorization: `Bearer ${result.token}` } })).status).toBe(200);
   });
 });
 

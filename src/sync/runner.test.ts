@@ -5,7 +5,7 @@
  *
  * 1. **单飞**：多个触发源撞在一起时只跑一次（+ 一次合并的补跑），
  *    而不是并发跑两次 —— 并发同步会让两边都以为自己是第一个写的人。
- * 2. **「密钥已轮换」是独立状态**，不是「错误」的一种。归进错误会让用户去查网络。
+ * 2. **「需要重新登录」是独立状态**，不是「错误」的一种。归进错误会让用户去查网络。
  */
 import { describe, expect, it, vi } from "vitest";
 import { createSyncRunner, describeSyncStatus, statusForError, type SyncStatus } from "./runner";
@@ -146,14 +146,14 @@ describe("§5.3 · `StatusBar` 要的那几个状态", () => {
     expect(runner.status()).toEqual({ phase: "idle", lastSyncedAt: 1000, conflicts: 1 });
   });
 
-  it("★ **401 ⇒ `key-rotated`**（独立状态，不是 error）—— §1.5 代价 2", async () => {
+  it("★ **401 ⇒ `signed-out`**（独立状态，不是 error）—— §1.5 代价 2", async () => {
     const runner = createSyncRunner({
       syncOnce: async () => {
-        throw new SyncProviderError("rotated", "令牌无效", 401);
+        throw new SyncProviderError("signed-out", "令牌无效", 401);
       },
     });
     await runner.request("manual");
-    expect(runner.status().phase).toBe("key-rotated");
+    expect(runner.status().phase).toBe("signed-out");
   });
 
   it("网络错误 ⇒ `offline`（「等等就好」与「服务端 500」对用户是两件事）", async () => {
@@ -345,14 +345,14 @@ describe("§5.3 · 本地写之后去抖推一次", () => {
    ============================================================================ */
 
 describe("§5.3 · 状态栏文案：三种「说准」", () => {
-  it("★ `key-rotated` 用**文档指定的**文案，且标记为「需要用户动手」", () => {
+  it("★ `signed-out` 用**文档指定的**文案，且标记为「需要用户动手」", () => {
     /*
      * §1.5 代价 2 与第 2030 行都要求 401 时给明确文案。写成「同步失败」会让用户
-     * 去查网络 —— 而这条**只有他自己能解决**（重新导入密钥）。
+     * 去查网络 —— 而这条**只有用户自己能解决**（重新登录）。
      */
-    const text = describeSyncStatus({ phase: "key-rotated", lastSyncedAt: null });
-    expect(text.label).toContain("密钥已被轮换");
-    expect(text.detail).toContain("导入新的账号密钥");
+    const text = describeSyncStatus({ phase: "signed-out", lastSyncedAt: null });
+    expect(text.label).toContain("需要重新登录");
+    expect(text.detail).toContain("重新登录");
     // 状态栏据此决定要不要给一个可点的入口。
     expect(text.actionable).toBe(true);
     // 绝不能退化成一句笼统的「同步失败」。
@@ -395,7 +395,7 @@ describe("§5.3 · 状态栏文案：三种「说准」", () => {
       { phase: "idle", lastSyncedAt: 1, conflicts: 1 },
       { phase: "syncing", startedAt: 1, progress: null },
       { phase: "offline", error: "x", lastSyncedAt: null },
-      { phase: "key-rotated", lastSyncedAt: null },
+      { phase: "signed-out", lastSyncedAt: null },
       { phase: "error", error: "x", code: "server", lastSyncedAt: null },
     ];
     for (const status of all) {
@@ -489,11 +489,11 @@ describe("★ 失败之后自动重试（指数退避）", () => {
     expect(calls).toBe(6);
   });
 
-  it("**不可重试**的失败不排**（密钥被轮换重试一万次也不会好）", async () => {
+  it("**不可重试**的失败不排**（登录失效重试一万次也不会好）", async () => {
     const timers = retryTimers();
     const runner = createSyncRunner({
       syncOnce: async () => {
-        throw new SyncProviderError("rotated", "令牌无效", 401);
+        throw new SyncProviderError("signed-out", "令牌无效", 401);
       },
       ...timers,
     });

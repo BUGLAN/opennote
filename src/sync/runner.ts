@@ -48,7 +48,8 @@ export type SyncStatus =
       progress: SyncProgress | null }
   | { phase: "offline"; error: string; lastSyncedAt: number | null }
   /** 密钥已被轮换 / 账号被禁用 —— **独立状态**，不是「错误」的一种（§1.5 代价 2）。 */
-  | { phase: "key-rotated"; lastSyncedAt: number | null }
+  | { phase: "signed-out"; lastSyncedAt: number | null }
+  | { phase: "disabled"; lastSyncedAt: number | null }
   | { phase: "error"; error: string; code: string; lastSyncedAt: number | null };
 
 /** 触发这次同步的原因（日志与诊断用；也便于用例断言「谁触发的」）。 */
@@ -145,8 +146,9 @@ const DEFAULT_RETRY_MAX_MS = 120_000;
 /** 把一次失败翻成状态。**401 单独成一种状态**，见模块头 ②。 */
 export function statusForError(error: unknown, lastSyncedAt: number | null): SyncStatus {
   if (error instanceof SyncProviderError) {
-    // ★ 「密钥已轮换」不是错误，是一个**要用户动手**的状态。
-    if (error.code === "rotated") return { phase: "key-rotated", lastSyncedAt };
+    // ★ 「需要重新登录」「账号停用」不是错误，是**要用户动手**的状态。
+    if (error.code === "signed-out") return { phase: "signed-out", lastSyncedAt };
+    if (error.code === "disabled") return { phase: "disabled", lastSyncedAt };
     // 网络类问题报「离线」——它对用户的含义与「服务端 500」不同（前者等等就好）。
     if (error.code === "network") return { phase: "offline", error: error.message, lastSyncedAt };
     return { phase: "error", error: error.message, code: error.code, lastSyncedAt };
@@ -357,9 +359,8 @@ export interface SyncStatusText {
  *
  * 三种情况都要求「**说准**」，而它们很容易被写成一句笼统的「同步失败」：
  *
- * 1. **`key-rotated` 有指定文案**（§1.5 代价 2、第 2030 行）：
- *    「此设备的密钥已被轮换，请导入新密钥」。写成「同步失败」会让用户去查网络 ——
- *    而这条**只有他自己能解决**（重新导入密钥），所以要 `actionable: true`。
+ * 1. **`signed-out` / `disabled` 要说准**：「需要重新登录」「账号已被停用」。写成「同步失败」
+ *    会让用户去查网络 —— 而这两条**只有用户自己能解决**，所以要 `actionable: true`。
  * 2. **`offline` 与 `error` 不是一回事**：前者「等等就好」，后者要人管。
  * 3. **冲突数必须露出来**（§5.3 的「N 冲突」）：冲突是**只报不猜**的
  *    （引擎绝不动它们），所以用户不知道就等于永远不解决。
@@ -372,15 +373,17 @@ export function describeSyncStatus(status: SyncStatus): SyncStatusText {
     case "syncing":
       return { label: "同步中…", detail: null, tone: "busy", actionable: false };
 
-    case "key-rotated":
+    case "signed-out":
       return {
-        // ★ 这句是文档指定的，不要改写成「同步失败」。
-        label: "此设备的密钥已被轮换",
-        detail: "请导入新的账号密钥。",
+        label: "需要重新登录",
+        detail: "这台设备的登录已失效（密码改过，或在别处被移除了）。请在「设置 → 同步」里重新登录。",
         tone: "error",
-        // 只有用户自己能解决 —— 状态栏要给他一个入口。
+        // 只有用户自己能解决 —— 状态栏要给一个入口。
         actionable: true,
       };
+
+    case "disabled":
+      return { label: "账号已被停用", detail: "请联系同步服务器的管理员。", tone: "error", actionable: true };
 
     case "offline":
       return { label: "离线", detail: "网络恢复后会自动重试。", tone: "warn", actionable: false };

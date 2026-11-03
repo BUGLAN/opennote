@@ -17,6 +17,11 @@ import { cn, formatBytes, formatDateTime } from "../lib/utils";
 import { Icon } from "./Icons";
 import { ImportApiPanel } from "./ImportApiPanel";
 import { Modal } from "./Overlays";
+import { SyncPane } from "./sync/SyncPane";
+import { useStore } from "../lib/store";
+import { syncUiStore } from "../sync/appSync";
+import { syncAccountStore } from "../sync/account";
+import type { NotebookSummary } from "../../shared/contract";
 
 /* ================================ settings ============================== */
 
@@ -29,6 +34,7 @@ import { Modal } from "./Overlays";
 const SECTIONS = [
   { id: "外观", hint: "主题、字体与排版" },
   { id: "文件", hint: "笔记本、导入与导出" },
+  { id: "同步", hint: "账号、设备与冲突" },
   { id: "编辑", hint: "写作模式与格式" },
   { id: "视图", hint: "布局、模式与导航" },
   { id: "帮助", hint: "快捷键与关于" },
@@ -58,6 +64,7 @@ export function SettingsDialog({
   updateStatus,
   onCheckUpdate,
   onUpdateAction,
+  onDownloadRemote,
 }: {
   settings: UiSettings;
   workspace: WorkspaceRecord | null;
@@ -79,8 +86,15 @@ export function SettingsDialog({
   updateStatus: UpdateStatus | null;
   onCheckUpdate(): void;
   onUpdateAction(action: UpdateAction): void;
+  /** 同步一栏「只在云端的」笔记本 → 在本机建一个笔记本并绑上它。 */
+  onDownloadRemote(notebook: NotebookSummary): Promise<void>;
 }): ReactNode {
   const [section, setSection] = useState<SectionId>(initialSection ?? "外观");
+  const syncUi = useStore(syncUiStore);
+  const syncAccount = useStore(syncAccountStore);
+  // 分类栏上「同步」带一个点：只在需要你处理时（冲突 / 待解锁 / 需要重新登录）。
+  const syncNeedsYou =
+    (syncUi.last?.conflicts.length ?? 0) > 0 || syncUi.reason === "locked" || syncAccount.needsSignIn || syncAccount.disabled;
   const [legacy, setLegacy] = useState(false);
   useEffect(() => {
     void hasLegacyData().then(setLegacy);
@@ -114,7 +128,10 @@ export function SettingsDialog({
               className={cn("settings__tab", section === entry.id && "is-active")}
               onClick={() => setSection(entry.id)}
             >
-              <span>{entry.id}</span>
+              <span>
+                {entry.id}
+                {entry.id === "同步" && syncNeedsYou ? <i className="sync-dot" aria-label="需要处理" /> : null}
+              </span>
               <small>{entry.hint}</small>
             </button>
           ))}
@@ -513,6 +530,8 @@ export function SettingsDialog({
               <CommandGroup title="导航" commands={byGroup("导航")} onRunCommand={onRunCommand} />
             </>
           ) : null}
+
+          {section === "同步" ? <SyncPane workspace={workspace} onDownloadRemote={onDownloadRemote} /> : null}
 
           {section === "帮助" ? (
             <>

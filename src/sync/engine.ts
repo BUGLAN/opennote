@@ -1009,7 +1009,7 @@ export async function syncOnceIncremental(input: SyncOnceInput & { since?: strin
      * 但「密钥被轮换 / 被禁用」是另一回事：那必须往上抛，让状态栏说准
      * （§1.5 代价 2 的指定文案）。所以只有这一类继续抛。
      */
-    if (error instanceof SyncProviderError && (error.code === "rotated" || error.code === "forbidden")) throw error;
+    if (error instanceof SyncProviderError && (error.code === "signed-out" || error.code === "disabled" || error.code === "forbidden")) throw error;
     log("changes", { failed: true });
     return syncOnce(input);
   }

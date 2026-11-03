@@ -1,7 +1,7 @@
 /**
- * 账号密钥的用例（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §1.5、§3.9、§4.9、§10 U23）。
+ * 端到端加密密钥层级的用例（§3.9、§4.9、§10 U23）。
  *
- * ## 这个文件里最值钱的两组断言
+ * ## 这个文件里最值钱的一组断言
  *
  * ### ① **测试向量**（U23 明确要求）
  *
@@ -13,41 +13,20 @@
  * 而症状是「密钥不对」。一组官方向量是唯一能把「算法用对了」与「恰好自己自洽」分开的东西。
  * （RFC 的期望值我用 Node 内置的 `hkdfSync` 独立复算过一遍才写进来，不是抄的。）
  *
- * ### ② **@noble 与 WebCrypto 必须算出同一串字节**
- *
- * 控制台（`server/src/panel/app.js`）是「无构建步骤」的静态页，**没法 import noble**，
- * 只能用 WebCrypto。而 §3.9/§4.9 选 noble 的理由是「四端同一条代码路径」——
- * 控制台是那条路上的例外，所以**必须逐参数对齐**并在这里直接比对字节。
- *
- * 光靠「它们应该一致」是不够的：HKDF 的 salt / info 差一个字就是完全不同的密钥，
- * 而症状会是「密钥输错了」—— 一个会把人引到错方向（去怀疑用户）的报错。
  */
 import { describe, expect, it } from "vitest";
 import {
-  ACCOUNT_KEY_BYTES,
-  ACCOUNT_KEY_PREFIX,
   ACCOUNT_ID_BYTES,
-  HKDF_INFO_AUTH,
-  HKDF_INFO_WRAP,
   accountIdBytes,
-  createRegistrationMaterial,
-  decodeAccountKey,
-  deriveAuthToken,
-  deriveFromAccountKey,
   deriveNotebookKey,
   deriveNotebookSubkey,
-  deriveWrapKey,
-  encodeAccountKey,
   fromBase64Url,
   fromHex,
-  generateAccountId,
-  generateAccountKey,
   generateEncRoot,
   hkdfInfoNotebook,
   hkdfSha256ForTests,
   toBase64Url,
   toHex,
-  unlockEncRoot,
   unwrapEncRoot,
   wrapEncRoot,
   xchachaForTests,
@@ -59,7 +38,8 @@ const bytesOf = (value: string): Uint8Array => fromHex(value);
 
 /** 固定的一组测试材料（不用随机，断言才能稳定）。 */
 const ACCOUNT_ID = "00112233445566778899aabbccddeeff";
-const ACCOUNT_KEY = bytesOf("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+/** 一把固定的 wrapKey（生产里由加密口令 scrypt 出来，见 `vault.ts`）。 */
+const WRAP_KEY = bytesOf("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
 const ENC_ROOT = bytesOf("202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f");
 
 /* ============================================================================
@@ -143,72 +123,14 @@ describe("U23 · XChaCha20-Poly1305 对上 draft-irtf-cfrg-xchacha A.3", () => {
    ★ @noble ↔ WebCrypto：控制台只能用后者，两者必须逐字节相同
    ============================================================================ */
 
-describe("★ @noble 与 WebCrypto 算出同一串字节（控制台依赖这一条）", () => {
-  /** WebCrypto 版的 HKDF-SHA256（与 `server/src/panel/app.js` 里那段等价）。 */
-  async function webcryptoHkdf(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, length: number): Promise<Uint8Array> {
-    const base = await crypto.subtle.importKey("raw", ikm as BufferSource, "HKDF", false, ["deriveBits"]);
-    const bits = await crypto.subtle.deriveBits(
-      { name: "HKDF", hash: "SHA-256", salt: salt as BufferSource, info: info as BufferSource },
-      base,
-      length * 8,
-    );
-    return new Uint8Array(bits);
-  }
-
-  it("`authToken` 的派生：noble 与 WebCrypto 结果相同", async () => {
-    const noble = deriveAuthToken(ACCOUNT_KEY, ACCOUNT_ID);
-    const viaWeb = toHex(await webcryptoHkdf(ACCOUNT_KEY, accountIdBytes(ACCOUNT_ID), enc(HKDF_INFO_AUTH), 32));
-    expect(viaWeb).toBe(noble);
-  });
-
-  it("`wrapKey` 的派生：noble 与 WebCrypto 结果相同", async () => {
-    const noble = hex(deriveWrapKey(ACCOUNT_KEY, ACCOUNT_ID));
-    const viaWeb = hex(await webcryptoHkdf(ACCOUNT_KEY, accountIdBytes(ACCOUNT_ID), enc(HKDF_INFO_WRAP), 32));
-    expect(viaWeb).toBe(noble);
-  });
-
-  it("`notebookKey`（**无 salt**）在 WebCrypto 里也要用空 salt 才一致", async () => {
-    const noble = hex(deriveNotebookKey(ENC_ROOT, "nb-1"));
-    const viaWeb = hex(await webcryptoHkdf(ENC_ROOT, new Uint8Array(0), enc(hkdfInfoNotebook("nb-1")), 32));
-    expect(viaWeb).toBe(noble);
-  });
-
-  it("★ 反证：salt 用错（拿十六进制字符串的 ASCII 当 salt）会得到**完全不同**的令牌", async () => {
-    /*
-     * 这条是给未来的人看的：`accountId` 是「16B 随机」，十六进制只是它的**传输**表示。
-     * 如果哪个实现把 ASCII 的 `"00112233…"` 当 salt，它算出来的令牌与别人**完全不同**，
-     * 而症状是「密钥不对」。所以这个坑值得有一条用例明确地画出来。
-     */
-    const correct = deriveAuthToken(ACCOUNT_KEY, ACCOUNT_ID);
-    const wrong = toHex(await webcryptoHkdf(ACCOUNT_KEY, enc(ACCOUNT_ID), enc(HKDF_INFO_AUTH), 32));
-    expect(wrong).not.toBe(correct);
-  });
-});
 
 /* ============================================================================
    密钥层级的不变量
    ============================================================================ */
 
 describe("§1.5 · 密钥层级：分叉必须真的分叉", () => {
-  it("`authToken` 与 `wrapKey` 是**两把不同的东西**（E2EE 成立的前提）", () => {
-    const authToken = deriveAuthToken(ACCOUNT_KEY, ACCOUNT_ID);
-    const wrapKey = deriveWrapKey(ACCOUNT_KEY, ACCOUNT_ID);
-    // 一个是 hex 字符串、一个是 32 字节；把 wrapKey 也写成 hex 来比「值」。
-    expect(hex(wrapKey)).not.toBe(authToken);
-    expect(authToken).toHaveLength(64);
-    expect(wrapKey).toHaveLength(32);
-  });
-
-  it("info 字符串不同 ⇒ 输出不同（改一个字就是另一把钥匙）", () => {
-    expect(HKDF_INFO_AUTH).not.toBe(HKDF_INFO_WRAP);
-    expect(HKDF_INFO_AUTH.startsWith("opennote/v1/")).toBe(true);
-    expect(HKDF_INFO_WRAP.startsWith("opennote/v1/")).toBe(true);
+  it("info 字符串按版本前缀分开（改一个字就是另一把钥匙）", () => {
     expect(hkdfInfoNotebook("nb-1")).toBe("opennote/v1/notebook/nb-1");
-  });
-
-  it("**salt 参与派生**：换一个 `accountId`，同一把 `accountKey` 得到不同令牌", () => {
-    const other = "ffffffffffffffffffffffffffffffff";
-    expect(deriveAuthToken(ACCOUNT_KEY, other)).not.toBe(deriveAuthToken(ACCOUNT_KEY, ACCOUNT_ID));
   });
 
   it("每笔记本一把钥匙：`notebookId` 不同 ⇒ `notebookKey` 不同", () => {
@@ -222,11 +144,8 @@ describe("§1.5 · 密钥层级：分叉必须真的分叉", () => {
   });
 
   it("生成的是 CSPRNG（两次调用不相同，长度正确）", () => {
-    expect(generateAccountId()).toMatch(/^[0-9a-f]{32}$/);
-    expect(generateAccountId()).not.toBe(generateAccountId());
-    expect(generateAccountKey()).toHaveLength(ACCOUNT_KEY_BYTES);
     expect(generateEncRoot()).toHaveLength(32);
-    expect(hex(generateAccountKey())).not.toBe(hex(generateAccountKey()));
+    expect(hex(generateEncRoot())).not.toBe(hex(generateEncRoot()));
   });
 
   it("`accountIdBytes` 严格校验（长度不对就抛，**不**静默截断）", () => {
@@ -258,13 +177,13 @@ describe("十六进制 / base64url 编解码", () => {
 
 describe("§3.9 · `wrappedEncRoot`：AAD 绑 `accountId`（防跨账号替换）", () => {
   it("往返一致", () => {
-    const wrapKey = deriveWrapKey(ACCOUNT_KEY, ACCOUNT_ID);
+    const wrapKey = WRAP_KEY;
     const wrapped = wrapEncRoot(wrapKey, ENC_ROOT, ACCOUNT_ID);
     expect(hex(unwrapEncRoot(wrapKey, wrapped, ACCOUNT_ID))).toBe(hex(ENC_ROOT));
   });
 
   it("每次包裹的密文**都不同**（nonce 随机），但都能解开", () => {
-    const wrapKey = deriveWrapKey(ACCOUNT_KEY, ACCOUNT_ID);
+    const wrapKey = WRAP_KEY;
     const first = wrapEncRoot(wrapKey, ENC_ROOT, ACCOUNT_ID);
     const second = wrapEncRoot(wrapKey, ENC_ROOT, ACCOUNT_ID);
     expect(first).not.toBe(second);
@@ -277,20 +196,20 @@ describe("§3.9 · `wrappedEncRoot`：AAD 绑 `accountId`（防跨账号替换�
      * 不绑 AAD 的话，A 会解出 **B 的 encRoot** —— 它不会报错，只会「打开别人的笔记本」
      * （或者更糟：把自己以后写的内容加密成 B 能读的）。绑了 AAD 之后直接解不开。
      */
-    const wrapKey = deriveWrapKey(ACCOUNT_KEY, ACCOUNT_ID);
+    const wrapKey = WRAP_KEY;
     const wrapped = wrapEncRoot(wrapKey, ENC_ROOT, ACCOUNT_ID);
     const otherId = "ffffffffffffffffffffffffffffffff";
     expect(() => unwrapEncRoot(wrapKey, wrapped, otherId)).toThrow(/解不开/);
   });
 
   it("换一把 `wrapKey` ⇒ 解不开", () => {
-    const wrapped = wrapEncRoot(deriveWrapKey(ACCOUNT_KEY, ACCOUNT_ID), ENC_ROOT, ACCOUNT_ID);
-    const otherKey = deriveWrapKey(generateAccountKey(), ACCOUNT_ID);
+    const wrapped = wrapEncRoot(WRAP_KEY, ENC_ROOT, ACCOUNT_ID);
+    const otherKey = generateEncRoot();
     expect(() => unwrapEncRoot(otherKey, wrapped, ACCOUNT_ID)).toThrow(/解不开/);
   });
 
   it("包裹被改动一个字节 ⇒ 解不开（认证标签在起作用）", () => {
-    const wrapKey = deriveWrapKey(ACCOUNT_KEY, ACCOUNT_ID);
+    const wrapKey = WRAP_KEY;
     const wrapped = wrapEncRoot(wrapKey, ENC_ROOT, ACCOUNT_ID);
     const bytes = fromBase64Url(wrapped);
     bytes[bytes.length - 1] ^= 0x01;
@@ -298,7 +217,7 @@ describe("§3.9 · `wrappedEncRoot`：AAD 绑 `accountId`（防跨账号替换�
   });
 
   it("形状不对的包裹给**可读**的错误（不是 `invalid tag`）", () => {
-    const wrapKey = deriveWrapKey(ACCOUNT_KEY, ACCOUNT_ID);
+    const wrapKey = WRAP_KEY;
     expect(() => unwrapEncRoot(wrapKey, "!!not-base64!!", ACCOUNT_ID)).toThrow(/base64url/);
     expect(() => unwrapEncRoot(wrapKey, toBase64Url(new Uint8Array(10)), ACCOUNT_ID)).toThrow(/太短/);
   });
@@ -308,96 +227,8 @@ describe("§3.9 · `wrappedEncRoot`：AAD 绑 `accountId`（防跨账号替换�
    密钥导出 / 导入（为二维码优化）
    ============================================================================ */
 
-describe("§5.2 · 账号密钥的编解码（紧凑二进制，为二维码优化）", () => {
-  it("往返一致", () => {
-    const text = encodeAccountKey({ accountId: ACCOUNT_ID, accountKey: ACCOUNT_KEY });
-    const back = decodeAccountKey(text);
-    expect(back.accountId).toBe(ACCOUNT_ID);
-    expect(hex(back.accountKey)).toBe(hex(ACCOUNT_KEY));
-  });
-
-  it("★ 紧凑到能塞进二维码：49 字节 → 66 个 base64url 字符", () => {
-    /*
-     * §5.2 要求支持二维码。JSON 会把 49 字节膨胀到 150+ 字符；
-     * 紧凑二进制 base64url 后是 66 字符 —— 二维码能小一大圈，也更不容易扫错。
-     */
-    const text = encodeAccountKey({ accountId: ACCOUNT_ID, accountKey: ACCOUNT_KEY });
-    const body = text.slice(ACCOUNT_KEY_PREFIX.length);
-    expect(fromBase64Url(body)).toHaveLength(49);
-    expect(body).toHaveLength(66);
-    expect(text.startsWith(ACCOUNT_KEY_PREFIX)).toBe(true);
-  });
-
-  it("容忍前后空白与**没有前缀**（用户常常只复制了后半截）", () => {
-    const text = encodeAccountKey({ accountId: ACCOUNT_ID, accountKey: ACCOUNT_KEY });
-    const body = text.slice(ACCOUNT_KEY_PREFIX.length);
-    expect(decodeAccountKey(`  ${text}\n`).accountId).toBe(ACCOUNT_ID);
-    expect(decodeAccountKey(body).accountId).toBe(ACCOUNT_ID);
-  });
-
-  it("**不容忍**版本不对 / 长度不对（那会导致「派生出错误的密钥」）", () => {
-    const text = encodeAccountKey({ accountId: ACCOUNT_ID, accountKey: ACCOUNT_KEY });
-    const blob = fromBase64Url(text.slice(ACCOUNT_KEY_PREFIX.length));
-
-    const wrongVersion = new Uint8Array(blob);
-    wrongVersion[0] = 9;
-    expect(() => decodeAccountKey(ACCOUNT_KEY_PREFIX + toBase64Url(wrongVersion))).toThrow(/版本/);
-
-    expect(() => decodeAccountKey(ACCOUNT_KEY_PREFIX + toBase64Url(blob.slice(0, 40)))).toThrow(/长度不对/);
-    expect(() => decodeAccountKey("")).toThrow(/空的/);
-    expect(() => decodeAccountKey("!!!!")).toThrow(/base64url/);
-  });
-
-  it("`accountKey` 长度不对时**编码**就拒绝（不要产出坏 blob）", () => {
-    expect(() => encodeAccountKey({ accountId: ACCOUNT_ID, accountKey: new Uint8Array(16) })).toThrow(/32 字节/);
-  });
-});
 
 /* ============================================================================
    组合流程
    ============================================================================ */
 
-describe("§1.5 · 注册与解锁的组合流程", () => {
-  it("注册材料**自洽**：令牌能派出来、包裹能解开", () => {
-    const material = createRegistrationMaterial();
-    expect(material.accountId).toMatch(/^[0-9a-f]{32}$/);
-    expect(material.authToken).toHaveLength(64);
-
-    // 用同一份 accountKey 重新派生，必须得到同一个令牌（否则「新设备」永远进不去）。
-    const derived = deriveFromAccountKey({ accountId: material.accountId, accountKey: material.accountKey });
-    expect(derived.authToken).toBe(material.authToken);
-    // 用 wrapKey 解开包裹，必须拿回同一个 encRoot。
-    expect(hex(unlockEncRoot({ accountId: material.accountId, accountKey: material.accountKey }, material.wrappedEncRoot))).toBe(hex(material.encRoot));
-  });
-
-  it("两次注册得到完全不同的材料（CSPRNG）", () => {
-    const a = createRegistrationMaterial();
-    const b = createRegistrationMaterial();
-    expect(a.accountId).not.toBe(b.accountId);
-    expect(a.authToken).not.toBe(b.authToken);
-    expect(a.wrappedEncRoot).not.toBe(b.wrappedEncRoot);
-  });
-
-  it("★ 密钥导出 → 导入 → 解锁：**一个秘密搞定**（§1.5 流程②）", () => {
-    /*
-     * 这条把「新设备」的整条路走一遍：只有那串导出的文本，没有别的东西。
-     * `accountId` 必须在导出的 blob 里 —— 它是 `authToken` 的派生 salt，
-     * 少了它新设备就算拿到 `accountKey` 也派不出令牌。
-     */
-    const registered = createRegistrationMaterial();
-    const exported = encodeAccountKey({ accountId: registered.accountId, accountKey: registered.accountKey });
-
-    // ── 新设备：只有这串文本 ──
-    const imported = decodeAccountKey(exported);
-    const { authToken } = deriveFromAccountKey(imported);
-    expect(authToken).toBe(registered.authToken);
-    // 服务端凭这个令牌返回 wrappedEncRoot，客户端解开：
-    expect(hex(unlockEncRoot(imported, registered.wrappedEncRoot))).toBe(hex(registered.encRoot));
-  });
-
-  it("错的密钥解不开别人的包裹（给出可读的错，而不是静默拿到错的 encRoot）", () => {
-    const alice = createRegistrationMaterial();
-    const bob = createRegistrationMaterial();
-    expect(() => unlockEncRoot({ accountId: bob.accountId, accountKey: bob.accountKey }, alice.wrappedEncRoot)).toThrow();
-  });
-});

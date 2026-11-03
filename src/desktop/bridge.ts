@@ -458,7 +458,11 @@ export interface OpennoteBridge {
    * 「打开 Opennote 设置」死按钮就是协议从未注册导致的）。
    */
   onDeepLink(callback: (
-    link: { ok: true; kind: "settings"; section: "import" } | { ok: true; kind: "open"; path: string },
+    link:
+      | { ok: true; kind: "settings"; section: "import" }
+      | { ok: true; kind: "open"; path: string }
+      | { ok: true; kind: "sync-callback"; code: string | null; state: string; error: string | null; message: string | null; github: string | null }
+      | { ok: true; kind: "sync-sign-in"; server: string | null; email: string | null },
   ) => void): () => void;
   /**
    * 桌面端自更新（`opennote:update:*`）。只有打包版 Windows x64 上

@@ -13,18 +13,11 @@
  * 3. **`SyncProviderError` 的 code 映射只该有一份**（见 `codeForStatus`）——
  *    文案与 code 分散在多处时，UI 会开始匹配字符串。
  *
- * ## 401 的语义：**「密钥已被轮换」**（这是文档明确拍板的，不是我猜的）
+ * ## 401 的语义：**「需要重新登录」**
  *
- * §1.5 代价 2 / 第 271 行 / 第 2030 行三处都写了同一件事：
- *
- * > 客户端收到 401 时要给明确文案：「此设备的密钥已被轮换，请导入新密钥」
- *
- * 依据是**概率**：`authToken` 是 256 位随机值的派生，一个「手抖打错」的密钥几乎不可能
- * 恰好命中另一个账号。所以 401 在实践中就是「这台设备的密钥过期了」。
- * 把它当成「密钥输错了」会让用户去反复重输一个其实没问题的密钥。
- *
- * ⚠️ 唯一的例外是**真的换了密钥**（用户在另一台设备上导入了一个不同的账号）——
- * 那时 401 也是对的：新密钥还没生效，应当去导入。所以这个映射没有歧义。
+ * 凭据是服务端发的设备会话（`docs/执行-同步重写-2026-11-02.md`）。401 只有三种来路：
+ * 这台设备在别处被移除、账号改过 / 重置过密码、会话被吊销 —— 对用户都是同一件事：
+ * 回到「设置 → 同步」重新登录。403 `disabled` 单独一种：账号被管理员停用了，重新登录也没用。
  */
 
 import { SyncProviderError, type SyncProviderError as SyncProviderErrorType } from "./provider-types";
@@ -270,8 +263,8 @@ const textDecoder = new TextDecoder();
  * 放在这里（而不是各 provider 里）是为了**只有一份映射**：UI 依赖 code 而不是文案。
  */
 export function codeForStatus(status: number, serverCode?: string): SyncProviderError["code"] {
-  if (status === 401) return "rotated"; // 见模块头：文档拍板「401 = 密钥已被轮换」
-  if (status === 403) return serverCode === "disabled" ? "rotated" : "forbidden";
+  if (status === 401) return "signed-out"; // 见模块头：401 = 这台设备的登录失效了
+  if (status === 403) return serverCode === "disabled" ? "disabled" : "forbidden";
   if (status === 404) return "not-found";
   if (status === 409) return "conflict";
   if (status === 413) return "quota";

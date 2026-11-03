@@ -124,10 +124,10 @@ describe("接不上时要说清「为什么」", () => {
     const deferred = deferredAttach();
     const binding = createWorkspaceSyncBinding({ attach: deferred.attach });
     const starting = binding.start();
-    deferred.release(0, { ok: false, reason: "no-account-key", message: "还没导入密钥" });
+    deferred.release(0, { ok: false, reason: "signed-out", message: "还没导入密钥" });
     await starting;
     expect(binding.phase()).toBe("skipped");
-    expect(binding.reason()).toBe("no-account-key");
+    expect(binding.reason()).toBe("signed-out");
     expect(binding.controller()).toBeNull();
   });
 
@@ -147,7 +147,7 @@ describe("接不上时要说清「为什么」", () => {
     const made = fakeController();
     const binding = createWorkspaceSyncBinding({ attach: deferred.attach });
     const first = binding.start();
-    deferred.release(0, { ok: false, reason: "no-account-key", message: "x" });
+    deferred.release(0, { ok: false, reason: "signed-out", message: "x" });
     await first;
     expect(binding.phase()).toBe("skipped");
 

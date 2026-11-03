@@ -13,16 +13,14 @@ import { describe, expect, it, vi } from "vitest";
 import { attachWorkspaceSync, knownCursorFor } from "./attach";
 import { createSyncLedger } from "./state";
 import { createMemoryCursorStore } from "./cursor";
-import { encodeAccountKey, createRegistrationMaterial } from "./accountKey";
 import { DISABLED_SYNC, type WorkspaceRecord, type WorkspaceSyncConfig } from "../data/workspaces";
 import type { FileSystemBackend } from "../fs/types";
 
 const NOTEBOOK = "11111111-2222-4333-8444-555555555555";
 
-/** 一份合法的账号密钥文本。 */
+/** 一个设备会话令牌（形状对就行：attach 不校验它，服务端才校验）。 */
 function keyText(): string {
-  const material = createRegistrationMaterial();
-  return encodeAccountKey({ accountId: material.accountId, accountKey: material.accountKey });
+  return "ons_" + "t".repeat(43);
 }
 
 function recordWith(sync: WorkspaceSyncConfig): WorkspaceRecord {
@@ -74,7 +72,7 @@ async function attach(overrides: Partial<Parameters<typeof attachWorkspaceSync>[
     record: recordWith(enabled()),
     backend: emptyBackend(),
     ledger: ledger(),
-    accountKeyText: keyText(),
+    authToken: keyText(),
     provider: stubProvider(),
     ...overrides,
   });
@@ -119,21 +117,17 @@ describe("★ §5.1 · 关掉就**连 provider 都不建**", () => {
   });
 });
 
-describe("★ 缺密钥 ⇒ 明确说「缺密钥」，**不静默降级**", () => {
-  it("没有账号密钥 ⇒ `no-account-key`（而不是发一个没有凭证的请求）", async () => {
+describe("★ 没登录 ⇒ 明确说「没登录」，**不静默降级**", () => {
+  it("没有会话令牌 ⇒ `signed-out`（而不是发一个没有凭证的请求）", async () => {
     /*
      * 「先连上试试」会发出一个无凭证请求，服务端只能回 401 ——
-     * 用户看到「同步失败」，一个指向错误方向的报错（真因是「还没导入密钥」）。
+     * 用户看到「同步失败」，一个指向错误方向的报错（真因是「还没登录」）。
      */
-    const result = await attach({ accountKeyText: null, provider: undefined });
-    expect(result).toMatchObject({ ok: false, reason: "no-account-key" });
-    expect((result as { message: string }).message).toContain("密钥");
-  });
-
-  it("密钥损坏 ⇒ 也报「密钥」而不是「网络」", async () => {
-    const result = await attach({ accountKeyText: "坏掉的内容", provider: undefined });
-    expect(result).toMatchObject({ ok: false, reason: "no-account-key" });
-    expect((result as { message: string }).message).toContain("损坏");
+    for (const authToken of [null, ""]) {
+      const result = await attach({ authToken, provider: undefined });
+      expect(result).toMatchObject({ ok: false, reason: "signed-out" });
+      expect((result as { message: string }).message).toContain("登录");
+    }
   });
 });
 

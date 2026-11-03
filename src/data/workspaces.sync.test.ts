@@ -46,10 +46,10 @@ describe("★ 只有**恰好** `true` 才算开（坏值不许把同步意外打
 });
 
 describe("★ 半配好的同步视为**关**（绝不能往没验证过的地址发数据）", () => {
-  it("开了但没有 `notebookId` ⇒ 关", () => {
-    expect(normalizeSyncConfig({ ...GOOD, notebookId: "" }).enabled).toBe(false);
-    expect(normalizeSyncConfig({ ...GOOD, notebookId: "   " }).enabled).toBe(false);
-    expect(normalizeSyncConfig({ ...GOOD, notebookId: 42 }).enabled).toBe(false);
+  it("开了但还没有 `notebookId` ⇒ 仍是开（等下次打开时按名字配对），id 规范成空串", () => {
+    expect(normalizeSyncConfig({ ...GOOD, notebookId: "" })).toMatchObject({ enabled: true, notebookId: "" });
+    expect(normalizeSyncConfig({ ...GOOD, notebookId: "   " })).toMatchObject({ enabled: true, notebookId: "" });
+    expect(normalizeSyncConfig({ ...GOOD, notebookId: 42 })).toMatchObject({ enabled: true, notebookId: "" });
   });
 
   it("开了但没有 `baseUrl` ⇒ 关", () => {
@@ -171,7 +171,7 @@ describe("`load()` 的接线：坏记录在**读的时候**就被规范化", () 
           location: "/tmp/y",
           addedAt: 1,
           lastOpenedAt: 3,
-          // 开了但没有 notebookId ⇒ 必须退化成关。
+          // 开了但还没对上云端笔记本 ⇒ 仍是开，notebookId 留空（打开时再配对）。
           sync: { enabled: true, baseUrl: "https://notes.example.com", notebookId: "" },
         },
         {
@@ -199,8 +199,8 @@ describe("`load()` 的接线：坏记录在**读的时候**就被规范化", () 
       const byId = new Map(mod.listWorkspaces().map((record) => [record.id, record]));
       // 坏形状 ⇒ 关，而且**不抛**。
       expect(byId.get("w1")!.sync).toEqual(DISABLED_SYNC);
-      // 半配好 ⇒ 关（这是最要紧的一条）。
-      expect(byId.get("w2")!.sync!.enabled).toBe(false);
+      // 开了、还没对上云端 ⇒ 仍是开，等打开时配对（attach 在配对之前不发文件请求）。
+      expect(byId.get("w2")!.sync).toMatchObject({ enabled: true, notebookId: "" });
       // 合法的照常开。
       expect(byId.get("w3")!.sync!.enabled).toBe(true);
       expect(byId.get("w3")!.sync!.notebookId).toBe("nb-1");

@@ -111,8 +111,9 @@ import { ReadingView } from "./components/ReadingView";
 import { Sidebar, currentFolderId, revealTag, type Scope } from "./components/Sidebar";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { StatusBar } from "./components/StatusBar";
-import { SyncDialog } from "./components/SyncDialog";
-import { closeWorkspaceSync, openWorkspaceSync, syncStatusBarInfo, syncUiStore } from "./sync/appSync";
+import { bindWorkspaceToRemote, closeWorkspaceSync, openWorkspaceSync, syncStatusBarInfo, syncUiStore } from "./sync/appSync";
+import { finishGithubSignIn, loadAccount, signInPrefillStore, syncAccountStore } from "./sync/account";
+import type { NotebookSummary } from "../shared/contract";
 import { activeBackend } from "./data/library";
 import { TabBar } from "./components/TabBar";
 import { WindowControls } from "./components/WindowControls";
@@ -139,7 +140,7 @@ export default function App(): ReactNode {
 
   const viewRef = useRef<EditorView | null>(null);
   const syncUi = useStore(syncUiStore);
-  const [syncOpen, setSyncOpen] = useState(false);
+  const syncAccount = useStore(syncAccountStore);
   const [scope, setScope] = useState<Scope>({ kind: "all" });
   // D27: the sidebar tab is real state — it lives in the UI settings and in the
   // notebook's state.json, so it survives a reload (see `setSidebarTab`).
@@ -529,9 +530,43 @@ export default function App(): ReactNode {
         // API-12：打开一篇笔记。路径的合法性已在主进程判过（含越权拒绝），
         // 这里仍走正常打开路径，路径不存在时由 openNote 自己如实失败。
         openNote(link.path);
+        return;
+      }
+      if (link.kind === "sync-callback") {
+        // GitHub 登录回来：换会话（state 与 PKCE 在 account.ts 里核对），结果显示在「设置 → 同步」。
+        setSettingsSection("同步");
+        setSettingsOpen(true);
+        void finishGithubSignIn(link);
+        return;
+      }
+      if (link.kind === "sync-sign-in") {
+        // `/join` 页的「在 Opennote 中打开」：预填服务器与邮箱，不自动登录。
+        signInPrefillStore.set({ server: link.server, email: link.email });
+        setSettingsSection("同步");
+        setSettingsOpen(true);
       }
     });
   }, [bridge, openNote]);
+
+  /*
+   * 同步账号：启动时读一次本机凭据（设置页没打开笔记本时也要知道「登没登录」）。
+   * 网页端的 GitHub 登录是整页跳转，回来时地址栏带着 `?sync_code=…&sync_state=…`：
+   * 在这里收尾，并立刻把这些参数从地址栏抹掉（不留在历史里）。
+   */
+  useEffect(() => {
+    void loadAccount();
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const state = params.get("sync_state");
+    if (!state) return;
+    const callback = { code: params.get("sync_code"), state, error: params.get("sync_error"), message: params.get("sync_message"), github: params.get("sync_github") };
+    for (const key of [...params.keys()]) if (key.startsWith("sync_")) params.delete(key);
+    const query = params.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+    setSettingsSection("同步");
+    setSettingsOpen(true);
+    void finishGithubSignIn(callback);
+  }, []);
 
   /*
    * 入库完成后的刷新：**不订阅 `opennote:import:notice`** —— 主进程从来没有发过它的发送方，
@@ -740,14 +775,14 @@ export default function App(): ReactNode {
 
   /* --------------------------------------------------------- workspace flow */
 
-  const openRecord = async (record: WorkspaceRecord, requestPermission = false) => {
+  const openRecord = async (record: WorkspaceRecord, requestPermission = false, options: { welcome?: boolean } = {}) => {
     setBusy(`正在打开「${record.name}」…`);
     try {
       await openWorkspace(record, { requestPermission });
       setScope({ kind: "all" });
       setTab("files");
       // a brand-new notebook gets the welcome note so the first screen is not blank
-      if (Object.keys(libraryStore.get().notes).length === 0) {
+      if (options.welcome !== false && Object.keys(libraryStore.get().notes).length === 0) {
         await seedWelcome(WELCOME_CONTENT);
         await rescanWorkspace();
       }
@@ -761,6 +796,33 @@ export default function App(): ReactNode {
     } finally {
       setBusy(null);
     }
+  };
+
+  /**
+   * 「设置 → 同步 → 只在云端的 → 下载到本机」：在本机建一个笔记本并绑上那个云端笔记本，然后打开它
+   * （打开就开始同步，把云端内容拉下来）。桌面端让用户选一个文件夹，网页 / 手机建在应用自己的存储里。
+   * 不放欢迎笔记：那会被当成本机新增推到云端去。
+   */
+  const downloadRemoteNotebook = async (notebook: NotebookSummary) => {
+    let record: WorkspaceRecord | null;
+    if (isCapacitorNative()) {
+      record = await createMobileWorkspace(notebook.name);
+    } else if (bridge) {
+      const ok = await askConfirm({
+        title: `把「${notebook.name}」下载到哪里？`,
+        message: "接下来选一个文件夹（最好是空的）。云端的笔记会下载进去；文件夹里原有的文件会和云端合并。",
+        confirmLabel: "选择文件夹",
+      });
+      if (!ok) return;
+      record = await addLocalFolder();
+    } else {
+      record = await createBrowserWorkspace(notebook.name);
+    }
+    if (!record) return;
+    const bound = bindWorkspaceToRemote(record, notebook) ?? record;
+    setSettingsOpen(false);
+    setSettingsSection(null);
+    await openRecord(bound, false, { welcome: false });
   };
 
   const openLocalFolder = async () => {
@@ -1686,7 +1748,7 @@ export default function App(): ReactNode {
             library.workspace === null
               ? null
               : (() => {
-                  const info = syncStatusBarInfo(syncUi, true);
+                  const info = syncStatusBarInfo(syncUi, true, syncAccount);
                   /*
                    * `info === null` = 一切正常。这时**不藏掉入口**，只把文字收起来：
                    * 它同时是同步设置对话框唯一的入口（见 StatusBar 的 sync 说明）。
@@ -1695,7 +1757,10 @@ export default function App(): ReactNode {
                     tone: info?.tone ?? null,
                     label: info?.label ?? null,
                     title: info?.title ?? "同步",
-                    onOpen: () => setSyncOpen(true),
+                    onOpen: () => {
+                      setSettingsSection("同步");
+                      setSettingsOpen(true);
+                    },
                   };
                 })()
           }
@@ -1740,6 +1805,7 @@ export default function App(): ReactNode {
             updateStatus={update.status}
             onCheckUpdate={update.check}
             onUpdateAction={update.act}
+            onDownloadRemote={downloadRemoteNotebook}
             onOpenInbox={() => {
               setSettingsOpen(false);
               setInboxOpen(true);
@@ -1759,7 +1825,6 @@ export default function App(): ReactNode {
         ) : null}
       </Presence>
       <Presence>{shortcutsOpen ? <ShortcutsDialog onClose={() => setShortcutsOpen(false)} /> : null}</Presence>
-      <Presence>{syncOpen ? <SyncDialog workspace={library.workspace} onClose={() => setSyncOpen(false)} /> : null}</Presence>
       {/* UI-03：外部导入的待确认内容。入库走 L2 接收端，落盘始终在渲染层。 */}
       <InboxPanel
         open={inboxOpen}

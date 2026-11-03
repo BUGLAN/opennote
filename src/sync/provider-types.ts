@@ -247,7 +247,8 @@ export class SyncProviderError extends Error {
   constructor(
     readonly code:
       | "unauthorized"
-      | "rotated"
+      | "signed-out"
+      | "disabled"
       | "forbidden"
       | "not-found"
       | "conflict"

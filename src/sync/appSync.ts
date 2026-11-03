@@ -16,10 +16,15 @@
  * <SyncDialog … />
  * ```
  *
- * 密钥保管（`keys.ts`）、绑定竞态（`binding.ts`）、attach（`attach.ts`）、
- * 账本落盘（`state.ts`）各自只做一件事；这里把它们拼起来，并持有三样
- * **进程级**的状态：当前绑定的 backend / 账本 / 会话，以及解锁后的 `encRoot`
- * （**只在内存**，退出即失效 —— 它是加密根，落盘就违背红线 3）。
+ * 账号与凭据（`account.ts`）、绑定竞态（`binding.ts`）、attach（`attach.ts`）、
+ * 账本落盘（`state.ts`）各自只做一件事；这里把它们拼起来，并持有**进程级**的状态：
+ * 当前绑定的 backend / 账本 / 会话。登录、退出、解锁都会让它重新接上（`onAccountChange`）。
+ *
+ * ## 只同步当前打开的笔记本（`docs/执行-同步重写-2026-11-02.md`）
+ *
+ * 每个笔记本自己的 `record.sync` 记着「开没开、对应云端哪个笔记本」。设置页里打开一个
+ * 还没对上云端的笔记本时只记下 `enabled + 服务器`，`notebookId` 留空 —— 等它被打开时
+ * 在这里按名字配对（云端有同名的就合并，没有就新建），配好写回 `record.sync`。
  */
 
 import { createStore } from "../lib/store";
@@ -27,17 +32,9 @@ import type { FileSystemBackend } from "../fs/types";
 import type { WorkspaceRecord } from "../data/workspaces";
 import { desktopSyncBridge } from "./http";
 import { attachWorkspaceSync, type AttachResult, type AttachSkipReason } from "./attach";
-import {
-  createRegistrationMaterial,
-  decodeAccountKey,
-  deriveFromAccountKey,
-  deriveNotebookKey,
-  encodeAccountKey,
-  unwrapEncRoot,
-  type RegistrationMaterial,
-} from "./accountKey";
-import { describeKeyStorage, resolveAccountKeyStore, type AccountKeyStore } from "./keys";
-import { openAccountApi, type NotebookSummary } from "./accountApi";
+import { deriveNotebookKey } from "./accountKey";
+import { createRemoteNotebook, currentCredentials, currentEncRoot, loadAccount, onAccountChange, remoteNotebooks, reportSessionProblem } from "./account";
+import type { NotebookSummary } from "../../shared/contract";
 import { createSyncLedger, isSameRemote, readSyncLedger, writeSyncLedger, type SyncLedger } from "./state";
 import { createHashCache, readHashCache, writeHashCache, type HashCache } from "./hashCache";
 import { resolveCursorStore } from "./cursor";
@@ -50,7 +47,7 @@ import { normalizePath } from "../fs/paths";
 import { setSyncActive } from "./mode";
 import type { SyncStatus } from "./runner";
 /* `syncStatusBarInfo` 已移到 `statusBar.ts`（纯函数，可单独测），这里只转发。 */
-import { normalizeSyncConfig, updateWorkspaceSync } from "../data/workspaces";
+import { normalizeSyncConfig, updateWorkspaceSync, workspaceDisplayName, type WorkspaceSyncConfig } from "../data/workspaces";
 import type { SyncOnceResult } from "./engine";
 import type { SyncSession } from "./session";
 import { previewConflict as readConflictPreview, resolveConflictWithLocal, resolveConflictWithRemote, type ConflictPreview, type ResolutionOutcome } from "./resolution";
@@ -104,9 +101,6 @@ export interface SyncUiState {
    * 日志是排查用的，不该占用「出问题了」的位置。
    */
   logs: string[];
-  hasKey: boolean;
-  accountId: string | null;
-  storage: { where: string; risk: string | null } | null;
 }
 
 export const syncUiStore = createStore<SyncUiState>({
@@ -116,9 +110,6 @@ export const syncUiStore = createStore<SyncUiState>({
   last: null,
   error: null,
   logs: [],
-  hasKey: false,
-  accountId: null,
-  storage: null,
 });
 
 export { syncStatusBarInfo } from "./statusBar";
@@ -128,7 +119,6 @@ export type { SyncBarInfo, SyncBarTone } from "./statusBar";
    模块状态与内部工具
    ============================================================================ */
 
-const keyStore: AccountKeyStore = resolveAccountKeyStore();
 /**
  * 增量同步的游标（`/v1/changes?since=`）。**每设备一份**，不进笔记本目录 ——
  * 理由见 `cursor.ts` 模块头（跟着目录走会让另一台设备静默漏变更）。
@@ -145,12 +135,6 @@ let attachToken = 0;
 /** 「有字节落盘」的订阅退订句柄（见 `subscribeWorkspaceWrites`）。 */
 let writeUnsubscribed: (() => void) | null = null;
 /**
- * 解锁后的加密根。**只存内存**（红线 3）：退出应用就要重新解锁 ——
- * 桌面端密钥在主进程，解锁是一次静默的 `POST /v1/account/unlock`，代价可以接受。
- */
-let encRootCache: { accountId: string; encRoot: Uint8Array } | null = null;
-
-/**
  * 账本「心跳式落盘」的间隔（毫秒）。
  *
  * 为什么不是「每篇都写」：账本是整份 JSON（几百条时已 100+ KB），
@@ -162,6 +146,9 @@ const LEDGER_HEARTBEAT_MS = 2000;
 
 function onBindingStatus(status: SyncStatus): void {
   syncUiStore.set((prev) => ({ ...prev, status }));
+  // 服务端说这台设备的登录失效了 / 账号停了：账号状态上也要标出来（设置页据此给「重新登录」）。
+  if (status.phase === "signed-out") reportSessionProblem("signed-out");
+  if (status.phase === "disabled") reportSessionProblem("disabled");
 }
 
 function onBindingPhase(phase: BindingPhase): void {
@@ -177,37 +164,21 @@ function onBindingLog(line: string): void {
   }));
 }
 
-/** 刷新「有没有密钥 / 是谁的」这块事实（注册、导入、清除之后都要调）。 */
-export async function refreshAccountState(): Promise<void> {
-  try {
-    const text = await keyStore.load();
-    if (!text) {
-      syncUiStore.set((prev) => ({ ...prev, hasKey: false, accountId: null, storage: describeKeyStorage(keyStore) }));
-      return;
-    }
-    const parsed = decodeAccountKey(text);
-    syncUiStore.set((prev) => ({ ...prev, hasKey: true, accountId: parsed.accountId, storage: describeKeyStorage(keyStore) }));
-  } catch {
-    syncUiStore.set((prev) => ({ ...prev, hasKey: false, accountId: null, storage: describeKeyStorage(keyStore) }));
-  }
-}
-
-async function loadMaterial(): Promise<{ keyText: string; authToken: string; accountId: string; wrapKey: Uint8Array }> {
-  const text = await keyStore.load();
-  if (!text) throw new Error("这台设备还没有导入账号密钥");
-  const parsed = decodeAccountKey(text);
-  const derived = deriveFromAccountKey(parsed);
-  return { keyText: text, authToken: derived.authToken, accountId: parsed.accountId, wrapKey: derived.wrapKey };
-}
-
-/** 解开 `wrappedEncRoot`（账号级、一次），缓存进内存；E2EE attach 前必须已解锁。 */
-async function ensureUnlocked(baseUrl: string, material: Awaited<ReturnType<typeof loadMaterial>>): Promise<Uint8Array> {
-  if (encRootCache && encRootCache.accountId === material.accountId) return encRootCache.encRoot;
-  const api = await openAccountApi({ baseUrl, authToken: material.authToken });
-  const unlocked = await api.unlock();
-  const encRoot = unwrapEncRoot(material.wrapKey, unlocked.wrappedEncRoot, unlocked.accountId);
-  encRootCache = { accountId: unlocked.accountId, encRoot };
-  return encRoot;
+/**
+ * 还没对上云端的笔记本（`notebookId` 为空）：按名字配对，没有就新建。配好写回 `record.sync`。
+ *
+ * 按名字是原型定的规则：两台设备上叫同一个名字的笔记本就是同一个；同名的加密方式以云端为准
+ * （云端已经有密文了，本机不能把它当明文推）。
+ */
+async function resolveRemoteNotebook(record: WorkspaceRecord, config: WorkspaceSyncConfig): Promise<WorkspaceSyncConfig> {
+  if (config.notebookId !== "") return config;
+  const name = workspaceDisplayName(record);
+  const existing = (await remoteNotebooks()).find((notebook) => notebook.name === name && notebook.role !== "viewer");
+  const notebook = existing ?? (await createRemoteNotebook({ name, cryptoMode: config.cryptoMode }));
+  const resolved: WorkspaceSyncConfig = { ...config, notebookId: notebook.notebookId, cryptoMode: notebook.cryptoMode };
+  onBindingLog(`[sync] 「${name}」${existing ? "对上了云端的同名笔记本" : "在云端新建了笔记本"}（${notebook.notebookId}）`);
+  updateWorkspaceSync(record.id, resolved);
+  return resolved;
 }
 
 /** 账本：盘上有且远端信息一致就复用；换了笔记本/地址/模式 ⇒ 新账本（旧文件会被覆盖）。 */
@@ -300,21 +271,26 @@ async function attachCurrent(): Promise<AttachResult> {
   // 旧会话的 runner 已被绑定层停掉（dispose 后不再响应），别再往它身上挂写入通知。
   activeSession = null;
   if (!record || !backend) return { ok: false, reason: "disabled", message: "没有打开的笔记本" };
-  const config = normalizeSyncConfig(record.sync);
+  // 先看这个笔记本开没开同步：没开就是一个普通笔记本，登没登录都与它无关。
+  let config = normalizeSyncConfig(record.sync);
+  if (!config.enabled) return { ok: false, reason: "disabled", message: "这个笔记本没有开启同步" };
+  const credentials = currentCredentials();
+  if (!credentials) return { ok: false, reason: "signed-out", message: "这台设备还没有登录同步账号" };
+  if (config.baseUrl !== credentials.server) {
+    return { ok: false, reason: "other-server", message: `这个笔记本绑的是 ${config.baseUrl}，而这台设备登录的是 ${credentials.server}` };
+  }
+  config = await resolveRemoteNotebook(record, config);
+  if (token !== attachToken) return { ok: false, reason: "disabled", message: "已经换了笔记本" };
+  const boundRecord: WorkspaceRecord = { ...record, sync: config };
+  currentRecord = boundRecord;
 
-  let material: Awaited<ReturnType<typeof loadMaterial>>;
-  try {
-    material = await loadMaterial();
-  } catch {
-    return { ok: false, reason: "no-account-key", message: "这台设备还没有导入账号密钥" };
+  // 加密笔记本要先解锁：没有 encRoot 就停在「待解锁」，**绝不**退回明文。
+  const encRoot = config.cryptoMode === "user-key" ? currentEncRoot() : null;
+  if (config.cryptoMode === "user-key" && encRoot === null) {
+    return { ok: false, reason: "locked", message: "这个笔记本是端到端加密的，输入加密口令解锁后才能同步" };
   }
 
-  if (config.cryptoMode === "user-key") {
-    // 解不开就**抛**（attach 的纪律：绝不退回明文）。binding 会把它记成意外错误。
-    await ensureUnlocked(config.baseUrl, material);
-  }
-
-  const ledger = await loadLedger(backend, record);
+  const ledger = await loadLedger(backend, boundRecord);
   /*
    * 本地哈希缓存：读不到（第一次同步 / 文件坏了 / 换了加密模式）就新建一份空的。
    * 空缓存 = 这一轮把每个文件读一遍（正确），之后就是增量的。
@@ -351,26 +327,21 @@ async function attachCurrent(): Promise<AttachResult> {
       : (new EventSource(url) as unknown as EventStreamLike);
 
   const result = await attachWorkspaceSync({
-    record,
+    record: boundRecord,
     ledger,
     backend,
-    accountKeyText: material.keyText,
+    authToken: credentials.token,
     gitignoreText,
     hashCache,
     cursorStore,
     notebookKeyForNotebook: (notebookId) => {
-      if (config.cryptoMode !== "user-key") return undefined;
+      if (config.cryptoMode !== "user-key" || encRoot === null) return undefined;
       /*
-       * ★★ 拿不到 `encRoot` 时**必须返回 undefined**（让 attach 抛「还没有它的密钥」），
-       * **绝不能**退化成 `new Uint8Array()`：HKDF 对空输入**不报错**，会派生出一把
-       * 「错误但形状正确」的密钥 —— 推上去的密文其它设备全都解不开，而服务端不会拒绝
-       * （它只有密文）。这正是 L7 里那个极端时序的窗口。
-       *
-       * 顺带核对账号：`.opennote` 里没有 `encRoot`，但内存缓存可能还留着**上一个账号**的。
+       * ★★ 拿不到 `encRoot` 时**必须返回 undefined**（让 attach 抛），**绝不能**退化成空字节：
+       * HKDF 对空输入不报错，会派生出一把「错误但形状正确」的密钥 —— 推上去的密文其它设备全都解不开，
+       * 而服务端不会拒绝（它只有密文）。
        */
-      const cached = encRootCache;
-      if (cached === null || cached.accountId !== material.accountId) return undefined;
-      return deriveNotebookKey(cached.encRoot, notebookId);
+      return deriveNotebookKey(encRoot, notebookId);
     },
     onSynced: (synced) => handleSynced(backend, ledger, synced, hashCache),
     /**
@@ -404,7 +375,8 @@ async function attachCurrent(): Promise<AttachResult> {
      */
     onProgress: () => heartbeat(),
     // 实时状态（含进度）进 store —— 对话框与状态栏都从这里读。
-    onStatus: (status) => syncUiStore.set((prev) => ({ ...prev, status })),
+    // 与绑定层同一个出口：401 / 账号停用还要落到账号状态上（设置页据此切到「重新登录」）。
+    onStatus: (status) => onBindingStatus(status),
     openEventStream,
     /*
      * ★ 日志进 `logs`（诊断折叠区），**不进 `error`**。
@@ -448,7 +420,7 @@ export async function openWorkspaceSync(record: WorkspaceRecord, backend: FileSy
     syncUiStore.set((prev) => ({ ...prev, last: null }));
   }
   subscribeWorkspaceWrites();
-  await refreshAccountState();
+  await loadAccount();
   await binding.start();
 }
 
@@ -584,108 +556,59 @@ export async function resolveConflict(path: string, direction: "remote" | "local
 }
 
 /* ============================================================================
-   对话框用的账号动作
+   设置页用的笔记本动作
    ============================================================================ */
 
-/** 注册第一步：**客户端**生成全部密钥材料（服务端不生成任何密钥，红线 3）。 */
-export function prepareRegistration(): { material: RegistrationMaterial; keyText: string; accountId: string } {
-  const material = createRegistrationMaterial();
-  return {
-    material,
-    keyText: encodeAccountKey({ accountId: material.accountId, accountKey: material.accountKey }),
-    accountId: material.accountId,
-  };
-}
-
-/** 注册第二步：用户确认已保存密钥之后才允许调（引导码 `boot_` / 邀请码 `inv_` 按前缀分派）。 */
-export async function completeRegistration(input: {
-  baseUrl: string;
-  code: string;
-  material: RegistrationMaterial;
-  keyText: string;
-  label?: string;
-}): Promise<{ accountId: string; isAdmin: boolean }> {
-  const code = input.code.trim();
-  const field = code.startsWith("boot_") ? "bootstrapCode" : code.startsWith("inv_") ? "inviteCode" : null;
-  if (!field) throw new Error("看不懂这个码：管理员引导码以 boot_ 开头，注册邀请码以 inv_ 开头");
-  const api = await openAccountApi({ baseUrl: input.baseUrl });
-  const body = await api.register({
-    accountId: input.material.accountId,
-    authToken: input.material.authToken,
-    wrappedEncRoot: input.material.wrappedEncRoot,
-    label: input.label,
-    [field]: code,
-  });
-  await keyStore.save(input.keyText);
-  encRootCache = null;
-  await refreshAccountState();
-  return { accountId: body.accountId, isAdmin: body.isAdmin };
-}
-
-/** 导入已有账号密钥（另一台设备导出的那份文本）。 */
-export async function importAccountKey(text: string): Promise<void> {
-  const trimmed = text.trim();
-  decodeAccountKey(trimmed); // 形状不对就抛（可读的错误），不进存储
-  await keyStore.save(trimmed);
-  encRootCache = null;
-  await refreshAccountState();
-}
+/** 登录 / 退出 / 解锁之后：当前笔记本重新接上（没打开笔记本就什么都不做）。 */
+onAccountChange(() => {
+  if (currentRecord && currentBackend) void binding.start();
+});
 
 /**
- * 取当前保存的密钥文本（已登录状态下「复制密钥」用）。
- *
- * 多设备流程的必需品：注册之后密钥文本只在注册表单里出现过一次，
- * 没有它，第二台设备永远拿不到正确的钥匙（真机踩过：用户拿着旧环境的
- * 密钥导入新环境，症状是「令牌无效」）。
+ * 打开 / 关掉一个笔记本的同步。打开时只记「开 + 服务器 + 新建时用的加密方式」，
+ * 对上云端哪个笔记本留到它被打开时再定（见 `resolveRemoteNotebook`）。
  */
-export async function exportCurrentKey(): Promise<string | null> {
-  return keyStore.load();
+export function setWorkspaceSyncEnabled(record: WorkspaceRecord, enabled: boolean, cryptoMode: "none" | "user-key" = "none"): WorkspaceRecord | null {
+  const credentials = currentCredentials();
+  const current = normalizeSyncConfig(record.sync);
+  let updated: WorkspaceRecord | null;
+  if (!enabled) {
+    updated = updateWorkspaceSync(record.id, { ...current, enabled: false });
+  } else {
+    if (!credentials) throw new Error("还没有登录同步账号");
+    // 换了服务器：之前对上的云端笔记本不作数了。
+    const sameServer = current.baseUrl === credentials.server;
+    updated = updateWorkspaceSync(record.id, {
+      enabled: true,
+      baseUrl: credentials.server,
+      notebookId: sameServer ? current.notebookId : "",
+      cryptoMode: sameServer && current.notebookId !== "" ? current.cryptoMode : cryptoMode,
+      accountRef: credentials.accountId,
+    });
+  }
+  // 改的是正打开的那个：立刻按新配置重新接上（关掉就停）。
+  if (updated && currentRecord?.id === updated.id) {
+    currentRecord = updated;
+    void binding.start();
+    if (!enabled) setSyncActive(false);
+  }
+  return updated;
 }
 
-/** 清除本机密钥（账号不变，只是这台设备退出登录）。同步随之停掉。 */
-export async function forgetAccountKey(): Promise<void> {
-  await keyStore.clear();
-  encRootCache = null;
-  closeWorkspaceSync();
-  await refreshAccountState();
-}
-
-/** E2EE 解锁（拉取/推送前必须成功；成功后缓存进内存，本会话不再重复解锁）。 */
-export async function unlockAccount(baseUrl: string): Promise<void> {
-  const material = await loadMaterial();
-  await ensureUnlocked(baseUrl, material);
-}
-
-/* ============================================================================
-   对话框用的笔记本动作
-   ============================================================================ */
-
-export async function listNotebooks(baseUrl: string): Promise<NotebookSummary[]> {
-  const material = await loadMaterial();
-  const api = await openAccountApi({ baseUrl, authToken: material.authToken });
-  const body = await api.listNotebooks();
-  return body.notebooks;
-}
-
-export async function createNotebook(
-  baseUrl: string,
-  input: { name: string; cryptoMode: "none" | "user-key" },
-): Promise<NotebookSummary> {
-  const material = await loadMaterial();
-  const api = await openAccountApi({ baseUrl, authToken: material.authToken });
-  return api.createNotebook(input);
-}
-
-/** 保存连接配置（设置对话框「保存并连接」）。绑定重启由 App 的 effect 兜底。 */
-export function saveWorkspaceConnection(
-  record: WorkspaceRecord,
-  input: { baseUrl: string; notebookId: string; cryptoMode: "none" | "user-key"; enabled: boolean },
-): WorkspaceRecord | null {
+/** 把一个本机笔记本绑到指定的云端笔记本（「下载到本机」用）。 */
+export function bindWorkspaceToRemote(record: WorkspaceRecord, notebook: NotebookSummary): WorkspaceRecord | null {
+  const credentials = currentCredentials();
+  if (!credentials) throw new Error("还没有登录同步账号");
   return updateWorkspaceSync(record.id, {
-    enabled: input.enabled,
-    baseUrl: input.baseUrl.trim(),
-    notebookId: input.notebookId.trim(),
-    cryptoMode: input.cryptoMode,
-    accountRef: syncUiStore.get().accountId ?? record.sync?.accountRef ?? "",
+    enabled: true,
+    baseUrl: credentials.server,
+    notebookId: notebook.notebookId,
+    cryptoMode: notebook.cryptoMode,
+    accountRef: credentials.accountId,
   });
+}
+
+/** 当前打开的笔记本的记录（设置页要知道「哪个是这台正在用的」）。 */
+export function currentWorkspaceRecord(): WorkspaceRecord | null {
+  return currentRecord;
 }

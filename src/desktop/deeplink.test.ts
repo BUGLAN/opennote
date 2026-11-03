@@ -183,4 +183,34 @@ describe("opennote:// 深链解析", () => {
       },
     );
   });
+
+  describe("同步（阶段 ⑤）", () => {
+    it("opennote://sync/callback 只转交几个有上限的字符串参数", () => {
+      expect(deeplink.parseOpennoteUrl("opennote://sync/callback?code=ghc_abc&state=s123456789012345&github=lan")).toEqual({
+        ok: true,
+        kind: "sync-callback",
+        code: "ghc_abc",
+        state: "s123456789012345",
+        error: null,
+        message: null,
+        github: "lan",
+      });
+      // 失败也走回来（让设置页说清原因），但必须带 state。
+      expect(deeplink.parseOpennoteUrl("opennote://sync/callback?error=not-invited&message=%E4%B8%8D%E5%9C%A8&state=s123456789012345")).toMatchObject({ ok: true, error: "not-invited", message: "不在" });
+      expect(deeplink.parseOpennoteUrl("opennote://sync/callback?code=x")).toMatchObject({ ok: false, reason: "invalid" });
+      // 超长的值丢掉，不转交。
+      expect(deeplink.parseOpennoteUrl(`opennote://sync/callback?state=s123456789012345&code=${"x".repeat(300)}`)).toMatchObject({ ok: true, code: null });
+    });
+
+    it("opennote://sync/sign-in 只接受 http(s) 地址", () => {
+      expect(deeplink.parseOpennoteUrl("opennote://sync/sign-in?server=https%3A%2F%2Fnotes.example.com&email=a%40b.c")).toEqual({
+        ok: true,
+        kind: "sync-sign-in",
+        server: "https://notes.example.com",
+        email: "a@b.c",
+      });
+      expect(deeplink.parseOpennoteUrl("opennote://sync/sign-in?server=javascript%3Aalert(1)")).toMatchObject({ ok: false, reason: "invalid" });
+      expect(deeplink.parseOpennoteUrl("opennote://sync/sign-in")).toMatchObject({ ok: true, server: null, email: null });
+    });
+  });
 });

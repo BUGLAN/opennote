@@ -8,7 +8,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { attachWorkspaceSync } from "./attach";
 import { createSyncLedger } from "./state";
-import { createRegistrationMaterial, encodeAccountKey } from "./accountKey";
 import type { FileSystemBackend } from "../fs/types";
 import type { WorkspaceRecord } from "../data/workspaces";
 
@@ -63,8 +62,7 @@ function record(): WorkspaceRecord {
 }
 
 function keyText(): string {
-  const material = createRegistrationMaterial();
-  return encodeAccountKey({ accountId: material.accountId, accountKey: material.accountKey });
+  return "ons_" + "t".repeat(43);
 }
 
 describe("★ M9 · attach 必须把 deviceId 交给 provider", () => {
@@ -74,7 +72,7 @@ describe("★ M9 · attach 必须把 deviceId 交给 provider", () => {
       record: record(),
       backend: backend(),
       ledger: createSyncLedger({ baseUrl: "https://notes.example.com", notebookId: NOTEBOOK, cryptoMode: "none", protocolVersion: 1 }),
-      accountKeyText: keyText(),
+      authToken: keyText(),
       deviceId: "a".repeat(32),
       realtime: false,
     });
@@ -90,7 +88,7 @@ describe("★ M9 · attach 必须把 deviceId 交给 provider", () => {
       record: record(),
       backend: backend(),
       ledger: createSyncLedger({ baseUrl: "https://notes.example.com", notebookId: NOTEBOOK, cryptoMode: "none", protocolVersion: 1 }),
-      accountKeyText: keyText(),
+      authToken: keyText(),
       realtime: false,
     });
 

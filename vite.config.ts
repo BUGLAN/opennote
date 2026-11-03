@@ -372,5 +372,20 @@ export default defineConfig({
       },
     },
   },
-  server: { port: 5173, host: "127.0.0.1" },
+  server: {
+    port: 5173,
+    host: "127.0.0.1",
+    /*
+     * 开发时让网页端与本地同步服务同源：`OPENNOTE_SYNC_DEV_TARGET=http://127.0.0.1:8797 pnpm dev`，
+     * 然后在「设置 → 同步」里把服务器地址填成 `http://127.0.0.1:5173`。
+     * 生产里网页端就是同步服务自己发的（同源），服务端刻意不发 CORS 头，所以开发时只能这样接。
+     */
+    ...(process.env.OPENNOTE_SYNC_DEV_TARGET
+      ? {
+          proxy: Object.fromEntries(
+            ["/v1", "/auth", "/admin", "/panel", "/join", "/reset"].map((prefix) => [prefix, { target: process.env.OPENNOTE_SYNC_DEV_TARGET, changeOrigin: false }]),
+          ),
+        }
+      : {}),
+  },
 });
