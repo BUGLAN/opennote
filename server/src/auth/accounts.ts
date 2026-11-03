@@ -432,10 +432,17 @@ export class AccountStore {
     return row;
   }
 
-  /** `/join` 页面要显示的内容：发给谁、是什么角色。 */
-  inviteInfo(code: string, now = Date.now()): { email: string | null; grantAdmin: boolean; quotaBytes: number | null; expiresAt: number | null } {
+  /** `/join` 页面要显示的内容：发给谁、是什么角色、谁发的。 */
+  inviteInfo(code: string, now = Date.now()): { email: string | null; grantAdmin: boolean; quotaBytes: number | null; expiresAt: number | null; invitedBy: string | null } {
     const row = this.usableInvite(code, now);
-    return { email: row.email, grantAdmin: row.grant_admin === 1, quotaBytes: row.quota_bytes, expiresAt: row.expires_at };
+    const creator = row.created_by ? this.findById(row.created_by) : null;
+    return {
+      email: row.email,
+      grantAdmin: row.grant_admin === 1,
+      quotaBytes: row.quota_bytes,
+      expiresAt: row.expires_at,
+      invitedBy: creator ? accountLabel(creator) : null,
+    };
   }
 
   /** 接受邀请：建号 + 记一次使用，同一事务。 */
@@ -461,6 +468,18 @@ export class AccountStore {
       return accountId;
     });
     return this.findById(id)!;
+  }
+
+  /**
+   * 延长邀请（控制台只有哈希：明文码生成后就没了）。已作废、已用完的不延长。
+   * 新的到期时间从「现在」和「原到期时间」里较晚的那个往后算，所以没过期的邀请不会被缩短。
+   */
+  extendInviteByHash(codeHash: string, extraSeconds: number, now = Date.now()): number | null {
+    const row = this.db.prepare("SELECT * FROM invites WHERE code_hash = ?").get(codeHash) as InviteRow | undefined;
+    if (!row || row.revoked_at !== null || row.uses >= row.max_uses) return null;
+    const expiresAt = Math.max(now, row.expires_at ?? now) + extraSeconds * 1000;
+    this.db.prepare("UPDATE invites SET expires_at = ? WHERE code_hash = ?").run(expiresAt, codeHash);
+    return expiresAt;
   }
 
   revokeInvite(code: string, now = Date.now()): boolean {

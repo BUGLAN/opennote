@@ -223,6 +223,8 @@ export const inviteInfoSchema = z.object({
   grantAdmin: z.boolean(),
   quotaBytes: z.number().int().nonnegative(),
   expiresAt: z.number().int().nonnegative().nullable(),
+  /** 发邀请的人（显示名或邮箱）；CLI 发的是 null。 */
+  invitedBy: z.string().nullable(),
 });
 export type InviteInfo = z.infer<typeof inviteInfoSchema>;
 
@@ -512,6 +514,12 @@ export const adminAccountSummarySchema = z.object({
   quota: quotaSchema,
   createdAt: z.number().int().nonnegative(),
   lastSeenAt: z.number().int().nonnegative().nullable(),
+  /** 参与的笔记本数（拥有的 + 被共享的）。 */
+  notebookCount: z.number().int().nonnegative(),
+  /** 仍登录着的设备数（已移除的不算）。 */
+  deviceCount: z.number().int().nonnegative(),
+  /** 这个账号任一设备最近一次同步。 */
+  lastSyncAt: z.number().int().nonnegative().nullable(),
 });
 export type AdminAccountSummary = z.infer<typeof adminAccountSummarySchema>;
 

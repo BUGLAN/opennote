@@ -27,13 +27,15 @@
  */
 
 import { Hono } from "hono";
-import { adminAccountSummarySchema, adminServerInfoSchema, emailSchema, parseContract } from "../../../shared/contract";
-import { AccountError, AccountStore, type AccountRow } from "../auth/accounts";
+import { adminServerInfoSchema, emailSchema, parseContract } from "../../../shared/contract";
+import { AccountError, AccountStore, accountLabel } from "../auth/accounts";
 import type { CouchClient } from "../couch/client";
 import type { NotebookStore } from "../notebooks";
 import type { ServerConfig } from "../config";
 import type { SettingsStore } from "../settings";
-import { accountErrorResponse, bearerToken, quotaOf } from "./auth";
+import { accountErrorResponse } from "./auth";
+import { createAdminGate } from "./adminGate";
+import { accountSummaries } from "./adminView";
 
 export interface AdminRoutesDeps {
   accounts: AccountStore;
@@ -48,6 +50,9 @@ export interface AdminRoutesDeps {
   now?: () => number;
 }
 
+/** 列表里给的邀请 id：码的 sha256。 */
+const HASH_ID = /^[0-9a-f]{64}$/;
+
 /** 默认邀请码有效期：7 天（管理员发码给人，通常不会当天就用）。 */
 export const DEFAULT_INVITE_TTL_SECONDS = 7 * 24 * 3600;
 
@@ -56,30 +61,13 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
   const json = (body: unknown, status: number): Response =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 
-  /**
-   * **管理员闸门。**
-   *
-   * 返回 `Response` = 已经可以提前返回（**此刻还没有碰过数据库里的任何业务表**）；
-   * 返回 `AccountRow` = 通过。
-   *
-   * ⚠️ 401（没令牌）与 403（有令牌但不是管理员）要分开：前者是「你没登录」，
-   * 后者是「你登录了但没权限」——**两者都不透露「有没有别的账号」**。
-   */
-  const requireAdmin = (c: { req: { header: (name: string) => string | undefined } }): AccountRow | Response => {
-    const token = bearerToken(c.req.header("authorization"));
-    if (!token) return json({ error: "缺少 Authorization: Bearer 令牌", code: "unauthorized" }, 401);
-    let row: AccountRow;
-    try {
-      row = deps.accounts.authenticate(token);
-    } catch (error) {
-      if (error instanceof AccountError) {
-        const disabled = error.rejection === "disabled";
-        return json({ error: error.message, code: disabled ? "disabled" : "unauthorized" }, disabled ? 403 : 401);
-      }
-      throw error;
-    }
-    if (row.is_admin !== 1) return json({ error: "需要管理员权限", code: "forbidden" }, 403);
-    return row;
+  /** 管理员闸门（Bearer 或控制台 cookie，见 `adminGate.ts`）。每个处理器的第一句。 */
+  const requireAdmin = createAdminGate(deps);
+
+  /** 账号 id → 给人看的名字（账号已删除时退回截断的 id）。 */
+  const labelOf = (accountId: string): string => {
+    const row = deps.accounts.findById(accountId);
+    return row ? accountLabel(row) : `账号 ${accountId.slice(0, 8)}`;
   };
 
   const joinUrl = (code: string): string => `${deps.config.externalBaseUrl}/join/${code}`;
@@ -93,24 +81,7 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     const admin = requireAdmin(c as never);
     if (admin instanceof Response) return admin;
 
-    const rows = deps.accounts.list();
-    const accounts = rows.map((row) =>
-      parseContract(
-        adminAccountSummarySchema,
-        {
-          accountId: row.id,
-          email: row.email,
-          displayName: row.display_name,
-          loginMethods: { password: row.password_hash !== null },
-          status: row.status === "disabled" ? "disabled" : "active",
-          isAdmin: row.is_admin === 1,
-          quota: quotaOf(deps, row),
-          createdAt: row.created_at,
-          lastSeenAt: row.last_seen_at,
-        },
-        "GET /v1/admin/accounts 条目",
-      ),
-    );
+    const accounts = accountSummaries(deps, deps.accounts.list(), now());
     return json({ accounts, total: accounts.length }, 200);
   });
 
@@ -218,7 +189,8 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
       action: "delete_account",
       target: accountId,
       ip: null,
-      detail: `databasesDeleted=${databasesDeleted},notebooksTransferred=${notebooksTransferred}`,
+      // 账号删掉之后就查不到名字了，所以名字跟着审计走（去掉逗号：detail 按逗号分字段）。
+      detail: `databasesDeleted=${databasesDeleted},notebooksTransferred=${notebooksTransferred},label=${accountLabel(target).replace(/[,=]/g, " ")}`,
     });
     return json({ databasesDeleted, notebooksTransferred }, 200);
   });
@@ -235,7 +207,21 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
   routes.get("/invites", (c) => {
     const admin = requireAdmin(c as never);
     if (admin instanceof Response) return admin;
-    return json({ invites: deps.notebooks.listInvites() }, 200);
+    const at = now();
+    const invites = deps.notebooks.listInvites().map((invite) => ({
+      ...invite,
+      // 控制台只拿得到哈希（明文码只在生成那一刻返回过一次），作废 / 延长都用它当 id。
+      id: invite.codeHash,
+      state: invite.revokedAt !== null
+        ? "revoked"
+        : invite.uses >= invite.maxUses
+          ? "used"
+          : invite.expiresAt !== null && at > invite.expiresAt
+            ? "expired"
+            : "open",
+      acceptedByLabel: invite.acceptedBy ? labelOf(invite.acceptedBy) : null,
+    }));
+    return json({ invites }, 200);
   });
 
   /**
@@ -279,14 +265,62 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     }
   });
 
+  /** 作废邀请。`:code` 可以是明文码（`join_…`，刚生成时手里有）或列表里的 id（哈希）。 */
   routes.delete("/invites/:code", (c) => {
     const admin = requireAdmin(c as never);
     if (admin instanceof Response) return admin;
     const code = c.req.param("code");
     // 作废是**幂等**的：已经作废过返回 204（不是 404）—— 目标状态已经达成。
-    const changed = deps.accounts.revokeInvite(code);
+    const changed = HASH_ID.test(code) ? deps.notebooks.revokeInviteByHash(code, now()) : deps.accounts.revokeInvite(code, now());
     deps.audit?.({ actorId: admin.id, action: "revoke_invite", target: null, ip: null, detail: changed ? "revoked" : "already-revoked-or-unknown" });
     return new Response(null, { status: 204 });
+  });
+
+  /** 延长邀请：`{ extendSeconds }`，默认再给 7 天。 */
+  routes.patch("/invites/:id", async (c) => {
+    const admin = requireAdmin(c as never);
+    if (admin instanceof Response) return admin;
+    const id = c.req.param("id");
+    if (!HASH_ID.test(id)) return json({ error: "邀请 id 形状不对", code: "bad-request" }, 400);
+    const raw = (await c.req.json().catch(() => null)) as { extendSeconds?: unknown } | null;
+    const extendSeconds =
+      typeof raw?.extendSeconds === "number" && Number.isFinite(raw.extendSeconds) && raw.extendSeconds > 0
+        ? Math.min(Math.floor(raw.extendSeconds), 365 * 24 * 3600)
+        : DEFAULT_INVITE_TTL_SECONDS;
+    const expiresAt = deps.accounts.extendInviteByHash(id, extendSeconds, now());
+    if (expiresAt === null) return json({ error: "这个邀请已经作废或用完了", code: "not-found" }, 404);
+    deps.audit?.({ actorId: admin.id, action: "extend_invite", target: null, ip: null, detail: String(extendSeconds) });
+    return json({ expiresAt }, 200);
+  });
+
+  /* ---------------------------------------------------------------- 设备 */
+
+  /** 移除设备：账本上标记 + 吊销它的会话。它下次联网会收到 401（「需要重新登录」）。 */
+  routes.delete("/devices/:id", (c) => {
+    const admin = requireAdmin(c as never);
+    if (admin instanceof Response) return admin;
+    const device = deps.notebooks.findDevice(c.req.param("id"));
+    if (!device) return json({ error: "没有这台设备", code: "not-found" }, 404);
+    deps.notebooks.markDeviceRevoked(device.accountId, device.deviceId, now());
+    const revoked = deps.accounts.revokeDeviceSessions(device.accountId, device.deviceId, now());
+    deps.audit?.({ actorId: admin.id, action: "admin_remove_device", target: device.accountId, ip: null, detail: device.name ?? device.deviceId.slice(0, 8) });
+    return json({ revokedSessions: revoked }, 200);
+  });
+
+  /** 批量移除 `inactiveDays` 天（默认 90）没同步过、还登录着的设备。 */
+  routes.post("/devices/prune", async (c) => {
+    const admin = requireAdmin(c as never);
+    if (admin instanceof Response) return admin;
+    const raw = (await c.req.json().catch(() => null)) as { inactiveDays?: unknown } | null;
+    const days = typeof raw?.inactiveDays === "number" && Number.isInteger(raw.inactiveDays) && raw.inactiveDays >= 1 ? raw.inactiveDays : 90;
+    const cutoff = now() - days * 86_400_000;
+    const stale = deps.notebooks.listAllDevices({ now: now() }).filter((device) => device.signedIn && (device.lastSeenAt ?? device.createdAt) < cutoff);
+    for (const device of stale) {
+      deps.notebooks.markDeviceRevoked(device.accountId, device.deviceId, now());
+      deps.accounts.revokeDeviceSessions(device.accountId, device.deviceId, now());
+    }
+    deps.audit?.({ actorId: admin.id, action: "prune_devices", target: null, ip: null, detail: `count=${stale.length},days=${days}` });
+    return json({ removed: stale.length }, 200);
   });
 
   /* ------------------------------------------------------------ 服务设置 */
@@ -311,6 +345,13 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     }
     if ("passwordLogin" in raw) {
       if (typeof raw.passwordLogin !== "boolean") return json({ error: "passwordLogin 必须是布尔值", code: "bad-request" }, 400);
+      /*
+       * 现在只有密码一种登录方式（GitHub 在下一阶段）。关掉它 = 所有人、包括管理员自己
+       * 都再也登录不了，只能上服务器改库 —— 所以在有第二种方式之前拒绝。
+       */
+      if (!raw.passwordLogin) {
+        return json({ error: "还没有别的登录方式，关掉邮箱密码登录会让所有人都登录不了", code: "no-other-login" }, 409);
+      }
       patch.passwordLogin = raw.passwordLogin;
     }
     if ("defaultQuotaBytes" in raw) {

@@ -415,6 +415,7 @@ export class NotebookStore {
     day: string;
     kind: "pull" | "push" | "delete" | "conflict" | "error";
     amount?: number;
+    now?: number;
   }): void {
     const amount = Math.max(0, Math.trunc(input.amount ?? 1));
     if (amount === 0) return;
@@ -434,9 +435,9 @@ export class NotebookStore {
     // 列名来自**上面那张白名单**（不是外部输入），所以拼接是安全的。
     this.db
       .prepare(
-        `UPDATE sync_activity SET ` + column + ` = ` + column + ` + ? WHERE account_id = ? AND notebook_id = ? AND day = ?`,
+        `UPDATE sync_activity SET ` + column + ` = ` + column + ` + ?, last_at = ? WHERE account_id = ? AND notebook_id = ? AND day = ?`,
       )
-      .run(amount, input.accountId, input.notebookId, input.day);
+      .run(amount, input.now ?? Date.now(), input.accountId, input.notebookId, input.day);
   }
 
   /**
@@ -847,6 +848,8 @@ export class NotebookStore {
     createdAt: number;
     memberCount: number;
     bytesUsed: number;
+    /** 最近一次正文写 / 删的时间（`notebook_usage.updated_at`）；从没写过是 null。 */
+    lastChangeAt: number | null;
     provisioning: { designOk: boolean; revsLimit: string | null; syncInfoOk: boolean; lastChecked: number | null } | null;
   }[] {
     const rows = this.db
@@ -859,6 +862,7 @@ export class NotebookStore {
                 -- 用 SUM(quota_usage) 顶替，结果恒为 0，因为没有任何代码更新那一列）。
                 -- 台账问的是「这个库占了多少」，而一个账号下的库各占多少只有前者回答得了。
                 COALESCE(u.bytes_used, 0) AS bytes_used,
+                u.updated_at AS usage_updated_at,
                 p.design_ok, p.revs_limit, p.sync_info_ok, p.last_checked
            FROM notebooks n
            LEFT JOIN accounts a ON a.id = n.owner_id
@@ -876,6 +880,7 @@ export class NotebookStore {
       owner_label: string | null;
       member_count: number;
       bytes_used: number;
+      usage_updated_at: number | null;
       design_ok: number | null;
       revs_limit: string | null;
       sync_info_ok: number | null;
@@ -890,6 +895,7 @@ export class NotebookStore {
       createdAt: row.created_at,
       memberCount: row.member_count,
       bytesUsed: row.bytes_used,
+      lastChangeAt: row.usage_updated_at,
       /*
        * ★ **`last_checked` 才是「核对过没有」的判据**，不是 `design_ok`。
        *
@@ -916,44 +922,122 @@ export class NotebookStore {
   }
 
   /**
-   * **全站**设备账本（管理页「设备」）。
+   * **全站**设备账本（控制台「设备」页与用户详情）。
    *
-   * 仍然是只读账本：一个账号密钥所有设备共用，所以没有「踢掉这一台」这个动作。
+   * `lastSeenAt` 取「账本里的最近一次」与「这台设备的会话最近一次被用」中较晚的那个：
+   * 检查点每次同步都刷 `devices.last_seen_at`，而只拉不推的设备只会刷会话的 `last_used_at`。
+   * `signedIn` = 还有没吊销、没过期的会话（移除设备之后它就是 false）。
    */
-  listAllDevices(): {
-    deviceId: string;
-    accountId: string;
-    accountLabel: string | null;
-    name: string | null;
-    platform: string | null;
-    createdAt: number;
-    lastSeenAt: number | null;
-  }[] {
+  listAllDevices(options: { accountId?: string; now?: number } = {}): AdminDeviceRow[] {
+    const now = options.now ?? Date.now();
     const rows = this.db
       .prepare(
-        `SELECT d.id, d.account_id, d.name, d.platform, d.created_at, d.last_seen_at, COALESCE(a.display_name, a.email) AS account_label
+        `SELECT d.id, d.account_id, d.name, d.platform, d.os, d.client_version, d.created_at, d.last_seen_at, d.revoked_at,
+                COALESCE(a.display_name, a.email) AS account_label,
+                (SELECT MAX(s.last_used_at) FROM sessions s WHERE s.account_id = d.account_id AND s.device_id = d.id) AS session_used_at,
+                (SELECT COUNT(*) FROM sessions s
+                  WHERE s.account_id = d.account_id AND s.device_id = d.id AND s.revoked_at IS NULL
+                    AND (s.expires_at IS NULL OR s.expires_at > ?)) AS live_sessions
            FROM devices d
            LEFT JOIN accounts a ON a.id = d.account_id
-          ORDER BY COALESCE(d.last_seen_at, d.created_at) DESC`,
+          WHERE (? IS NULL OR d.account_id = ?)`,
       )
-      .all() as unknown as {
+      .all(now, options.accountId ?? null, options.accountId ?? null) as unknown as {
       id: string;
       account_id: string;
       name: string | null;
       platform: string | null;
+      os: string | null;
+      client_version: string | null;
       created_at: number;
       last_seen_at: number | null;
+      revoked_at: number | null;
       account_label: string | null;
+      session_used_at: number | null;
+      live_sessions: number;
+    }[];
+    return rows
+      .map((row) => {
+        const seen = [row.last_seen_at, row.session_used_at].filter((value): value is number => value !== null);
+        return {
+          deviceId: row.id,
+          accountId: row.account_id,
+          accountLabel: row.account_label,
+          name: row.name,
+          platform: row.platform,
+          os: row.os,
+          clientVersion: row.client_version,
+          createdAt: row.created_at,
+          lastSeenAt: seen.length > 0 ? Math.max(...seen) : null,
+          revokedAt: row.revoked_at,
+          signedIn: row.revoked_at === null && row.live_sessions > 0,
+        };
+      })
+      .sort((a, b) => (b.lastSeenAt ?? b.createdAt) - (a.lastSeenAt ?? a.createdAt));
+  }
+
+  /** 一台设备属于谁（控制台移除设备时用；设备 id 全站唯一）。 */
+  findDevice(deviceId: string): { deviceId: string; accountId: string; name: string | null } | null {
+    const row = this.db.prepare("SELECT id, account_id, name FROM devices WHERE id = ?").get(deviceId) as unknown as
+      | { id: string; account_id: string; name: string | null }
+      | undefined;
+    return row ? { deviceId: row.id, accountId: row.account_id, name: row.name } : null;
+  }
+
+  /** 每个账号拥有 / 参与的笔记本数（用户列表一次取齐，不逐行查）。 */
+  notebookCountsByAccount(): Map<string, number> {
+    const rows = this.db
+      .prepare(
+        `SELECT m.account_id, COUNT(*) AS n FROM memberships m JOIN notebooks n ON n.id = m.notebook_id
+          WHERE n.deleted_at IS NULL GROUP BY m.account_id`,
+      )
+      .all() as unknown as { account_id: string; n: number }[];
+    return new Map(rows.map((row) => [row.account_id, row.n]));
+  }
+
+  /** 全站已用存储（未删除的库）。 */
+  totalBytes(): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(SUM(u.bytes_used), 0) AS total FROM notebook_usage u JOIN notebooks n ON n.id = u.notebook_id WHERE n.deleted_at IS NULL")
+      .get() as unknown as { total: number };
+    return row.total;
+  }
+
+  /** `sync_activity` 里 `day >= sinceDay` 的行（活动日志与概览用；带 `lastAt`）。 */
+  activitySince(sinceDay: string): SyncActivityRow[] {
+    const rows = this.db.prepare("SELECT * FROM sync_activity WHERE day >= ? ORDER BY day DESC").all(sinceDay) as unknown as {
+      account_id: string;
+      notebook_id: string;
+      day: string;
+      pulls: number;
+      pushes: number;
+      deletes: number;
+      conflicts: number;
+      errors: number;
+      last_at: number | null;
     }[];
     return rows.map((row) => ({
-      deviceId: row.id,
       accountId: row.account_id,
-      accountLabel: row.account_label,
-      name: row.name,
-      platform: row.platform,
-      createdAt: row.created_at,
-      lastSeenAt: row.last_seen_at,
+      notebookId: row.notebook_id,
+      day: row.day,
+      pulls: row.pulls,
+      pushes: row.pushes,
+      deletes: row.deletes,
+      conflicts: row.conflicts,
+      errors: row.errors,
+      lastAt: row.last_at,
     }));
+  }
+
+  /** 笔记本 id → 名字与加密模式（活动日志给事件配名字用；包括已删除的）。 */
+  notebookLabels(): Map<string, { name: string; cryptoMode: "none" | "user-key"; deleted: boolean }> {
+    const rows = this.db.prepare("SELECT id, name, crypto_mode, deleted_at FROM notebooks").all() as unknown as {
+      id: string;
+      name: string;
+      crypto_mode: string;
+      deleted_at: number | null;
+    }[];
+    return new Map(rows.map((row) => [row.id, { name: row.name, cryptoMode: row.crypto_mode === "user-key" ? "user-key" : "none", deleted: row.deleted_at !== null }]));
   }
 
   /**
@@ -1052,6 +1136,21 @@ export class NotebookStore {
       .run(event.now ?? Date.now(), event.actorId, event.action, event.target ?? null, event.ip ?? null, event.detail ?? null);
   }
 
+  /** 审计的一页：`at < before`（不传就从最新开始），倒序。 */
+  auditBefore(before: number | null, limit: number): { at: number; actorId: string | null; action: string; target: string | null; ip: string | null; detail: string | null }[] {
+    const rows = this.db
+      .prepare("SELECT * FROM audit WHERE (? IS NULL OR at < ?) ORDER BY at DESC, id DESC LIMIT ?")
+      .all(before, before, limit) as unknown as {
+      at: number;
+      actor_id: string | null;
+      action: string;
+      target: string | null;
+      ip: string | null;
+      detail: string | null;
+    }[];
+    return rows.map((row) => ({ at: row.at, actorId: row.actor_id, action: row.action, target: row.target, ip: row.ip, detail: row.detail }));
+  }
+
   /** 审计尾部（控制台用；倒序）。 */
   recentAudit(limit = 50): { at: number; actorId: string | null; action: string; target: string | null; ip: string | null; detail: string | null }[] {
     const rows = this.db.prepare("SELECT * FROM audit ORDER BY at DESC LIMIT ?").all(limit) as unknown as {
@@ -1071,4 +1170,32 @@ export function assertNotebookQuota(currentNotebooks: number, limit: number): vo
   if (currentNotebooks >= limit) {
     throw new NotebookError("quota", `笔记本数量已达配额上限（${limit}）`);
   }
+}
+
+/** 控制台看到的一台设备（`listAllDevices`）。 */
+export interface AdminDeviceRow {
+  deviceId: string;
+  accountId: string;
+  accountLabel: string | null;
+  name: string | null;
+  platform: string | null;
+  os: string | null;
+  clientVersion: string | null;
+  createdAt: number;
+  lastSeenAt: number | null;
+  revokedAt: number | null;
+  signedIn: boolean;
+}
+
+/** `sync_activity` 的一行（带 v5 的 `lastAt`）。 */
+export interface SyncActivityRow {
+  accountId: string;
+  notebookId: string;
+  day: string;
+  pulls: number;
+  pushes: number;
+  deletes: number;
+  conflicts: number;
+  errors: number;
+  lastAt: number | null;
 }

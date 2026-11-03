@@ -7,7 +7,7 @@
  * | `POST /auth/setup` | `/admin` 初始化页 | 无（只在零账号时可用） |
  * | `POST /auth/login` · `POST /auth/register` | 客户端 | 无 |
  * | `POST /auth/logout` | 客户端 | 会话令牌 |
- * | `GET/POST /auth/invites/:code` | `/join` 页 | 无（码本身就是凭据） |
+ * | `GET/POST /auth/invites/:code` | `/join` 页 | 无（码本身就是凭据；「关闭注册」时 403） |
  * | `GET/POST /auth/password-resets/:code` | `/reset` 页 | 无（同上） |
  * | `GET/PATCH /me` · `POST /me/password` · `GET/DELETE /me/devices` | 客户端 | 会话令牌 |
  *
@@ -43,6 +43,8 @@ export interface AuthRoutesDeps {
   config: ServerConfig;
   settings: SettingsStore;
   audit?: (event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null }) => void;
+  /** 登录失败计数；与控制台登录共用一个（`app.ts` 装配时传入），不传就自己建一个。 */
+  throttle?: LoginThrottle;
   now?: () => number;
 }
 
@@ -144,7 +146,7 @@ export class LoginThrottle {
 export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   const routes = new Hono();
   const now = (): number => deps.now?.() ?? Date.now();
-  const throttle = new LoginThrottle();
+  const throttle = deps.throttle ?? new LoginThrottle();
   const json = (body: unknown, status: number): Response =>
     new Response(status === 204 ? null : JSON.stringify(body), {
       status,
@@ -268,7 +270,15 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
 
   /* ---------------------------------------------------------------- 邀请 */
 
+  /** 「关闭注册」连邀请也不收：已有账号照常用，只是不能再新增。 */
+  const registrationClosed = (): Response | null =>
+    deps.settings.get("registration") === "closed"
+      ? json({ error: "这台服务器暂时不接受新账号，请联系管理员", code: "registration-closed" }, 403)
+      : null;
+
   routes.get("/auth/invites/:code", (c) => {
+    const closed = registrationClosed();
+    if (closed) return closed;
     try {
       const info = deps.accounts.inviteInfo(c.req.param("code"), now());
       return json(
@@ -277,6 +287,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
           grantAdmin: info.grantAdmin,
           quotaBytes: info.quotaBytes ?? deps.settings.get("defaultQuotaBytes"),
           expiresAt: info.expiresAt,
+          invitedBy: info.invitedBy,
         }),
         200,
       );
@@ -287,6 +298,8 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   });
 
   routes.post("/auth/invites/:code", async (c) => {
+    const closed = registrationClosed();
+    if (closed) return closed;
     const body = await readBody(c, inviteAcceptRequestSchema);
     if (body instanceof Response) return body;
     try {

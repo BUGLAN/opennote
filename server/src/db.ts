@@ -27,7 +27,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 interface Migration {
   version: number;
@@ -372,6 +372,18 @@ const MIGRATIONS: readonly Migration[] = [
 
         DROP TABLE IF EXISTS bootstrap_codes;
       `);
+    },
+  },
+  {
+    version: 5,
+    description: "sync_activity 记下当天最后一次活动的时间（控制台活动日志按时间排）",
+    up: (db) => {
+      /*
+       * `sync_activity` 按天聚合，只有 `day` 没有时刻 —— 活动日志要把它和审计（精确到毫秒）
+       * 排进同一条时间线，只靠 `day` 只能把一整天的同步堆在当天末尾。
+       * 加一列「这一行最后一次被记账的时间」，旧行留空（按当天末尾排）。
+       */
+      db.exec("ALTER TABLE sync_activity ADD COLUMN last_at INTEGER");
     },
   },
 ];

@@ -7,7 +7,7 @@
  * | --- | --- | --- |
  * | `/` + 静态资源 | **PWA 客户端**（与其它两个同源，所以 CSP 不用放开任何 https） | 网页端 |
  * | `/v1/*` | 客户端 API | 桌面 / Android / 网页 |
- * | `/admin` | **控制台**（阶段 ② 重写，`docs/执行-同步重写-2026-11-02.md`） | 浏览器（运维） |
+ * | `/admin`、`/join`、`/reset` | **控制台**与两张公开页（`routes/panel.ts`） | 浏览器（运维 / 被邀请的人） |
  * | `/v1/health` | 公开健康检查 | 隧道 / 监控 |
  *
  * 同源带来两件具体的好事：**CSP 里 `connect-src` 不用放开任何 https**；控制台不需要 CORS。
@@ -40,12 +40,14 @@ import { CouchClient } from "./couch/client";
 import { AccountStore } from "./auth/accounts";
 import { NotebookStore } from "./notebooks";
 import { rateLimit, globalRateLimitKey, rateLimitKeyFromHeader } from "./ratelimit";
-import { createAuthRoutes } from "./routes/auth";
+import { createAuthRoutes, LoginThrottle } from "./routes/auth";
 import { createAdminRoutes } from "./routes/admin";
+import { createAdminViewRoutes } from "./routes/adminView";
+import { createPanelRoutes } from "./routes/panel";
 import { createNotebookRoutes } from "./routes/notebooks";
 import { createV1Routes } from "./routes/v1";
 import { SettingsStore } from "./settings";
-import { isHttps, securityHeaders } from "./panelSecurity";
+import { csrfGuard, isHttps, securityHeaders } from "./panelSecurity";
 
 export interface AppOptions {
   config: ServerConfig;
@@ -157,7 +159,12 @@ export function createApp(options: AppOptions): BuiltApp {
     }
   });
 
-  app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit: (event) => notebooks.audit(event), ...(options.now === undefined ? {} : { now: options.now }) }));
+  const nowOption = options.now === undefined ? {} : { now: options.now };
+  const audit = (event: Parameters<NotebookStore["audit"]>[0]): void => notebooks.audit(event);
+  // 客户端登录与控制台登录共用一份失败计数：换个入口不该换来五次新机会。
+  const throttle = new LoginThrottle();
+
+  app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, throttle, ...nowOption }));
   app.route(
     "/v1",
     createNotebookRoutes({
@@ -173,6 +180,23 @@ export function createApp(options: AppOptions): BuiltApp {
     "/v1",
     createV1Routes({ accounts, notebooks, config, couch, couchAdmin, settings, audit: (event) => notebooks.audit(event) }),
   );
+  /*
+   * 控制台用 cookie 调管理接口：cookie 会被浏览器自动带上，所以变更请求必须带自定义头
+   * （跨源页面发不出来）。纯 Bearer 的请求没有 cookie，不受影响（见 `csrfGuard`）。
+   */
+  app.use("/v1/admin/*", csrfGuard());
+  app.route(
+    "/v1/admin",
+    createAdminViewRoutes({
+      accounts,
+      notebooks,
+      config,
+      couch,
+      settings,
+      ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
+      ...nowOption,
+    }),
+  );
   app.route(
     "/v1/admin",
     createAdminRoutes({
@@ -187,10 +211,8 @@ export function createApp(options: AppOptions): BuiltApp {
     }),
   );
 
-  /*
-   * 网页控制台（`/admin`）与 `/join`、`/reset` 页在阶段 ② 重写
-   * （`docs/执行-同步重写-2026-11-02.md`）。旧的 `/panel` 依赖「密钥即身份」登录，已随 v2 移除。
-   */
+  /* 网页控制台（`/admin`）、`/join`、`/reset` 与它们的静态资源、cookie 会话接口。 */
+  app.route("/", createPanelRoutes({ accounts, notebooks, config, settings, throttle, audit, ...nowOption }));
 
   // 兜底 404：**形状与其它错误一致**（`{error, code}`），免得客户端要处理两种错误体。
   app.notFound((c) =>
