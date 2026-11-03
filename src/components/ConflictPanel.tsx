@@ -87,8 +87,18 @@ export function ConflictPanel({ conflicts }: { conflicts: ConflictItem[] }): Rea
       .finally(() => setBusy(null));
   };
 
+  /**
+   * 选了这一边之后**会删文件**的冲突：另一边已经没有这一条了，裁决就是把删除执行到底
+   * （「用远端」删本机那份 / 「用我的」删远端那份）。批量确认框必须如实写出来。
+   */
+  const deletesFor = (direction: "remote" | "local"): number =>
+    conflicts.filter((item) =>
+      item.kind === (direction === "remote" ? "deleted-remotely-modified-locally" : "deleted-locally-modified-remotely"),
+    ).length;
+
   const bulk = async (direction: "remote" | "local") => {
     const total = conflicts.length;
+    const deletes = deletesFor(direction);
     const ok = await askConfirm({
       title: `把 ${total} 条冲突全部${direction === "local" ? "改成你的版本" : "改成远端版本"}？`,
       message:
@@ -100,7 +110,10 @@ export function ConflictPanel({ conflicts }: { conflicts: ConflictItem[] }): Rea
           k: "覆盖",
           v: direction === "local" ? `${total} 篇远端内容` : `${total} 篇本机内容`,
         },
-        { k: "不会", v: "删任何文件，也不会动其余的笔记" },
+        deletes > 0
+          ? { k: "删除", v: `${deletes} 篇${direction === "local" ? "远端" : "本机"}内容（另一边已经删了它）` }
+          : { k: "不会", v: "删任何文件" },
+        { k: "不会", v: "动其余的笔记" },
         { k: "可撤销", v: "每篇都有前像，可以从「历史」逐篇恢复" },
       ],
       confirmLabel: direction === "local" ? "全部用我的" : "全部用远端",

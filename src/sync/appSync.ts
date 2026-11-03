@@ -239,6 +239,24 @@ async function loadLedger(backend: FileSystemBackend, record: WorkspaceRecord): 
   });
 }
 
+/**
+ * 冲突清单 = **账本里还挂着的 `pendingConflict`** ∪ 本次结果（按路径去重，本次结果优先）。
+ *
+ * 为什么不只看本次结果：冲突要一直列到用户裁决为止（H1）。引擎每轮会把账本里挂着的
+ * 冲突并进 `result.conflicts`，但这里再从账本兜一遍 —— 清单的来源就是账本本身，
+ * 不依赖引擎某一条分支有没有记得把它报出来。
+ */
+function collectConflicts(ledger: SyncLedger, result: SyncOnceResult): { path: string; kind: string }[] {
+  const byPath = new Map<string, string>();
+  for (const item of [...result.conflicts, ...result.pushConflicts]) {
+    if (!byPath.has(item.path)) byPath.set(item.path, item.kind);
+  }
+  for (const [path, file] of Object.entries(ledger.files)) {
+    if (file.pendingConflict !== undefined && !byPath.has(path)) byPath.set(path, file.pendingConflict.kind);
+  }
+  return [...byPath].map(([path, kind]) => ({ path, kind }));
+}
+
 /** 每一轮成功同步：账本 + 哈希缓存落盘 + 概要进 UI（含冲突列表 —— 对话框从这里取）。 */
 function handleSynced(
   backend: FileSystemBackend,
@@ -264,7 +282,7 @@ function handleSynced(
       pulled: result.pulled,
       deleted: result.deleted,
       remoteDeleted: result.remoteDeleted,
-      conflicts: [...result.conflicts, ...result.pushConflicts].map((item) => ({ path: item.path, kind: item.kind })),
+      conflicts: collectConflicts(ledger, result),
       unknownDids: result.unknownDids.length,
       suspendedDeletes: result.suspendedDeletes.length,
       treeTruncated: result.treeTruncated,
@@ -555,7 +573,13 @@ export async function resolveConflict(path: string, direction: "remote" | "local
   const session = activeSession;
   if (!session) return { path, ok: false, error: "同步还没有接上" };
   const outcome = direction === "remote" ? await resolveConflictWithRemote(session, path) : await resolveConflictWithLocal(session, path);
-  if (outcome.ok) await manualSync();
+  if (outcome.ok) {
+    // 先把这一条从清单里摘掉：随后那一轮同步若失败/被跳过，界面也不该还挂着已裁决的冲突。
+    syncUiStore.set((prev) =>
+      prev.last === null ? prev : { ...prev, last: { ...prev.last, conflicts: prev.last.conflicts.filter((item) => item.path !== path) } },
+    );
+    await manualSync();
+  }
   return outcome;
 }
 
