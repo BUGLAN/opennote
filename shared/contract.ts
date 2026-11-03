@@ -188,6 +188,46 @@ export const githubExchangeRequestSchema = z.object({
   device: deviceDescriptorSchema,
 });
 
+/**
+ * 加密口令的 KDF 参数（阶段 ④）。口令只在客户端用：scrypt(口令, salt) → wrapKey → 解开 encRoot。
+ * 参数随包装一起存在服务端，以后调高参数时旧包装仍能解。
+ */
+export const kdfParamsSchema = z.object({
+  alg: z.literal("scrypt"),
+  N: z.number().int().min(1024).max(2 ** 20),
+  r: z.number().int().min(1).max(32),
+  p: z.number().int().min(1).max(16),
+  /** base64url，16 字节以上。 */
+  salt: z.string().min(16).max(128),
+});
+export type KdfParams = z.infer<typeof kdfParamsSchema>;
+
+/** `GET /v1/me/encryption` */
+export const encryptionStateSchema = z.union([
+  z.object({ configured: z.literal(false) }),
+  z.object({ configured: z.literal(true), wrappedEncRoot: z.string().min(1), kdf: kdfParamsSchema }),
+]);
+export type EncryptionState = z.infer<typeof encryptionStateSchema>;
+
+/** `PUT /v1/me/encryption`：`expected` 是服务端当前那一份（第一次设置时为 null），对不上就 409。 */
+export const encryptionUpdateRequestSchema = z.object({
+  wrappedEncRoot: z.string().min(16).max(1024),
+  kdf: kdfParamsSchema,
+  expected: z.string().nullable(),
+});
+
+/** X25519 公钥：原始 32 字节的 base64url。 */
+export const pairingPublicKeySchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/, "公钥形状不对");
+
+export const pairingCreateRequestSchema = z.object({ publicKey: pairingPublicKeySchema });
+export const pairingClaimRequestSchema = z.object({
+  code: z.string().regex(/^\d{6}$/, "配对码是 6 位数字"),
+  publicKey: pairingPublicKeySchema,
+  device: deviceDescriptorSchema,
+});
+export const pairingApproveRequestSchema = z.object({ sealed: z.string().min(16).max(2048).nullable() });
+export const pairingResultRequestSchema = z.object({ claimToken: z.string().min(16).max(128) });
+
 export const setupRequestSchema = z.object({
   email: emailSchema,
   password: passwordSchema,

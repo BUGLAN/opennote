@@ -498,6 +498,13 @@ export class AccountStore {
     return Number(result.changes ?? 0) > 0;
   }
 
+  /* ---------------------------------------------------------- 加密口令 */
+
+  /** 写入客户端包好的 encRoot 与 KDF 参数（服务端解不开，见模块头）。 */
+  setEncryption(accountId: string, wrappedEncRoot: string, encParams: string): void {
+    this.db.prepare("UPDATE accounts SET wrapped_enc_root = ?, enc_params = ? WHERE id = ?").run(wrappedEncRoot, encParams, accountId);
+  }
+
   /* ---------------------------------------------------------- 第三方身份 */
 
   identityOf(accountId: string, provider: "github"): IdentityRow | null {

@@ -19,6 +19,7 @@
 
 import { Hono, type Context } from "hono";
 import {
+  encryptionUpdateRequestSchema,
   githubExchangeRequestSchema,
   inviteAcceptRequestSchema,
   inviteInfoSchema,
@@ -88,6 +89,34 @@ export function meOf(deps: { accounts: AccountStore; notebooks: NotebookStore; c
     loginMethods: loginMethodsOf(deps.accounts, row),
     deviceId: session?.device_id ?? null,
   });
+}
+
+/**
+ * 给一台设备发会话：登记设备（名字、系统、版本）、作废它旧的会话、发新令牌。
+ * 密码登录、GitHub 登录、配对加入都走这一条。
+ */
+export function issueDeviceSession(
+  deps: { accounts: AccountStore; notebooks: NotebookStore; config: ServerConfig; settings: SettingsStore },
+  account: AccountRow,
+  device: DeviceDescriptor,
+  ip: string | null,
+  now: number,
+): { token: string; me: Me } {
+  deps.notebooks.upsertDevice({
+    deviceId: device.deviceId,
+    accountId: account.id,
+    name: device.name,
+    platform: device.platform,
+    os: device.os ?? null,
+    clientVersion: device.clientVersion ?? null,
+    now,
+    ip,
+  });
+  // 同一台设备重新登录：旧会话作废，免得一台设备挂着好几条有效令牌。
+  deps.accounts.revokeDeviceSessions(account.id, device.deviceId, now);
+  const { token, session } = deps.accounts.createSession({ accountId: account.id, kind: "device", deviceId: device.deviceId, ip, now });
+  deps.accounts.touch(account.id, now);
+  return { token, me: meOf(deps, account, session) };
 }
 
 /** AccountError → HTTP。所有账号相关路由共用这一张表。 */
@@ -188,23 +217,8 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   };
 
   /** 登录 / 注册成功后的共同收尾：登记设备、发设备会话。 */
-  const openDeviceSession = (account: AccountRow, device: DeviceDescriptor, ip: string | null): Response => {
-    deps.notebooks.upsertDevice({
-      deviceId: device.deviceId,
-      accountId: account.id,
-      name: device.name,
-      platform: device.platform,
-      os: device.os ?? null,
-      clientVersion: device.clientVersion ?? null,
-      now: now(),
-      ip,
-    });
-    // 同一台设备重新登录：旧会话作废，免得一台设备挂着好几条有效令牌。
-    deps.accounts.revokeDeviceSessions(account.id, device.deviceId, now());
-    const { token, session } = deps.accounts.createSession({ accountId: account.id, kind: "device", deviceId: device.deviceId, ip, now: now() });
-    deps.accounts.touch(account.id, now());
-    return json({ token, me: meOf(deps, account, session) }, 200);
-  };
+  const openDeviceSession = (account: AccountRow, device: DeviceDescriptor, ip: string | null): Response =>
+    json(issueDeviceSession(deps, account, device, ip, now()), 200);
 
   /** 只信配置里列出的代理头（`TRUSTED_PROXY_HEADERS`）；没配就不记 IP，不去猜。 */
   const ipOf = (c: Context): string | null => clientIpFrom(c.req.raw.headers, deps.config);
@@ -346,6 +360,41 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       if (error instanceof AccountError) return accountErrorResponse(error);
       throw error;
     }
+  });
+
+  /* --------------------------------------------------------------- 加密口令 */
+
+  /**
+   * 账号级的「加密口令」包好的 encRoot（阶段 ④）。服务端只存不解：没有口令就没有 wrapKey。
+   * 没设过 → `{ configured: false }`。
+   */
+  routes.get("/me/encryption", (c) => {
+    const auth = authenticate(c);
+    if (auth instanceof Response) return auth;
+    const row = auth.account;
+    if (!row.wrapped_enc_root || !row.enc_params) return json({ configured: false }, 200);
+    return json({ configured: true, wrappedEncRoot: row.wrapped_enc_root, kdf: JSON.parse(row.enc_params) as unknown }, 200);
+  });
+
+  /**
+   * 设置 / 改加密口令。改口令时 encRoot 不变，只是换一层包装 —— 所有已加密的笔记本不用重新加密。
+   *
+   * `expected` 是比较并交换：必须等于服务端当前那一份（第一次设置时是 null）。
+   * 两台设备同时设口令时，后到的那台会拿到 409，而不是悄悄覆盖掉对方的 encRoot
+   * （那会让先上传的加密笔记本再也解不开）。
+   */
+  routes.put("/me/encryption", async (c) => {
+    const auth = authenticate(c);
+    if (auth instanceof Response) return auth;
+    const body = await readBody(c, encryptionUpdateRequestSchema);
+    if (body instanceof Response) return body;
+    const current = auth.account.wrapped_enc_root;
+    if ((current ?? null) !== body.expected) {
+      return json({ error: current ? "这个账号已经设过加密口令了（可能是另一台设备刚设的），请先用它解锁" : "加密口令已经被移除了，请刷新后重试", code: "conflict" }, 409);
+    }
+    deps.accounts.setEncryption(auth.account.id, body.wrappedEncRoot, JSON.stringify(body.kdf));
+    deps.audit?.({ actorId: auth.account.id, action: current ? "change_passphrase" : "set_passphrase", target: auth.account.id, ip: ipOf(c), detail: null });
+    return json({ configured: true, wrappedEncRoot: body.wrappedEncRoot, kdf: body.kdf }, 200);
   });
 
   /* --------------------------------------------------------------- GitHub */

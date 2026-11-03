@@ -46,6 +46,8 @@ import { createAdminViewRoutes } from "./routes/adminView";
 import { createPanelRoutes } from "./routes/panel";
 import { createGithubRoutes } from "./routes/github";
 import { createGithubApi, OAuthFlows, type GithubApi } from "./auth/github";
+import { PairingStore } from "./auth/pairing";
+import { createPairingRoutes } from "./routes/pairing";
 import { createNotebookRoutes } from "./routes/notebooks";
 import { createV1Routes } from "./routes/v1";
 import { SettingsStore } from "./settings";
@@ -171,6 +173,7 @@ export function createApp(options: AppOptions): BuiltApp {
   const oauth = new OAuthFlows();
 
   app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, throttle, oauth, ...nowOption }));
+  app.route("/v1", createPairingRoutes({ accounts, notebooks, config, settings, pairings: new PairingStore(), audit, ...nowOption }));
   app.route(
     "/v1",
     createNotebookRoutes({

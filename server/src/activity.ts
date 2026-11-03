@@ -107,6 +107,12 @@ export function describeAudit(event: AuditEvent, labels: ActivityLabels): Activi
       return entry("account", `绑定了 GitHub @${event.detail ?? "?"}`, event.ip);
     case "unlink_github":
       return entry("account", "解绑了 GitHub", event.ip);
+    case "pair_device":
+      return entry("account", event.detail ? `用配对码添加了设备「${event.detail}」` : "用配对码添加了一台设备", event.ip);
+    case "set_passphrase":
+      return entry("account", "设置了加密口令", event.ip);
+    case "change_passphrase":
+      return entry("account", "修改了加密口令", event.ip);
     case "register":
       return entry("account", "注册了账号", event.ip);
     case "accept_invite":
