@@ -37,6 +37,7 @@ import {
   toastError,
   until,
 } from "./dom.js";
+import { githubMark } from "./public.js";
 
 const NAV = [
   ["运行", [["概览", "/admin", "activity"], ["活动日志", "/admin/activity", "scroll"]]],
@@ -202,6 +203,15 @@ function panel(title, options, ...body) {
     title ? h("div", { class: "panel__head" }, h("h2", { text: title }), options && options.tag !== undefined ? options.tag : null, options && options.right ? [h("span", { class: "grow" }), options.right] : null) : null,
     body,
   );
+}
+
+/** 「GitHub @x · 密码」这一格。 */
+function loginMethodsText(methods) {
+  const parts = [];
+  if (methods.github) parts.push(h("span", {}, githubMark(), " @" + methods.github));
+  if (methods.password) parts.push(h("span", { class: "muted", text: "密码" }));
+  if (parts.length === 0) return h("span", { class: "muted", text: "还没设密码" });
+  return h("span", {}, parts.flatMap((part, index) => (index === 0 ? [part] : [h("span", { class: "muted", text: " · " }), part])));
 }
 
 function accountName(account) {
@@ -496,7 +506,7 @@ async function pageUsers(main) {
                     ),
                   ),
                   h("td", {}, x.status === "disabled" ? h("span", { class: "tag", text: "已停用" }) : h("span", { class: x.isAdmin ? "tag" : "tag tag--solid", text: x.isAdmin ? "管理员" : "成员" })),
-                  h("td", { class: "nowrap" }, h("span", { class: "muted", text: x.loginMethods.password ? "密码" : "还没设密码" })),
+                  h("td", { class: "nowrap" }, loginMethodsText(x.loginMethods)),
                   h("td", { class: "num", text: String(x.notebookCount) }),
                   h("td", { class: "num", text: String(x.deviceCount) }),
                   h("td", { class: "nowrap" }, bar(ratio, { attn }), h("span", { class: attn ? "accent" : "muted", text: bytes(x.quota.bytesUsed) + " / " + bytes(x.quota.bytesLimit) })),
@@ -758,7 +768,40 @@ function userSections(data, now, reload) {
       "div",
       {},
       h("p", { class: "section-h", text: "登录方式" }),
-      h("div", { class: "list" }, h("div", { class: "list__row" }, icon("mail"), h("div", { class: "grow" }, "邮箱密码", h("small", { text: x.loginMethods.password ? "已设置" : "还没设置：发一个设置密码链接给对方" })))),
+      h(
+        "div",
+        { class: "list" },
+        x.loginMethods.github
+          ? h(
+              "div",
+              { class: "list__row" },
+              h("span", { class: "ico" }, githubMark()),
+              h("div", { class: "grow" }, "GitHub @" + x.loginMethods.github, h("small", { text: x.loginMethods.password ? "也可以用密码登录" : "这是它唯一的登录方式" })),
+              h("button", {
+                type: "button",
+                class: "btn btn--ghost btn--sm",
+                text: "解绑",
+                onClick: async () => {
+                  const ok = await confirm({
+                    title: "解绑 GitHub @" + x.loginMethods.github + "？",
+                    message: x.loginMethods.password ? "解绑后对方只能用邮箱密码登录，已登录的设备不受影响。" : "这是对方唯一的登录方式。解绑后请给对方发一个设置密码链接，否则以后登录不了（已登录的设备不受影响）。",
+                    confirmText: "解绑",
+                    danger: true,
+                  });
+                  if (!ok) return;
+                  try {
+                    await del("/v1/admin/accounts/" + x.accountId + "/github");
+                    toast("已解绑");
+                    await reload();
+                  } catch (error) {
+                    toastError(error);
+                  }
+                },
+              }),
+            )
+          : null,
+        h("div", { class: "list__row" }, icon("mail"), h("div", { class: "grow" }, "邮箱密码", h("small", { text: x.loginMethods.password ? "已设置" : "还没设置：发一个设置密码链接给对方" }))),
+      ),
       h("p", { class: "section-h mt-lg", text: "账号" }),
       h("div", { class: "row" }, resetButton, adminButton, statusButton),
       h("p", { class: "note", text: "重置密码不影响端到端加密的笔记本 —— 那把钥匙只在对方自己的设备上。" }),
@@ -1173,7 +1216,16 @@ async function pageDevices(main, params) {
 
 async function pageSettings(main) {
   const [settings, accountsData] = await Promise.all([get("/v1/admin/settings"), get("/v1/admin/accounts")]);
-  const draft = { registration: settings.registration, defaultQuotaBytes: settings.defaultQuotaBytes };
+  const draft = {
+    registration: settings.registration,
+    defaultQuotaBytes: settings.defaultQuotaBytes,
+    passwordLogin: settings.passwordLogin,
+    githubEnabled: settings.githubEnabled,
+    githubClientId: settings.githubClientId,
+    githubClientSecret: "",
+    githubPolicy: settings.githubPolicy,
+    githubOrgs: [...settings.githubOrgs],
+  };
   const admins = accountsData.accounts.filter((x) => x.isAdmin);
   const save = h("button", { type: "button", class: "btn btn--primary", text: "保存", disabled: true });
   const error = errorSlot();
@@ -1181,6 +1233,9 @@ async function pageSettings(main) {
     const patchBody = {};
     if (draft.registration !== settings.registration) patchBody.registration = draft.registration;
     if (draft.defaultQuotaBytes !== settings.defaultQuotaBytes) patchBody.defaultQuotaBytes = draft.defaultQuotaBytes;
+    for (const key of ["passwordLogin", "githubEnabled", "githubClientId", "githubPolicy"]) if (draft[key] !== settings[key]) patchBody[key] = draft[key];
+    if (draft.githubClientSecret.trim() !== "") patchBody.githubClientSecret = draft.githubClientSecret;
+    if (draft.githubOrgs.join(",") !== settings.githubOrgs.join(",")) patchBody.githubOrgs = draft.githubOrgs;
     return patchBody;
   };
   const sync = () => (save.disabled = Object.keys(changed()).length === 0);
@@ -1211,6 +1266,64 @@ async function pageSettings(main) {
     draft.defaultQuotaBytes = Number.isFinite(value) && value >= 0 ? Math.round(value * GB) : settings.defaultQuotaBytes;
     sync();
   });
+
+  const passwordSwitch = h("input", { type: "checkbox", checked: draft.passwordLogin });
+  passwordSwitch.addEventListener("change", () => {
+    draft.passwordLogin = passwordSwitch.checked;
+    sync();
+  });
+  const githubSwitch = h("input", { type: "checkbox", checked: draft.githubEnabled });
+  githubSwitch.addEventListener("change", () => {
+    draft.githubEnabled = githubSwitch.checked;
+    sync();
+  });
+  const clientId = h("input", { class: "field mono", value: draft.githubClientId, attrs: { autocomplete: "off", spellcheck: "false" } });
+  clientId.addEventListener("input", () => {
+    draft.githubClientId = clientId.value.trim();
+    sync();
+  });
+  const clientSecret = h("input", { class: "field", type: "password", placeholder: settings.githubClientSecretSet ? "••••••••（不修改）" : "", attrs: { autocomplete: "new-password" } });
+  clientSecret.addEventListener("input", () => {
+    draft.githubClientSecret = clientSecret.value;
+    sync();
+  });
+  const callback = ctx.session.externalBaseUrl + "/auth/github/callback";
+  const policySlot = h("div");
+  const orgSlot = h("div");
+  const drawPolicy = () => {
+    mount(
+      policySlot,
+      segmented([["invited", "只有已邀请 / 已绑定的"], ["org", "指定组织的成员自动加入"]], draft.githubPolicy, (value) => {
+        draft.githubPolicy = value;
+        drawPolicy();
+        sync();
+      }),
+    );
+    const orgInput = h("input", { class: "field", placeholder: "组织名，回车添加", attrs: { spellcheck: "false" } });
+    orgInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      const org = orgInput.value.trim().toLowerCase();
+      if (!/^[a-z0-9-]{1,39}$/.test(org)) return toast("组织名只能有字母、数字和连字符", "error");
+      if (!draft.githubOrgs.includes(org)) draft.githubOrgs.push(org);
+      drawPolicy();
+      sync();
+    });
+    mount(
+      orgSlot,
+      draft.githubPolicy === "org"
+        ? h(
+            "div",
+            { class: "tags-input" },
+            draft.githubOrgs.map((org) =>
+              h("span", { class: "tag" }, org, " ", h("button", { type: "button", class: "link", attrs: { "aria-label": "移除 " + org }, text: "×", onClick: () => { draft.githubOrgs = draft.githubOrgs.filter((item) => item !== org); drawPolicy(); sync(); } })),
+            ),
+            orgInput,
+          )
+        : null,
+    );
+  };
+  drawPolicy();
 
   save.addEventListener("click", () =>
     busy(save, async () => {
@@ -1249,8 +1362,30 @@ async function pageSettings(main) {
         setting(
           "邮箱和密码",
           null,
-          h("label", { class: "switch" }, h("input", { type: "checkbox", checked: settings.passwordLogin, disabled: true }), "允许"),
-          h("div", { class: "setting__meta", text: "现在是唯一的登录方式，所以不能关。接入 GitHub 登录之后才能只留其中一种。" }),
+          h("label", { class: "switch" }, passwordSwitch, "允许"),
+          h("div", { class: "setting__meta", text: "关掉后只能用 GitHub 登录（要先把 GitHub 配好）；已有的密码保留，重新打开即可恢复。" }),
+        ),
+        setting(
+          "GitHub",
+          "OAuth App",
+          h("label", { class: "switch" }, githubSwitch, "允许用 GitHub 登录"),
+          h("label", { class: "lab" }, "Client ID", clientId),
+          h("label", { class: "lab" }, "Client Secret", clientSecret, h("span", { class: "hint", text: settings.githubClientSecretSet ? "已设置。只写不读；留空表示不修改。" : "还没设置。" })),
+          h("div", { class: "lab" }, "回调地址（填到 GitHub 的 OAuth App 里）", h("div", { class: "row" }, h("span", { class: "mono grow break", text: callback }), h("button", { type: "button", class: "btn btn--sm", onClick: () => copy(callback) }, icon("copy", 13), "复制"))),
+          h(
+            "div",
+            { class: "row" },
+            h("a", { class: "link", href: "https://github.com/settings/applications/new", target: "_blank", rel: "noopener noreferrer", text: "在 GitHub 新建 OAuth App →" }),
+            h("span", { class: "grow" }),
+            settings.githubAvailable ? h("a", { class: "btn btn--sm", href: "/auth/github?mode=panel", text: "测试登录" }) : h("span", { class: "hint", text: "保存并配好之后可以测试登录" }),
+          ),
+        ),
+        setting(
+          "谁能用 GitHub 登录",
+          null,
+          policySlot,
+          orgSlot,
+          h("div", { class: "setting__meta", text: "第一项：GitHub 账号要先通过邀请链接加入，或由用户在客户端里绑定。第二项：组织成员第一次登录就自动建账号（仍受「谁可以注册」限制）。" }),
         ),
       ),
     ),

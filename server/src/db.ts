@@ -27,7 +27,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 interface Migration {
   version: number;
@@ -384,6 +384,28 @@ const MIGRATIONS: readonly Migration[] = [
        * 加一列「这一行最后一次被记账的时间」，旧行留空（按当天末尾排）。
        */
       db.exec("ALTER TABLE sync_activity ADD COLUMN last_at INTEGER");
+    },
+  },
+  {
+    version: 6,
+    description: "第三方登录身份（GitHub）：identities",
+    up: (db) => {
+      /*
+       * 一个账号可以绑一个 GitHub 身份；`subject` 是 GitHub 的数字 id（login 会改名，id 不会）。
+       * 删账号时级联删掉它的身份，身份不会挂在不存在的账号上。
+       */
+      db.exec(`
+        CREATE TABLE identities (
+          provider     TEXT NOT NULL,              -- github
+          subject      TEXT NOT NULL,              -- GitHub 用户的数字 id
+          account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          login        TEXT,                       -- 显示用（@buglan），每次登录刷新
+          created_at   INTEGER NOT NULL,
+          last_used_at INTEGER,
+          PRIMARY KEY (provider, subject)
+        );
+        CREATE UNIQUE INDEX idx_identities_account ON identities(account_id, provider);
+      `);
     },
   },
 ];

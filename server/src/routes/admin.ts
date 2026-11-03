@@ -149,6 +149,20 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     }
   });
 
+  /** 解绑 GitHub（管理员可以解掉没有密码的账号的唯一登录方式：之后给对方发设置密码链接）。 */
+  routes.delete("/accounts/:id/github", (c) => {
+    const admin = requireAdmin(c as never);
+    if (admin instanceof Response) return admin;
+    try {
+      const removed = deps.accounts.unlinkIdentity(c.req.param("id"), "github", { requireOtherMethod: false });
+      if (removed) deps.audit?.({ actorId: admin.id, action: "admin_unlink_github", target: c.req.param("id"), ip: null, detail: null });
+      return new Response(null, { status: 204 });
+    } catch (error) {
+      if (error instanceof AccountError) return accountErrorResponse(error);
+      throw error;
+    }
+  });
+
   routes.delete("/accounts/:id", async (c) => {
     const admin = requireAdmin(c as never);
     if (admin instanceof Response) return admin;
@@ -328,7 +342,7 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
   routes.get("/settings", (c) => {
     const admin = requireAdmin(c as never);
     if (admin instanceof Response) return admin;
-    return json(deps.settings.all(), 200);
+    return json(deps.settings.publicView(), 200);
   });
 
   routes.patch("/settings", async (c) => {
@@ -345,14 +359,40 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     }
     if ("passwordLogin" in raw) {
       if (typeof raw.passwordLogin !== "boolean") return json({ error: "passwordLogin 必须是布尔值", code: "bad-request" }, 400);
-      /*
-       * 现在只有密码一种登录方式（GitHub 在下一阶段）。关掉它 = 所有人、包括管理员自己
-       * 都再也登录不了，只能上服务器改库 —— 所以在有第二种方式之前拒绝。
-       */
-      if (!raw.passwordLogin) {
-        return json({ error: "还没有别的登录方式，关掉邮箱密码登录会让所有人都登录不了", code: "no-other-login" }, 409);
-      }
       patch.passwordLogin = raw.passwordLogin;
+    }
+    if ("githubEnabled" in raw) {
+      if (typeof raw.githubEnabled !== "boolean") return json({ error: "githubEnabled 必须是布尔值", code: "bad-request" }, 400);
+      patch.githubEnabled = raw.githubEnabled;
+    }
+    if ("githubClientId" in raw) {
+      if (typeof raw.githubClientId !== "string" || raw.githubClientId.length > 100) return json({ error: "githubClientId 形状不对", code: "bad-request" }, 400);
+      patch.githubClientId = raw.githubClientId.trim();
+    }
+    // Secret 只写不读：空字符串 / 不传 = 不修改（控制台的输入框留空就是这个意思）。
+    if (typeof raw.githubClientSecret === "string" && raw.githubClientSecret.trim() !== "") {
+      if (raw.githubClientSecret.length > 200) return json({ error: "githubClientSecret 太长", code: "bad-request" }, 400);
+      patch.githubClientSecret = raw.githubClientSecret.trim();
+    }
+    if ("githubPolicy" in raw) {
+      if (raw.githubPolicy !== "invited" && raw.githubPolicy !== "org") return json({ error: "githubPolicy 必须是 invited 或 org", code: "bad-request" }, 400);
+      patch.githubPolicy = raw.githubPolicy;
+    }
+    if ("githubOrgs" in raw) {
+      const orgs = raw.githubOrgs;
+      if (!Array.isArray(orgs) || orgs.length > 20 || !orgs.every((org) => typeof org === "string" && /^[A-Za-z0-9-]{1,39}$/.test(org))) {
+        return json({ error: "githubOrgs 必须是 GitHub 组织名的列表", code: "bad-request" }, 400);
+      }
+      patch.githubOrgs = [...new Set(orgs.map((org: string) => org.toLowerCase()))];
+    }
+    /*
+     * 关掉邮箱密码登录之后，只剩 GitHub 能进来。GitHub 不可用时关掉它 = 所有人、
+     * 包括管理员自己都登录不了，只能上服务器改库 —— 所以按「保存之后的样子」检查一遍。
+     */
+    const projected = { ...deps.settings.all(), ...patch };
+    const githubAfter = projected.githubEnabled && projected.githubClientId.trim() !== "" && projected.githubClientSecret.trim() !== "";
+    if (!projected.passwordLogin && !githubAfter) {
+      return json({ error: "GitHub 登录还没配好，关掉邮箱密码登录会让所有人都登录不了", code: "no-other-login" }, 409);
     }
     if ("defaultQuotaBytes" in raw) {
       const value = raw.defaultQuotaBytes;
@@ -361,9 +401,9 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
       }
       patch.defaultQuotaBytes = value;
     }
-    const next = deps.settings.set(patch, now());
+    deps.settings.set(patch, now());
     deps.audit?.({ actorId: admin.id, action: "update_settings", target: null, ip: null, detail: Object.keys(patch).join(",") });
-    return json(next, 200);
+    return json(deps.settings.publicView(), 200);
   });
 
   /* ---------------------------------------------------------- 服务器信息 */

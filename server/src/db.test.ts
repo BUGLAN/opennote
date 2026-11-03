@@ -23,6 +23,7 @@ describe("首次打开", () => {
         "audit",
         "client_stats",
         "devices",
+        "identities",
         "invites",
         "memberships",
         "notebook_invites",

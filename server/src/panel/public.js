@@ -6,6 +6,27 @@
 import { get, post } from "./api.js";
 import { bytes, copy, errorSlot, h, mount, busy, segmented, icon } from "./dom.js";
 
+/** GitHub 标志（与原型同一个路径；fill 跟着文字颜色）。 */
+const GITHUB_PATH =
+  "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z";
+
+export function githubMark() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("class", "gh");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", GITHUB_PATH);
+  path.setAttribute("fill", "currentColor");
+  svg.append(path);
+  return svg;
+}
+
+/** 「用 GitHub …」按钮：整页跳到 /auth/github（授权完由服务端跳回来）。 */
+function githubButton(label, href) {
+  return h("a", { class: "btn btn--block", href }, githubMark(), label);
+}
+
 /** 与服务端 `auth/passwords.ts` 的 PASSWORD_MIN_LENGTH 同一个数。 */
 const PASSWORD_MIN = 10;
 
@@ -131,11 +152,13 @@ export function renderLogin(root, session, onDone) {
     error.node,
     submit,
   );
+  if (!session.passwordLogin) form.hidden = true;
   mount(
     root,
     card(
       "登录控制台",
       h("p", { class: "message", text: host() + " · 只有管理员能登录控制台。普通账号请在 Opennote 客户端里登录。" }),
+      session.github ? h("div", { class: "stack mt-lg" }, githubButton("使用 GitHub 登录", "/auth/github?mode=panel"), session.passwordLogin ? h("div", { class: "divider", text: "或用邮箱登录" }) : null) : null,
       form,
       h("p", { class: "note" }, "忘了密码：请另一位管理员发一个设置密码链接，或在服务器上运行 ", h("code", { text: "node dist/cli.js reset-password <邮箱>" }), "。"),
     ),
@@ -228,7 +251,17 @@ export async function renderJoin(root, code) {
     submit,
   );
 
-  mount(root, card("加入 " + host(), h("p", { class: "message", text: intro }), form));
+  const health = await get("/v1/health").catch(() => null);
+  const github = health && health.auth && health.auth.github;
+  mount(
+    root,
+    card(
+      "加入 " + host(),
+      h("p", { class: "message", text: intro }),
+      github ? h("div", { class: "stack mt-lg" }, githubButton("用 GitHub 接受邀请", "/auth/github?mode=join&invite=" + encodeURIComponent(code)), h("div", { class: "divider", text: "或设置一个密码" })) : null,
+      form,
+    ),
+  );
   (info.email ? name : email).focus();
 }
 
@@ -281,4 +314,35 @@ export async function renderReset(root, code) {
   );
   mount(root, card("设置新密码", h("p", { class: "message", text: "为 " + (info.email || "你的账号") + " 设置一个新密码。链接只能用一次。" }), form));
   password.focus();
+}
+
+/* ------------------------------------------------------------ /auth/result */
+
+/** GitHub 授权在网页上的收尾：接受邀请 / 绑定成功，或者失败原因（服务端把人话放在 message 里）。 */
+export function renderAuthResult(root, params) {
+  const done = params.get("done");
+  if (done === "joined") {
+    return mount(
+      root,
+      card(
+        "账号建好了",
+        h("p", { class: "message", text: "已经用 GitHub" + (params.get("github") ? "（@" + params.get("github") + "）" : "") + " 接受邀请。之后在 Opennote 里点「使用 GitHub 登录」即可。" }),
+        nextSteps(params.get("email") || "", false),
+      ),
+    );
+  }
+  if (done === "linked") {
+    return mount(
+      root,
+      card("GitHub 已绑定", h("p", { class: "message", text: "这个账号以后也可以用 GitHub" + (params.get("github") ? "（@" + params.get("github") + "）" : "") + " 登录。可以关掉这个页面，回到 Opennote 了。" })),
+    );
+  }
+  mount(
+    root,
+    card(
+      "没能完成 GitHub 登录",
+      h("p", { class: "message", text: params.get("message") || "授权没有完成，请重试。" }),
+      h("p", { class: "note", text: "可以关掉这个页面，回到原来的地方重试。" }),
+    ),
+  );
 }

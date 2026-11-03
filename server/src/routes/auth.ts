@@ -19,6 +19,7 @@
 
 import { Hono, type Context } from "hono";
 import {
+  githubExchangeRequestSchema,
   inviteAcceptRequestSchema,
   inviteInfoSchema,
   loginRequestSchema,
@@ -33,6 +34,7 @@ import {
   type Quota,
 } from "../../../shared/contract";
 import { AccountError, accountLabel, type AccountRow, type AccountStore, type SessionRow } from "../auth/accounts";
+import type { OAuthFlows } from "../auth/github";
 import { clientIpFrom, type ServerConfig } from "../config";
 import type { NotebookStore } from "../notebooks";
 import type { SettingsStore } from "../settings";
@@ -45,6 +47,8 @@ export interface AuthRoutesDeps {
   audit?: (event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null }) => void;
   /** 登录失败计数；与控制台登录共用一个（`app.ts` 装配时传入），不传就自己建一个。 */
   throttle?: LoginThrottle;
+  /** GitHub 授权的一次性码与绑定票（与 `routes/github.ts` 共用）。不传 = 没有 GitHub 相关接口。 */
+  oauth?: OAuthFlows;
   now?: () => number;
 }
 
@@ -68,14 +72,20 @@ export function quotaOf(
   };
 }
 
-export function meOf(deps: { notebooks: NotebookStore; config: ServerConfig; settings: SettingsStore }, row: AccountRow, session: SessionRow | null): Me {
+/** 账号能用哪些方式登录（`/me`、控制台账号摘要共用）。 */
+export function loginMethodsOf(accounts: AccountStore, row: Pick<AccountRow, "id" | "password_hash">): { password: boolean; github: string | null } {
+  const github = accounts.identityOf(row.id, "github");
+  return { password: row.password_hash !== null, github: github ? (github.login ?? `#${github.subject}`) : null };
+}
+
+export function meOf(deps: { accounts: AccountStore; notebooks: NotebookStore; config: ServerConfig; settings: SettingsStore }, row: AccountRow, session: SessionRow | null): Me {
   return meSchema.parse({
     accountId: row.id,
     email: row.email,
     displayName: row.display_name,
     isAdmin: row.is_admin === 1,
     quota: quotaOf(deps, row),
-    loginMethods: { password: row.password_hash !== null },
+    loginMethods: loginMethodsOf(deps.accounts, row),
     deviceId: session?.device_id ?? null,
   });
 }
@@ -98,6 +108,8 @@ export function accountErrorResponse(error: AccountError): Response {
     "reset-expired": [410, "reset-expired"],
     unauthorized: [401, "unauthorized"],
     disabled: [403, "disabled"],
+    "identity-taken": [409, "identity-taken"],
+    "only-login-method": [409, "only-login-method"],
     "not-found": [404, "not-found"],
   };
   const [status, code] = table[error.rejection];
@@ -330,6 +342,46 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       const account = await deps.accounts.resetPassword(c.req.param("code"), body.password, now());
       deps.audit?.({ actorId: account.id, action: "reset_password", target: account.id, ip: ipOf(c), detail: null });
       return json(null, 204);
+    } catch (error) {
+      if (error instanceof AccountError) return accountErrorResponse(error);
+      throw error;
+    }
+  });
+
+  /* --------------------------------------------------------------- GitHub */
+
+  /**
+   * 客户端拿 GitHub 回调发的一次性登录码 + 自己的 PKCE verifier 换设备会话。
+   * 码只能用一次；verifier 对不上同样作废（不给第二次机会）。
+   */
+  routes.post("/auth/github/exchange", async (c) => {
+    if (!deps.oauth) return json({ error: "这台服务器没有开启 GitHub 登录", code: "github-disabled" }, 403);
+    const body = await readBody(c, githubExchangeRequestSchema);
+    if (body instanceof Response) return body;
+    const accountId = deps.oauth.redeemLoginCode(body.code, body.verifier, now());
+    const account = accountId ? deps.accounts.findById(accountId) : null;
+    if (!account) return json({ error: "GitHub 登录已过期，请重新登录", code: "bad-credentials" }, 401);
+    if (account.status !== "active") return json({ error: "账号已被停用", code: "disabled" }, 403);
+    deps.audit?.({ actorId: account.id, action: "login_github", target: body.device.deviceId, ip: ipOf(c), detail: body.device.name });
+    return openDeviceSession(account, body.device, ipOf(c));
+  });
+
+  /** 已登录的客户端绑定 GitHub：拿一张一次性票，在浏览器里打开返回的地址。 */
+  routes.post("/me/github/link", (c) => {
+    const auth = authenticate(c);
+    if (auth instanceof Response) return auth;
+    if (!deps.oauth || !deps.settings.githubAvailable()) return json({ error: "这台服务器没有开启 GitHub 登录", code: "github-disabled" }, 403);
+    const ticket = deps.oauth.issueLinkTicket(auth.account.id, now());
+    return json({ url: `${deps.config.externalBaseUrl}/auth/github?mode=link&ticket=${encodeURIComponent(ticket)}` }, 200);
+  });
+
+  routes.delete("/me/github", (c) => {
+    const auth = authenticate(c);
+    if (auth instanceof Response) return auth;
+    try {
+      const removed = deps.accounts.unlinkIdentity(auth.account.id, "github", { requireOtherMethod: true });
+      if (removed) deps.audit?.({ actorId: auth.account.id, action: "unlink_github", target: auth.account.id, ip: ipOf(c), detail: null });
+      return json(meOf(deps, deps.accounts.findById(auth.account.id)!, auth.session), 200);
     } catch (error) {
       if (error instanceof AccountError) return accountErrorResponse(error);
       throw error;

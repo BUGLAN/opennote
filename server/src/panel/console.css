@@ -1178,3 +1178,22 @@ table.t {
     padding: 22px;
   }
 }
+
+.gh {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  vertical-align: -2px;
+}
+a.btn {
+  text-decoration: none;
+}
+.tags-input {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.tags-input .field {
+  width: 160px;
+}

@@ -116,6 +116,8 @@ export type AccountRejection =
   | "reset-expired"
   | "unauthorized"
   | "disabled"
+  | "identity-taken"
+  | "only-login-method"
   | "not-found";
 
 export class AccountError extends Error {
@@ -145,6 +147,15 @@ export interface InviteRow {
   grant_admin: number;
   quota_bytes: number | null;
   accepted_by: string | null;
+}
+
+export interface IdentityRow {
+  provider: string;
+  subject: string;
+  account_id: string;
+  login: string | null;
+  created_at: number;
+  last_used_at: number | null;
 }
 
 export interface AccountStoreOptions {
@@ -485,6 +496,94 @@ export class AccountStore {
   revokeInvite(code: string, now = Date.now()): boolean {
     const result = this.db.prepare("UPDATE invites SET revoked_at = ? WHERE code_hash = ? AND revoked_at IS NULL").run(now, hashCode(code));
     return Number(result.changes ?? 0) > 0;
+  }
+
+  /* ---------------------------------------------------------- 第三方身份 */
+
+  identityOf(accountId: string, provider: "github"): IdentityRow | null {
+    return (this.db.prepare("SELECT * FROM identities WHERE account_id = ? AND provider = ?").get(accountId, provider) as IdentityRow | undefined) ?? null;
+  }
+
+  findByIdentity(provider: "github", subject: string): AccountRow | null {
+    const row = this.db.prepare("SELECT account_id FROM identities WHERE provider = ? AND subject = ?").get(provider, subject) as { account_id: string } | undefined;
+    return row ? this.findById(row.account_id) : null;
+  }
+
+  /** 绑定（已经绑在别的账号上 → `identity-taken`；这个账号已绑了另一个 → 换成新的）。 */
+  linkIdentity(input: { accountId: string; provider: "github"; subject: string; login: string | null; now?: number }): void {
+    const now = input.now ?? Date.now();
+    this.transaction(() => {
+      const owner = this.db.prepare("SELECT account_id FROM identities WHERE provider = ? AND subject = ?").get(input.provider, input.subject) as { account_id: string } | undefined;
+      if (owner && owner.account_id !== input.accountId) throw new AccountError("identity-taken", "这个 GitHub 账号已经绑定了另一个账号");
+      this.db.prepare("DELETE FROM identities WHERE account_id = ? AND provider = ?").run(input.accountId, input.provider);
+      this.db
+        .prepare("INSERT INTO identities (provider, subject, account_id, login, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(input.provider, input.subject, input.accountId, input.login, now, now);
+    });
+  }
+
+  /** 用这个身份登录了一次：刷新 login（GitHub 上改名了也跟上）与最近使用时间。 */
+  touchIdentity(provider: "github", subject: string, login: string | null, now = Date.now()): void {
+    this.db.prepare("UPDATE identities SET login = ?, last_used_at = ? WHERE provider = ? AND subject = ?").run(login, now, provider, subject);
+  }
+
+  /**
+   * 解绑。`requireOtherMethod`：账号没有密码时不许解（那是它唯一的登录方式）。
+   * 返回 false = 本来就没绑。
+   */
+  unlinkIdentity(accountId: string, provider: "github", options: { requireOtherMethod: boolean }): boolean {
+    const account = this.findById(accountId);
+    if (!account) throw new AccountError("not-found", "账号不存在");
+    if (options.requireOtherMethod && account.password_hash === null && this.identityOf(accountId, provider)) {
+      throw new AccountError("only-login-method", "这是这个账号唯一的登录方式，先设一个密码再解绑");
+    }
+    const result = this.db.prepare("DELETE FROM identities WHERE account_id = ? AND provider = ?").run(accountId, provider);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  /** 用第三方身份新建账号（GitHub 组织成员自动加入时用）：没有密码。 */
+  createWithIdentity(input: { email: string; displayName: string | null; provider: "github"; subject: string; login: string | null; quotaBytes?: number | null; now?: number }): AccountRow {
+    const now = input.now ?? Date.now();
+    const id = this.transaction(() => {
+      const accountId = this.insertAccount({ email: this.checkEmail(input.email), passwordHash: null, displayName: input.displayName?.trim() || null, isAdmin: false, quotaBytes: input.quotaBytes ?? null, now });
+      this.db
+        .prepare("INSERT INTO identities (provider, subject, account_id, login, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(input.provider, input.subject, accountId, input.login, now, now);
+      return accountId;
+    });
+    return this.findById(id)!;
+  }
+
+  /**
+   * 用 GitHub 接受邀请：建号（没有密码）+ 绑身份 + 记一次使用，同一事务。
+   * 邮箱：邀请绑了邮箱就用邀请的，否则用 GitHub 上已验证的那个。
+   */
+  acceptInviteWithIdentity(
+    code: string,
+    input: { githubEmail: string | null; displayName: string | null; provider: "github"; subject: string; login: string | null },
+    now = Date.now(),
+  ): AccountRow {
+    const id = this.transaction(() => {
+      const invite = this.usableInvite(code, now);
+      const email = invite.email ?? input.githubEmail;
+      if (!email) throw new AccountError("bad-email", "GitHub 上没有已验证的邮箱，请改用「设置一个密码」接受邀请");
+      const taken = this.db.prepare("SELECT account_id FROM identities WHERE provider = ? AND subject = ?").get(input.provider, input.subject) as { account_id: string } | undefined;
+      if (taken) throw new AccountError("identity-taken", "这个 GitHub 账号已经绑定了另一个账号，直接用它登录即可");
+      const accountId = this.insertAccount({
+        email: this.checkEmail(email),
+        passwordHash: null,
+        displayName: input.displayName?.trim() || null,
+        isAdmin: invite.grant_admin === 1,
+        quotaBytes: invite.quota_bytes,
+        now,
+      });
+      this.db
+        .prepare("INSERT INTO identities (provider, subject, account_id, login, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(input.provider, input.subject, accountId, input.login, now, now);
+      this.db.prepare("UPDATE invites SET uses = uses + 1, accepted_by = ? WHERE code_hash = ?").run(accountId, invite.code_hash);
+      return accountId;
+    });
+    return this.findById(id)!;
   }
 
   /* ------------------------------------------------------ 管理员能改的字段 */

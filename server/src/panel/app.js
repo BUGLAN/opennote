@@ -14,7 +14,7 @@
 import { get, post, setUnauthorizedHandler } from "./api.js";
 import { h, mount, loading, toast } from "./dom.js";
 import { renderConsole, route } from "./console.js";
-import { renderJoin, renderLogin, renderReset, renderSetup } from "./public.js";
+import { renderAuthResult, renderJoin, renderLogin, renderReset, renderSetup } from "./public.js";
 
 const root = document.getElementById("root");
 
@@ -68,7 +68,10 @@ window.addEventListener("popstate", () => {
 
 const join = /^\/join\/([^/]+)\/?$/.exec(location.pathname);
 const reset = /^\/reset\/([^/]+)\/?$/.exec(location.pathname);
-if (join) {
+if (location.pathname === "/auth/result") {
+  document.title = "GitHub 登录 · Opennote 同步";
+  renderAuthResult(root, new URLSearchParams(location.search));
+} else if (join) {
   document.title = "接受邀请 · Opennote 同步";
   renderJoin(root, decodeURIComponent(join[1]));
 } else if (reset) {

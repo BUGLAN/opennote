@@ -6,6 +6,7 @@
  * | `GET /admin`、`/admin/*` | 控制台（零账号时显示初始化表单，没登录显示登录表单） |
  * | `GET /join/:code` | 被邀请的人设密码、建账号 |
  * | `GET /reset/:code` | 管理员发出的「设置密码」链接 |
+ * | `GET /auth/result` | GitHub 授权在网页上的收尾（接受邀请 / 绑定成功，或失败原因） |
  * | `GET /panel/*` | 上面三者共用的静态资源（白名单，见 `panelAssets.ts`） |
  * | `GET /v1/panel/session` | 页面启动时问：要不要初始化、登录了没有 |
  * | `POST /v1/panel/setup` · `login` · `logout` | 初始化 / 登录 / 退出（cookie 会话） |
@@ -59,7 +60,7 @@ export interface PanelRoutesDeps {
 }
 
 /** 发同一份外壳的页面路径。 */
-const PAGE_PATHS = ["/admin", "/admin/*", "/join/:code", "/reset/:code"] as const;
+const PAGE_PATHS = ["/admin", "/admin/*", "/join/:code", "/reset/:code", "/auth/result"] as const;
 
 export function createPanelRoutes(deps: PanelRoutesDeps): Hono {
   const routes = new Hono();
@@ -119,6 +120,8 @@ export function createPanelRoutes(deps: PanelRoutesDeps): Hono {
       externalBaseUrl: deps.config.externalBaseUrl,
       protocolVersion: deps.config.protocolVersionExpected,
       maxFileBytes: deps.config.maxFileBytes,
+      github: deps.settings.githubAvailable(),
+      passwordLogin: deps.settings.get("passwordLogin"),
     };
     if (!readCookie(c.req.header("cookie"), PANEL_COOKIE)) return json({ ...base, me: null }, 200);
     const auth = authenticateAdminRequest(deps, c);

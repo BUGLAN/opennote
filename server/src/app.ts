@@ -44,6 +44,8 @@ import { createAuthRoutes, LoginThrottle } from "./routes/auth";
 import { createAdminRoutes } from "./routes/admin";
 import { createAdminViewRoutes } from "./routes/adminView";
 import { createPanelRoutes } from "./routes/panel";
+import { createGithubRoutes } from "./routes/github";
+import { createGithubApi, OAuthFlows, type GithubApi } from "./auth/github";
 import { createNotebookRoutes } from "./routes/notebooks";
 import { createV1Routes } from "./routes/v1";
 import { SettingsStore } from "./settings";
@@ -57,6 +59,8 @@ export interface AppOptions {
   couchAdmin?: CouchClient;
   /** 进程启动时间（uptime）。 */
   startedAt?: number;
+  /** 覆盖 GitHub 接口（测试注入假实现）。 */
+  github?: GithubApi;
   now?: () => number;
 }
 
@@ -163,8 +167,10 @@ export function createApp(options: AppOptions): BuiltApp {
   const audit = (event: Parameters<NotebookStore["audit"]>[0]): void => notebooks.audit(event);
   // 客户端登录与控制台登录共用一份失败计数：换个入口不该换来五次新机会。
   const throttle = new LoginThrottle();
+  // 进行中的 GitHub 授权与一次性登录码（只在内存）：回调路由发码，`/v1/auth/github/exchange` 收码。
+  const oauth = new OAuthFlows();
 
-  app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, throttle, ...nowOption }));
+  app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, throttle, oauth, ...nowOption }));
   app.route(
     "/v1",
     createNotebookRoutes({
@@ -213,6 +219,7 @@ export function createApp(options: AppOptions): BuiltApp {
 
   /* 网页控制台（`/admin`）、`/join`、`/reset` 与它们的静态资源、cookie 会话接口。 */
   app.route("/", createPanelRoutes({ accounts, notebooks, config, settings, throttle, audit, ...nowOption }));
+  app.route("/", createGithubRoutes({ accounts, config, settings, oauth, github: options.github ?? createGithubApi(), audit, ...nowOption }));
 
   // 兜底 404：**形状与其它错误一致**（`{error, code}`），免得客户端要处理两种错误体。
   app.notFound((c) =>

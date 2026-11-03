@@ -256,7 +256,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         webBuildHash: process.env.OPENNOTE_WEB_BUILD_HASH ?? null,
         couchVersion,
         // 客户端在「服务器地址」失焦时读这三项，决定显示哪些登录方式、要不要提示去初始化。
-        auth: { password: deps.settings?.get("passwordLogin") ?? true, github: false },
+        auth: { password: deps.settings?.get("passwordLogin") ?? true, github: deps.settings?.githubAvailable() ?? false },
         registration: deps.settings?.get("registration") ?? "invite",
         setupRequired: deps.accounts.needsSetup(),
       },

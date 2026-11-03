@@ -52,6 +52,11 @@ const SETTING_NAMES: Record<string, string> = {
   registration: "谁可以注册",
   passwordLogin: "邮箱密码登录",
   defaultQuotaBytes: "默认空间配额",
+  githubEnabled: "GitHub 登录开关",
+  githubClientId: "GitHub Client ID",
+  githubClientSecret: "GitHub Client Secret",
+  githubPolicy: "谁能用 GitHub 登录",
+  githubOrgs: "允许的 GitHub 组织",
 };
 
 /** 字节 → 人话（与控制台页面上的写法一致：1024 进位）。 */
@@ -93,11 +98,19 @@ export function describeAudit(event: AuditEvent, labels: ActivityLabels): Activi
     case "login_locked":
       return entry("account", `${target ?? "某个邮箱"} 登录失败次数太多，临时锁定 15 分钟${event.ip ? `（来自 ${event.ip}）` : ""}`, event.ip);
     case "panel_login":
-      return entry("account", "登录控制台", event.ip);
+      return entry("account", (event.detail ?? "").startsWith("github:") ? `用 GitHub（@${event.detail!.slice(7)}）登录控制台` : "登录控制台", event.ip);
+    case "login_github":
+      return entry("account", event.detail ? `用 GitHub 登录，设备「${event.detail}」` : "用 GitHub 登录了一台设备", event.ip);
+    case "register_github":
+      return entry("account", `用 GitHub（@${event.detail ?? "?"}）自动加入（组织成员）`, event.ip);
+    case "link_github":
+      return entry("account", `绑定了 GitHub @${event.detail ?? "?"}`, event.ip);
+    case "unlink_github":
+      return entry("account", "解绑了 GitHub", event.ip);
     case "register":
       return entry("account", "注册了账号", event.ip);
     case "accept_invite":
-      return entry("account", "接受邀请，建好了账号", event.ip);
+      return entry("account", (event.detail ?? "").startsWith("github:") ? `用 GitHub（@${event.detail!.slice(7)}）接受邀请，建好了账号` : "接受邀请，建好了账号", event.ip);
     case "reset_password":
       return entry("account", "用重置链接设了新密码，其它设备已全部下线", event.ip);
     case "change_password":
@@ -149,6 +162,8 @@ export function describeAudit(event: AuditEvent, labels: ActivityLabels): Activi
       const names = (event.detail ?? "").split(",").filter(Boolean).map((key) => SETTING_NAMES[key] ?? key);
       return entry("admin", names.length > 0 ? `修改了服务设置：${names.join("、")}` : "保存了服务设置（没有改动）");
     }
+    case "admin_unlink_github":
+      return entry("admin", `解绑了 ${target ? labels.account(target) : "?"} 的 GitHub`);
     case "admin_remove_device":
       return entry("admin", `移除了 ${target ? labels.account(target) : "?"} 的设备「${event.detail ?? "?"}」`);
     case "prune_devices":

@@ -26,7 +26,7 @@ import type { ServerConfig } from "../config";
 import type { AdminDeviceRow, NotebookStore } from "../notebooks";
 import type { SettingsStore } from "../settings";
 import { createAdminGate } from "./adminGate";
-import { quotaOf } from "./auth";
+import { loginMethodsOf, quotaOf } from "./auth";
 
 export interface AdminViewDeps {
   accounts: AccountStore;
@@ -57,7 +57,7 @@ function utcDay(ms: number): string {
 
 /** 用户列表 / 详情共用的账号摘要（一次取齐笔记本数与设备，不逐行查）。 */
 export function accountSummaries(
-  deps: Pick<AdminViewDeps, "notebooks" | "config" | "settings">,
+  deps: Pick<AdminViewDeps, "accounts" | "notebooks" | "config" | "settings">,
   rows: AccountRow[],
   now: number,
 ): AdminAccountSummary[] {
@@ -72,7 +72,7 @@ export function accountSummaries(
         accountId: row.id,
         email: row.email,
         displayName: row.display_name,
-        loginMethods: { password: row.password_hash !== null },
+        loginMethods: loginMethodsOf(deps.accounts, row),
         status: row.status === "disabled" ? "disabled" : "active",
         isAdmin: row.is_admin === 1,
         quota: quotaOf(deps, row),

@@ -181,6 +181,13 @@ export const loginRequestSchema = z.object({
 export type LoginRequest = z.infer<typeof loginRequestSchema>;
 
 /** `POST /v1/auth/setup`：零账号时建第一个管理员（网页初始化页用）。 */
+/** `POST /v1/auth/github/exchange`：GitHub 回调发的一次性码 + 客户端的 PKCE verifier。 */
+export const githubExchangeRequestSchema = z.object({
+  code: z.string().min(8).max(256),
+  verifier: z.string().min(43).max(128),
+  device: deviceDescriptorSchema,
+});
+
 export const setupRequestSchema = z.object({
   email: emailSchema,
   password: passwordSchema,
@@ -189,13 +196,17 @@ export const setupRequestSchema = z.object({
 export type SetupRequest = z.infer<typeof setupRequestSchema>;
 
 /** `GET /v1/me`：当前登录的账号。 */
+/** 账号能用哪些方式登录：有没有密码，绑了哪个 GitHub（login，没绑是 null）。 */
+export const loginMethodsSchema = z.object({ password: z.boolean(), github: z.string().nullable() });
+export type LoginMethods = z.infer<typeof loginMethodsSchema>;
+
 export const meSchema = z.object({
   accountId: accountIdSchema,
   email: z.string().nullable(),
   displayName: z.string().nullable(),
   isAdmin: z.boolean(),
   quota: quotaSchema,
-  loginMethods: z.object({ password: z.boolean() }),
+  loginMethods: loginMethodsSchema,
   /** 这次请求用的会话属于哪台设备（控制台会话为 null）。 */
   deviceId: deviceIdSchema.nullable(),
 });
@@ -508,7 +519,7 @@ export const adminAccountSummarySchema = z.object({
   accountId: accountIdSchema,
   email: z.string().nullable(),
   displayName: z.string().nullable(),
-  loginMethods: z.object({ password: z.boolean() }),
+  loginMethods: loginMethodsSchema,
   status: z.enum(["active", "disabled"]),
   isAdmin: z.boolean(),
   quota: quotaSchema,
