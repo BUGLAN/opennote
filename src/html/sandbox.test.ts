@@ -61,6 +61,13 @@ describe("prepareSandboxDocument", () => {
     expect(out).toContain(MSG_OPEN);
   });
 
+  it("配色跟随应用：没声明 color-scheme 的页面补一个；页面自己声明了就不动", () => {
+    expect(injected("<html><head></head><body>x</body></html>")).toContain('<meta name="color-scheme" content="light dark">');
+    const own = injected('<html><head><meta name="color-scheme" content="light"></head><body>x</body></html>');
+    expect(own.match(/name="color-scheme"/g)).toHaveLength(1);
+    expect(own).toContain('content="light"');
+  });
+
   it("没有 <head> 但有 <html>：补一个 <head>", () => {
     expect(injected("<html><body>x</body></html>")).toMatch(/^<html><head><meta http-equiv=/);
   });

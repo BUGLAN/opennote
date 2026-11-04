@@ -3823,17 +3823,21 @@ mark.hit {
 }
 
 .html-pane:fullscreen {
-  background: #fff;
+  background: var(--paper);
 }
 
-/* 页面默认按「白纸」写（浏览器缺省），不跟应用的暗色走：暗色主题下页面照样是它原本的样子。 */
+/*
+ * 底色 = 应用的纸色（跟着主题走），打开页面时不再先闪一下白。
+ * `color-scheme` 不写死：继承应用主题的浅 / 深，配合页面里注入的
+ * `<meta name="color-scheme" content="light dark">`（`sandbox.ts`），没写颜色的页面在深色主题下
+ * 是浅色字；写了自己背景与文字颜色的页面不受影响。
+ */
 .html-frame {
   display: block;
   width: 100%;
   height: 100%;
   border: 0;
-  background: #fff;
-  color-scheme: light;
+  background: var(--paper);
 }
 
 .html-pane__frame {

@@ -70,14 +70,22 @@ export const MSG_OPEN = "opennote:html:open";
 const LINK_GUARD = `(function(){document.addEventListener("click",function(e){if(e.defaultPrevented)return;var t=e.target;var a=t&&t.closest?t.closest("a[href]"):null;if(!a)return;var h=a.getAttribute("href")||"";if(h.charAt(0)==="#")return;e.preventDefault();if(/^(https?:|mailto:)/i.test(h))parent.postMessage({type:${JSON.stringify(MSG_OPEN)},url:a.href},"*");},false);})();`;
 
 /**
+ * 页面跟随应用的浅色 / 深色（`.html-frame` 的 `color-scheme` 继承自应用主题）：
+ * 没写颜色的页面在深色主题下是浅色字，压在应用的底色上；写了颜色的页面照旧。
+ * 页面自己声明过 `color-scheme` 的（meta 或 CSS）以页面为准 —— 这里只在没有 meta 时补一个。
+ */
+const COLOR_SCHEME_META = '<meta name="color-scheme" content="light dark">';
+
+/**
  * 交给宿主页之前的最后一步：在文档最前面（`<head>` 里，没有就在 doctype/`<html>` 之后）
- * 注入 CSP meta 与点击拦截脚本。**只在渲染时注入，不写回文件**。
+ * 注入 CSP meta、配色声明与点击拦截脚本。**只在渲染时注入，不写回文件**。
  *
  * CSP 在宿主页上已经有一份；这里再注入一次是兜底：`document.open()` 之后策略是否保留，
  * 各引擎的历史行为并不一致，而 parser 读到 `<head>` 里的 CSP meta 一定生效。
  */
 export function prepareSandboxDocument(html: string): string {
-  const inject = `<meta http-equiv="Content-Security-Policy" content="${HTML_SANDBOX_CSP}"><meta name="referrer" content="no-referrer"><script>${LINK_GUARD}</script>`;
+  const colorScheme = /<meta\b[^>]*\bname\s*=\s*["']?color-scheme\b/i.test(html) ? "" : COLOR_SCHEME_META;
+  const inject = `<meta http-equiv="Content-Security-Policy" content="${HTML_SANDBOX_CSP}"><meta name="referrer" content="no-referrer">${colorScheme}<script>${LINK_GUARD}</script>`;
   const head = /<head\b[^>]*>/i.exec(html);
   if (head) return insertAt(html, head.index + head[0].length, inject);
   const root = /<html\b[^>]*>/i.exec(html);
