@@ -1197,3 +1197,38 @@ a.btn {
 .tags-input .field {
   width: 160px;
 }
+
+/*
+ * 切页过渡（console.js 的 `run`）：新页数据没到之前旧页留着；等得久了才变淡、顶上出一道细进度条。
+ * 不用整块「正在读取」去顶替旧页 —— 那一下闪白正是「像整页刷新」的来源。
+ */
+.admin__main {
+  position: relative;
+}
+.admin__view {
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.admin__main.is-loading > .admin__view {
+  opacity: 0.55;
+  pointer-events: none;
+}
+.admin__main.is-loading::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: page-progress 1s var(--ease) infinite;
+}
+@keyframes page-progress {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}

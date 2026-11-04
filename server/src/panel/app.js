@@ -13,15 +13,16 @@
 
 import { get, post, setUnauthorizedHandler } from "./api.js";
 import { h, mount, loading, toast } from "./dom.js";
-import { renderConsole, route } from "./console.js";
+import { forgetCachedPage, renderConsole, route } from "./console.js";
 import { renderAuthResult, renderJoin, renderLogin, renderReset, renderSetup } from "./public.js";
 
 const root = document.getElementById("root");
 
 function navigate(path) {
   if (path !== location.pathname + location.search) history.pushState(null, "", path);
+  else forgetCachedPage(); // 再点一次当前页 = 刷新这一页
+  // 滚回顶部放在 console.js 换页的那一刻：开 / 关用户详情不该把列表滚走。
   route();
-  window.scrollTo({ top: 0 });
 }
 
 async function bootAdmin() {

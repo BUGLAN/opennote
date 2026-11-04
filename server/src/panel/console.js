@@ -2,11 +2,15 @@
  * 控制台：侧栏 + 七页（概览 / 活动日志 / 用户 + 详情抽屉 / 邀请 / 笔记本 / 设备 / 服务设置）。
  * 版式照 docs/sync/mockups/03-admin.html。路由是真路径（/admin/users/…），服务端对 /admin/* 都发同一份外壳。
  *
- * 每页的写法一样：先画「正在读取」，取数，再整页画出来；筛选 / 搜索只重画表格那一块，
+ * 每页的写法一样：取数，再整页画出来；筛选 / 搜索只重画表格那一块，
  * 免得输入框在打字时被换掉、丢焦点。
+ *
+ * 切页（`run`）**不先清屏**：新页画在一块还没挂上去的视图里，数据到了才整块换上；
+ * 等得久（>120ms）时旧页变淡、顶上一道细进度条。以前是「先把主区换成『正在读取』再取数」，
+ * 每点一下都是一次闪白 + 转圈，看上去就像整页刷新。
  */
 
-import { ApiError, del, get, patch, post } from "./api.js";
+import { ApiError, del, get, invalidate, patch, post } from "./api.js";
 import {
   GB,
   ago,
@@ -64,6 +68,8 @@ const memory = {
 
 export function renderConsole(root, context) {
   ctx = context;
+  rendered = null; // 重新登录后是一套新的外壳：上一次画到哪儿不作数
+  invalidate();
   const side = h("nav", { class: "admin__side", attrs: { "aria-label": "控制台导航" } });
   const main = h("section", { class: "admin__main" });
   const overlay = h("div");
@@ -80,8 +86,7 @@ export function route() {
   const params = new URLSearchParams(location.search);
   const userMatch = /^\/admin\/users\/([0-9a-f]{32})$/.exec(path);
   const section = userMatch ? "/admin/users" : path;
-  drawSide(section);
-  shell.main.className = "admin__main" + (section === "/admin/settings" ? " admin__main--narrow" : "");
+  markSide(section);
   mount(shell.overlay);
 
   const pages = {
@@ -95,11 +100,20 @@ export function route() {
   };
   const page = pages[section];
   if (!page) {
+    navToken += 1; // 还在路上的上一页不许再换上来
+    shell.main.className = "admin__main";
     mount(shell.main, pageHead("找不到这一页", "地址可能写错了。"), h("a", { class: "btn", href: "/admin", onClick: navLink("/admin"), text: "回到概览" }));
+    rendered = null;
     return;
   }
   document.title = titleOf(section) + " · Opennote 同步";
-  run(page, params);
+  /*
+   * 用户列表 ⇄ 用户详情只是开 / 关抽屉：列表本身没变，不重画它。
+   * （以前每开一次详情、每关一次，都把整张用户表重新取一遍、重新画一遍。）
+   * 抽屉里改了东西会自己调 `usersRedraw()` 刷新列表。
+   */
+  const sameList = section === "/admin/users" && rendered !== null && rendered.section === section && rendered.search === location.search;
+  if (!sameList) run(page, params, section);
   if (userMatch) openUser(userMatch[1]);
 }
 
@@ -108,18 +122,71 @@ function titleOf(section) {
   return "控制台";
 }
 
-/** 跑一页：出错时画一块可重试的错误，而不是一片空白。 */
-async function run(page, params) {
-  mount(shell.main, loading());
+/** 主区现在显示的是哪一页（换上去之后才记）。 */
+let rendered = null;
+/** 每次切页 +1；只有最新的那一次才有资格把自己换上去（快速连点时旧的晚到也不会盖掉新的）。 */
+let navToken = 0;
+
+/**
+ * 跑一页：画在一块新视图里，**数据到了才换上去**；出错时画一块可重试的错误，而不是一片空白。
+ *
+ * - 主区还是空的（刚进控制台）⇒ 照旧先给「正在读取」；
+ * - 否则旧页留着，120ms 内回来就直接换（多数走缓存的切页根本看不到过渡），
+ *   久了才让旧页变淡、顶上出一道细进度条（`.admin__main.is-loading`）。
+ */
+async function run(page, params, section) {
+  const token = ++navToken;
+  const view = h("div", { class: "admin__view" });
+  let timer = 0;
+  let swapped = false;
+  const swap = () => {
+    if (swapped || token !== navToken) return;
+    swapped = true;
+    clearTimeout(timer);
+    const changedSection = rendered === null || rendered.section !== section;
+    shell.main.className = "admin__main" + (section === "/admin/settings" ? " admin__main--narrow" : "");
+    mount(shell.main, view);
+    rendered = { section, search: location.search };
+    if (changedSection) window.scrollTo({ top: 0 });
+  };
+  if (rendered === null || shell.main.childElementCount === 0) {
+    mount(view, loading());
+    swap();
+  } else {
+    timer = setTimeout(() => {
+      if (token === navToken && !swapped) shell.main.classList.add("is-loading");
+    }, 120);
+  }
   try {
-    await page(shell.main, params);
+    await page(view, params);
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) return; // app.js 会切回登录页
     mount(
-      shell.main,
+      view,
       h("div", { class: "callout callout--attn page-error" }, h("b", { text: "这一页没读出来" }), "：" + (error.message || String(error)) + " ", h("button", { type: "button", class: "link", text: "重试", onClick: () => route() })),
     );
   }
+  swap();
+}
+
+/** 只改侧栏的选中态（不重建整条侧栏：点过的链接不丢焦点，也不闪）。 */
+function markSide(section) {
+  const links = shell.side.querySelectorAll(".admin__nav");
+  if (links.length === 0) {
+    drawSide(section);
+    return;
+  }
+  for (const link of links) {
+    const active = link.getAttribute("href") === section;
+    link.classList.toggle("is-active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+}
+
+/** 点的是**当前这一页**：当成「刷新这一页」，丢掉缓存（app.js 的 navigate 调）。 */
+export function forgetCachedPage() {
+  invalidate();
 }
 
 /** 页内链接：拦下点击走 pushState，保留中键 / Cmd 点击开新标签。 */

@@ -48,7 +48,44 @@ export async function request(method, path, body) {
   return data;
 }
 
-export const get = (path) => request("GET", path);
-export const post = (path, body) => request("POST", path, body === undefined ? {} : body);
-export const patch = (path, body) => request("PATCH", path, body);
-export const del = (path) => request("DELETE", path);
+/*
+ * ## 读的短缓存
+ *
+ * 控制台切页时每一页都要整页重新取数（经 Cloudflare 一次往返约 0.5 秒），来回点几下就是
+ * 一次次「转圈 → 出内容」，看上去像整页刷新。这里给 GET 一个很短的缓存：
+ * - 15 秒内再取同一个地址，直接给上一次的结果（并发的同一请求也只发一次）；
+ * - **任何写操作**（POST / PATCH / DELETE）都清空整个缓存 —— 写完之后的重画一定是新数据；
+ * - 取失败的不留（下次照常重试）。
+ * 点当前所在那一项导航会先 `invalidate()`，等于「刷新这一页」。
+ */
+const CACHE_TTL_MS = 15_000;
+const cache = new Map();
+
+export function invalidate() {
+  cache.clear();
+}
+
+export function get(path) {
+  const hit = cache.get(path);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.promise;
+  const promise = request("GET", path);
+  cache.set(path, { at: Date.now(), promise });
+  promise.catch(() => {
+    if (cache.get(path)?.promise === promise) cache.delete(path);
+  });
+  return promise;
+}
+
+async function write(method, path, body) {
+  invalidate();
+  try {
+    return await request(method, path, body);
+  } finally {
+    // 请求在飞的时候别的页面可能又取过一次旧数据，写完再清一次。
+    invalidate();
+  }
+}
+
+export const post = (path, body) => write("POST", path, body === undefined ? {} : body);
+export const patch = (path, body) => write("PATCH", path, body);
+export const del = (path) => write("DELETE", path);
