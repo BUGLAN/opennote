@@ -929,6 +929,9 @@ describe("★ H3 · 推送侧删除的防误删闸门", () => {
     expect(result.remoteDeleted).toBe(1);
     expect(result.blockedDeletes).toBe(0);
     expect(harness.provider.tombstones()).toEqual([idForPath("notes/a.md")]);
+    // 「最近同步」的明细：删的是哪一篇
+    expect(result.remoteDeletedPaths).toEqual(["notes/a.md"]);
+    expect(result.pushedPaths).toEqual([]);
   });
 });
 

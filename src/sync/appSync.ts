@@ -37,6 +37,7 @@ import { createRemoteNotebook, currentCredentials, currentEncRoot, loadAccount, 
 import type { NotebookSummary } from "../../shared/contract";
 import { createSyncLedger, isSameRemote, readSyncLedger, writeSyncLedger, type SyncLedger } from "./state";
 import { PROTOCOL_VERSION } from "./contract";
+import { entryFromResult, failureEntry, recordSyncHistory } from "./history";
 import { createHashCache, readHashCache, writeHashCache, type HashCache } from "./hashCache";
 import { resolveCursorStore } from "./cursor";
 import { createDesktopEventStream, supportsDesktopStream } from "./desktopStream";
@@ -147,6 +148,7 @@ const LEDGER_HEARTBEAT_MS = 2000;
 
 function onBindingStatus(status: SyncStatus): void {
   syncUiStore.set((prev) => ({ ...prev, status }));
+  recordFailure(status);
   // 服务端说这台设备的登录失效了 / 账号停了：账号状态上也要标出来（设置页据此给「重新登录」）。
   if (status.phase === "signed-out") reportSessionProblem("signed-out");
   if (status.phase === "disabled") reportSessionProblem("disabled");
@@ -235,6 +237,18 @@ function collectConflicts(ledger: SyncLedger, result: SyncOnceResult): { path: s
   return [...byPath].map(([path, kind]) => ({ path, kind }));
 }
 
+/**
+ * 失败 / 离线进「最近同步」（`history.ts`）。连续同样的失败在那边合并成一条，
+ * 所以重试时每次都调到这里也不会刷屏。
+ */
+function recordFailure(status: SyncStatus): void {
+  const notebookId = currentRecord ? normalizeSyncConfig(currentRecord.sync).notebookId : "";
+  if (status.phase === "offline") recordSyncHistory(notebookId, failureEntry("offline", status.error, Date.now()));
+  else if (status.phase === "error") recordSyncHistory(notebookId, failureEntry("error", status.error, Date.now()));
+  else if (status.phase === "signed-out") recordSyncHistory(notebookId, failureEntry("error", "这台设备的同步登录已失效，需要重新登录", Date.now()));
+  else if (status.phase === "disabled") recordSyncHistory(notebookId, failureEntry("error", "同步账号已被管理员停用", Date.now()));
+}
+
 /** 每一轮成功同步：账本 + 哈希缓存落盘 + 概要进 UI（含冲突列表 —— 对话框从这里取）。 */
 function handleSynced(
   backend: FileSystemBackend,
@@ -252,6 +266,10 @@ function handleSynced(
   if (hashCache !== null) {
     void writeHashCache(backend, hashCache, { keep: Object.keys(ledger.files) }).catch(() => undefined);
   }
+  const conflicts = collectConflicts(ledger, result);
+  // 动了东西的一轮进「最近同步」（空跑的一轮 `entryFromResult` 返回 null，不记）。
+  const entry = entryFromResult(result, conflicts.map((item) => item.path), Date.now());
+  if (entry !== null) recordSyncHistory(ledger.remote.notebookId, entry);
   syncUiStore.set((prev) => ({
     ...prev,
     last: {
@@ -260,7 +278,7 @@ function handleSynced(
       pulled: result.pulled,
       deleted: result.deleted,
       remoteDeleted: result.remoteDeleted,
-      conflicts: collectConflicts(ledger, result),
+      conflicts,
       unknownDids: result.unknownDids.length,
       suspendedDeletes: result.suspendedDeletes.length,
       treeTruncated: result.treeTruncated,

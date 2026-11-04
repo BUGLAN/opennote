@@ -15,6 +15,7 @@ import type { HealthResponse, NotebookSummary } from "../../../shared/contract";
 import { listWorkspaces, normalizeSyncConfig, useWorkspaces, workspaceDisplayName, type WorkspaceRecord } from "../../data/workspaces";
 import { askConfirm } from "../../lib/dialogs";
 import { useStore } from "../../lib/store";
+import { clearSyncHistory, loadSyncHistory, syncHistoryStore, type SyncHistoryEntry } from "../../sync/history";
 import { notify } from "../../lib/toast";
 import { cn, formatBytes, formatRelativeTime } from "../../lib/utils";
 import {
@@ -135,36 +136,36 @@ export function SyncPane({
    没登录
    ============================================================================ */
 
+/**
+ * 没登录时的首屏：**安静地说明**，不催。
+ *
+ * 很多人就是离线用的 —— 笔记是这台设备上的普通文件，不登录什么都不缺。以前这里是一张带边框的
+ * 大卡片「这台设备还没有开启同步」+ 两块大按钮，读起来像「出问题了」（用户原话：太醒目）。
+ * 现在：一段平铺的说明 + 两行和其它设置项一样的入口，没有图标框、没有强调色。
+ */
 function HomeView({ onSignIn, onPair }: { onSignIn(): void; onPair(): void }): ReactNode {
   return (
     <div className="sync-pane">
-      <div className="sync-hero">
-        <div className="sync-hero__icon">
-          <Icon name="rotate" size={16} />
-        </div>
-        <div className="sync-hero__main">
-          <div className="sync-hero__title">这台设备还没有开启同步</div>
-          <div className="sync-hero__sub">开启后，你的笔记会在电脑、手机和网页之间自动保持一致。笔记文件仍然留在本机文件夹里。</div>
-        </div>
+      <div className="sync-intro">
+        <p>同步是可选的。不登录也能完整使用：笔记一直是这台设备上的普通文件。</p>
+        <p>想让电脑、手机和网页上的笔记保持一致时，再连上一台自托管的 Opennote 同步服务器。</p>
       </div>
-      <p className="sync-section-h">怎么开始</p>
-      <div className="sync-choices">
-        <button type="button" className="choice" onClick={onSignIn}>
-          <Icon name="unlock" size={16} />
-          <span>
-            <strong>登录同步账号</strong>
-            <small>用邮箱密码或 GitHub 登录；第一次用就先打开管理员发给你的邀请链接。</small>
+      <div className="sync-list">
+        <button type="button" className="sync-row sync-row--link" onClick={onSignIn}>
+          <span className="sync-row__main">
+            登录同步账号
+            <small>邮箱密码或 GitHub。第一次用，先打开管理员发给你的邀请链接。</small>
           </span>
+          <Icon name="chevronRight" size={14} className="sync-row__chevron" />
         </button>
-        <button type="button" className="choice" onClick={onPair}>
-          <Icon name="link" size={16} />
-          <span>
-            <strong>从另一台设备加入</strong>
-            <small>已经有设备在同步？在那台设备上点「添加设备」，在这里输入 6 位码。</small>
+        <button type="button" className="sync-row sync-row--link" onClick={onPair}>
+          <span className="sync-row__main">
+            从另一台设备加入
+            <small>在已经同步的那台设备上点「添加设备」，在这里输入 6 位码。</small>
           </span>
+          <Icon name="chevronRight" size={14} className="sync-row__chevron" />
         </button>
       </div>
-      <p className="dialog__note">同步需要一台自托管的 Opennote 同步服务器。</p>
     </div>
   );
 }
@@ -917,6 +918,8 @@ function MainView({ workspace, onDownloadRemote }: { workspace: WorkspaceRecord 
       <NotebookList workspace={workspace} remote={notebooks} newMode={newMode} onToggle={toggle} onDownloadRemote={onDownloadRemote} />
       <NewNotebookEncryption mode={newMode} onMode={setNewMode} />
 
+      <HistorySection workspace={workspace} />
+
       <DevicesSection />
       <EncryptionSection />
       <AccountSection />
@@ -926,6 +929,174 @@ function MainView({ workspace, onDownloadRemote }: { workspace: WorkspaceRecord 
         <pre>{ui.logs.length > 0 ? ui.logs.join("\n") : "（还没有日志）"}</pre>
       </details>
     </div>
+  );
+}
+
+/** 「最近同步」平时显示几条（其余点「显示全部」）。 */
+const HISTORY_PREVIEW = 6;
+
+/**
+ * 最近同步（`src/sync/history.ts`）：这台设备上、当前笔记本**真的动了东西**的那几轮，
+ * 以及出错 / 离线。点一条「已同步」能看到具体是哪几篇。
+ */
+function HistorySection({ workspace }: { workspace: WorkspaceRecord | null }): ReactNode {
+  const config = workspace ? normalizeSyncConfig(workspace.sync) : null;
+  const notebookId = config?.enabled ? config.notebookId : "";
+  const all = useStore(syncHistoryStore);
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    loadSyncHistory(notebookId);
+  }, [notebookId]);
+  if (notebookId === "") return null;
+  const entries = all[notebookId] ?? [];
+  const visible = showAll ? entries : entries.slice(0, HISTORY_PREVIEW);
+
+  return (
+    <>
+      <p className="sync-section-h">最近同步</p>
+      <div className="sync-list">
+        {entries.length === 0 ? (
+          <div className="sync-row sync-row--empty">还没有记录。上传、下载、删除或出错时会记在这里（只记这台设备上的）。</div>
+        ) : null}
+        {visible.map((entry) => (
+          <HistoryRow key={`${entry.kind}-${entry.firstAt ?? entry.at}`} entry={entry} />
+        ))}
+      </div>
+      {entries.length > 0 ? (
+        <div className="sync-row-actions">
+          {entries.length > HISTORY_PREVIEW ? (
+            <button type="button" className="btn btn--ghost btn--sm" onClick={() => setShowAll((value) => !value)}>
+              {showAll ? "收起" : `显示全部 ${entries.length} 条`}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={async () => {
+              const ok = await askConfirm({
+                title: "清空同步记录？",
+                message: "只清掉这台设备上「最近同步」的列表，不影响任何笔记，也不影响同步本身。",
+                confirmLabel: "清空",
+              });
+              if (ok) clearSyncHistory(notebookId);
+            }}
+          >
+            清空记录
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/** 路径 → 给人看的样子：笔记本内的相对路径；Markdown 去掉 `.md`（侧栏里也是这么叫它的），其它种类保留扩展名。 */
+function displayPath(path: string): string {
+  return path.toLowerCase().endsWith(".md") ? path.slice(0, -3) : path;
+}
+
+/**
+ * 一条记录：**一行**（用户原话：改成单行，用相对路径，「从云端下载」这种字不用显示）。
+ *
+ * `[方向图标] 操作系统/线程相关 · 保存了 2 次                 3 分钟前`
+ *
+ * - 方向只用图标说：上传 / 下载 / 删除；几种混在一起时用同步图标，并在后面淡淡地写各方向的数量；
+ * - 文件写笔记本里的相对路径；几篇时写前两篇 +「等 N 篇」，点开看全部；
+ * - 失败 / 离线同样一行：原因跟在后面，次数用「× N」。
+ */
+function HistoryRow({ entry }: { entry: SyncHistoryEntry }): ReactNode {
+  const when = (
+    <time className="sync-history__time" dateTime={new Date(entry.at).toISOString()} title={new Date(entry.at).toLocaleString()}>
+      {formatRelativeTime(entry.at)}
+    </time>
+  );
+  if (entry.kind !== "synced") {
+    const label = entry.kind === "offline" ? "连不上同步服务器" : "同步出错";
+    return (
+      <div
+        className={cn("sync-row", "sync-history__row", entry.kind === "error" && "is-error")}
+        title={`${label}：${entry.message}${entry.repeat > 1 ? `（从 ${new Date(entry.firstAt).toLocaleString()} 起共 ${entry.repeat} 次）` : ""}`}
+      >
+        <span className="sync-row__icon">
+          <Icon name="info" size={14} />
+        </span>
+        <span className="sync-history__line">
+          <span className="sync-history__name">{label}</span>
+          <span className="sync-history__meta">
+            {/* 传输层的报错自带「连不上同步服务：」开头，和前面的标签说的是同一件事 —— 只留原因。 */}
+            {entry.message.replace(/^连不上同步服务[：:]\s*/, "")}
+            {entry.repeat > 1 ? ` · × ${entry.repeat}` : ""}
+          </span>
+        </span>
+        {when}
+      </div>
+    );
+  }
+
+  const groups: { key: string; label: string; verb: string; icon: Parameters<typeof Icon>[0]["name"]; total: number; paths: string[] }[] = [
+    { key: "pushed", label: "上传到云端", verb: "上传", icon: "upload" as const, total: entry.pushed, paths: entry.paths.pushed },
+    { key: "pulled", label: "从云端下载", verb: "下载", icon: "download" as const, total: entry.pulled, paths: entry.paths.pulled },
+    { key: "deleted", label: "跟着云端删掉", verb: "删除", icon: "trash" as const, total: entry.deleted, paths: entry.paths.deleted },
+    { key: "remoteDeleted", label: "在云端删掉", verb: "删除", icon: "trash" as const, total: entry.remoteDeleted, paths: entry.paths.remoteDeleted },
+  ].filter((group) => group.total > 0);
+  const moved = groups.reduce((sum, group) => sum + group.total, 0);
+  const paths = groups.flatMap((group) => group.paths);
+  const only = groups.length === 1 ? groups[0]! : null;
+  const single = only !== null && only.total === 1 && only.paths.length === 1 ? only.paths[0]! : null;
+
+  const title =
+    moved === 0
+      ? "没有改动"
+      : paths.length === 0
+        ? `${moved} 篇`
+        : `${paths.slice(0, 2).map(displayPath).join("、")}${moved > 2 ? ` 等 ${moved} 篇` : ""}`;
+  const rounds = entry.rounds ?? 1;
+  const meta = [
+    // 方向混在一起时图标说不清，补一句各方向的数量；只有一个方向时图标就够了。
+    groups.length > 1 ? groups.map((group) => `${group.verb} ${group.total}`).join(" · ") : null,
+    rounds > 1 ? (only?.key === "pushed" ? `保存了 ${rounds} 次` : only?.key === "pulled" ? `收到 ${rounds} 次更新` : `${rounds} 次`) : null,
+  ].filter((part): part is string => part !== null);
+
+  const summary = (
+    <>
+      <span className="sync-row__icon" title={only?.label}>
+        <Icon name={only !== null ? only.icon : moved === 0 ? "info" : "rotate"} size={14} />
+      </span>
+      <span className="sync-history__line" title={single ?? undefined}>
+        <span className="sync-history__name">{title}</span>
+        {meta.length > 0 ? <span className="sync-history__meta">{meta.join(" · ")}</span> : null}
+        {entry.conflicts > 0 ? <span className="sync-history__meta sync-history__attn">{entry.conflicts} 篇待处理</span> : null}
+      </span>
+      {when}
+    </>
+  );
+
+  // 只动了一篇、没有冲突：一行就说完了，不用再点开。
+  if (single !== null && entry.conflicts === 0) return <div className="sync-row sync-history__row">{summary}</div>;
+
+  const listed = [...groups, { key: "conflicts", label: "待处理冲突", verb: "冲突", icon: "info" as const, total: entry.conflicts, paths: entry.paths.conflicts }].filter(
+    (group) => group.total > 0,
+  );
+  return (
+    <details className="sync-row sync-history__row sync-history__details">
+      <summary>{summary}</summary>
+      <div className="sync-history__paths">
+        {listed.map((group) => (
+          <div key={group.key}>
+            <div className="sync-history__group">
+              {group.label} {group.total}
+            </div>
+            <ul>
+              {group.paths.map((path) => (
+                <li key={path} title={path}>
+                  {displayPath(path)}
+                </li>
+              ))}
+              {group.total > group.paths.length ? <li className="sync-history__more">还有 {group.total - group.paths.length} 篇</li> : null}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </details>
   );
 }
 

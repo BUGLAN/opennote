@@ -164,6 +164,17 @@ export interface SyncOnceResult {
   suspendedPushDeletes: string[];
   /** 远端说游标过期 ⇒ 这次走的是全树比对（`planPush`/`planPull` 本来就是全树比对）。 */
   resynced: boolean;
+  /**
+   * 这一轮**具体动了哪些路径**（给「设置 → 同步 → 最近同步」看：点开一条记录能看到是哪几篇）。
+   * 计数仍以上面的 `pushed` / `pulled` / `deleted` / `remoteDeleted` 为准；这几张单子只是明细。
+   * 可选：手写的结果（测试替身）可以不带。
+   */
+  pushedPaths?: string[];
+  pulledPaths?: string[];
+  /** 远端删了 ⇒ 本机跟着删掉的。 */
+  deletedPaths?: string[];
+  /** 本机删了 ⇒ 在远端留下墓碑的。 */
+  remoteDeletedPaths?: string[];
   /** 引擎更新后的账本（调用方负责落盘）。 */
   ledger: SyncLedger;
   /** 本次同步里**本地发生了变化的路径** → 交给 `applyExternalPaths()` 刷 UI。 */
@@ -516,6 +527,10 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   const conflicts: EngineConflict[] = [];
   const pushConflicts: EngineConflict[] = [];
   const appliedPaths: string[] = [];
+  const pushedPaths: string[] = [];
+  const pulledPaths: string[] = [];
+  const deletedPaths: string[] = [];
+  const remoteDeletedPaths: string[] = [];
   let pushed = 0;
   let pulled = 0;
   /** 远端墓碑（本地删了 → 推上去）。 */
@@ -777,6 +792,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       syncedAt: now(),
     };
     pushed += 1;
+    pushedPaths.push(file.path);
     finishOne();
     log("push", { path: file.path, bytes: file.bytes });
   });
@@ -841,7 +857,10 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
      * 「删除」的痕迹由远端墓碑承担（§6.4 规则 3），本地不需要再记一份。
      */
     delete ledger.files[path];
-    if (!("gone" in result)) remoteDeleted += 1;
+    if (!("gone" in result)) {
+      remoteDeleted += 1;
+      remoteDeletedPaths.push(path);
+    }
     finishOne();
     log("delete", { path, remote: true, ...("gone" in result ? { gone: true } : {}) });
   });
@@ -883,6 +902,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       syncedAt: now(),
     };
     appliedPaths.push(item.path);
+    pulledPaths.push(item.path);
     pulled += 1;
     finishOne();
     log("pull", { path: item.path, bytes: read.bytes.byteLength });
@@ -994,6 +1014,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
           const existing = ledger.files[path];
           if (existing) delete ledger.files[path];
           appliedPaths.push(path);
+          deletedPaths.push(path);
           deleted += 1;
           finishOne();
           log("delete", { path });
@@ -1058,6 +1079,10 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     scanIncomplete,
     suspendedPushDeletes,
     resynced: false,
+    pushedPaths,
+    pulledPaths,
+    deletedPaths,
+    remoteDeletedPaths,
     ledger,
     appliedPaths,
     unknownDids,
