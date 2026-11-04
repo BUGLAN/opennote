@@ -36,6 +36,7 @@ import { deriveNotebookKey } from "./accountKey";
 import { createRemoteNotebook, currentCredentials, currentEncRoot, loadAccount, onAccountChange, remoteNotebooks, reportSessionProblem } from "./account";
 import type { NotebookSummary } from "../../shared/contract";
 import { createSyncLedger, isSameRemote, readSyncLedger, writeSyncLedger, type SyncLedger } from "./state";
+import { PROTOCOL_VERSION } from "./contract";
 import { createHashCache, readHashCache, writeHashCache, type HashCache } from "./hashCache";
 import { resolveCursorStore } from "./cursor";
 import { createDesktopEventStream, supportsDesktopStream } from "./desktopStream";
@@ -191,6 +192,11 @@ async function loadLedger(backend: FileSystemBackend, record: WorkspaceRecord): 
    * 每次打开应用全量重推（真机事故：880 篇、每次 2~3 分钟，远端文档被反复改写）。
    */
   if (existing && isSameRemote(existing.remote, config)) {
+    /*
+     * 旧客户端建账本时把 `protocolVersion` 写死成了 1（服务端早就是 2）。只是记录，不参与判定，
+     * 所以不重建账本，原地改正即可（同步完照常落盘）。
+     */
+    if (existing.remote.protocolVersion !== PROTOCOL_VERSION) existing.remote.protocolVersion = PROTOCOL_VERSION;
     return existing;
   }
   /*
@@ -206,7 +212,8 @@ async function loadLedger(backend: FileSystemBackend, record: WorkspaceRecord): 
     baseUrl: config.baseUrl,
     notebookId: config.notebookId,
     cryptoMode: config.cryptoMode,
-    protocolVersion: 1,
+    // 本客户端说的协议版本（`shared/contract.ts`，与服务端同一份常量）。以前写死成 1。
+    protocolVersion: PROTOCOL_VERSION,
   });
 }
 
