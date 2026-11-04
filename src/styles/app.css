@@ -2300,10 +2300,26 @@ mark.hit {
   color: color-mix(in srgb, var(--accent) 70%, var(--ink-3));
 }
 
+/*
+ * 设置的内容区（所有分类共用这一个滚动容器）。
+ *
+ * ★ 给滚动条**留出位置**：以前内容一直铺到容器右边，10px 的滚动条直接压在内容上 ——
+ * 列表的右边框、右对齐的时间和按钮都贴着甚至被它盖住（用户截图：每个分类都这样）。
+ * 两种滚动条都要顾到：
+ * - **占位的**（Windows / 系统设置为「始终显示」）：`scrollbar-gutter: stable` 把那一条始终留着，
+ *   内容出现 / 消失滚动条时不再左右跳；
+ * - **浮在内容上的**（macOS 默认）：不占位，只能靠 `padding-right` 让出它画的那一条（约 10px）。
+ * 所以留 12px：占位的情况下内容离滚动条 12px，浮层的情况下滚动条正好画在这段留白里。
+ * 负的 `margin-right` 把这一段挪进对话框右侧的留白（`.dialog__body` 的 16px），
+ * 内容的右边因此几乎不动，仍然和标题栏、底栏对得齐。
+ */
 .settings__pane {
   min-width: 0;
   max-height: min(62vh, 560px);
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  margin-right: calc(-1 * var(--s3));
+  padding-right: var(--s3);
 }
 
 .setting--stack {
@@ -4012,22 +4028,6 @@ mark.hit {
   display: inline-grid;
   place-items: center;
 }
-.sync-row--empty {
-  color: var(--ink-3);
-  font-size: var(--fs-sm);
-}
-.sync-tag {
-  display: inline-flex;
-  align-items: center;
-  height: 19px;
-  padding: 0 7px;
-  border-radius: 99px;
-  border: 1px solid var(--rule-strong);
-  font-size: 11px;
-  color: var(--ink-2);
-  white-space: nowrap;
-  flex: none;
-}
 /* ---- 没登录时的首屏（`SyncPane` 的 `HomeView`）：安静的说明 + 两行入口 ---- */
 
 .sync-intro {
@@ -4169,6 +4169,22 @@ mark.hit {
   color: var(--ink-3);
 }
 
+.sync-row--empty {
+  color: var(--ink-3);
+  font-size: var(--fs-sm);
+}
+.sync-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 7px;
+  border-radius: 99px;
+  border: 1px solid var(--rule-strong);
+  font-size: 11px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  flex: none;
+}
 .sync-tag--solid {
   background: var(--paper-3);
   border-color: transparent;
