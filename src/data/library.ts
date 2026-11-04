@@ -170,7 +170,7 @@ function readCanvasViewports(value: unknown): Record<Id, CanvasViewport> | null 
   return Object.keys(out).length ? out : null;
 }
 
-const SIDEBAR_TABS: SidebarTab[] = ["files", "search", "tags", "starred"];
+const SIDEBAR_TABS: SidebarTab[] = ["files", "search", "tags", "starred", "trash"];
 
 function isSidebarTab(value: unknown): value is SidebarTab {
   return typeof value === "string" && (SIDEBAR_TABS as string[]).includes(value);

@@ -181,6 +181,8 @@
  */
 .sidebar__head {
   grid-area: 1 / 1 / 2 / 2;
+  /* 笔记本切换菜单（`.workspace__menu`）挂在头部下面 */
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--s2);
@@ -283,6 +285,41 @@
   gap: 2px;
 }
 
+/*
+ * 头部标题 = 当前笔记本名，点它切换笔记本（以前是身体最上面单独一行的带框下拉）。
+ * 平时看上去就是一行标题；悬停才露出按钮的底色，免得头部像一排表单控件。
+ */
+.sidebar__notebook {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 28px;
+  margin-left: -4px;
+  padding: 0 6px 0 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.sidebar__notebook:hover,
+.sidebar__notebook[aria-expanded="true"] {
+  background: var(--paper-3);
+}
+
+.sidebar__notebook-caret {
+  flex: none;
+  color: var(--ink-3);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.sidebar__notebook[aria-expanded="true"] .sidebar__notebook-caret {
+  transform: rotate(180deg);
+}
+
 /* ---------------------------- 自更新按钮 -------------------------------- */
 
 /*
@@ -366,59 +403,38 @@
   }
 }
 
-/* 上边距归零：与工作区按钮之间的那段间距由 `.sidebar__workspace` 的下 padding 出，
-   两处不会各留一半。标签行自身的落点因此不变。 */
-.sidebar__tabs {
-  display: flex;
-  gap: 2px;
-  padding: 0 var(--s3) 6px;
-}
 
-/* ---- workspace (notebook) switcher ------------------------------------ */
+/* ---- 常驻搜索框 ------------------------------------------------------- */
 
 /*
- * 上下各 `--s2`（8px）：按钮因此在「头部」与「标签栏」之间垂直居中
- * ——上下留白相等，按钮不再贴着头部的分割线。
- * 容器总高（8 + 30 + 8 = 46px）与改动前（4 + 30 + 4 + 标签栏 8px 上 padding）一致，
- * 所以标签栏及其以下的位置一点没动。
+ * 在滚动区（`.sidebar__body`）**外面**：文件树滑多深它都在原地。
+ * 以前它是 `.sidebar__body` 里的 `.sidebar__filter`，跟着树一起被滚走。
  */
-.sidebar__workspace {
-  position: relative;
-  padding: var(--s2) var(--s3);
+.sidebar__search {
+  flex: none;
+  padding: var(--s2) var(--s3) var(--s1);
 }
 
-.workspace__button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  height: 30px;
-  padding: 0 8px;
-  border: 1px solid var(--rule-strong);
-  border-radius: var(--radius-sm);
-  background: var(--paper-2);
-  color: var(--ink);
-  font-size: var(--fs-md);
-  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+/* 搜索框做轻：没有边框，一块比侧栏底色深一点的底；聚焦时才出边框。 */
+.sidebar__search .field {
+  border-color: transparent;
+  background-color: var(--paper-3);
 }
 
-.workspace__button:hover {
-  background: var(--paper-3);
-  border-color: var(--ink-3);
+.sidebar__search .field:focus {
+  border-color: var(--accent-line);
+  background-color: var(--paper-2);
 }
 
-.workspace__caret {
-  margin-left: auto;
-  color: var(--ink-3);
-}
+/* ---- notebook switcher menu（挂在头部下面） -------------------------- */
 
 .workspace__menu {
   position: absolute;
   z-index: 40;
-  /* 8px 容器上 padding + 30px 按钮 + 2px 缝：跟着 `.sidebar__workspace` 的 padding 走 */
-  top: 40px;
-  left: var(--s3);
-  right: var(--s3);
+  /* 紧贴头部下沿（头部高 `--tabbar-h`），左右与头部内容对齐 */
+  top: calc(var(--tabbar-h) - 2px);
+  left: var(--s2);
+  right: var(--s2);
   max-height: 62vh;
   overflow-y: auto;
   padding: 5px;
@@ -678,26 +694,6 @@
   }
 }
 
-.sidebar__tab {
-  flex: 1;
-  height: 26px;
-  border-radius: var(--radius-sm);
-  color: var(--ink-2);
-  font-size: var(--fs-sm);
-  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
-}
-
-.sidebar__tab:hover {
-  background: var(--paper-3);
-  color: var(--ink);
-}
-
-.sidebar__tab.is-active {
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 600;
-}
-
 .sidebar__body {
   flex: 1;
   min-height: 0;
@@ -719,6 +715,138 @@
  * 但 `.sidebar` 是 `overflow: hidden`：将来往这里塞更高的元素会被裁掉 —— 加之前先确认
  * 底边线还齐不齐。
  */
+/* ---- 分区列表（2026-11-04，照 Notion / Bear）------------------------ */
+
+/*
+ * 侧栏只有一种行：`.tree__row`（图标 + 名字 + 数量）。星标 / 收件箱 / 回收站这几条入口
+ * 也是它（`.sidebar__nav` 只补上 <button> 的默认样式），所以和文件树天然对齐。
+ */
+.sidebar__nav {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+}
+
+/*
+ * 分区标题（文件夹 / 标签）：一行灰色小字，没有分割线，没有底色。
+ * 折叠箭头在字的右边、很淡；「新建文件夹」的 + 平时隐着，悬停分区标题才出现。
+ */
+.sidebar__section {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: var(--s4) 0 2px;
+  padding: 0 2px 0 8px;
+  height: 22px;
+}
+
+.sidebar__section-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 22px;
+  padding: 0 4px 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.sidebar__section-toggle:hover {
+  color: var(--ink-2);
+}
+
+.sidebar__section-caret {
+  opacity: 0;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.sidebar__section-caret.is-open {
+  transform: rotate(90deg);
+}
+
+/* 收起时箭头常亮（否则看不出这里还藏着一整块）；展开时只在悬停时出现。 */
+.sidebar__section-toggle[aria-expanded="false"] .sidebar__section-caret,
+.sidebar__section:hover .sidebar__section-caret {
+  opacity: 1;
+}
+
+.sidebar__section-action {
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.sidebar__section:hover .sidebar__section-action,
+.sidebar__section-action:focus-visible {
+  opacity: 1;
+}
+
+/* 侧栏里剩下的小标题（文件夹分区里的「未归档」、搜索结果里的「标签」）与分区标题同一个样子：
+   不加宽字距、不拖一条横线。别处（笔记本菜单）的 `.tree__group` 不受影响。 */
+.sidebar__body .tree__group {
+  margin: var(--s2) 0 2px;
+  letter-spacing: 0.02em;
+  font-weight: 500;
+}
+
+.sidebar__body .tree__group::after {
+  display: none;
+}
+
+/* 星标展开后没有笔记时的一句提示：与行同一个缩进，不居中（它是分区里的一行，不是空页）。 */
+.sidebar__hint {
+  margin: 2px 0 4px;
+  padding: 0 8px 0 28px;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+
+/* 回收站钉在底部、不随树滚动；和树里的行同一个样子，上面一条细线。 */
+.sidebar__pinned {
+  flex: none;
+  padding: 4px var(--s2);
+  border-top: 1px solid var(--rule);
+}
+
+/* 回收站页顶上的「返回」：一行，点它回到文件树。 */
+.sidebar__back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 28px;
+  margin-bottom: 4px;
+  padding: 0 8px 0 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sidebar__back:hover {
+  background: var(--paper-3);
+}
+
+.sidebar__back .tree__meta {
+  margin-left: auto;
+}
+
 .sidebar__foot {
   display: flex;
   align-items: center;
@@ -736,9 +864,7 @@
  * （`shellLayout.test.ts`）。将来要在这里加动作，记得沿用**盒模型量得到的高度**，
  * 别用行内 span 包按钮 —— 那个 1.4px 的行盒陷阱还在。 */
 
-.sidebar__filter {
-  padding: 0 var(--s3) var(--s2);
-}
+/* 「筛选笔记」那个框已经并进常驻的 `.sidebar__search`（见上）。 */
 
 /* ============================== filter field ============================ */
 
@@ -859,6 +985,47 @@
   display: inline-flex;
   color: var(--ink-3);
   flex: none;
+}
+
+/*
+ * 文件夹 / 标签的图标**自己就是开合记号**（行首不再有单独的箭头）。
+ * - 文件夹：合上 / 打开两张图，打开的那一下轻轻一弹；
+ * - 标签 `#`：展开时转一个角度、上强调色（没有子项的标签不动）。
+ */
+.tree__icon--toggle {
+  transition:
+    transform var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.tree__icon--toggle.is-open:not(.tree__icon--hash) {
+  animation: tree-icon-open var(--dur) var(--ease-out);
+}
+
+/*
+ * 合上 / 打开两张图在 14px 下只差两三个像素，单靠轮廓分不清（实测截图）。
+ * 合上的文件夹再给一层浅填充：一眼看上去是「实心的一块」，打开的则是空心、前片外翻。
+ */
+.tree__icon--toggle:not(.is-open):not(.tree__icon--hash) svg {
+  fill: currentColor;
+  fill-opacity: 0.22;
+}
+
+.tree__icon--hash.is-open:not(.is-leaf) {
+  transform: rotate(-15deg);
+  color: var(--accent);
+}
+
+@keyframes tree-icon-open {
+  0% {
+    transform: scale(0.82);
+  }
+  60% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
 }
 
 .tree__row.is-active .tree__icon,

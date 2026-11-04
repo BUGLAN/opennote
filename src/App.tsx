@@ -108,7 +108,7 @@ import { ConflictDialogHost, installImportConflictDialog, uninstallImportConflic
 import { DialogHost, MenuHost, Toasts, openMenu } from "./components/Overlays";
 import { Outline } from "./components/Outline";
 import { ReadingView } from "./components/ReadingView";
-import { Sidebar, currentFolderId, revealTag, type Scope } from "./components/Sidebar";
+import { Sidebar, currentFolderId, focusSidebarSearch, revealTag, type Scope } from "./components/Sidebar";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { StatusBar } from "./components/StatusBar";
 import { bindWorkspaceToRemote, closeWorkspaceSync, openWorkspaceSync, syncStatusBarInfo, syncUiStore } from "./sync/appSync";
@@ -1222,8 +1222,10 @@ export default function App(): ReactNode {
         showNoteInCanvas,
         openPalette: (mode) => setPalette(mode),
         openSearch: () => {
+          // 搜索框常驻侧栏顶部（不再是单独一页）：回到文件页、把焦点放进去。
           patchUi({ sidebarOpen: true });
-          setTab("search");
+          setTab("files");
+          focusSidebarSearch();
         },
         saveNow: () => {
           void rescanWorkspace()

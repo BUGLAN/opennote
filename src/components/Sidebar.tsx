@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   childFolders,
   collapseFolder,
@@ -28,7 +28,7 @@ import {
   type TagTreeNode,
 } from "../data/library";
 import type { EntryOptions } from "../data/entryOptions";
-import type { Folder, Id, Note, UiSettings } from "../data/types";
+import { noteKind, type Folder, type Id, type Note, type SidebarSections, type UiSettings } from "../data/types";
 import { getUi, patchUi, themeKind } from "../data/ui";
 import type { WorkspaceRecord } from "../data/workspaces";
 import { isCapacitorNative } from "../fs";
@@ -41,7 +41,30 @@ import { cn, excerpt, formatRelativeTime } from "../lib/utils";
 import { Icon, type IconName } from "./Icons";
 import { openMenu, type MenuItem } from "./Overlays";
 
-export type SidebarTab = "files" | "search" | "tags" | "starred";
+export type SidebarTab = "files" | "search" | "tags" | "starred" | "trash";
+
+/**
+ * 侧栏实际画哪一页：文件树（星标 / 文件夹 / 标签三个分区都在这一页里）或回收站。
+ * 旧的 `"search"` / `"tags"` / `"starred"` 页签已经并进分区列表，读到它们按「文件」画。
+ */
+type SidebarView = "files" | "trash";
+function viewOf(tab: SidebarTab): SidebarView {
+  return tab === "trash" ? "trash" : "files";
+}
+
+/*
+ * 常驻搜索框的句柄（模块级）：「搜索全部笔记」（Ctrl/⌘ + Shift + F）从 App 那边要把焦点
+ * 落进这个框，而它不再藏在某个页签后面 —— 侧栏只有一个，挂一份引用就够了。
+ */
+let searchInputHandle: HTMLInputElement | null = null;
+
+/** 把焦点放进侧栏顶部的搜索框（侧栏刚展开时等一帧，等它可见）。 */
+export function focusSidebarSearch(): void {
+  requestAnimationFrame(() => {
+    searchInputHandle?.focus();
+    searchInputHandle?.select();
+  });
+}
 
 export type Scope =
   | { kind: "all" }
@@ -94,6 +117,12 @@ export interface SidebarProps {
   onUpdateAction(action: UpdateAction): void;
 }
 
+/**
+ * 每深一层缩进多少。行首不再有单独的展开箭头（文件夹 / `#` 图标自己就是开合记号），
+ * 所以比以前的 13px 多给 3px，层级仍然一眼看得出。
+ */
+const TREE_INDENT = 16;
+
 /** Drag state lives outside React: it only matters between two native events. */
 let dragPayload: { kind: "note" | "folder"; id: Id } | null = null;
 
@@ -112,9 +141,31 @@ export function Sidebar(rawProps: SidebarProps): ReactNode {
   const openNote = useCallback((id: Id) => onOpenNoteRef.current(id), []);
   const props: SidebarProps = { ...rawProps, onOpenNote: openNote };
   const { library, ui, scope, tab, activeId } = props;
-  const [filter, setFilter] = useState("");
+  const view = viewOf(tab);
   const [query, setQuery] = useState("");
-  const [tagFilter, setTagFilter] = useState("");
+  const searching = query.trim() !== "";
+  const sections = ui.sidebarSections;
+  const toggleSection = (key: keyof SidebarSections): void => {
+    patchUi({ sidebarSections: { ...getUi().sidebarSections, [key]: !getUi().sidebarSections[key] } });
+  };
+  /*
+   * 旧页签的兼容：命令面板跳到某个标签时仍然 `setTab("tags")`，旧的 state.json 里也可能存着
+   * `"tags"` / `"starred"` / `"search"`。现在它们都不是单独一页了 —— 展开对应分区、回到文件页。
+   */
+  useEffect(() => {
+    if (tab !== "tags" && tab !== "starred" && tab !== "search") return;
+    const key = tab === "tags" ? "tags" : tab === "starred" ? "starred" : null;
+    if (key && !getUi().sidebarSections[key]) patchUi({ sidebarSections: { ...getUi().sidebarSections, [key]: true } });
+    props.onTab("files");
+  }, [tab]);
+  const openTrash = (): void => {
+    props.onTab("trash");
+    props.onScope({ kind: "trash" });
+  };
+  const closeTrash = (): void => {
+    props.onTab("files");
+    if (scope.kind === "trash") props.onScope({ kind: "all" });
+  };
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -136,14 +187,11 @@ export function Sidebar(rawProps: SidebarProps): ReactNode {
   const createWhere = folderPathLabel(createTarget, library.folders);
 
   /*
-   * 两处过滤都走**同一棵树 + 一个可见集合**（用户原话「直接使用原来的那一份加个筛选就行了」）：
+   * 搜索走**同一棵树 + 一个可见集合**（用户原话「直接使用原来的那一份加个筛选就行了」）：
    * 集合由 `treeFilterFor()` 算（命中笔记 + 祖先目录 + 文件夹名命中），
-   * 树本身（`TreeBody`/`FolderBranch`）一行都没改样式 —— 目录行的 caret 照旧能展开能收缩。
+   * 树本身（`TreeBody`/`FolderBranch`）一行都没改样式 —— 目录行照旧能展开能收缩。
+   * 设置里关掉「搜索时显示文件夹」时走平铺的结果列表（`SearchBody`）。
    */
-  const nameFilter = useMemo(
-    () => (filter.trim() && ui.searchFolders ? treeFilterFor(filter) : null),
-    [library, filter, ui.searchFolders],
-  );
   const searchFilter = useMemo(
     () => (query.trim() && ui.searchFolders ? treeFilterFor(query) : null),
     [library, query, ui.searchFolders],
@@ -184,7 +232,21 @@ export function Sidebar(rawProps: SidebarProps): ReactNode {
             height={22}
             aria-hidden="true"
           />
-          <span className="sidebar__name">Opennote</span>
+          {/*
+            笔记本名就是头部的标题，点它切换笔记本。以前它在身体最上面单独占一整行（一个带边框的
+            下拉框），而笔记本打开之后几乎不换 —— 那一行的位置让给了常驻的搜索框。
+          */}
+          <button
+            type="button"
+            className="sidebar__notebook"
+            aria-haspopup="menu"
+            aria-expanded={props.switcherOpen}
+            onClick={() => props.onSwitcherOpen(!props.switcherOpen)}
+            title={props.workspace ? `${workspaceLocation(props.workspace)} · 点击切换笔记本` : "打开或新建笔记本"}
+          >
+            <span className="sidebar__name">{props.workspace?.name ?? "Opennote"}</span>
+            <Icon name="chevronDown" size={12} className="sidebar__notebook-caret" />
+          </button>
         </div>
         <div className="sidebar__actions">
           {/*
@@ -246,32 +308,8 @@ export function Sidebar(rawProps: SidebarProps): ReactNode {
             <Icon name="sidebar" />
           </button>
         </div>
-      </div>
-
-      {/* 收起时 inert：窄屏抽屉只是平移到屏幕外，不加的话 Tab 仍会走进看不见的树里。 */}
-      <aside className={cn("sidebar", !ui.sidebarOpen && "is-collapsed")} inert={!ui.sidebarOpen}>
-        <div className="sidebar__workspace">
-        <button
-          type="button"
-          className="workspace__button"
-          onClick={() => props.onSwitcherOpen(!props.switcherOpen)}
-          title={props.workspace ? workspaceLocation(props.workspace) : "还没有打开笔记本"}
-        >
-          <Icon
-            name={
-              props.workspace?.kind === "node" || props.workspace?.kind === "capacitor"
-                ? "folder"
-                : props.workspace
-                  ? "layers"
-                  : "info"
-            }
-            size={13}
-          />
-          <span className="truncate">{props.workspace?.name ?? "未打开笔记本"}</span>
-          <Icon name="chevronDown" size={12} className="workspace__caret" />
-        </button>
         {props.switcherOpen ? (
-          <div className="workspace__menu">
+          <div className="workspace__menu" role="menu">
             {props.workspaces.length ? <div className="tree__group">笔记本</div> : null}
             {props.workspaces.map((record) => (
               <button
@@ -335,125 +373,238 @@ export function Sidebar(rawProps: SidebarProps): ReactNode {
         ) : null}
       </div>
 
-      <nav className="sidebar__tabs">
-        {(
-          [
-            ["files", "文件"],
-            ["search", "搜索"],
-            ["tags", "标签"],
-            ["starred", "星标"],
-          ] as [SidebarTab, string][]
-        ).map(([id, label]) => (
-          <button
-            key={id}
-            className={cn("sidebar__tab", tab === id && "is-active")}
-            onClick={() => {
-              props.onTab(id);
-              if (id === "search") requestAnimationFrame(() => searchInputRef.current?.focus());
+      {/* 收起时 inert：窄屏抽屉只是平移到屏幕外，不加的话 Tab 仍会走进看不见的树里。 */}
+      <aside className={cn("sidebar", !ui.sidebarOpen && "is-collapsed")} inert={!ui.sidebarOpen}>
+        {/*
+          ★ 常驻搜索框：在滚动区**外面**，文件树滑到多深它都在原地。
+          搜的是笔记（标题 / 标签 / 正文 / 文件夹名），同时筛标签；有词时下面只显示结果。
+        */}
+        <div className="sidebar__search">
+          <input
+            ref={(element) => {
+              searchInputRef.current = element;
+              searchInputHandle = element;
             }}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
+            className="field field--search"
+            type="search"
+            value={query}
+            placeholder="搜索笔记…"
+            aria-label="搜索笔记"
+            onChange={(event) => {
+              setQuery(event.target.value);
+              if (view !== "files" && event.target.value.trim()) props.onTab("files");
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && query) {
+                event.stopPropagation();
+                setQuery("");
+              }
+            }}
+          />
+        </div>
 
-      <div className="sidebar__body">
-        {tab === "files" ? (
-          <>
-            <div className="sidebar__filter">
-              <input
-                className="field field--search"
-                value={filter}
-                placeholder="筛选笔记…"
-                onChange={(event) => setFilter(event.target.value)}
-              />
-            </div>
-            {filter.trim() && !props.ui.searchFolders ? (
-              <FilteredNotes
+        <div className="sidebar__body">
+          {view === "trash" ? (
+            <>
+              <button type="button" className="sidebar__back" onClick={closeTrash}>
+                <Icon name="chevronLeft" size={13} />
+                <span>回收站</span>
+                {counts.trash > 0 ? <span className="tree__meta">{counts.trash}</span> : null}
+              </button>
+              <div className="tree">
+                <TrashList library={library} onOpen={props.onOpenNote} />
+              </div>
+            </>
+          ) : searching ? (
+            <>
+              {props.ui.searchFolders ? (
+                searchFilter && searchFilter.notes.size === 0 && searchFilter.folders.size === 0 ? (
+                  <p className="tree__empty">没有找到包含「{query.trim()}」的笔记或文件夹。</p>
+                ) : (
+                  <TreeBody
+                    {...props}
+                    dropTarget={dropTarget}
+                    setDropTarget={setDropTarget}
+                    onDropOn={handleDrop}
+                    filter={searchFilter}
+                  />
+                )
+              ) : (
+                <SearchBody query={query} activeId={activeId} onOpen={props.onOpenNote} showFolders={false} />
+              )}
+              <TagsBody
                 library={library}
-                filter={filter.trim()}
+                ui={ui}
+                scope={scope}
                 activeId={activeId}
+                filter={query}
+                onScope={props.onScope}
                 onOpen={props.onOpenNote}
+                asSearchResult
               />
-            ) : (
-              <TreeBody
-                {...props}
-                counts={counts}
-                dropTarget={dropTarget}
-                setDropTarget={setDropTarget}
-                onDropOn={handleDrop}
-                filter={nameFilter}
+            </>
+          ) : (
+            <>
+              {/*
+                ★ 「分区列表」（照 Notion / Bear 的做法）：没有页签，整条侧栏只有「图标 + 名字 + 数量」
+                这一种行，加几行灰色小字的分区标题。星标与收件箱放在最上面（不用滑到树底下找），
+                文件夹与标签是两个可折叠分区，回收站钉在底部。
+              */}
+              <NavRow
+                icon="star"
+                label="星标"
+                count={counts.starred}
+                open={sections.starred}
+                onClick={() => toggleSection("starred")}
               />
-            )}
-          </>
-        ) : null}
+              {sections.starred ? (
+                <div className="tree">
+                  {starredNotes(library).length ? (
+                    starredNotes(library).map((note) => (
+                      <NoteRow
+                        key={note.id}
+                        note={note}
+                        depth={1}
+                        dirty={Boolean(library.dirty[note.id])}
+                        active={activeId === note.id}
+                        onOpen={props.onOpenNote}
+                        dnd={false}
+                      />
+                    ))
+                  ) : (
+                    <p className="sidebar__hint">还没有星标笔记。右键笔记即可加星标。</p>
+                  )}
+                </div>
+              ) : null}
+              <NavRow icon="download" label="收件箱" count={props.inboxPending} onClick={() => props.onOpenInbox()} />
 
-        {tab === "search" ? (
-          <SearchBody
-            inputRef={searchInputRef}
-            query={query}
-            onQuery={setQuery}
-            activeId={activeId}
-            onOpen={props.onOpenNote}
-            showFolders={props.ui.searchFolders}
-            tree={
-              <TreeBody
-                {...props}
-                counts={counts}
-                dropTarget={dropTarget}
-                setDropTarget={setDropTarget}
-                onDropOn={handleDrop}
-                filter={searchFilter}
+              <SectionHeader
+                label="文件夹"
+                open={sections.folders}
+                onToggle={() => toggleSection("folders")}
+                action={{ title: `新建文件夹 · 将建在「${createWhere}」`, onClick: () => props.onNewFolder(createTarget) }}
               />
-            }
-          />
-        ) : null}
+              {sections.folders ? (
+                <TreeBody
+                  {...props}
+                  dropTarget={dropTarget}
+                  setDropTarget={setDropTarget}
+                  onDropOn={handleDrop}
+                  filter={null}
+                />
+              ) : null}
 
-        {tab === "tags" ? (
-          <>
-            <div className="sidebar__filter">
-              <input
-                className="field field--search"
-                value={tagFilter}
-                placeholder="筛选标签…"
-                onChange={(event) => setTagFilter(event.target.value)}
-              />
-            </div>
-            <TagsBody
-              library={library}
-              ui={ui}
-              scope={scope}
-              activeId={activeId}
-              filter={tagFilter}
-              onScope={props.onScope}
-              onOpen={props.onOpenNote}
-            />
-          </>
-        ) : null}
+              <SectionHeader label="标签" open={sections.tags} onToggle={() => toggleSection("tags")} />
+              {sections.tags ? (
+                <TagsBody
+                  library={library}
+                  ui={ui}
+                  scope={scope}
+                  activeId={activeId}
+                  filter=""
+                  onScope={props.onScope}
+                  onOpen={props.onOpenNote}
+                />
+              ) : null}
+            </>
+          )}
+        </div>
 
-        {tab === "starred" ? (
-          <NoteList
-            library={library}
-            notes={starredNotes(library)}
-            activeId={activeId}
-            onOpen={props.onOpenNote}
-            emptyHint="还没有星标笔记。右键任意笔记即可加星标。"
-          />
-        ) : null}
-      </div>
+        {/* 回收站钉在底部：低频、但要随时找得到（与 Notion 同一个位置）。 */}
+        <div className="sidebar__pinned">
+          <NavRow icon="trash" label="回收站" count={counts.trash} active={view === "trash"} onClick={() => (view === "trash" ? closeTrash() : openTrash())} />
+        </div>
 
-      {/* 脚注不再放「设置」按钮：状态栏最右那颗是同一个图标、同一个动作
-          （2026-10-10 用户反馈「这里的设置图标就不用了，右边有相同的图标」）。
-          随之退场的还有动作位 `.sidebar__foot-actions` 与它那条「22px 行盒」的护栏。 */}
-      <footer className="sidebar__foot">
-        <Icon name="shield" size={13} />
-        <span title={props.workspace ? workspaceLocation(props.workspace) : undefined}>
-          {counts.all} 篇笔记
-        </span>
-      </footer>
+        {/* 脚注不再放「设置」按钮：状态栏最右那颗是同一个图标、同一个动作
+            （2026-10-10 用户反馈「这里的设置图标就不用了，右边有相同的图标」）。
+            随之退场的还有动作位 `.sidebar__foot-actions` 与它那条「22px 行盒」的护栏。 */}
+        <footer className="sidebar__foot">
+          <Icon name="shield" size={13} />
+          <span title={props.workspace ? workspaceLocation(props.workspace) : undefined}>
+            {counts.all} 篇笔记
+          </span>
+        </footer>
       </aside>
     </>
   );
+}
+
+/**
+ * 侧栏里的一条入口（星标 / 收件箱 / 回收站）：和文件树的行同一套样子 —— 图标 + 名字 + 数量。
+ * 传了 `open` 就是可展开的（星标），图标和文件夹一样兼作开合记号。
+ */
+function NavRow({
+  icon,
+  label,
+  count,
+  open,
+  active = false,
+  onClick,
+}: {
+  icon: IconName;
+  label: string;
+  count: number;
+  open?: boolean;
+  active?: boolean;
+  onClick: () => void;
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      className={cn("tree__row", "sidebar__nav", active && "is-current")}
+      aria-expanded={open}
+      aria-current={active ? "true" : undefined}
+      style={{ paddingLeft: 6 }}
+      onClick={onClick}
+    >
+      <span className={cn("tree__icon", open !== undefined && "tree__icon--toggle", open && "is-open")}>
+        <Icon name={icon} size={14} filled={icon === "star" && open === true} />
+      </span>
+      <span className="tree__label">{label}</span>
+      {count > 0 ? <span className="tree__meta">{count}</span> : null}
+    </button>
+  );
+}
+
+/**
+ * 分区标题（文件夹 / 标签）：一行灰色小字，点它整块折叠。
+ * 右侧的动作按钮（「新建文件夹」）平时淡出，悬停分区标题时才出现 —— 与 Notion 的分区一样。
+ */
+function SectionHeader({
+  label,
+  open,
+  onToggle,
+  action,
+}: {
+  label: string;
+  open: boolean;
+  onToggle: () => void;
+  action?: { title: string; onClick: () => void };
+}): ReactNode {
+  return (
+    <div className="sidebar__section">
+      <button type="button" className="sidebar__section-toggle" aria-expanded={open} onClick={onToggle}>
+        <span>{label}</span>
+        <Icon name="chevronRight" size={11} className={cn("sidebar__section-caret", open && "is-open")} />
+      </button>
+      {action ? (
+        <button type="button" className="icon-btn sidebar__section-action" title={action.title} aria-label={action.title} onClick={action.onClick}>
+          <Icon name="plus" size={13} />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * 文件行的图标按**种类**分：Markdown 笔记、HTML 页面、画布各一张，扫一眼就知道点开是什么
+ * （以前三种都是同一张「笔记」图）。种类判据与编辑器同一份（`noteKind`）。
+ */
+function noteIcon(note: Pick<Note, "kind">): IconName {
+  const kind = noteKind(note);
+  if (kind === "html") return "code";
+  if (kind === "canvas") return "canvas";
+  return "note";
 }
 
 function workspaceLocation(record: WorkspaceRecord): string {
@@ -475,7 +626,6 @@ export interface TreeFilter {
 }
 
 interface TreeProps extends SidebarProps {
-  counts: { all: number; starred: number; trash: number };
   dropTarget: string | null;
   setDropTarget: (key: string | null) => void;
   onDropOn: (folderId: Id | null) => void;
@@ -484,16 +634,7 @@ interface TreeProps extends SidebarProps {
 }
 
 function TreeBody(props: TreeProps): ReactNode {
-  const { library, ui, scope, activeId, counts } = props;
-  // ㊷：「其他」是可折叠组，条目缩进为子项（与文件夹树同一套语言）。
-  // 默认展开：收件箱的待确认条数是**要看的**，折叠起来等于把它藏了。
-  const [othersOpen, setOthersOpen] = useState(true);
-  // （56）：星标 / 回收站各自也是**可折叠分支**——它们此前与文件夹长得一样（图标 + 计数），
-  // 点下去却只改 scope、什么都不展开（回收站的单子还长在整棵树的末尾），于是「折叠」这件事
-  // 在同一个文件树里有两种说法。现在两者与 `FolderBranch` 同一套语言：caret + 子项缩进一级。
-  // 默认收起，与文件夹树一致（`DEFAULT_UI.expanded` 是空数组）。
-  const [starredOpen, setStarredOpen] = useState(false);
-  const [trashOpen, setTrashOpen] = useState(false);
+  const { library, ui, activeId } = props;
   const filter = props.filter ?? null;
   const roots = childFolders(library, null).filter((folder) => !filter || filter.folders.has(folder.id));
   const loose = notesInFolder(library, null, { sort: ui.sort }).filter((note) => !filter || filter.notes.has(note.id));
@@ -523,7 +664,7 @@ function TreeBody(props: TreeProps): ReactNode {
        * 而不是选中态 —— 整棵树里的选中底色只属于编辑器里打开的那篇笔记。
        * 整棵树的空白处依旧是拖到根目录的投放区（见上面的 `dropZoneProps("root", null)`）。
        */}
-      {roots.length ? <div className="tree__group">文件夹</div> : null}
+      {/* 「文件夹」这几个字由分区标题说（`SectionHeader`）；树里只在有散放笔记时标一行「未归档」。 */}
       {roots.map((folder) => (
         <FolderBranch key={folder.id} folder={folder} depth={0} {...props} dropZoneProps={dropZoneProps} />
       ))}
@@ -554,132 +695,7 @@ function TreeBody(props: TreeProps): ReactNode {
         </p>
       ) : null}
 
-      {/* 过滤时只画命中的那部分树：星标 / 回收站 / 收件箱是**另一条轴**的东西，
-          混进搜索结果里只会把「我搜到的那几篇」淹掉。 */}
-      {filter ? null : (
-        <>
-          {/* ㊷：「其他」像文件夹那样可展开/收起，条目缩进一级，父子关系看得见。 */}
-          <button
-            type="button"
-            className="tree__group tree__group--toggle"
-            aria-expanded={othersOpen}
-            onClick={() => setOthersOpen((open) => !open)}
-          >
-            <span className={cn("tree__caret", othersOpen && "is-open")}>
-              <Icon name="chevronRight" size={12} />
-            </span>
-            其他
-          </button>
-          {othersOpen ? (
-            <>
-              <ScopeRow
-                depth={1}
-                icon="star"
-                label="星标笔记"
-                count={counts.starred}
-                current={scope.kind === "starred"}
-                open={starredOpen}
-                onClick={() => {
-                  props.onScope({ kind: "starred" });
-                  setStarredOpen((open) => !open);
-                }}
-              >
-                <StarredNotes
-                  library={library}
-                  activeId={activeId}
-                  onOpen={props.onOpenNote}
-                  dropTarget={props.dropTarget}
-                  setDropTarget={props.setDropTarget}
-                />
-              </ScopeRow>
-              <ScopeRow
-                depth={1}
-                icon="trash"
-                label="回收站"
-                count={counts.trash}
-                current={scope.kind === "trash"}
-                open={trashOpen}
-                onClick={() => {
-                  props.onScope({ kind: "trash" });
-                  setTrashOpen((open) => !open);
-                }}
-              >
-                <TrashList library={library} onOpen={props.onOpenNote} />
-              </ScopeRow>
-              {/* 外部导入的待确认内容在这里，不属于文件树，所以不参与 scope 记号。 */}
-              <ScopeRow
-                depth={1}
-                icon="download"
-                label="收件箱"
-                count={props.inboxPending}
-                current={false}
-                onClick={() => props.onOpenInbox()}
-              />
-            </>
-          ) : null}
-        </>
-      )}
     </div>
-  );
-}
-
-function ScopeRow({
-  icon,
-  label,
-  count,
-  current,
-  onClick,
-  depth = 0,
-  open,
-  children,
-}: {
-  icon: IconName;
-  label: string;
-  count: number;
-  /** 「当前集合」记号（星标 / 回收站）：见 `.tree__row.is-current` —— 不是选中态。 */
-  current: boolean;
-  onClick: () => void;
-  /** 缩进层级；与 FolderBranch 用同一公式，保证「其他」的子项和文件夹子项对齐。 */
-  depth?: number;
-  /** 传了 `children` 就是**可折叠分支**（星标 / 回收站）：caret、`aria-expanded`、子项缩进一级。 */
-  open?: boolean;
-  children?: ReactNode;
-}): ReactNode {
-  // 有子项的组：caret 与图标同列，展开时才渲染子项 —— 与 `FolderBranch` 完全同构。
-  const hasChildren = children !== undefined;
-  // 收起时才显示计数：展开后子项自己会说话（与文件夹行的写法一致）。
-  const showCount = count > 0 && !(hasChildren && open);
-
-  return (
-    <>
-      <div
-        role="treeitem"
-        tabIndex={0}
-        aria-selected={false}
-        aria-current={current ? "true" : undefined}
-        aria-expanded={hasChildren ? open : undefined}
-        className={cn("tree__row", current && "is-current")}
-        style={{ paddingLeft: 6 + depth * 13 }}
-        onClick={onClick}
-        onKeyDown={(event) => {
-          // The row itself is the tree item; inner controls own their own keys.
-          if (event.target !== event.currentTarget) return;
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          onClick();
-        }}
-      >
-        <span className={cn("tree__caret", open && "is-open")}>
-          {hasChildren ? <Icon name="chevronRight" size={13} /> : null}
-        </span>
-        <span className="tree__icon">
-          <Icon name={icon} size={14} />
-        </span>
-        <span className="tree__label">{label}</span>
-        {showCount ? <span className="tree__meta">{count}</span> : null}
-      </div>
-      {hasChildren && open ? children : null}
-    </>
   );
 }
 
@@ -721,7 +737,7 @@ function FolderBranch({ folder, depth, dropZoneProps, ...props }: BranchProps): 
         aria-current={current ? "true" : undefined}
         draggable
         className={cn("tree__row", current && "is-current", props.dropTarget === `folder:${folder.id}` && "is-drop")}
-        style={{ paddingLeft: 6 + depth * 13 }}
+        style={{ paddingLeft: 6 + depth * TREE_INDENT }}
         onClick={() => {
           props.onScope({ kind: "folder", id: folder.id });
           if (open) collapseFolder(folder.id);
@@ -749,10 +765,11 @@ function FolderBranch({ folder, depth, dropZoneProps, ...props }: BranchProps): 
         }}
         {...dropZoneProps(`folder:${folder.id}`, folder.id)}
       >
-        <span className={cn("tree__caret", open && "is-open")}>
-          {hasChildren ? <Icon name="chevronRight" size={13} /> : null}
-        </span>
-        <span className="tree__icon">
+        {/*
+          没有单独的展开箭头：文件夹图标本身就是开合的记号（合上 / 打开两张图，切换时轻轻一弹），
+          以前「箭头 + 文件夹图标」两样东西说的是同一件事。
+        */}
+        <span className={cn("tree__icon", "tree__icon--toggle", open && "is-open")}>
           <Icon name={open ? "folderOpen" : "folder"} size={14} />
         </span>
         <span className="tree__label">{folder.name}</span>
@@ -996,7 +1013,7 @@ const NoteRow = memo(function NoteRow({
       tabIndex={0}
       aria-selected={active}
       className={cn("tree__row", active && "is-active", dropTarget === key && "is-drop", variant === "list" && "tree__row--stacked")}
-      style={{ paddingLeft: 6 + depth * 13 }}
+      style={{ paddingLeft: 6 + depth * TREE_INDENT }}
       onClick={() => onOpen(note.id)}
       onKeyDown={(event) => {
         // The row itself is the tree item; the inner "more" button owns its own keys.
@@ -1044,9 +1061,8 @@ const NoteRow = memo(function NoteRow({
           }
         : {})}
     >
-      <span className="tree__caret" />
       <span className="tree__icon">
-        <Icon name="note" size={14} />
+        <Icon name={noteIcon(note)} size={14} />
       </span>
       <span className="tree__label">
         {/* 标题包一层 `.tree__label-main`：`tree__row--stacked` 里它是**第一行**，
@@ -1076,92 +1092,11 @@ const NoteRow = memo(function NoteRow({
   );
 });
 
-function NoteList({
-  library,
-  notes,
-  activeId,
-  onOpen,
-  emptyHint,
-}: {
-  library: LibraryState;
-  notes: Note[];
-  activeId: Id | null;
-  onOpen: (id: Id) => void;
-  emptyHint: string;
-}): ReactNode {
-  if (!notes.length) return <p className="tree__empty">{emptyHint}</p>;
-  return (
-    <div className="tree">
-      {notes.map((note) => (
-        <NoteRow
-          key={note.id}
-          note={note}
-          depth={0}
-          variant="list"
-          dirty={Boolean(library.dirty[note.id])}
-          active={activeId === note.id}
-          onOpen={onOpen}
-        />
-      ))}
-    </div>
-  );
-}
-
-/** （56）嵌在「星标笔记 / 回收站」下面的子项层级：父行是 `depth = 1`，子项再进一级。
- *  缩进公式仍是 `6 + depth * 13`，所以子项和文件夹里的笔记行**用同一把尺子**。 */
-const NESTED_DEPTH = 2;
-
-function nestedIndent(): number {
-  return 6 + NESTED_DEPTH * 13;
-}
-
-/** 「星标笔记」展开后的子项：与文件树里的笔记行同一写法（同一套右键菜单、同一套拖放）。 */
-function StarredNotes({
-  library,
-  activeId,
-  onOpen,
-  dropTarget,
-  setDropTarget,
-}: {
-  library: LibraryState;
-  activeId: Id | null;
-  onOpen: (id: Id) => void;
-  dropTarget: string | null;
-  setDropTarget: (key: string | null) => void;
-}): ReactNode {
-  const notes = starredNotes(library);
-  if (!notes.length) {
-    return (
-      <p className="tree__empty" style={{ paddingLeft: nestedIndent(), textAlign: "left" }}>
-        还没有星标笔记。右键任意笔记即可加星标。
-      </p>
-    );
-  }
-  return (
-    <>
-      {notes.map((note) => (
-        <NoteRow
-          key={note.id}
-          note={note}
-          depth={NESTED_DEPTH}
-          dirty={Boolean(library.dirty[note.id])}
-          active={activeId === note.id}
-          onOpen={onOpen}
-          dropTarget={dropTarget}
-          setDropTarget={setDropTarget}
-        />
-      ))}
-    </>
-  );
-}
-
 function TrashList({ library, onOpen }: { library: LibraryState; onOpen: (id: Id) => void }): ReactNode {
   const notes = Object.values(library.trash).sort((a, b) => (b.trashedAt ?? 0) - (a.trashedAt ?? 0));
   if (!notes.length) {
     return (
-      <p className="tree__empty" style={{ paddingLeft: nestedIndent(), textAlign: "left" }}>
-        回收站是空的。
-      </p>
+      <p className="tree__empty">回收站是空的。删除的笔记会先放在这里，可以恢复。</p>
     );
   }
   return (
@@ -1172,7 +1107,7 @@ function TrashList({ library, onOpen }: { library: LibraryState; onOpen: (id: Id
           role="button"
           tabIndex={0}
           className="tree__row"
-          style={{ paddingLeft: nestedIndent() }}
+          style={{ paddingLeft: 6 }}
           title={note.title}
           onClick={() => onOpen(note.id)}
           onKeyDown={(event) => {
@@ -1183,9 +1118,8 @@ function TrashList({ library, onOpen }: { library: LibraryState; onOpen: (id: Id
             onOpen(note.id);
           }}
         >
-          <span className="tree__caret" />
           <span className="tree__icon">
-            <Icon name="note" size={14} />
+            <Icon name={noteIcon(note)} size={14} />
           </span>
           <span className="tree__label truncate">{note.title}</span>
           <span className="tree__extra">
@@ -1225,7 +1159,7 @@ function TrashList({ library, onOpen }: { library: LibraryState; onOpen: (id: Id
           </span>
         </div>
       ))}
-      <div className="tree__hint" style={{ paddingLeft: nestedIndent() }}>
+      <div className="tree__hint" style={{ paddingLeft: 6 }}>
         <span className="truncate">文件在 .opennote/trash 里</span>
         <button
           type="button"
@@ -1256,122 +1190,43 @@ function TrashList({ library, onOpen }: { library: LibraryState; onOpen: (id: Id
 
 /* ============================= filter / search =========================== */
 
-function FilteredNotes({
-  library,
-  filter,
-  activeId,
-  onOpen,
-}: {
-  library: LibraryState;
-  filter: string;
-  activeId: Id | null;
-  onOpen: (id: Id) => void;
-}): ReactNode {
-  const notes = useMemo(() => {
-    const terms = filter.toLowerCase().split(/\s+/).filter(Boolean);
-    return Object.values(library.notes)
-      .filter((note) => !note.trashed)
-      .filter((note) => {
-        const haystack = `${note.title}\n${note.tags.join(" ")}\n${excerpt(note.content, 4000)}`.toLowerCase();
-        return terms.every((term) => haystack.includes(term));
-      })
-      .slice(0, 200);
-  }, [library.notes, filter]);
-
-  if (!notes.length) return <p className="tree__empty">没有匹配「{filter}」的笔记。</p>;
-  /*
-   * **平铺列表**（设置里的「搜索时显示文件夹」关掉时用）：只有笔记行，没有目录行。
-   * 「显示文件夹」打开时走的是 `TreeBody` + `treeFilterFor()` —— 那是**同一棵树**加过滤，
-   * 目录行仍是树上那一行（真 caret、能展开能收缩），不再另写一套层级样式。
-   */
-  return (
-    <div className="tree">
-      {notes.map((note) => (
-        <NoteRow
-          key={note.id}
-          note={note}
-          depth={0}
-          variant="list"
-          dirty={Boolean(library.dirty[note.id])}
-          active={activeId === note.id}
-          onOpen={onOpen}
-        />
-      ))}
-    </div>
-  );
-}
-
 function SearchBody({
-  inputRef,
   query,
-  onQuery,
   activeId,
   onOpen,
-  showFolders,
-  tree,
 }: {
-  inputRef: React.RefObject<HTMLInputElement | null>;
   query: string;
-  onQuery: (value: string) => void;
   activeId: Id | null;
   onOpen: (id: Id) => void;
-  /** 设置里的「搜索时显示文件夹」：开 = 树 + 过滤（同一棵树，可展开可收缩）；关 = 平铺列表。 */
-  showFolders: boolean;
-  /** 「显示文件夹」打开时由调用方传进来的**那一棵树**（带过滤集合），本组件不再自己画行。 */
-  tree: ReactNode;
+  /** 只在设置里关掉「搜索时显示文件夹」时用：平铺的结果列表（开着时走文件树本体 + 过滤）。 */
+  showFolders: false;
 }): ReactNode {
   const trimmed = query.trim();
   const hits = useMemo(() => (trimmed ? searchNotes(trimmed, { limit: 60 }) : []), [trimmed]);
 
+  if (!hits.length) return <p className="tree__empty">没有找到包含「{trimmed}」的笔记。</p>;
   return (
-    <>
-      <div className="sidebar__filter">
-        <input
-          ref={inputRef}
-          className="field field--search"
-          value={query}
-          placeholder="搜索全文…"
-          onChange={(event) => onQuery(event.target.value)}
-        />
-      </div>
-      {!trimmed ? (
-        <p className="tree__empty">
-          输入关键词，搜索所有笔记的标题、标签与正文{showFolders ? "，以及文件夹名" : ""}。
-          <br />
-          多个关键词用空格分隔。
-        </p>
-      ) : null}
-      {trimmed && !hits.length ? <p className="tree__empty">没有找到包含「{query}」的笔记或文件夹。</p> : null}
-      {/*
-       * 开 = 直接用文件树本体（调用方传进来的 `tree`）：命中笔记挂在**它们真实的目录层级**里，
-       * 目录行是树上那一行（真 caret、能展开能收缩、右键菜单/拖放都在）。
-       * 关 = 平铺列表（0.3.x 的行为）。
-       */}
-      {trimmed && showFolders ? tree : null}
-      {trimmed && !showFolders && hits.length ? (
-        <div className="tree">
-          {hits.map((hit) => (
-            <button
-              key={hit.note.id}
-              type="button"
-              className={cn("tree__row", "tree__row--stacked", activeId === hit.note.id && "is-active")}
-              onClick={() => {
-                revealNoteInTree(hit.note.id);
-                onOpen(hit.note.id);
-              }}
-            >
-              <span className="tree__icon">
-                <Icon name="note" size={14} />
-              </span>
-              <span className="tree__label">
-                <span className="tree__label-main">{hit.note.title}</span>
-                <span className="tree__note-snippet">{hit.snippet}</span>
-              </span>
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </>
+    <div className="tree">
+      {hits.map((hit) => (
+        <button
+          key={hit.note.id}
+          type="button"
+          className={cn("tree__row", "tree__row--stacked", activeId === hit.note.id && "is-active")}
+          onClick={() => {
+            revealNoteInTree(hit.note.id);
+            onOpen(hit.note.id);
+          }}
+        >
+          <span className="tree__icon">
+            <Icon name={noteIcon(hit.note)} size={14} />
+          </span>
+          <span className="tree__label">
+            <span className="tree__label-main">{hit.note.title}</span>
+            <span className="tree__note-snippet">{hit.snippet}</span>
+          </span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -1451,6 +1306,7 @@ function TagsBody({
   filter,
   onScope,
   onOpen,
+  asSearchResult = false,
 }: {
   library: LibraryState;
   ui: UiSettings;
@@ -1459,10 +1315,35 @@ function TagsBody({
   filter: string;
   onScope: (scope: Scope) => void;
   onOpen: (id: Id) => void;
+  /** 搜索结果里的那一块：没有命中就整块不出现；有命中时自带一行「标签」小标题。 */
+  asSearchResult?: boolean;
 }): ReactNode {
   const roots = useMemo(() => tagTree(library, { sort: ui.sort }), [library, ui.sort]);
   const terms = useMemo(() => filter.trim().toLowerCase().split(/\s+/).filter(Boolean), [filter]);
   const visible = useMemo(() => filterTagTree(roots, terms), [roots, terms]);
+
+  if (asSearchResult) {
+    if (!visible.length) return null;
+    return (
+      <div className="tree">
+        <div className="tree__group">标签</div>
+        {visible.map((entry) => (
+          <TagBranch
+            key={entry.node.path}
+            entry={entry}
+            depth={0}
+            filtered
+            library={library}
+            ui={ui}
+            scope={scope}
+            activeId={activeId}
+            onScope={onScope}
+            onOpen={onOpen}
+          />
+        ))}
+      </div>
+    );
+  }
 
   if (!roots.length) {
     return (
@@ -1476,7 +1357,7 @@ function TagsBody({
 
   return (
     <div className="tree">
-      <div className="tree__group">全部标签</div>
+      {/* 「标签」这几个字由分区标题说（`SectionHeader`），这里不再重复一行「全部标签」。 */}
       {visible.length ? (
         visible.map((entry) => (
           <TagBranch
@@ -1528,7 +1409,7 @@ function TagBranch({ entry, depth, filtered, library, ui, scope, activeId, onSco
         aria-selected={false}
         aria-current={current ? "true" : undefined}
         className={cn("tree__row", current && "is-current")}
-        style={{ paddingLeft: 6 + depth * 13 }}
+        style={{ paddingLeft: 6 + depth * TREE_INDENT }}
         onClick={() => {
           onScope({ kind: "tag", tag: node.path });
           if (open) collapseTag(node.path);
@@ -1543,10 +1424,8 @@ function TagBranch({ entry, depth, filtered, library, ui, scope, activeId, onSco
           else expandTag(node.path);
         }}
       >
-        <span className={cn("tree__caret", open && "is-open")}>
-          {hasChildren ? <Icon name="chevronRight" size={13} /> : null}
-        </span>
-        <span className="tree__icon">
+        {/* 同文件夹：`#` 本身就是开合记号（展开时转一个角度、上强调色），不再另挂箭头。 */}
+        <span className={cn("tree__icon", "tree__icon--toggle", "tree__icon--hash", open && "is-open", !hasChildren && "is-leaf")}>
           <Icon name="hash" size={13} />
         </span>
         {/* 子标签只显示最后一段；完整路径放悬浮提示里，重名时靠它分辨。 */}
