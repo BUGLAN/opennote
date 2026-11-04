@@ -37,7 +37,7 @@ const { DEEPLINK_CHANNEL, PROTOCOL, deeplinkMessage, findDeeplinkInArgv, parseOp
 // 远程配图在界面里加载不了；扩展侧 host_permissions 又只有 127.0.0.1 的十条。
 // 主进程没有这两道限制 —— 「图片一起保存」真正落地就靠这一层。纯函数，可单测。
 const { downloadImages: downloadImagesInMain } = require('./fetch-images.cjs')
-const { createSyncProxy, composeUrl, normalizeBaseUrl, assertSafeRelPath } = require('./sync.cjs')
+const { createSyncProxy, composeUrl, normalizeBaseUrl, assertSafeRelPath, fetchWithIdleTimeout } = require('./sync.cjs')
 
 /** 图片下载通道（preload 用同一个常量；verify-contract 的 C-12a 靠常量名配对两侧）。 */
 const NET_DOWNLOAD_IMAGES_CHANNEL = 'opennote:net:downloadImages'
@@ -1336,7 +1336,8 @@ async function configureSyncProxy(baseUrl, confirmImpl) {
     //    渲染层仍然见过 `authToken` 一次。如实记在这里，不假装已经做到。
     authToken: () => syncAuthToken,
     transport: async ({ method, url, headers, body, timeoutMs }) => {
-      const response = await fetch(url, {
+      // 「无进展才超时」：慢线路上的大文件只要还在传就不掐断（见 sync.cjs 的 fetchWithIdleTimeout）。
+      const { response, bytes } = await fetchWithIdleTimeout(fetch, url, {
         method,
         headers,
         // ★ 渲染层过 IPC 的 body 是 **number[]**（字节值的普通数组）。undici 的 fetch
@@ -1344,9 +1345,7 @@ async function configureSyncProxy(baseUrl, confirmImpl) {
         //   于是服务端 JSON.parse 失败，报「形状不符合契约：expected object,
         //   received null」。真机（桌面注册）实测，先转回字节再发。
         body: Array.isArray(body) ? Uint8Array.from(body) : body,
-        signal: AbortSignal.timeout(timeoutMs),
-      })
-      const bytes = new Uint8Array(await response.arrayBuffer())
+      }, { idleMs: timeoutMs })
       return { status: response.status, headers: Object.fromEntries(response.headers.entries()), body: bytes }
     },
   })

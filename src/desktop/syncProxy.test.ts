@@ -16,7 +16,13 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 const requireCjs = createRequire(import.meta.url);
-const { SyncProxyError, assertSafeRelPath, createSyncProxy, normalizeBaseUrl, sanitizeHeaders } = requireCjs("../../electron/sync.cjs") as {
+const { SyncProxyError, assertSafeRelPath, createSyncProxy, fetchWithIdleTimeout, normalizeBaseUrl, sanitizeHeaders } = requireCjs("../../electron/sync.cjs") as {
+  fetchWithIdleTimeout: (
+    fetchFn: (url: string, init: RequestInit) => Promise<Response>,
+    url: string,
+    init: RequestInit,
+    limits: { idleMs?: number; maxMs?: number },
+  ) => Promise<{ response: Response; bytes: Uint8Array }>;
   SyncProxyError: new (message: string) => Error;
   assertSafeRelPath: (input: unknown) => string;
   normalizeBaseUrl: (input: string) => { origin: string; path: string; base: string };
@@ -163,5 +169,37 @@ describe("`assertSafeRelPath` / `normalizeBaseUrl` / `sanitizeHeaders`", () => {
     const proxy = createSyncProxy({ baseUrl: "https://a.com/opennote", fetchImpl: stub.fetchImpl });
     await proxy.request({ method: "GET", relPath: "/v1/tree" });
     expect(stub.calls[0]!.url).toBe("https://a.com/opennote/v1/tree");
+  });
+});
+
+/** 一个按节奏吐数据的响应：每 `everyMs` 来一块，`stallAfter` 块之后就再也不来（模拟挂死的连接）。 */
+function trickleResponse(chunks: number, everyMs: number, stallAfter = Infinity): Response {
+  let sent = 0;
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (sent >= stallAfter) return new Promise<void>(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, everyMs));
+      if (sent >= chunks) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(new Uint8Array([sent]));
+      sent += 1;
+    },
+  });
+  return new Response(body, { status: 200 });
+}
+
+describe("★ 主进程代理：无进展才超时", () => {
+  it("慢但一直在来的正文能读完；挂住的在 idleMs 后失败", async () => {
+    const ok = await fetchWithIdleTimeout(async () => trickleResponse(8, 20), "https://x/v1/file", {}, { idleMs: 60 });
+    expect([...ok.bytes]).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    await expect(fetchWithIdleTimeout(async () => trickleResponse(8, 5, 1), "https://x/v1/file", {}, { idleMs: 40 })).rejects.toThrow(/没有收到任何数据|abort/i);
+  });
+
+  it("createSyncProxy 走 fetchImpl 时也用它（总时长超过 timeoutMs 仍然成功）", async () => {
+    const proxy = createSyncProxy({ baseUrl: "https://notes.example.com", timeoutMs: 60, fetchImpl: async () => trickleResponse(6, 20) });
+    const response = await proxy.request({ method: "GET", relPath: "/v1/file" });
+    expect([...response.body]).toEqual([0, 1, 2, 3, 4, 5]);
   });
 });
