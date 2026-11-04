@@ -485,7 +485,18 @@ describe("§4.11 · 退避：只重试「值得重试」的", () => {
       }
       return original(request);
     };
-    const provider = opennoteOn(stub, { sleep: async (ms) => void slept.push(ms) });
+    /*
+     * 时钟也要用假的，并且随 `sleep` 前进：只假 `sleep`、用真 `Date.now()` 的话，
+     * 「记下冷却截止」与「算还要等多久」之间只要跨过 1ms，算出来就是 999 —— CI 上真出现过。
+     */
+    let clock = 0;
+    const provider = opennoteOn(stub, {
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    });
     const tree = await provider.tree();
     expect(tree.entries).toHaveLength(1);
     // ★ 听了服务端的 `Retry-After`（1000ms），而不是自己拍一个退避值。
