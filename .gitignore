@@ -19,6 +19,8 @@ coverage
 # DSH 工具在本地跑诊断时留下的报告目录，不属于本项目产物
 .dsh-acl-report/
 .tmp-shots
+# 任何 `.tmp-*` 目录都是本地临时产物（调研 / 验证 / 截图），统一不进库
+.tmp-*/
 # `pnpm build:ignore` 的中间产物目录（产物本体是 electron/ignore-rules.cjs，它要提交）
 .ignore-rules-build
 
@@ -69,3 +71,8 @@ docs/sync/mockups/
 
 # claude
 .claude/
+
+# 本地验证 / 探针的输出目录（如 `scripts/statusbar-fit-probe.mjs` 默认写到 `docs/verify/`）：过程证据，不进库
+docs/verify/
+# TypeScript 增量构建缓存
+*.tsbuildinfo
