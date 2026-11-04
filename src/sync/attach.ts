@@ -123,6 +123,11 @@ export interface AttachWorkspaceSyncOptions {
    * 否则每次接一个工作区都要重新解一遍包裹。
    */
   notebookKeyForNotebook?: (notebookId: string) => Uint8Array | undefined;
+  /**
+   * 加密笔记本的文件名对照表密钥（`derivePathMapKey(encRoot)`）。给了，全新设备才认得出
+   * 别的设备建的加密文件（见 `pathMap.ts`）。明文笔记本忽略它。
+   */
+  pathMapKey?: Uint8Array;
   /** 测试注入 provider（跳过真实网络）。 */
   provider?: ReturnType<typeof createOpenNoteProvider>;
   /**
@@ -211,6 +216,7 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
     ...(options.cursorStore === undefined ? {} : { cursorStore: options.cursorStore }),
     cursorKey,
     ...(notebookKey === undefined ? {} : { notebookKey }),
+    ...(config.cryptoMode === "user-key" && options.pathMapKey !== undefined ? { pathMapKey: options.pathMapKey } : {}),
     ...(options.onSynced === undefined ? {} : { onSynced: options.onSynced }),
     ...(options.onStatus === undefined ? {} : { onStatus: options.onStatus }),
     ...(options.onApplied === undefined ? {} : { onApplied: options.onApplied }),

@@ -381,6 +381,8 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   const remoteEntries: { path: string; hash: string; rev: string; size?: number }[] = [];
   const rejectedPaths: string[] = [];
   for (const entry of tree.entries) {
+    // `m:` 是元记录（加密笔记本的文件名对照表），不是文件：不进 diff，也不算「认不出来」。
+    if (isMetaDid(entry.did)) continue;
     let path = didIndex.get(entry.did);
     if (path === undefined && entry.path !== undefined) {
       try {
@@ -1165,7 +1167,9 @@ export async function syncOnceIncremental(input: SyncOnceInput & { since?: strin
     return { ...result, resynced: true };
   }
 
-  if (changes.changes.length === 0) {
+  // 只动了元记录（对照表）⇒ 对文件来说等于「远端没变」（对照表由会话自己读，见 `pathMap.ts`）。
+  const fileChanges = changes.changes.filter((change) => !isMetaDid(change.did));
+  if (fileChanges.length === 0) {
     /*
      * ★ 远端一个变更都没有 ⇒ **不列树、不做拉取计划**，只把本地改动推上去。
      *
@@ -1190,7 +1194,7 @@ export async function syncOnceIncremental(input: SyncOnceInput & { since?: strin
    * 方向永远是「宁可多拉一遍，不可漏拉一条」。
    */
   if (changes.truncated !== true) {
-    const partial = await resolveChangedPaths(changes.changes, deps);
+    const partial = await resolveChangedPaths(fileChanges, deps);
     if (partial !== null) {
       const result = await syncOnce({ ...input, partialRemote: partial, cursorHint: changes.cursor });
       return { ...result, resynced: false };
@@ -1339,6 +1343,7 @@ export async function resolveChangedPaths(
 
   const seen = new Map<string, string | null>();
   for (const change of changes) {
+    if (isMetaDid(change.did)) continue; // 元记录不是文件（见 `isMetaDid`）
     const path = change.path ?? byDid.get(change.did);
     if (path === undefined) return null;
     const hash = change.op === "delete" ? null : change.hash;
@@ -1351,6 +1356,16 @@ export async function resolveChangedPaths(
     seen.set(path, value);
   }
   return [...seen.entries()].map(([path, hash]) => ({ path, hash }));
+}
+
+/**
+ * `m:` 前缀的元记录（目前只有 `m:pathmap`，由 `pathMap.ts` 读写）。
+ *
+ * 引擎眼里它**不存在**：不推、不拉、不删，也不报进 `unknownDids` ——
+ * 否则每一轮都会多出一条「认不出来」，而会话会为它反复重读对照表。
+ */
+export function isMetaDid(did: string): boolean {
+  return did.startsWith("m:");
 }
 
 /** 冲突原因（与 `planPull` 的判定一一对应）。 */

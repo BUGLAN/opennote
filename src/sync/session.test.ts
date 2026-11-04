@@ -310,9 +310,10 @@ describe("★★ E2EE 端到端：远端只有密文与不可逆的 did", () => 
      * 文档没有说明那张表从哪来（它本身不能明文上云，否则路径就泄露了）。
      *
      * 引擎的处理是**对的**：认不出来的 did 如实报进 `unknownDids`，
-     * **绝不猜路径、也绝不因此往盘上写东西**。但「全新设备怎么重建路径」
-     * 是 P4-b 必须解决的问题（候选：把路径映射表用 `encRoot` 派生的密钥加密后
-     * 作为一条特殊记录同步，或让用户在导入时提供）。
+     * **绝不猜路径、也绝不因此往盘上写东西**。
+     *
+     * 这里的会话**没给**对照表密钥（`pathMapKey`）。给了之后全新设备靠 `m:pathmap`
+     * 认路，见 `pathMap.test.ts`。
      */
     const provider = createMemoryProvider();
     await e2eeSession(memoryBackend({ "notes/a.md": "# 机密" }), provider).syncNow();

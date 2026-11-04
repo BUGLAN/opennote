@@ -33,6 +33,7 @@ import type { WorkspaceRecord } from "../data/workspaces";
 import { desktopSyncBridge } from "./http";
 import { attachWorkspaceSync, type AttachResult, type AttachSkipReason } from "./attach";
 import { deriveNotebookKey } from "./accountKey";
+import { derivePathMapKey } from "./crypto";
 import { createRemoteNotebook, currentCredentials, currentEncRoot, loadAccount, onAccountChange, remoteNotebooks, reportSessionProblem } from "./account";
 import type { NotebookSummary } from "../../shared/contract";
 import { createSyncLedger, isSameRemote, readSyncLedger, writeSyncLedger, type SyncLedger } from "./state";
@@ -368,6 +369,8 @@ async function attachCurrent(): Promise<AttachResult> {
        */
       return deriveNotebookKey(encRoot, notebookId);
     },
+    // 文件名对照表（`m:pathmap`）的密钥：全新设备靠它认出别的设备建的加密文件。
+    ...(encRoot === null ? {} : { pathMapKey: derivePathMapKey(encRoot) }),
     onSynced: (synced) => handleSynced(backend, ledger, synced, hashCache),
     /**
      * ★ **拉取落地后按路径刷新界面**。

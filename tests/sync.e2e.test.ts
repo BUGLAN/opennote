@@ -61,6 +61,7 @@ import { createPairingKeys, createVault, openFromPeer, openVault, pairingSecrets
 import { createSyncSession } from "../src/sync/session";
 import { createOpenNoteProvider } from "../src/sync/providers/opennote";
 import { deriveNotebookKey } from "../src/sync/accountKey";
+import { derivePathMapKey } from "../src/sync/crypto";
 import { describeSyncStatus, type SyncStatus } from "../src/sync/runner";
 import { desktopSend, type HttpSend } from "../src/sync/http";
 import type { FileSystemBackend } from "../src/fs/types";
@@ -211,7 +212,7 @@ interface World {
   /** 服务端的账号存储：用来直接建号（等价于管理员发邀请、对方接受）。 */
   accounts: AccountStore;
   /** 按需建一台设备（临时目录在 afterAll 统一清理）。 */
-  device(options: { cryptoMode: "none" | "user-key"; notebookKey?: Uint8Array; authToken: string; notebookId: string; gitignoreText?: string }): Promise<DeviceHandle>;
+  device(options: { cryptoMode: "none" | "user-key"; notebookKey?: Uint8Array; pathMapKey?: Uint8Array; authToken: string; notebookId: string; gitignoreText?: string }): Promise<DeviceHandle>;
   cleanup: () => Promise<void>;
 }
 
@@ -235,7 +236,7 @@ async function makeWorld(): Promise<World> {
     if (code !== 0) throw new Error(`setup-couch-user 失败(exit ${code}):${errLines.join(" / ")}`);
   }
 
-  const device: World["device"] = async ({ cryptoMode, notebookKey, authToken, notebookId, gitignoreText }) => {
+  const device: World["device"] = async ({ cryptoMode, notebookKey, pathMapKey, authToken, notebookId, gitignoreText }) => {
     const root = await mkdtemp(join(tmpdir(), "opennote-sync-e2e-"));
     tempRoots.push(root);
     const ledger = createSyncLedger({
@@ -275,6 +276,7 @@ async function makeWorld(): Promise<World> {
       },
       notebookId,
       ...(notebookKey === undefined ? {} : { notebookKey }),
+      ...(pathMapKey === undefined ? {} : { pathMapKey }),
       ...(gitignoreText === undefined ? {} : { gitignoreText }),
     });
     return { root, disk, ledger, session };
@@ -555,10 +557,8 @@ describe("E2EE：两台设备互相同步，库里看不到明文", () => {
     const r1 = await syncAndPersist(a);
     expect(r1.pushed).toBe(1);
 
-    // ★ B 必须**知道这条路径**才能反解 did（P4-c 的 did↔path 映射同步尚未接线，
-    //   见 7fa5209 的「尚未做」注记）。这里直接把「账本里记着这一条、但从未物化过」
-    //   写进账本 —— 等价于真实流程里「映射已重建」的状态，且不会伪造本地内容。
-    //   全新空设备拿不出路径、只能看到 unknownDids 的情况见下一条用例。
+    // ★ 这一条**不带**文件名对照表的密钥：B 靠「账本里记着这一条、但从未物化过」认出路径。
+    //   全新空设备靠对照表（`m:pathmap`）认路的情况见下面两条用例。
     const b = await loginOnAnotherDevice(world.base, account);
     const notebookKeyB = deriveNotebookKey(b.encRoot, notebookId);
     expect(Buffer.from(notebookKeyB).equals(Buffer.from(notebookKeyA))).toBe(true);
@@ -576,26 +576,59 @@ describe("E2EE：两台设备互相同步，库里看不到明文", () => {
     await expectNoPlaintextOnServer({ plaintext: "张三 13800000000", pathHint: "名单" });
   });
 
-  it("★ 全新空设备（没有 did↔path 映射）⇒ 如实报 unknownDids，盘上不写任何东西", async () => {
+  it("★ 全新空设备 + 文件名对照表 ⇒ 拉得下来，且对照表在服务端只是密文", async () => {
     /*
-     * 这是 P4-c **尚未接线**的部分（7fa5209 / fe699fe 的「尚未做」注记）：
-     * session 的 push/pull 还不写/读 `m:pathmap`，新设备重建流程也没有。
-     * 所以模式 B 下 did 不可逆 ⇒ 全新设备认不出路径。
-     *
-     * 这里钉住的是「引擎的行为是**对的**」：认不出来的 did 如实上报，**绝不猜路径、
-     * 绝不往盘上写密文**（那会把用户的笔记变成乱码，而且是静默的）。
-     * 等 m:pathmap 接上之后，这条用例应当改成「pulled = 1」。
+     * 模式 B 的 did 不可逆：全新设备（空目录、空账本）只能靠 A 推上去的 `m:pathmap`
+     * （用 encRoot 派生的密钥加密）把 did 翻回文件名。
      */
     const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "E2EE-全新设备", "user-key");
+    const notebookKey = deriveNotebookKey(account.encRoot, notebookId);
+    const pathMapKey = derivePathMapKey(account.encRoot);
+
+    const a = await world.device({ cryptoMode: "user-key", authToken: account.authToken, notebookKey, pathMapKey, notebookId });
+    await a.disk.write("notes/极密档案.md", "# 机密 QZX-7731");
+    await syncAndPersist(a);
+
+    // 另一台设备：自己登录、用加密口令解开 encRoot，空目录、空账本。
+    const b = await loginOnAnotherDevice(world.base, account);
+    const fresh = await world.device({
+      cryptoMode: "user-key",
+      authToken: b.authToken,
+      notebookKey: deriveNotebookKey(b.encRoot, notebookId),
+      pathMapKey: derivePathMapKey(b.encRoot),
+      notebookId,
+    });
+    const result = await syncAndPersist(fresh);
+    expect(result.unknownDids).toHaveLength(0);
+    expect(result.pulled).toBe(1);
+    expect(await fresh.disk.read("notes/极密档案.md")).toBe("# 机密 QZX-7731");
+
+    // 对照表本身也不能把路径漏给服务端。
+    await expectNoPlaintextOnServer({ plaintext: "QZX-7731", pathHint: "极密档案" });
+  });
+
+  it("★ 没有对照表密钥的全新设备 ⇒ 如实报 unknownDids，盘上不写任何东西", async () => {
+    /*
+     * 钉住「引擎的行为是**对的**」：认不出来的 did 如实上报，**绝不猜路径、
+     * 绝不往盘上写密文**（那会把用户的笔记变成乱码，而且是静默的）。
+     * 真实客户端总会带上对照表密钥；这里模拟的是「建这篇的设备还是旧版、没写过表」。
+     */
+    const account = await registerAccount(world.base);
+    const notebookId = await createNotebook(world.base, account.authToken, "E2EE-无对照表", "user-key");
     const notebookKey = deriveNotebookKey(account.encRoot, notebookId);
 
     const a = await world.device({ cryptoMode: "user-key", authToken: account.authToken, notebookKey, notebookId });
     await a.disk.write("notes/secret.md", "# 机密");
     await syncAndPersist(a);
 
-    // 全新设备：同一把密钥、空目录、空账本。
-    const fresh = await world.device({ cryptoMode: "user-key", authToken: account.authToken, notebookKey, notebookId });
+    const fresh = await world.device({
+      cryptoMode: "user-key",
+      authToken: account.authToken,
+      notebookKey,
+      pathMapKey: derivePathMapKey(account.encRoot),
+      notebookId,
+    });
     const result = await syncAndPersist(fresh);
     expect(result.pulled).toBe(0);
     expect(result.unknownDids).toHaveLength(1);

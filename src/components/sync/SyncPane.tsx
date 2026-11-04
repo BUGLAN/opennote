@@ -805,13 +805,13 @@ function Hero({ workspace }: { workspace: WorkspaceRecord | null }): ReactNode {
   if (status?.phase === "error") return <HeroBox attn icon="info" title="同步出错了" sub={status.error} action={retry} />;
   const last = ui.last;
   if (last && last.unknownDids > 0) {
-    // 加密笔记本的「文件 ↔ 路径」对照表还不随同步走：这台设备从没见过的加密笔记，认不出它叫什么、该放哪。
+    // 文件名对照表（m:pathmap）里还没有它们：通常是建它们的那台设备还没装新版、或还没同步完一轮。
     return (
       <HeroBox
         attn
         icon="lock"
         title={`云端有 ${last.unknownDids} 篇加密笔记这台设备还认不出来`}
-        sub="端到端加密时连文件名也是加密的，而文件名对照表现在还不随同步传过来，所以这台设备只能先跳过它们（不会写乱码到本机）。在已经有这些笔记的设备上继续使用不受影响。"
+        sub="端到端加密时连文件名也是加密的，要靠云端的文件名对照表才认得出来。建这些笔记的设备装上新版并同步一次后，这里会自动补上；在那之前先跳过它们（不会写乱码到本机）。"
         action={retry}
       />
     );

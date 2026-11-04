@@ -285,6 +285,16 @@ ${notebookId}`)).encrypt(plaintext);
 }
 
 /**
+ * 映射表这条记录的内容标识（CAS 与 `/v1/tree` 要的 64 位十六进制）。
+ *
+ * 取**密文**的 sha256：nonce 每次随机，所以它不泄露表的内容，
+ * 也不会与任何文件的 `ehash`（HMAC）撞上。
+ */
+export function pathMapContentId(blob: Uint8Array): string {
+  return toHex(sha256(blob));
+}
+
+/**
  * 解开映射表。
  *
  * 形状不对的条目**丢掉**而不是整张表作废：一条坏记录不该让整台新设备

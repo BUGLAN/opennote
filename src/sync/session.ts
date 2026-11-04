@@ -32,7 +32,8 @@
  */
 
 import type { CryptoMode } from "../../shared/contract";
-import { hasPendingLocalChanges, syncOnceIncremental, type SyncEngineDeps, type SyncOnceResult } from "./engine";
+import { hasPendingLocalChanges, syncOnce, syncOnceIncremental, type SyncEngineDeps, type SyncOnceInput, type SyncOnceResult } from "./engine";
+import { createPathMapSync, type PathMapSync } from "./pathMap";
 import { createIgnoreRules, type IgnoreRules } from "./ignore";
 import { createSyncRunner, type SyncProgress, type SyncRunner, type SyncStatus } from "./runner";
 import type { SyncProvider } from "./provider-types";
@@ -54,6 +55,13 @@ export interface SyncSessionOptions {
   gitignoreText?: string;
   /** E2EE 时必须给。 */
   notebookKey?: Uint8Array;
+  /**
+   * E2EE 的文件名对照表密钥（`derivePathMapKey(encRoot)`，见 `pathMap.ts`）。
+   *
+   * 给了才会读写 `m:pathmap`；不给时全新设备认不出远端的加密文件（只报 `unknownDids`）。
+   * 明文笔记本不用它（did 本身可逆）。
+   */
+  pathMapKey?: Uint8Array;
   /** 工作区根目录的 notebookId（E2EE 的 AAD 要用）。 */
   notebookId: string;
   /**
@@ -114,6 +122,8 @@ export function knownPathsOf(ledger: SyncLedger): string[] {
 
 export function createSyncSession(options: SyncSessionOptions): SyncSession {
   const rules: IgnoreRules = createIgnoreRules(options.gitignoreText ?? "");
+  /** 加密笔记本的文件名对照表（明文笔记本 / 没给密钥时为 null）。在 `deps` 之后才建，因为它要用 `deps.didOf`。 */
+  let pathMap: PathMapSync | null = null;
 
   const deps = createWorkspaceEngineDeps({
     backend: options.backend,
@@ -136,7 +146,8 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
      */
     knownPaths: async () => {
       const local = selectSyncableEntries(await options.backend.list(), rules).map((entry) => entry.path);
-      return Array.from(new Set([...local, ...knownPathsOf(options.ledger)]));
+      // 再并上对照表里的路径：全新设备靠它把别的设备建的加密文件认出来（`pathMap.ts`）。
+      return Array.from(new Set([...local, ...knownPathsOf(options.ledger), ...(pathMap?.paths() ?? [])]));
     },
     ...(options.log === undefined
       ? {}
@@ -150,6 +161,21 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
           log: (kind, detail) => options.log?.(`[sync] ${kind} ${JSON.stringify(detail)}`),
         }),
   });
+
+  if (options.config.cryptoMode === "user-key" && options.pathMapKey !== undefined) {
+    pathMap = createPathMapSync({
+      provider: options.provider,
+      pathMapKey: options.pathMapKey,
+      notebookId: options.notebookId,
+      didOf: deps.didOf,
+      ...(options.log === undefined ? {} : { log: options.log }),
+    });
+  }
+  /** 上一轮还认不出来的 did：下一轮开头先重读对照表，学到了就走一次全树（增量的游标已经越过它们了）。 */
+  let pendingUnknown = new Set<string>();
+  /** 刚学到的路径里，有没有能认出 `unknown` 里某条 did 的。 */
+  const resolvesAny = (learned: string[], unknown: Set<string>): boolean =>
+    unknown.size > 0 && learned.some((path) => unknown.has(deps.didOf(path)));
 
   /*
    * 引擎的逐文件进度 → runner（由它发布带进度的 syncing 状态给 UI）。
@@ -175,16 +201,36 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
        */
       const cursorKey = options.cursorKey ?? options.notebookId;
       const since = options.cursorStore?.load(cursorKey) ?? null;
-      const result = await syncOnceIncremental({
+      const base: SyncOnceInput = {
         provider: options.provider,
         ledger: options.ledger,
         deps,
-        since,
         onProgress: (progress) => reportProgress?.(progress),
         ...(options.maxFiles === undefined ? {} : { maxFiles: options.maxFiles }),
         ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
         ...(options.now === undefined ? {} : { now: options.now }),
-      });
+      };
+      /*
+       * ★ 加密笔记本的对照表（`pathMap.ts`）：
+       * ① 会话第一轮、或上一轮还有认不出的 did ⇒ 先重读表；学到了能认出它们的路径就走全树
+       *    （增量游标已经越过那些 did，只看变更是再也见不到它们的）；
+       * ② 这一轮仍有认不出的 ⇒ 再读一次表（别的设备可能刚写完），学到了就立刻补一次全树；
+       * ③ 收尾把本机账本里的路径并进表、去掉这一轮删掉的。
+       */
+      let forceFull = false;
+      if (pathMap !== null && (!pathMap.loaded || pendingUnknown.size > 0)) {
+        forceFull = resolvesAny(await pathMap.refresh(), pendingUnknown);
+      }
+      let result = forceFull ? await syncOnce(base) : await syncOnceIncremental({ ...base, since });
+      if (pathMap !== null && result.unknownDids.length > 0) {
+        if (resolvesAny(await pathMap.refresh(), new Set(result.unknownDids))) {
+          result = mergeRounds(result, await syncOnce(base));
+        }
+      }
+      pendingUnknown = new Set(result.unknownDids);
+      if (pathMap !== null) {
+        await pathMap.publish(Object.keys(options.ledger.files), [...(result.deletedPaths ?? []), ...(result.remoteDeletedPaths ?? [])]);
+      }
       // 只有真的拿到了游标才推进；拿不到就保持旧值 —— 下一轮会再问一次（安全方向）。
       if (result.checkpoint !== null) options.cursorStore?.save(cursorKey, result.checkpoint);
       return result;
@@ -214,6 +260,32 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
     },
     status: () => runner.status(),
     dispose: () => runner.dispose(),
+  };
+}
+
+/**
+ * 把同一轮里的两次引擎运行合成一份结果（第二次是学到对照表之后补的全树）。
+ *
+ * 计数与明细相加（两次做的事都真实发生了）；「现在是什么状态」的字段取第二次 ——
+ * 它是在第一次之后、拿着更全的路径跑的，账本、检查点、冲突、认不出的 did 都以它为准。
+ */
+export function mergeRounds(first: SyncOnceResult, second: SyncOnceResult): SyncOnceResult {
+  const concat = (a?: string[], b?: string[]): string[] => Array.from(new Set([...(a ?? []), ...(b ?? [])]));
+  const pushConflicts = new Map(first.pushConflicts.map((conflict) => [conflict.path, conflict]));
+  for (const conflict of second.pushConflicts) pushConflicts.set(conflict.path, conflict);
+  return {
+    ...second,
+    pushed: first.pushed + second.pushed,
+    remoteDeleted: first.remoteDeleted + second.remoteDeleted,
+    pulled: first.pulled + second.pulled,
+    deleted: first.deleted + second.deleted,
+    pushConflicts: [...pushConflicts.values()],
+    resynced: first.resynced || second.resynced,
+    pushedPaths: concat(first.pushedPaths, second.pushedPaths),
+    pulledPaths: concat(first.pulledPaths, second.pulledPaths),
+    deletedPaths: concat(first.deletedPaths, second.deletedPaths),
+    remoteDeletedPaths: concat(first.remoteDeletedPaths, second.remoteDeletedPaths),
+    appliedPaths: concat(first.appliedPaths, second.appliedPaths),
   };
 }
 
