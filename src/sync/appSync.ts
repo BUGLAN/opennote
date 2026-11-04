@@ -84,6 +84,8 @@ export interface LastSyncSummary {
   scanIncomplete?: boolean;
   /** 因本地扫描不完整而挂起的**推送删除**条数。 */
   suspendedPushDeletes?: number;
+  /** 服务端拒收（空间满了 / 单个文件太大）、这一轮没上传的文件。 */
+  rejected?: { path: string; reason: "quota" | "too-large"; message: string }[];
 }
 
 export interface SyncUiState {
@@ -285,6 +287,7 @@ function handleSynced(
       treeTruncated: result.treeTruncated,
       scanIncomplete: result.scanIncomplete,
       suspendedPushDeletes: result.suspendedPushDeletes.length,
+      rejected: (result.rejectedPushes ?? []).map(({ path, reason, message }) => ({ path, reason, message })),
     },
   }));
 }

@@ -32,7 +32,7 @@
  */
 
 import type { CryptoMode } from "../../shared/contract";
-import { hasPendingLocalChanges, syncOnce, syncOnceIncremental, type SyncEngineDeps, type SyncOnceInput, type SyncOnceResult } from "./engine";
+import { hasPendingLocalChanges, syncOnce, syncOnceIncremental, type RejectedPush, type SyncEngineDeps, type SyncOnceInput, type SyncOnceResult } from "./engine";
 import { createPathMapSync, type PathMapSync } from "./pathMap";
 import { createIgnoreRules, type IgnoreRules } from "./ignore";
 import { createSyncRunner, type SyncProgress, type SyncRunner, type SyncStatus } from "./runner";
@@ -115,6 +115,12 @@ export interface SyncSession {
   dispose(): void;
 }
 
+/**
+ * 空间满了被拒的文件，隔多久再试一次（期间内容没变就不重传）。
+ * 「单个文件太大」不会自己好，内容不变就一直不重传。
+ */
+export const QUOTA_RETRY_MS = 5 * 60 * 1000;
+
 /** 账本里记着的全部路径 —— 引擎靠它把远端 did 翻回本机路径（见模块头 ①）。 */
 export function knownPathsOf(ledger: SyncLedger): string[] {
   return Object.keys(ledger.files);
@@ -171,6 +177,33 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
       ...(options.log === undefined ? {} : { log: options.log }),
     });
   }
+  /*
+   * 被服务端 413 拒过的文件（path → 被拒时的内容标识）。内容没变就先别再推：
+   * 一个超限的大附件每次同步都重传一遍，只会白白耗流量、换回同一个 413。
+   */
+  const clock = options.now ?? (() => Date.now());
+  const rejected = new Map<string, { hash: string; reason: RejectedPush["reason"]; message: string; at: number }>();
+  const skippedThisPass = new Set<string>();
+  const skipPush: NonNullable<SyncOnceInput["skipPush"]> = (path, hash) => {
+    const memo = rejected.get(path);
+    if (memo === undefined || memo.hash !== hash) return null;
+    if (memo.reason === "quota" && clock() - memo.at >= QUOTA_RETRY_MS) return null;
+    skippedThisPass.add(path);
+    return { reason: memo.reason, message: memo.message };
+  };
+  /** 每次引擎跑完：记下真的被拒的（跳过的保留原来的时间），推上去了或不再需要推的就忘掉。 */
+  const rememberRejected = (result: SyncOnceResult): void => {
+    const next = new Map<string, { hash: string; reason: RejectedPush["reason"]; message: string; at: number }>();
+    for (const item of result.rejectedPushes ?? []) {
+      const memo = rejected.get(item.path);
+      const kept = skippedThisPass.has(item.path) && memo !== undefined;
+      next.set(item.path, { hash: item.hash, reason: item.reason, message: item.message, at: kept ? memo.at : clock() });
+    }
+    rejected.clear();
+    for (const [path, memo] of next) rejected.set(path, memo);
+    skippedThisPass.clear();
+  };
+
   /** 上一轮还认不出来的 did：下一轮开头先重读对照表，学到了就走一次全树（增量的游标已经越过它们了）。 */
   let pendingUnknown = new Set<string>();
   /** 刚学到的路径里，有没有能认出 `unknown` 里某条 did 的。 */
@@ -209,6 +242,7 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
         ...(options.maxFiles === undefined ? {} : { maxFiles: options.maxFiles }),
         ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
         ...(options.now === undefined ? {} : { now: options.now }),
+        skipPush,
       };
       /*
        * ★ 加密笔记本的对照表（`pathMap.ts`）：
@@ -222,9 +256,12 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
         forceFull = resolvesAny(await pathMap.refresh(), pendingUnknown);
       }
       let result = forceFull ? await syncOnce(base) : await syncOnceIncremental({ ...base, since });
+      rememberRejected(result);
       if (pathMap !== null && result.unknownDids.length > 0) {
         if (resolvesAny(await pathMap.refresh(), new Set(result.unknownDids))) {
-          result = mergeRounds(result, await syncOnce(base));
+          const second = await syncOnce(base);
+          rememberRejected(second);
+          result = mergeRounds(result, second);
         }
       }
       pendingUnknown = new Set(result.unknownDids);
@@ -286,6 +323,9 @@ export function mergeRounds(first: SyncOnceResult, second: SyncOnceResult): Sync
     deletedPaths: concat(first.deletedPaths, second.deletedPaths),
     remoteDeletedPaths: concat(first.remoteDeletedPaths, second.remoteDeletedPaths),
     appliedPaths: concat(first.appliedPaths, second.appliedPaths),
+    rejectedPushes: [
+      ...new Map([...(first.rejectedPushes ?? []), ...(second.rejectedPushes ?? [])].map((item) => [item.path, item])).values(),
+    ],
   };
 }
 

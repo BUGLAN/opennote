@@ -627,7 +627,7 @@ export class HttpTransport {
     } catch {
       // 不是 JSON（例如反代返回的 HTML 错误页）：保留默认文案。
     }
-    return new SyncProviderError(codeForStatus(response.status, serverCode), message, response.status);
+    return new SyncProviderError(codeForStatus(response.status, serverCode), message, response.status, serverCode);
   }
 
   /** 解析 JSON 响应体。 */

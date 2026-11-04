@@ -804,6 +804,32 @@ function Hero({ workspace }: { workspace: WorkspaceRecord | null }): ReactNode {
   }
   if (status?.phase === "error") return <HeroBox attn icon="info" title="同步出错了" sub={status.error} action={retry} />;
   const last = ui.last;
+  const quotaFull = last?.rejected?.filter((item) => item.reason === "quota") ?? [];
+  if (quotaFull.length > 0) {
+    // 服务端的原话里带着已用 / 配额（「空间已满：已用 …，配额 …」），直接给人看。
+    return (
+      <HeroBox
+        attn
+        icon="info"
+        title={`空间已满，有 ${quotaFull.length} 个文件没上传`}
+        sub={`${quotaFull[0].message}。删掉一些云端的内容或请管理员调高配额后会自动重试；其它改动照常同步，这些文件仍好好地存在本机。`}
+        action={retry}
+      />
+    );
+  }
+  const tooLarge = last?.rejected?.filter((item) => item.reason === "too-large") ?? [];
+  if (tooLarge.length > 0) {
+    const names = tooLarge.slice(0, 3).map((item) => item.path.split("/").pop()).join("、");
+    return (
+      <HeroBox
+        attn
+        icon="info"
+        title={`有 ${tooLarge.length} 个文件超过服务器的单个文件上限，没有上传`}
+        sub={`${names}${tooLarge.length > 3 ? " 等" : ""}：${tooLarge[0].message}。它们只留在这台设备上；其它改动照常同步。`}
+        action={retry}
+      />
+    );
+  }
   if (last && last.unknownDids > 0) {
     // 文件名对照表（m:pathmap）里还没有它们：通常是建它们的那台设备还没装新版、或还没同步完一轮。
     return (

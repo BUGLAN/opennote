@@ -131,6 +131,17 @@ export interface EngineConflict {
   remoteId: string | null;
 }
 
+/** 一条被服务端拒收的推送（413）：这一条没上去，其它照常。 */
+export interface RejectedPush {
+  path: string;
+  /** 本地那一版的内容标识（调用方据此判断「改过之后值得再试」）。 */
+  hash: string;
+  /** `quota` = 空间配额满了；`too-large` = 单个文件超过服务器上限。 */
+  reason: "quota" | "too-large";
+  /** 服务端给的原话（「空间已满：已用 …」）。 */
+  message: string;
+}
+
 export interface SyncOnceResult {
   /** 本地改了、远端没改 → 已推上去。 */
   pushed: number;
@@ -175,6 +186,12 @@ export interface SyncOnceResult {
   deletedPaths?: string[];
   /** 本机删了 ⇒ 在远端留下墓碑的。 */
   remoteDeletedPaths?: string[];
+  /**
+   * 服务端拒收（413）的推送：空间满了 / 单个文件太大。**只跳过这一条**，其它照常推；
+   * 账本不动，所以条件变了（删了东西腾出空间、文件改小了）之后会自然重试。
+   * 也包括调用方经 `skipPush` 要求这一轮先别推的（它们上一轮刚被拒过）。
+   */
+  rejectedPushes?: RejectedPush[];
   /** 引擎更新后的账本（调用方负责落盘）。 */
   ledger: SyncLedger;
   /** 本次同步里**本地发生了变化的路径** → 交给 `applyExternalPaths()` 刷 UI。 */
@@ -243,6 +260,13 @@ export interface SyncOnceInput {
    * 给 UI 画进度条用 —— 第一轮全量同步几百个文件，没有它界面就是黑箱。
    */
   onProgress?: (progress: { done: number; total: number }) => void;
+  /**
+   * 这一轮先别推的条目（返回被拒的原因与原话；返回 null = 照常推）。
+   *
+   * 给「上一轮刚被服务端 413 拒过、内容也没变」的文件用：再推一遍只会把同样的字节
+   * 再传一次、换来同一个 413（一个 40 MB 的附件每次同步都重传一遍）。
+   */
+  skipPush?: (path: string, hash: string) => { reason: RejectedPush["reason"]; message: string } | null;
 }
 
 /**
@@ -710,17 +734,45 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    * 上限刻意压得比较低：服务端按账号限流，堆太多请求只会换来一片 429。
    */
   const concurrency = Math.max(1, Math.floor(input.concurrency ?? DEFAULT_SYNC_CONCURRENCY));
+  const rejectedPushes: RejectedPush[] = [];
   await runBounded([...pushAdded, ...pushModified], concurrency, async (file) => {
+    const skip = input.skipPush?.(file.path, file.hash) ?? null;
+    if (skip !== null) {
+      rejectedPushes.push({ path: file.path, hash: file.hash, ...skip });
+      finishOne();
+      return;
+    }
     const did = deps.didOf(file.path);
     const known = ledger.files[file.path];
     const bytes = await deps.readLocal(file.path);
-    const result = await provider.put({
-      did,
-      bytes,
-      hash: file.hash,
-      // CAS 依据 = 上次同步时**远端**那一版；`null` 表示本地认为远端还没有这一条。
-      baseHash: known?.remoteHash ?? null,
-    });
+    let result: Awaited<ReturnType<SyncProvider["put"]>>;
+    try {
+      result = await provider.put({
+        did,
+        bytes,
+        hash: file.hash,
+        // CAS 依据 = 上次同步时**远端**那一版；`null` 表示本地认为远端还没有这一条。
+        baseHash: known?.remoteHash ?? null,
+      });
+    } catch (error) {
+      /*
+       * ★ 413（空间满了 / 单个文件太大）只是**这一条**上不去：记下来、接着推别的。
+       * 以前它会让整轮失败 —— `runBounded` 停止领取新条目，于是排在它后面的文件
+       * 也永远推不上去，而状态栏只显示「同步出错了」。
+       */
+      if (error instanceof SyncProviderError && error.status === 413) {
+        rejectedPushes.push({
+          path: file.path,
+          hash: file.hash,
+          reason: error.serverCode === "too-large" ? "too-large" : "quota",
+          message: error.message,
+        });
+        log("push", { path: file.path, rejected: error.serverCode ?? "413" });
+        finishOne();
+        return;
+      }
+      throw error;
+    }
     if ("conflict" in result) {
       /*
        * 远端在我们列树之后前进了。**不重试、不强推**（§6.1 L2：两份都留着，让用户裁决）。
@@ -1085,6 +1137,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     pulledPaths,
     deletedPaths,
     remoteDeletedPaths,
+    rejectedPushes,
     ledger,
     appliedPaths,
     unknownDids,

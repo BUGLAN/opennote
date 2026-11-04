@@ -1162,3 +1162,54 @@ describe("控制台取数 · 服务端在数据面上**自己数**（不依赖�
   });
 });
 
+
+describe("空间配额：超出就拒收让用量变多的写", () => {
+  it("超配额 → 413 + code quota；改小、删除照常放行；读不受影响", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.accounts.setQuota(alice.id, 10);
+    const put = (did: string, path: string, body: string, ifMatch?: string) =>
+      call(world, `/v1/file?nb=${notebook.id}&did=${did}&path=${path}`, {
+        method: "PUT",
+        headers: { ...auth(alice.token), ...(ifMatch === undefined ? {} : { "if-match": ifMatch }) },
+        body,
+      });
+
+    const first = await put("f:a", "a.md", "12345678");
+    expect(first.status).toBe(201);
+    const firstHash = ((await first.json()) as { hash: string }).hash;
+
+    const over = await put("f:b", "b.md", "12345678");
+    expect(over.status).toBe(413);
+    const body = (await over.json()) as { code: string; error: string; bytesUsed: number; bytesLimit: number };
+    expect(body.code).toBe("quota");
+    expect(body.error).toContain("空间已满");
+    expect(body).toMatchObject({ bytesUsed: 8, bytesLimit: 10 });
+
+    // 改小：用量变少，放行。
+    const smaller = await put("f:a", "a.md", "1234", firstHash);
+    expect(smaller.status).toBe(200);
+    expect(world.notebooks.bytesOwnedBy(alice.id)).toBe(4);
+
+    // 腾出空间之后，原来被拒的那条能写进去了。
+    expect((await put("f:b", "b.md", "123456")).status).toBe(201);
+
+    // 读不受配额影响。
+    const read = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { headers: auth(alice.token) });
+    expect(read.status).toBe(200);
+  });
+
+  it("配额 ≤ 0 视为不限", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.accounts.setQuota(alice.id, 0);
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, {
+      method: "PUT",
+      headers: auth(alice.token),
+      body: "x".repeat(100),
+    });
+    expect(response.status).toBe(201);
+  });
+});

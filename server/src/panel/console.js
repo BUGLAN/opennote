@@ -730,7 +730,7 @@ function userSections(data, now, reload) {
           },
         }),
       ),
-      h("p", { class: "hint mt" }, "配额现在只用来显示和提醒，超出不会拦截上传。", h("button", { type: "button", class: "link", text: "恢复默认配额", onClick: (event) => busy(event.currentTarget, saveQuota(null)) })),
+      h("p", { class: "hint mt" }, "超出配额后不能再上传新内容（删除、改小照常可以），已有内容照常读取。", h("button", { type: "button", class: "link", text: "恢复默认配额", onClick: (event) => busy(event.currentTarget, saveQuota(null)) })),
     ),
   );
 

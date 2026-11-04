@@ -49,6 +49,7 @@ import type { NotebookRow, NotebookStore } from "../notebooks";
 import type { ServerConfig } from "../config";
 import type { SettingsStore } from "../settings";
 import { bearerToken } from "./auth";
+import { formatBytes } from "../activity";
 
 export interface V1RoutesDeps {
   accounts: AccountStore;
@@ -193,6 +194,19 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       return json({ error: "需要 owner 权限", code: "bad-request" }, 403);
     }
     return { account: auth, notebook };
+  };
+
+  /**
+   * 再写 `growth` 字节会不会超出 `ownerId` 的配额；超了返回当前用量与配额，没超返回 null。
+   * 配额 = 账号自己设的，否则服务默认值；≤ 0 视为不限。
+   */
+  const quotaExceeded = (ownerId: string, growth: number): { used: number; limit: number } | null => {
+    const owner = deps.accounts.findById(ownerId);
+    if (!owner) return null;
+    const limit = owner.quota_bytes ?? deps.settings?.get("defaultQuotaBytes") ?? deps.config.defaultAccountQuotaBytes;
+    if (!(limit > 0)) return null;
+    const used = deps.notebooks.bytesOwnedBy(ownerId);
+    return used + growth > limit ? { used, limit } : null;
   };
 
   /**
@@ -601,6 +615,28 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         return json({ error: "这一条已存在（缺省 If-Match 只允许新建）", code: "conflict", current: { hash: currentId, rev: existing._rev ?? null } }, 409);
       }
 
+      /*
+       * ★ **空间配额**：算在笔记本**所有者**头上（共享笔记本里别人写进来的也算他的）。
+       *
+       * 只拦「让用量变多」的写：覆盖成更小的版本、删除照常放行 —— 超了配额的人
+       * 得能靠删东西、改小东西自救。读取从来不受配额影响（§10.1 M9）。
+       * 配额 ≤ 0 视为不限（控制台的提醒也是这么算的，见 `adminView.ts`）。
+       */
+      const previousSize = typeof existing?.size === "number" ? existing.size : 0;
+      const growth = bytes.byteLength - previousSize;
+      const overQuota = growth > 0 ? quotaExceeded(notebook.owner_id, growth) : null;
+      if (overQuota !== null) {
+        return json(
+          {
+            error: `空间已满：已用 ${formatBytes(overQuota.used)}，配额 ${formatBytes(overQuota.limit)}，这个文件还要 ${formatBytes(growth)}`,
+            code: "quota",
+            bytesUsed: overQuota.used,
+            bytesLimit: overQuota.limit,
+          },
+          413,
+        );
+      }
+
       const written = await deps.couch.putDoc(
         notebook.db_name,
         {
@@ -654,8 +690,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
        * 上一版的大小从文档的 `size` 字段读 —— 那是我们自己写的，形状可信。
        * 读不到就按 0 算（宁可少记，不可凭空多记一个账号的用量）。
        */
-      const previousSize = typeof existing?.size === "number" ? existing.size : 0;
-      deps.notebooks.addNotebookBytes(notebook.id, bytes.byteLength - previousSize);
+      deps.notebooks.addNotebookBytes(notebook.id, growth);
       // 响应里回**这一版**的标识与 rev（客户端据此更新基线，§4.7: `-> 200/201 { hash?, ehash?, rev }`）。
       return json(
         { rev: written.rev, ...(cryptoMode === "none" ? { hash: newHash } : { ehash: newHash }) },
