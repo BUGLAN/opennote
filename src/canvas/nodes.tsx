@@ -10,8 +10,11 @@ import {
   type CanvasNode,
 } from "./types";
 import { normalizeFileRef } from "./refs";
-import { ensureImageUrl, imageUrl } from "../data/assets";
+import { ensureImageUrl, imageUrl, resolveImageSrc } from "../data/assets";
 import { isImagePath } from "../fs/paths";
+import { resolveWorkspacePath } from "../fs/workspaceRef";
+import { decodeMarkdownHref } from "../lib/markdown";
+import { notePreviewSource, renderNoteCard, renderTextCard } from "./cardMarkdown";
 import { HtmlFrame } from "../html/HtmlFrame";
 import { htmlPlainText } from "../html/bundle";
 import { cn } from "../lib/utils";
@@ -29,7 +32,13 @@ export interface CanvasCardCallbacks {
   /** 这张卡是不是刚建出来、应当挂载即进入编辑（领走一次，之后恒为 false）。 */
   takeAutoEdit(id: string): boolean;
   openNote(id: string): void;
+  /** 跟随卡内的 `[[双链]]`（按标题或路径找笔记；没有就新建，与编辑器里一致）。 */
+  openWikiLink(target: string): void;
   getNoteInfo(id: string): { title: string; exists: boolean } | null;
+  /** 目标笔记的正文（文件卡显示内容用）；宿主没接或不是笔记时为 null。 */
+  getNoteContent(id: string): string | null;
+  /** 画布文件所在目录：文本卡里相对路径的图片 / 链接以它为基准。 */
+  canvasDir(): string;
   /** 网页卡打开外链（桌面走主进程 openExternal，浏览器 window.open）。 */
   openLink(url: string): void;
   /** 分组框 label 提交（空串 = 清除字段）。 */
@@ -95,6 +104,94 @@ function useAccentVar(color: string | undefined): Ref<HTMLDivElement | null> {
   return ref;
 }
 
+/** 路径的目录部分（`a/b/c.md` → `a/b`；根目录下 → `""`）。 */
+function dirOf(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index < 0 ? "" : path.slice(0, index);
+}
+
+/**
+ * 卡内渲染好的 Markdown。负责三件 HTML 字符串做不了的事：
+ *
+ * - **图片**：相对路径按 `baseDir` 解析成 blob URL（与阅读视图同一套，先解百分号编码）；
+ * - **点击链接**：`[[双链]]` 交给宿主跟随，网址走外部浏览器，相对的 `.md` 打开那篇笔记；
+ *   一律拦下默认行为 —— 卡片里的 `<a>` 真跳走会把整个应用导航掉；
+ * - **滚轮**：内容溢出时在滚轮事件冒泡到画布之前挂上 `nowheel`，于是卡内滚动、
+ *   而不是缩放画布；没溢出时不挂，滚轮照常缩放 / 平移画布。
+ */
+function CardMarkdown({
+  html,
+  baseDir,
+  cb,
+  className,
+  onDoubleClick,
+}: {
+  html: string;
+  baseDir: string;
+  cb: CanvasCardCallbacks;
+  className?: string;
+  onDoubleClick?: (event: React.MouseEvent) => void;
+}): ReactNode {
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const host = ref.current;
+    if (!host) return;
+    let cancelled = false;
+    for (const img of Array.from(host.querySelectorAll("img"))) {
+      img.draggable = false;
+      const src = decodeMarkdownHref(img.getAttribute("src") || "");
+      if (!src || /^(https?:|data:|blob:)/i.test(src)) continue;
+      void resolveImageSrc(src, baseDir).then((resolved) => {
+        if (cancelled || !resolved) return;
+        if (img.getAttribute("src") !== resolved) img.setAttribute("src", resolved);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [html, baseDir]);
+
+  useEffect(() => {
+    const host = ref.current;
+    if (!host) return;
+    // 原生监听：React 的事件委托挂在根节点上，晚于画布自己的滚轮处理，来不及挂类。
+    const onWheel = () => host.classList.toggle("nowheel", host.scrollHeight > host.clientHeight + 1);
+    host.addEventListener("wheel", onWheel);
+    return () => host.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const onClick = (event: React.MouseEvent) => {
+    const anchor = (event.target as HTMLElement).closest("a");
+    if (!anchor || !ref.current?.contains(anchor)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const wiki = anchor.getAttribute("data-wiki");
+    if (wiki) {
+      cb.openWikiLink(wiki);
+      return;
+    }
+    const href = anchor.getAttribute("href") || "";
+    if (/^https?:/i.test(href)) {
+      cb.openLink(href);
+      return;
+    }
+    if (href === "" || href.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;
+    const target = resolveWorkspacePath(decodeMarkdownHref(href), baseDir);
+    if (target) cb.openNote(target);
+  };
+
+  return (
+    <div
+      ref={ref}
+      className={cn("canvas-md", "prose", className)}
+      onClick={onClick}
+      onDoubleClick={onDoubleClick}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
 /** 就地编辑的小输入框共用行为：按键不许漏给画布（Backspace 会删节点）。 */
 function stopCanvasKeys(event: React.KeyboardEvent): void {
   event.stopPropagation();
@@ -109,6 +206,7 @@ export function TextCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(text);
   const areaRef = useRef<HTMLTextAreaElement | null>(null);
+  const html = useMemo(() => renderTextCard(text), [text]);
 
   // 双击空白 / 拖线建出的新卡：挂载即进编辑（effect 而非 useState 初值 —— StrictMode 下初值会算两次）
   useEffect(() => {
@@ -122,6 +220,11 @@ export function TextCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
   const commit = () => {
     setEditing(false);
     if (draft !== text) data.cb.editText(node.id, draft);
+  };
+  const startEditing = (event: React.MouseEvent) => {
+    event.stopPropagation();
+    setDraft(text);
+    setEditing(true);
   };
 
   return (
@@ -145,22 +248,32 @@ export function TextCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
           onDoubleClick={(event) => event.stopPropagation()}
         />
       ) : (
-        <div
-          className="canvas-card__body"
-          onDoubleClick={(event) => {
-            event.stopPropagation();
-            setDraft(text);
-            setEditing(true);
-          }}
-        >
-          {text.trim() ? text : <span className="canvas-card__placeholder">双击输入文字</span>}
-        </div>
+        text.trim() ? (
+          <CardMarkdown html={html} baseDir={data.cb.canvasDir()} cb={data.cb} className="canvas-card__body" onDoubleClick={startEditing} />
+        ) : (
+          <div className="canvas-card__body" onDoubleClick={startEditing}>
+            <span className="canvas-card__placeholder">双击输入文字</span>
+          </div>
+        )
       )}
     </div>
   );
 }
 
-/** 文件卡片：标题 + 路径标识；目标笔记不存在时置灰提示「文件已删除」；双击打开笔记。 */
+function FileGlyph(): ReactNode {
+  return (
+    <svg className="canvas-card__glyph" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3.5 1.5h6l3 3v10h-9z" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M9.5 1.5v3h3" fill="none" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+/**
+ * 文件卡片：标题 + 路径，下面是笔记正文（带 `#标题` 时只显示那一节）；
+ * 目标笔记不存在时置灰提示「文件已删除」；双击打开笔记。
+ * 图片卡只显示图：文件名是内容哈希（`saveImageAsset` 的命名规则），选中时才露出路径。
+ */
 export function FileCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNode {
   const node = data.source;
   const color = typeof node.color === "string" ? node.color : undefined;
@@ -186,6 +299,13 @@ export function FileCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
     };
   }, [file, isImage]);
   const imageReady = isImage && thumbUrl != null;
+  // 笔记正文：图片 / 已删除 / 宿主没给内容时为 null（退回只有标题与路径的样子）。
+  const content = !isImage && !missing ? data.cb.getNoteContent(file) : null;
+  const preview = useMemo(() => {
+    if (content === null) return null;
+    const { text, truncated } = notePreviewSource(content, subpath);
+    return { html: text.trim() ? renderNoteCard(text) : null, truncated };
+  }, [content, subpath]);
 
   return (
     <div
@@ -194,6 +314,7 @@ export function FileCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
         "canvas-card",
         "canvas-card--file",
         imageReady && "canvas-card--image",
+        preview !== null && "canvas-card--note",
         colorClass(color),
         selected && "is-selected",
         missing && !imageReady && "is-missing",
@@ -207,21 +328,38 @@ export function FileCard({ data, selected }: NodeProps<CanvasCardNode>): ReactNo
       <SideHandles />
       {imageReady ? (
         <>
-          <img className="canvas-card__thumb" src={thumbUrl} alt={title} draggable={false} />
-          <div className="canvas-card__caption">
-            <div className="canvas-card__title">{title}</div>
-            <div className="canvas-card__path" title={file + (subpath ?? "")}>
-              {file}
-              {subpath ? <span className="canvas-card__subpath">{subpath}</span> : null}
+          <img className="canvas-card__thumb" src={thumbUrl} alt={file.split("/").pop() ?? ""} draggable={false} />
+          {selected ? (
+            <div className="canvas-card__caption">
+              <div className="canvas-card__path" title={file + (subpath ?? "")}>
+                {file}
+                {subpath ? <span className="canvas-card__subpath">{subpath}</span> : null}
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : preview !== null ? (
+        <>
+          <div className="canvas-card__head">
+            <FileGlyph />
+            <div className="canvas-card__main">
+              <div className="canvas-card__title">{title}</div>
+              <div className="canvas-card__path" title={file + (subpath ?? "")}>
+                {file}
+                {subpath ? <span className="canvas-card__subpath">{subpath}</span> : null}
+              </div>
             </div>
           </div>
+          {preview.html === null ? (
+            <div className="canvas-card__note canvas-card__placeholder">{subpath ? "这一节没有内容" : "空笔记"}</div>
+          ) : (
+            <CardMarkdown html={preview.html} baseDir={dirOf(file)} cb={data.cb} className="canvas-card__note" />
+          )}
+          {preview.truncated ? <div className="canvas-card__more">内容太长，只显示开头 · 双击打开全文</div> : null}
         </>
       ) : (
         <>
-          <svg className="canvas-card__glyph" viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M3.5 1.5h6l3 3v10h-9z" fill="none" stroke="currentColor" strokeWidth="1.3" />
-            <path d="M9.5 1.5v3h3" fill="none" stroke="currentColor" strokeWidth="1.3" />
-          </svg>
+          <FileGlyph />
           <div className="canvas-card__main">
             <div className="canvas-card__title">{title}</div>
             {missing ? (

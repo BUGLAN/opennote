@@ -85,6 +85,10 @@ export interface CanvasViewProps {
    * 该入口退化为手输 subpath，其余功能不受影响。
    */
   getNoteContent?(id: string): string | null;
+  /**
+   * 跟随卡内的 `[[双链]]`（目标是标题或路径）。可选：宿主没接时按路径打开，找不到就提示。
+   */
+  onOpenWikiLink?(target: string): void;
 }
 
 /*
@@ -96,7 +100,8 @@ const edgeTypes = { canvasCard: CanvasCardEdgeView };
 
 /** 新卡默认尺寸（JSON Canvas 的宽高是节点数据的一部分，落盘可见）。 */
 const NEW_TEXT_CARD_SIZE = { width: 260, height: 160 };
-const NEW_FILE_CARD_SIZE = { width: 260, height: 110 };
+/** 文件卡要放得下一段笔记正文（卡里显示内容之后，旧的 260×110 只够看见标题）。 */
+const NEW_FILE_CARD_SIZE = { width: 320, height: 260 };
 const NEW_LINK_CARD_SIZE = { width: 300, height: 110 };
 const NEW_GROUP_SIZE = { width: 400, height: 300 };
 /** HTML 卡默认给一个「预览有意义」的尺寸（选中即挂 iframe，太小看不清）。 */
@@ -406,7 +411,23 @@ function CanvasSurface(props: CanvasViewProps): ReactNode {
           edgesRef.current,
         ]),
       openNote: (id) => propsRef.current.onOpenNote(id),
+      openWikiLink: (target) => {
+        const props = propsRef.current;
+        if (props.onOpenWikiLink) {
+          props.onOpenWikiLink(target);
+          return;
+        }
+        const id = [target, `${target}.md`].find((candidate) => props.getNoteInfo(candidate)?.exists);
+        if (id) props.onOpenNote(id);
+        else notify(`没有找到《${target}》`);
+      },
       getNoteInfo: (id) => propsRef.current.getNoteInfo(id),
+      getNoteContent: (id) => propsRef.current.getNoteContent?.(id) ?? null,
+      canvasDir: () => {
+        const id = propsRef.current.canvasId;
+        const slash = id.lastIndexOf("/");
+        return slash < 0 ? "" : id.slice(0, slash);
+      },
       openLink: (url) => {
         // 桌面交给主进程（用户默认浏览器，仅 http/https）；纯浏览器退回 window.open。
         // 主进程没有 setWindowOpenHandler，直接 window.open 会开出一个 Electron 窗口。

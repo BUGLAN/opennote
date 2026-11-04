@@ -202,6 +202,82 @@
   opacity: 0.55;
 }
 
+/* ---- 卡内 Markdown（文本卡正文、文件卡里的笔记正文）--------------------
+ * 排版沿用 .prose（与阅读视图 / 导出同一套），这里只把它压成卡片尺度：
+ * 字号跟卡片正文走、标题与段落的外边距收紧、首尾不留白。内容溢出时卡内滚动
+ * （滚轮是否让给画布由 nodes.tsx 按是否溢出挂 nowheel 决定）。 */
+.canvas-md.prose {
+  font-size: calc(var(--doc-fs) * 0.82);
+  white-space: normal;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.canvas-md > :first-child {
+  margin-top: 0;
+}
+
+.canvas-md > :last-child {
+  margin-bottom: 0;
+}
+
+.canvas-md :is(h1, h2, h3, h4, h5, h6) {
+  margin: 0.9em 0 0.4em;
+}
+
+.canvas-md h1 {
+  font-size: 1.4em;
+}
+
+.canvas-md h2 {
+  font-size: 1.22em;
+}
+
+.canvas-md h3 {
+  font-size: 1.08em;
+}
+
+.canvas-md :is(p, ul, ol, blockquote, pre, table) {
+  margin: 0.5em 0;
+}
+
+.canvas-md img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* 双链：与编辑器里的 md-wikilink 同色，点了打开那篇笔记 */
+.canvas-md a {
+  cursor: pointer;
+}
+
+/* 文件卡显示笔记正文：标题行在上、正文在下（纵排，覆盖文件卡默认的横排） */
+.canvas-card--note {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.canvas-card__head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  min-width: 0;
+  padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--rule);
+}
+
+.canvas-card__note {
+  flex: 1;
+  min-height: 0;
+}
+
+.canvas-card__more {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+
 /* 未知类型节点：虚线占位，可拖动 / 删除 / 连线，内容不可编辑 */
 .canvas-card--unknown {
   border-style: dashed;

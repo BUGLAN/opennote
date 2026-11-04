@@ -117,7 +117,7 @@ import type { NotebookSummary } from "../shared/contract";
 import { activeBackend } from "./data/library";
 import { TabBar } from "./components/TabBar";
 import { WindowControls } from "./components/WindowControls";
-import { setBridge } from "./editor/bridge";
+import { bridge as editorBridge, setBridge } from "./editor/bridge";
 /* 画布（无限画布 MVP）：types 与 controller 都无三方依赖，静态 import 不破坏懒加载；
    CanvasView 本体只经下面的 React.lazy 进入 —— 它连着 @xyflow/react。 */
 import { getActiveCanvasApi } from "./canvas/controller";
@@ -1691,6 +1691,12 @@ export default function App(): ReactNode {
                 }}
                 /* 「指向标题」要用目标笔记的正文抽标题列表；没接时画布退化为手输 subpath。 */
                 getNoteContent={(id) => library.notes[id]?.content ?? null}
+                /* 卡内 `[[双链]]`：先按路径认（`[[目录/笔记]]`），再走编辑器同一条「按标题打开，没有就新建」。 */
+                onOpenWikiLink={(target) => {
+                  const byPath = [target, `${target}.md`].find((candidate) => library.notes[candidate]);
+                  if (byPath) openNote(byPath, { activate: true });
+                  else editorBridge.openWikiLink(target);
+                }}
               />
             </Suspense>
           </div>
