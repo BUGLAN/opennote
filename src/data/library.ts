@@ -1029,6 +1029,13 @@ export function applyExternalPaths(paths: readonly string[], options: { type?: W
   return tail;
 }
 
+/** 这条路径在磁盘上是不是**目录**（看父目录的列表；读不到就当不是）。 */
+async function isDirectoryEntry(target: FileSystemBackend, path: string): Promise<boolean> {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const entries = await target.list(parentPath(path) || "").catch(() => null);
+  return entries?.some((entry) => entry.name === name && entry.kind === "directory") ?? false;
+}
+
 async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileChange[]): Promise<void> {
   const myGen = generation;
   if (backend !== target) return;
@@ -1123,6 +1130,12 @@ async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileCha
     if (change.type === "delete") continue;
     if (libraryStore.get().folders[change.path]) continue;
     if (!(await target.exists(change.path).catch(() => false))) continue;
+    /*
+     * ★ `exists()` 对文件也答 true —— 同步拉下来的图片、`.py`、`Dockerfile` 都会走到这里，
+     * 不再确认一次「它真是目录」，侧栏就会冒出一个叫 `1.py` 的文件夹。
+     * `stat()` 对目录不受保证（D33），所以看父目录的列表里它是不是 directory。
+     */
+    if (!(await isDirectoryEntry(target, change.path))) continue;
     patchFolders((folders) => ({ ...folders, [change.path]: makeFolder(change.path, Date.now()) }));
   }
   reconcileTabs();

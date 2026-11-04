@@ -29,7 +29,7 @@
  * 这也是「E2EE 放 P4 不会造成迁移」的结构性原因（§9 末段）。
  */
 
-import { assertSafeRelative, isMaterializable } from "../fs/paths";
+import { assertSafeRelative } from "../fs/paths";
 import { applyTruncationGuard, assertDeletionBudget, planPull, planPush, type BaselineLike } from "./diff";
 import type { ConflictKind } from "./conflicts";
 import { isSameUpToFormatting } from "./textDiff";
@@ -277,6 +277,25 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
   const localByPath = new Map(localFiles.map((file) => [file.path, file]));
 
   /*
+   * ★ **旧版本留下的删除墓碑**：`imported: true` + `localHash: null` + 本地没有、也没挂冲突。
+   *
+   * 旧引擎删完远端之后把这种条目留在账本里（见下面「推送删除」处的说明），于是它们每一轮都被
+   * 判成「本地删了」再 DELETE 一次。新引擎删完就去掉条目，但已有账本里的存货要在这里清 ——
+   * 不能指望「再 DELETE 一次、收到 410 再去掉」：存货多于删除保护阈值时整批会被拦下，
+   * 永远清不掉，还会挂一条「要删除 N 个文件，请确认」的假提示。
+   *
+   * 为什么直接去掉是安全的：`localHash: null` 说明本机从没记下过它的内容，本地也确实没有它，
+   * 所以既没有「本地删除」要推，也没有本地内容会丢。远端若还有它（别的设备后来又建了），
+   * 去掉之后 `planPull` 按「远端新增」拉下来，正是想要的结果。
+   * 本地没扫全时不动（读不到的目录里可能正躺着它）；放在拼增量树之前，免得墓碑被当成「远端还在」。
+   */
+  for (const [path, file] of Object.entries(ledger.files)) {
+    if (file.imported && file.localHash === null && file.pendingConflict === undefined && !localByPath.has(path) && !ignored(path) && !scanIncomplete) {
+      delete ledger.files[path];
+    }
+  }
+
+  /*
    * ★★ P0：列树**必须翻页取完**（这条以前是缺的，是最严重的多设备缺陷）。
    *
    * 服务端 `/v1/tree` 有分页上限（`clampLimit`，默认 500、最大 2000），超出时
@@ -348,7 +367,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    * `truncated` **必须**一路带下去（§6.4 规则 1）。
    */
   const unknownDids: string[] = [];
-  const remoteEntries: { path: string; hash: string }[] = [];
+  const remoteEntries: { path: string; hash: string; rev: string; size?: number }[] = [];
   const rejectedPaths: string[] = [];
   for (const entry of tree.entries) {
     let path = didIndex.get(entry.did);
@@ -366,7 +385,8 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       continue;
     }
     if (ignored(path)) continue; // 忽略路径不进远端视图（否则会被当成「远端新增」拉下来）
-    remoteEntries.push({ path, hash: entry.hash });
+    // `rev` / `size` 给后面用：前者记账，后者决定这一条走批量还是单独取（大文件别塞进批量）。
+    remoteEntries.push({ path, hash: entry.hash, rev: entry.rev, ...(entry.size === undefined ? {} : { size: entry.size }) });
   }
   if (unknownDids.length > 0) log("tree", { unknownDids: unknownDids.length });
   if (rejectedPaths.length > 0) log("tree", { rejectedPaths: rejectedPaths.length });
@@ -437,7 +457,61 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
         removeLocal: [] as string[],
         conflicts: [] as { path: string; reason: "both-modified" | "deleted-locally-modified-remotely" | "deleted-remotely-modified-locally" }[],
       } as ReturnType<typeof planPull>)
-    : planPull(baselineView, remoteTree, localFiles);
+    : planPull(baselineView, remoteTree, localFiles, {
+        /*
+         * ★ 拉取范围 = 推送范围（同步范围内的一切；忽略路径在上面已经滤掉）。
+         * 默认的 `isMaterializable` 是 GitHub 通道的规矩，放在这里会让「推得上去、拉不下来、
+         * 也进不了账本」的文件（.py / Dockerfile …）每一轮都撞一次 409 报假冲突。见 `planPull` 的说明。
+         */
+        pullable: () => true,
+      });
+
+  /**
+   * 把一条冲突**记进账本**（N1：远端没变的那几轮也不能让它从列表里消失、更不能被推出去）。
+   *
+   * 账本里还没有这一条时（「两边各自新建了同一路径」，或推送时撞了 409 的新文件）要先补一条
+   * **占位**：`remoteHash: null` + `localHash: null`。这样选是有意的 ——
+   * - `remoteHash: null` ⇒ 下一轮 `planPull` 仍然判「远端变了」、`localHash: null` ⇒ 仍然判「本地变了」，
+   *   于是它会被**重新判成冲突**，而不是被当成「远端没动」放行推送；
+   * - **绝不能**把 `remoteHash` 记成远端当前值：那等于把 CAS 依据前移，下一轮用户一改本地，
+   *   推送就会静默盖掉对方那一版（H1，红线 5）。
+   * 用户裁决（`resolution.ts`）时这一条会被整体重写。
+   */
+  const recordPendingConflict = (path: string, kind: ConflictKind, localId: string | null, remoteId: string | null): void => {
+    let entry = ledger.files[path];
+    if (entry === undefined) {
+      entry = {
+        bid: ledger.bids[path] ?? allocateBid(ledger, path),
+        localHash: null,
+        remoteHash: null,
+        rev: null,
+        imported: true,
+        syncedAt: now(),
+      };
+      ledger.files[path] = entry;
+    }
+    entry.pendingConflict = { kind, localId, remoteId, at: now() };
+  };
+
+  /**
+   * 两边**只差格式**（换行符 / BOM / 末尾空行）⇒ 按「已经同步好了」记账，**不改写本地**。
+   *
+   * 以前的做法是「采用远端字节」：Windows 推上去的 CRLF 会把 Mac 上的 LF 文件整篇改写
+   * （真机：309 篇笔记在 git 里全部变成「已修改」）。现在两边各留各的字节，只在账本里
+   * 把本机标识与远端标识配成一对 —— 下一轮 `planPush` 看本地没变、`planPull` 看远端没变，
+   * 自然不会再撞。哪边以后真改了内容，就按普通的单边修改传过去。
+   */
+  const settleFormattingOnly = (path: string, localHash: string, remote: ProviderReadResult): void => {
+    const existing = ledger.files[path];
+    ledger.files[path] = {
+      bid: existing?.bid ?? ledger.bids[path] ?? allocateBid(ledger, path),
+      localHash,
+      remoteHash: remote.hash,
+      rev: remote.rev,
+      imported: true,
+      syncedAt: now(),
+    };
+  };
 
   const conflicts: EngineConflict[] = [];
   const pushConflicts: EngineConflict[] = [];
@@ -463,28 +537,52 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    * 于是同一篇会字节不同、被判成「两边都改了」。用户看到的是一条冲突，
    * 点开对比**完全一样** —— 判宽了会吞真改动，判窄了就永远是噪音。
    *
-   * 处置方式不是「忽略」而是**收敛**：把它转成一次普通的下载（采用远端字节），
-   * 下一轮两边字节就一致了。只忽略不收敛的话，下一轮还会再撞一次。
+   * 处置方式不是「忽略」而是**在账本里收敛**（`settleFormattingOnly`）：两边各留各的字节，
+   * 账本把这一对标识记成「已同步」。只忽略不记账的话，下一轮还会再撞一次；
+   * 而「采用远端字节」会把另一台设备的换行风格强加给本机（见 `settleFormattingOnly`）。
    *
    * 代价是每条冲突多一次 `provider.read`；只在**有冲突**时才发生，可以接受。
    */
+  const settledPaths = new Set<string>();
+  /*
+   * ★ 远端变了、但本地已经是同一份（`planPull` 的 `inSync`）⇒ 只把账本对齐，不下载、也不推。
+   * 上一轮在记账之前失败（比如大文件超时）时，已经写下去的那些文件靠这一条免于整批重拉。
+   */
+  for (const item of pullPlan.inSync ?? []) {
+    const local = localByPath.get(item.path);
+    const remote = treeEntryByPath.get(item.path);
+    if (local === undefined || remote === undefined) continue;
+    const existing = ledger.files[item.path];
+    ledger.files[item.path] = {
+      bid: existing?.bid ?? ledger.bids[item.path] ?? allocateBid(ledger, item.path),
+      localHash: local.hash,
+      remoteHash: remote.hash,
+      // 增量拼出来的树没有 rev（空串）：那就沿用账本里原来的。
+      rev: remote.rev !== "" ? remote.rev : existing?.rev ?? null,
+      imported: true,
+      syncedAt: now(),
+    };
+    settledPaths.add(item.path);
+  }
   const effectiveConflicts = await filterFormattingOnly(pullPlan.conflicts, {
     provider,
     deps,
-    treeEntryByPath,
-    onFormattingOnly: (path) => {
-      const entry = treeEntryByPath.get(path);
-      if (entry !== undefined) pullPlan.download.push({ path, sha: entry.hash });
+    onFormattingOnly: (path, remote) => {
+      const local = localByPath.get(path);
+      if (local === undefined) return;
+      settleFormattingOnly(path, local.hash, remote);
+      settledPaths.add(path);
     },
     log,
   });
 
   const conflictedPaths = new Set(effectiveConflicts.map((item) => item.path));
+  // 刚在账本里收敛掉的路径这一轮也不推：本地那份与远端只差格式，推上去只会把对方的字节换掉。
   const pushAdded = pushPlan.added.filter(
-    (file) => !conflictedPaths.has(file.path) && !ignored(file.path) && !blockedPaths.has(file.path),
+    (file) => !conflictedPaths.has(file.path) && !settledPaths.has(file.path) && !ignored(file.path) && !blockedPaths.has(file.path),
   );
   const pushModified = pushPlan.modified.filter(
-    (file) => !conflictedPaths.has(file.path) && !ignored(file.path) && !blockedPaths.has(file.path),
+    (file) => !conflictedPaths.has(file.path) && !settledPaths.has(file.path) && !ignored(file.path) && !blockedPaths.has(file.path),
   );
   /*
    * ★ **冲突路径不推删除**：`planPull` 已经判出「本地删了、远端改过」时，
@@ -565,15 +663,7 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       remoteId: remote?.hash ?? null,
     });
     // ★ 记进账本：下一轮即使「远端没变、不跑 planPull」，这条冲突也不会从列表里消失（N1）。
-    const entry = ledger.files[item.path];
-    if (entry !== undefined) {
-      entry.pendingConflict = {
-        kind: item.reason,
-        localId: local?.hash ?? null,
-        remoteId: remote?.hash ?? null,
-        at: now(),
-      };
-    }
+    recordPendingConflict(item.path, item.reason, local?.hash ?? null, remote?.hash ?? null);
     log("conflict", { path: item.path, reason: item.reason });
   }
 
@@ -648,18 +738,25 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
         finishOne();
         return;
       }
+      /*
+       * ★ 推送这一侧也要认「只差格式」（拉取侧早就有 `filterFormattingOnly`）。
+       *
+       * 少了它，「两台设备各有一份、只差 CRLF/LF」的文件在推送时永远是冲突：
+       * 远端标识与本地标识逐字不等 ⇒ 进冲突列表 ⇒ 用户点开一看「差 0 行」。
+       */
+      if (remoteEntry !== null) {
+        const remote = await readIfFormattingOnly(provider, deps, file.path);
+        if (remote !== null) {
+          settleFormattingOnly(file.path, file.hash, remote);
+          log("push", { path: file.path, formattingOnly: true });
+          finishOne();
+          return;
+        }
+      }
       // ★ 账本的 CAS 依据（`localHash` / `remoteHash` / `rev`）**一个字都不改** ——
       //   远端当前值只用于把冲突描述清楚（`remoteId`）。但冲突本身要**记下来**（N1），
-      //   否则下一轮「远端没变」时它会从界面上消失。
-      const conflictedEntry = ledger.files[file.path];
-      if (conflictedEntry !== undefined) {
-        conflictedEntry.pendingConflict = {
-          kind: "both-modified",
-          localId: file.hash,
-          remoteId: remoteEntry?.hash ?? null,
-          at: now(),
-        };
-      }
+      //   否则下一轮「远端没变」时它会从界面上消失，而且每一轮都会重推、重撞一次 409。
+      recordPendingConflict(file.path, "both-modified", file.hash, remoteEntry?.hash ?? null);
       pushConflicts.push({
         path: file.path,
         kind: "both-modified",
@@ -732,24 +829,21 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
       return;
     }
     /*
-     * 删成功之后**保留账本那一条**，只把 `localHash` 置空。
+     * 删成功（或远端早就没了：`gone`，服务端 410）⇒ **账本整条去掉**，与 `resolution.ts` 的
+     * 「本地已删 · 保留本地」同一个处置。
      *
-     * 为什么不整条清掉：远端墓碑活得比 update 久（§6.4 规则 3），本地也该能回答
-     * 「这条我们管过、现在没了」。留着一条 `localHash: null` 的记录代价极小，
-     * 而清掉会让「删除」在本地完全没有痕迹。
+     * ⚠️ 以前这里「保留那一条、只把 `localHash` 置空」，想让本地记得「这条我们管过」。
+     * 但 `imported: true` + 本地没有 ⇒ `planPush` **每一轮**都把它判成「本地删了」再发一次
+     * DELETE，服务端回 410，引擎又把它原样记回去 —— 墓碑永久留在账本里，删过的笔记越多，
+     * 每轮白发的请求越多（真机：同步明显变慢）。`hasPendingLocalChanges` 也因此永远为真。
+     * 另一个后果：别的设备后来在同一路径新建了笔记，这里会误判成「本地删了 / 远端改了」的冲突，
+     * 而正确的处置是直接拉下来（账本里没有这一条时 `planPull` 就是这么做的）。
+     * 「删除」的痕迹由远端墓碑承担（§6.4 规则 3），本地不需要再记一份。
      */
-    const bid = ledger.bids[path] ?? allocateBid(ledger, path);
-    ledger.files[path] = {
-      bid,
-      localHash: null,
-      remoteHash: known?.remoteHash ?? null,
-      rev: known?.rev ?? null,
-      imported: true,
-      syncedAt: now(),
-    };
-    remoteDeleted += 1;
+    delete ledger.files[path];
+    if (!("gone" in result)) remoteDeleted += 1;
     finishOne();
-    log("delete", { path, remote: true });
+    log("delete", { path, remote: true, ...("gone" in result ? { gone: true } : {}) });
   });
 
   /* ------------------------------------------------------------------ 拉取 */
@@ -805,10 +899,36 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    * 那时**逐条退回**，绝不让整轮同步失败 —— 批量只是优化。
    */
   if (typeof provider.readMany === "function" && pullPlan.download.length > 1) {
+    /*
+     * ★ 分批按**字节**，不只按条数；大文件单独取。
+     *
+     * 以前一批固定 50 条：碰上一篇 1.4 MB 的笔记（或几 MB 的附件），整批响应被 base64
+     * 撑到好几 MB，慢一点的线路（实测经 Cloudflare 约 80 KB/s）30 秒内传不完 ⇒ 整批超时 ⇒
+     * 整轮失败重来，2~3 分钟停在「正在同步」。现在：
+     * - 已知大小超过 `PULL_SINGLE_BYTES` 的走 `read()`（二进制直传，不经 base64，也不拖累别人）；
+     * - 其余按「≤ PULL_BATCH_SIZE 条且 ≤ PULL_BATCH_BYTES 字节」装批。
+     * 不知道大小的（增量拼出来的树不带 size）按小文件算 —— 增量多半是刚改的几篇，
+     * 真碰上大的，传输层的「无进展才超时」也能让它传完。
+     */
+    const sizeOf = (path: string): number => treeEntryByPath.get(path)?.size ?? 0;
+    const singles = pullPlan.download.filter((item) => sizeOf(item.path) > PULL_SINGLE_BYTES);
+    const batchable = pullPlan.download.filter((item) => sizeOf(item.path) <= PULL_SINGLE_BYTES);
     const chunks: typeof pullPlan.download[] = [];
-    for (let index = 0; index < pullPlan.download.length; index += PULL_BATCH_SIZE) {
-      chunks.push(pullPlan.download.slice(index, index + PULL_BATCH_SIZE));
+    let current: typeof pullPlan.download = [];
+    let currentBytes = 0;
+    for (const item of batchable) {
+      const size = sizeOf(item.path);
+      if (current.length > 0 && (current.length >= PULL_BATCH_SIZE || currentBytes + size > PULL_BATCH_BYTES)) {
+        chunks.push(current);
+        current = [];
+        currentBytes = 0;
+      }
+      current.push(item);
+      currentBytes += size;
     }
+    if (current.length > 0) chunks.push(current);
+    if (singles.length > 0) log("pull", { large: singles.length });
+    // 先小后大：几百篇小笔记先落地，界面上先「有东西」，大文件慢慢来。
     await runBounded(chunks, concurrency, async (items) => {
       const dids = items.map((item) => deps.didOf(item.path));
       let results: Map<string, ProviderReadResult>;
@@ -838,6 +958,10 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
         await applyPulled(items[index]!, results.get(dids[index]!) ?? null);
       }
     });
+    // 大文件同时只取两个：它们拼的是带宽，不是往返，并发开大只会让每一个都更慢。
+    await runBounded(singles, Math.min(2, concurrency), async (item) => {
+      await applyPulled(item, await provider.read(deps.didOf(item.path)));
+    });
   } else {
     await runBounded(pullPlan.download, concurrency, async (item) => {
       await applyPulled(item, await provider.read(deps.didOf(item.path)));
@@ -860,16 +984,11 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     } else {
       for (const path of guarded.removeLocal) {
         /*
-         * 只删**我们物化过的笔记/图片**（`isMaterializable`）。
+         * 删除候选与下载**同一个范围**（`planPull` 的 `pullable`，引擎传的是「同步范围内的一切」）。
          *
-         * 以前这里用 `isMarkdownPath`，而 `planPull` 的删除候选是按「账本里有、远端没了」
-         * 生成的 —— 图片也能进来。于是图片永远删不掉、账本条目也不清，每轮重算一次（L5）。
-         * 判据统一成 `isMaterializable`，与下载分支同源。
+         * 以前这里另有一道 `isMaterializable`（更早是 `isMarkdownPath`）：两处判据不一致时，
+         * 候选进得来、却永远删不掉，账本条目也不清，每轮重算一次（L5）。现在判据只在 `planPull` 里。
          */
-        if (!isMaterializable(path)) {
-          finishOne();
-          continue;
-        }
         try {
           await deps.removeLocal(path);
           const existing = ledger.files[path];
@@ -1138,6 +1257,12 @@ export const DEFAULT_SYNC_CONCURRENCY = 4;
  */
 export const PULL_BATCH_SIZE = 50;
 
+/** 一批正文的原始字节上限（base64 之后约 ×1.33）。慢线路上一批要能在几秒内传完。 */
+export const PULL_BATCH_BYTES = 512 * 1024;
+
+/** 超过这个大小的单条不进批量，走 `read()` 单独取（二进制直传，不经 base64）。 */
+export const PULL_SINGLE_BYTES = 256 * 1024;
+
 /**
  * 变更超过这个条数，就不走「变更驱动」而直接列整树。
  *
@@ -1221,7 +1346,37 @@ function decodeText(bytes: Uint8Array): string | null {
 }
 
 /**
- * 把「仅格式不同」的冲突挑出来（它们会被转成一次下载，不进冲突列表）。
+ * 本地与远端这一条是不是**只差格式**（换行符 / BOM / 末尾空行）。是就返回远端那一版，否则 `null`。
+ *
+ * 读不到、不是文本、解不开都算「不是」—— 拿不准就交给人裁决，绝不往「已同步」那边猜。
+ * 推送撞 409 与拉取判出冲突两处共用这一份。
+ */
+async function readIfFormattingOnly(provider: SyncProvider, deps: SyncEngineDeps, path: string): Promise<ProviderReadResult | null> {
+  /*
+   * ★ 两边都要**先变明文**再比（M8）：E2EE 下 `readLocal` 给的是密文、`provider.read`
+   * 给的也是密文 —— 直接 `decodeText` 必然失败，这条判定在 E2EE 下等于不存在。
+   */
+  const readPlain = deps.readLocalPlain ?? deps.readLocal;
+  const did = deps.didOf(path);
+  const [localBytes, remote] = await Promise.all([
+    readPlain(path).catch(() => null),
+    provider.read(did).catch(() => null),
+  ]);
+  if (localBytes === null || remote === null) return null;
+  let remotePlain: Uint8Array;
+  try {
+    remotePlain = deps.decodeRemote === undefined ? remote.bytes : deps.decodeRemote(did, remote.bytes);
+  } catch {
+    return null;
+  }
+  const left = decodeText(localBytes);
+  const right = decodeText(remotePlain);
+  if (left === null || right === null || !isSameUpToFormatting(left, right)) return null;
+  return remote;
+}
+
+/**
+ * 把「仅格式不同」的冲突挑出来（它们在账本里收敛成「已同步」，不进冲突列表）。
  *
  * 只处理 `both-modified`：另外两种是「一边删了、一边改了」，
  * 那根本没有「两份文本」可比 —— 必须由人裁决。
@@ -1231,8 +1386,8 @@ async function filterFormattingOnly(
   context: {
     provider: SyncProvider;
     deps: SyncEngineDeps;
-    treeEntryByPath: Map<string, { hash: string }>;
-    onFormattingOnly: (path: string) => void;
+    /** 判成「只差格式」：交回远端那一版（标识 + 修订），由调用方记账。 */
+    onFormattingOnly: (path: string, remote: ProviderReadResult) => void;
     log: (kind: "conflict", detail: { path: string; formattingOnly: true }) => void;
   },
 ): Promise<ConflictRow[]> {
@@ -1243,25 +1398,12 @@ async function filterFormattingOnly(
       kept.push(item);
       return;
     }
-    /*
-     * ★ 两边都要**先变明文**再比（M8）：E2EE 下 `readLocal` 给的是密文、`provider.read`
-     * 给的也是密文 —— 直接 `decodeText` 必然失败，这条优化在 E2EE 下等于不存在。
-     */
-    const readPlain = context.deps.readLocalPlain ?? context.deps.readLocal;
-    const did = context.deps.didOf(item.path);
-    const [localBytes, remote] = await Promise.all([
-      readPlain(item.path).catch(() => null),
-      context.provider.read(did).catch(() => null),
-    ]);
-    const left = localBytes === null ? null : decodeText(localBytes);
-    const right = remote === null
-      ? null
-      : decodeText(context.deps.decodeRemote === undefined ? remote.bytes : context.deps.decodeRemote(did, remote.bytes));
-    if (left === null || right === null || !isSameUpToFormatting(left, right)) {
+    const remote = await readIfFormattingOnly(context.provider, context.deps, item.path);
+    if (remote === null) {
       kept.push(item);
       return;
     }
-    context.onFormattingOnly(item.path);
+    context.onFormattingOnly(item.path, remote);
     context.log("conflict", { path: item.path, formattingOnly: true });
   });
   // 并发下顺序不定；排一下让界面稳定。
