@@ -30,6 +30,15 @@ export async function noteToPortableMarkdown(note: Note, opts: { inlineAssets?: 
   return opts.inlineAssets ? out : out.split("](./").join("](");
 }
 
+/**
+ * HTML 页面的导出：原样下载这个文件（入库时资源已内联，拿走双击就能打开）。
+ * 扩展名跟着源文件（`.html` / `.htm`），不经过 Markdown 管线。
+ */
+export function exportHtmlPage(note: Note): void {
+  const ext = /\.htm$/i.test(note.id) ? ".htm" : ".html";
+  download(new Blob([note.content], { type: "text/html;charset=utf-8" }), `${sanitizeName(note.title)}${ext}`);
+}
+
 export async function exportNoteMarkdown(note: Note, opts: { inlineAssets?: boolean } = {}): Promise<void> {
   const markdown = await noteToPortableMarkdown(note, opts);
   download(new Blob([markdown], { type: "text/markdown;charset=utf-8" }), `${sanitizeName(note.title)}.md`);
@@ -122,6 +131,7 @@ export async function buildWorkspaceZip(options: ZipOptions = {}): Promise<Blob>
       `导出时间：${formatDateTime(Date.now())}`,
       "",
       "这个压缩包就是笔记本文件夹本身：目录结构、Markdown 正文、图片（跟笔记走的 `<笔记名>.assets/`，以及早年的公共 assets/）都在。",
+      "画布（`.canvas` 文件）也随库一起打包，解压后照常打开。",
       `直接解压到任意位置，再用 Opennote「打开文件夹」选择它即可继续写。`,
       `${META_DIR}/ 里是星标、历史快照等附加信息，不需要可以直接删掉。`,
       "",

@@ -13,18 +13,11 @@
  * 3. **`SyncProviderError` 的 code 映射只该有一份**（见 `codeForStatus`）——
  *    文案与 code 分散在多处时，UI 会开始匹配字符串。
  *
- * ## 401 的语义：**「密钥已被轮换」**（这是文档明确拍板的，不是我猜的）
+ * ## 401 的语义：**「需要重新登录」**
  *
- * §1.5 代价 2 / 第 271 行 / 第 2030 行三处都写了同一件事：
- *
- * > 客户端收到 401 时要给明确文案：「此设备的密钥已被轮换，请导入新密钥」
- *
- * 依据是**概率**：`authToken` 是 256 位随机值的派生，一个「手抖打错」的密钥几乎不可能
- * 恰好命中另一个账号。所以 401 在实践中就是「这台设备的密钥过期了」。
- * 把它当成「密钥输错了」会让用户去反复重输一个其实没问题的密钥。
- *
- * ⚠️ 唯一的例外是**真的换了密钥**（用户在另一台设备上导入了一个不同的账号）——
- * 那时 401 也是对的：新密钥还没生效，应当去导入。所以这个映射没有歧义。
+ * 凭据是服务端发的设备会话（`docs/执行-同步重写-2026-11-02.md`）。401 只有三种来路：
+ * 这台设备在别处被移除、账号改过 / 重置过密码、会话被吊销 —— 对用户都是同一件事：
+ * 回到「设置 → 同步」重新登录。403 `disabled` 单独一种：账号被管理员停用了，重新登录也没用。
  */
 
 import { SyncProviderError, type SyncProviderError as SyncProviderErrorType } from "./provider-types";
@@ -96,54 +89,113 @@ export interface HttpTransportOptions {
  */
 export interface FetchSendOptions {
   /**
-   * 单次请求的超时（毫秒）。默认 30000，**与桌面代理对齐**（`electron/sync.cjs` 的默认值）。
+   * **无进展**超时（毫秒）：连上之前、等响应头、以及读正文时**两块数据之间**最多等多久。
+   * 默认 30000，**与桌面代理对齐**（`electron/sync.cjs` 的默认值）。
    *
    * 没有它的时候：一条挂起却不失败的连接（中间设备静默丢包）会让这个 worker **永远等下去** ——
    * 同步状态停在「同步中」，不进重试、也不报离线（L6）。
+   *
+   * ⚠️ 它以前是**整个请求**的总时限：慢线路（实测约 80 KB/s）上一个 1.4 MB 的笔记还在稳定地传，
+   * 30 秒一到照样被掐断，然后整轮重来 —— 真机上一篇大笔记要 2~3 分钟才同步完。
+   * 现在只要数据还在来就不算超时；真正的总上限是 `maxMs`。
    */
   timeoutMs?: number;
+  /** 单个请求的总上限（毫秒），默认 10 分钟：防止「一直有一点点数据」的连接无限拖下去。 */
+  maxMs?: number;
   /** 测试注入（默认 `globalThis.fetch`）。 */
   fetchImpl?: (url: string, init: RequestInit) => Promise<Response>;
 }
 
+/** 时长的人话：1 秒以上按秒，以下按毫秒（报错文案会进同步面板）。 */
+function spanText(ms: number): string {
+  return ms >= 1000 ? `${Math.round(ms / 1000)} 秒` : `${ms} 毫秒`;
+}
+
+function timeoutError(message: string): Error {
+  return Object.assign(new Error(message), { name: "TimeoutError" });
+}
+
 /**
- * 造一个「到点必失败」的 signal。
+ * 发一个请求并读完正文，**无进展**超过 `idleMs` 或总时长超过 `maxMs` 就中止。
  *
- * 优先用 `AbortSignal.timeout`（现代浏览器 / Node 18+）；没有它就退回
- * `AbortController` + `setTimeout`，并在 `finally` 里清掉定时器
- * （否则 Node 侧的测试进程会被一个挂着的定时器拖住）。
+ * 读正文走 `response.body` 的 reader，每来一块数据就重新计时；
+ * 没有 `body`（某些测试替身）时退回 `arrayBuffer()`，那时只剩总时限与首包时限。
  */
-function timeoutSignal(ms: number): { signal: AbortSignal; cancel: () => void } {
-  const anyAbort = AbortSignal as unknown as { timeout?: (value: number) => AbortSignal };
-  if (typeof anyAbort.timeout === "function") {
-    return { signal: anyAbort.timeout(ms), cancel: () => undefined };
-  }
+export async function fetchWithIdleTimeout(
+  call: (url: string, init: RequestInit) => Promise<Response>,
+  url: string,
+  init: RequestInit,
+  limits: { idleMs: number; maxMs: number },
+): Promise<{ response: Response; bytes: Uint8Array }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  return { signal: controller.signal, cancel: () => clearTimeout(timer) };
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const armIdle = (): void => {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => controller.abort(timeoutError(`${spanText(limits.idleMs)}没有收到任何数据`)), limits.idleMs);
+  };
+  const maxTimer = setTimeout(() => controller.abort(timeoutError(`请求超过 ${spanText(limits.maxMs)}`)), limits.maxMs);
+  /*
+   * 中止时**直接让正在等的那一步失败**，不指望 fetch 实现自己把正文流弄出错：
+   * 不是每个实现都把 signal 接到正文上。也不用 `reader.cancel()` 收尾 —— 那会让
+   * 正在等的 `read()` 返回 `done`，一份被截断的正文就会被当成「读完了」。
+   */
+  const aborted = new Promise<never>((_resolve, reject) => {
+    controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+  });
+  aborted.catch(() => undefined);
+  armIdle();
+  try {
+    const response = await Promise.race([call(url, { ...init, signal: controller.signal }), aborted]);
+    armIdle();
+    const body = response.body;
+    if (body === null || typeof body.getReader !== "function") {
+      return { response, bytes: new Uint8Array(await Promise.race([response.arrayBuffer(), aborted])) };
+    }
+    const reader = body.getReader();
+    controller.signal.addEventListener("abort", () => void reader.cancel(controller.signal.reason).catch(() => undefined), { once: true });
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await Promise.race([reader.read(), aborted]);
+      if (done) break;
+      parts.push(value);
+      total += value.byteLength;
+      armIdle();
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      bytes.set(part, offset);
+      offset += part.byteLength;
+    }
+    return { response, bytes };
+  } finally {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    clearTimeout(maxTimer);
+  }
 }
 
 export function fetchSend(options: FetchSendOptions = {}): HttpSend {
-  const timeoutMs = options.timeoutMs ?? 30_000;
+  const idleMs = options.timeoutMs ?? 30_000;
+  const maxMs = options.maxMs ?? 10 * 60_000;
   const call: (url: string, init: RequestInit) => Promise<Response> =
     options.fetchImpl ?? ((url, init) => globalThis.fetch(url, init));
   return async (request) => {
-    const { signal, cancel } = timeoutSignal(timeoutMs);
-    try {
-      const response = await call(request.url, {
+    const { response, bytes } = await fetchWithIdleTimeout(
+      call,
+      request.url,
+      {
         method: request.method,
         headers: request.headers,
-        signal,
         ...(request.body === undefined ? {} : { body: request.body as BodyInit }),
-      });
-      const headers: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        headers[key.toLowerCase()] = value;
-      });
-      return { status: response.status, headers, bytes: new Uint8Array(await response.arrayBuffer()) };
-    } finally {
-      cancel();
-    }
+      },
+      { idleMs, maxMs },
+    );
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      headers[key.toLowerCase()] = value;
+    });
+    return { status: response.status, headers, bytes };
   };
 }
 
@@ -270,8 +322,8 @@ const textDecoder = new TextDecoder();
  * 放在这里（而不是各 provider 里）是为了**只有一份映射**：UI 依赖 code 而不是文案。
  */
 export function codeForStatus(status: number, serverCode?: string): SyncProviderError["code"] {
-  if (status === 401) return "rotated"; // 见模块头：文档拍板「401 = 密钥已被轮换」
-  if (status === 403) return serverCode === "disabled" ? "rotated" : "forbidden";
+  if (status === 401) return "signed-out"; // 见模块头：401 = 这台设备的登录失效了
+  if (status === 403) return serverCode === "disabled" ? "disabled" : "forbidden";
   if (status === 404) return "not-found";
   if (status === 409) return "conflict";
   if (status === 413) return "quota";
@@ -575,7 +627,7 @@ export class HttpTransport {
     } catch {
       // 不是 JSON（例如反代返回的 HTML 错误页）：保留默认文案。
     }
-    return new SyncProviderError(codeForStatus(response.status, serverCode), message, response.status);
+    return new SyncProviderError(codeForStatus(response.status, serverCode), message, response.status, serverCode);
   }
 
   /** 解析 JSON 响应体。 */

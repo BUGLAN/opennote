@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveTags, deriveTitle, splitFrontMatter } from "../utils";
+import { derivePlaceholderTitle, deriveTags, splitFrontMatter } from "../utils";
 import { validateImportEnvelope, type ImportEnvelope } from "./envelope";
 import {
   FRONT_MATTER_KEYS,
@@ -89,9 +89,9 @@ describe("front-matter 字节级模板（契约 §3.2 / 附录 A.2）", () => {
     expect(renderMarkdown(envelope, "正文")).toContain("tags: [乙, 甲]");
   });
 
-  it("正文必须以 `# <title>` 开头（deriveTitle 不读 front-matter）", () => {
+  it("正文必须以 `# <title>` 开头（应用不读 front-matter 的 title）", () => {
     const text = renderMarkdown(parsed(), "在浏览器里剪下的一段话。");
-    expect(deriveTitle(text)).toBe("写给工程师的本地优先笔记");
+    expect(derivePlaceholderTitle(text)).toBe("写给工程师的本地优先笔记");
     expect(splitFrontMatter(text).body.startsWith("\n# 写给工程师的本地优先笔记")).toBe(true);
   });
 

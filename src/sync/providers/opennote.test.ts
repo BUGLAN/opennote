@@ -431,13 +431,13 @@ describe("§4.7 · HTTP 映射的形状（这是 provider 唯一的职责）", (
    错误映射与退避（§1.5 代价 2、§4.11）
    ============================================================================ */
 
-describe("§1.5 代价 2 · 401 = **密钥已被轮换**（文档明确拍板，不是我猜的）", () => {
-  it("401 → code `rotated`（因为 256 位令牌「打错」在实践中不可能）", () => {
-    expect(codeForStatus(401)).toBe("rotated");
+describe("401 = **需要重新登录**；403 disabled = **账号已被停用**", () => {
+  it("401 → code `signed-out`（会话被吊销 / 过期：回去重新登录）", () => {
+    expect(codeForStatus(401)).toBe("signed-out");
   });
 
-  it("403 + 服务端 `code: disabled` → 也是 `rotated`（账号被禁用，同一个出口）", () => {
-    expect(codeForStatus(403, "disabled")).toBe("rotated");
+  it("403 + 服务端 `code: disabled` → `disabled`（账号被停用，重新登录也没用）", () => {
+    expect(codeForStatus(403, "disabled")).toBe("disabled");
     expect(codeForStatus(403, "forbidden")).toBe("forbidden");
   });
 
@@ -448,10 +448,10 @@ describe("§1.5 代价 2 · 401 = **密钥已被轮换**（文档明确拍板，
     expect(codeForStatus(500)).toBe("server");
   });
 
-  it("provider 把 401 真的翻成 `rotated`（映射不是只写在函数里）", async () => {
+  it("provider 把 401 真的翻成 `signed-out`（映射不是只写在函数里）", async () => {
     const stub = new StubV1();
     stub.failNext = { status: 401, body: '{"error":"令牌无效","code":"unauthorized"}' };
-    await expect(opennoteOn(stub).tree()).rejects.toMatchObject({ code: "rotated", status: 401 });
+    await expect(opennoteOn(stub).tree()).rejects.toMatchObject({ code: "signed-out", status: 401 });
   });
 
   it("服务端的可读文案会被带进错误信息（不是「HTTP 401」这种无用话）", async () => {

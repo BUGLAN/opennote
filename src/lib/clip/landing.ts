@@ -36,10 +36,11 @@ export { assetFinalName, assetsDirFor, markdownRef, relativeAssetRef, SHARED_ASS
 /**
  * 请求路径 = `joinPath(folder, sanitizeName(title, "未命名") + ".md")`（契约 §3.1）。
  * `folder` 为 `null`/`""` 时是**工作区根目录**；目录不存在时逐段创建，不是失败。
+ * `ext` 只有 HTML 页面（`format: "html"` → `.html`）会改它。
  */
-export function requestedNotePath(folder: string | null, title: string): string {
+export function requestedNotePath(folder: string | null, title: string, ext = ".md"): string {
   const dir = normalizeFolder(folder);
-  return joinPath(dir, `${sanitizeName(title, "未命名")}.md`);
+  return joinPath(dir, `${sanitizeName(title, "未命名")}${ext}`);
 }
 
 /** 逐段 `mkdir`（幂等；三段后端都会自动创建中间层）。 */

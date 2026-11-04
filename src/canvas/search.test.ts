@@ -1,0 +1,72 @@
+/**
+ * 画布搜索纯逻辑测试：匹配面（文本/文件标题/路径/链接/分组/HTML 卡纯文本/边标签）、
+ * 大小写、空查询。
+ */
+import { describe, expect, it } from "vitest";
+import { canvasPlainText, searchCanvas } from "./search";
+import type { CanvasDocument } from "./types";
+
+const doc: CanvasDocument = {
+  nodes: [
+    { id: "t1", type: "text", x: 0, y: 0, width: 10, height: 10, text: "先把问题列出来" },
+    { id: "f1", type: "file", x: 0, y: 0, width: 10, height: 10, file: "读书/系统设计.md" },
+    { id: "l1", type: "link", x: 0, y: 0, width: 10, height: 10, url: "https://example.com/PR" },
+    { id: "g1", type: "group", x: 0, y: 0, width: 10, height: 10, label: "评审组" },
+    { id: "h1", type: "html", x: 0, y: 0, width: 10, height: 10, html: "<style>.a{color:red}</style><h1>状态板</h1><p>服务正常</p>" },
+    { id: "u1", type: "embed", src: "embed 不参与搜索" },
+  ],
+  edges: [{ id: "e1", fromNode: "t1", toNode: "f1", label: "展开评审" }],
+};
+
+describe("searchCanvas", () => {
+  const titles: Record<string, string> = { "读书/系统设计.md": "系统设计入门" };
+  const search = (q: string) => searchCanvas(doc, q, (id) => titles[id] ?? null);
+
+  it("匹配文本卡文字与链接 url（大小写不敏感）", () => {
+    expect(search("问题").map((m) => m.id)).toEqual(["t1"]);
+    expect(search("pr").map((m) => m.id)).toEqual(["l1"]);
+  });
+
+  it("匹配文件卡标题（经 noteTitle）与路径", () => {
+    expect(search("系统设计").map((m) => m.id)).toEqual(["f1"]);
+    expect(search("读书/").map((m) => m.id)).toEqual(["f1"]);
+  });
+
+  it("匹配分组 label、边标签；未知类型节点不参与", () => {
+    expect(search("example.com").map((m) => m.id)).toEqual(["l1"]);
+    expect(search("评审").map((m) => m.id)).toEqual(["g1", "e1"]);
+    expect(search("embed")).toEqual([]);
+  });
+
+  it("HTML 卡认纯文本（标题/正文），不认标记与样式", () => {
+    expect(search("状态板").map((m) => m.id)).toEqual(["h1"]);
+    expect(search("服务正常").map((m) => m.id)).toEqual(["h1"]);
+    // <style> 块整段消失：标记与 CSS 都不是搜索面
+    expect(search("color")).toEqual([]);
+    expect(search("h1")).toEqual([]);
+  });
+
+  it("空查询与纯空白返回空", () => {
+    expect(search("")).toEqual([]);
+    expect(search("   ")).toEqual([]);
+  });
+
+  it("命中按文档序（节点在前、边在后），kind 标注正确", () => {
+    const matches = search("评");
+    expect(matches.map((m) => `${m.kind}:${m.id}`)).toEqual(["node:g1", "edge:e1"]);
+    expect(search("e").map((m) => m.id)).toEqual(["l1"]);
+  });
+});
+
+describe("canvasPlainText", () => {
+  it("取文本卡/网址/分组名/HTML 纯文本/边标签，跳过文件卡与未知节点，空白折成一个空格", () => {
+    const text = canvasPlainText(JSON.stringify(doc));
+    expect(text).toBe("先把问题列出来 https://example.com/PR 评审组 状态板 服务正常 展开评审");
+    expect(text).not.toContain("系统设计");
+    expect(text).not.toContain("embed");
+  });
+
+  it("读不出的 JSON 返回空串", () => {
+    expect(canvasPlainText("{ not json")).toBe("");
+  });
+});

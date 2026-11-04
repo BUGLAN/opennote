@@ -1,12 +1,23 @@
 import type { ReactNode } from "react";
 import type { UiSettings } from "../data/types";
+import { useStore } from "../lib/store";
 import { cn } from "../lib/utils";
+import { cursorStore } from "./cursorStore";
 import { Icon } from "./Icons";
-import type { CursorInfo } from "./EditorPane";
 
 interface StatusBarProps {
   counts: { chars: number; words: number; minutes: number };
-  cursor: CursorInfo;
+  /**
+   * 画布活跃时的卡片/连线统计（普通笔记为 `null`）。非空时字数槽位换成
+   * 「N 张卡片 · M 条连线」（仍受 `showWordCount` 开关管），光标行列不渲染
+   * （画布没有行列概念，残留上一次编辑器的值只会误导）。
+   */
+  canvas: { cards: number; edges: number } | null;
+  /**
+   * 活跃标签是 HTML 页面：度量槽位只写「HTML 页面 · 只读」—— 字数是标记的字数、
+   * 行列是上一个编辑器的残值，两个都只会误导。
+   */
+  htmlPage: boolean;
   settings: UiSettings;
   locationLabel: string;
   snapshotCount: number;
@@ -59,6 +70,17 @@ interface StatusBarProps {
  * 所有带文字的按钮都把文字包进 `.statusbar__label`：窄窗只丢这段文字、留图标 + `title`，
  * 所以每个按钮都必须同时给 `aria-label`（`Icon` 是 `aria-hidden`，文字一没按钮就没有可访问名）。
  */
+/** 行列读数自己订阅 `cursorStore`：光标移动只重渲染这一小段，不牵动整条状态栏。 */
+function CursorPosition(): ReactNode {
+  const cursor = useStore(cursorStore);
+  return (
+    <span className="statusbar__item statusbar__item--cursor" title="光标位置">
+      行 {cursor.line} · 列 {cursor.column}
+      {cursor.selected ? ` · 选中 ${cursor.selected}` : ""}
+    </span>
+  );
+}
+
 export function StatusBar(props: StatusBarProps): ReactNode {
   const { settings } = props;
   const inboxText = props.inboxPending ? `收件箱 ${props.inboxPending}` : "收件箱";
@@ -86,17 +108,27 @@ export function StatusBar(props: StatusBarProps): ReactNode {
             左侧那三段（存放位置 / 文件数 / 文件夹）留得更久。 */}
         <span className="statusbar__spacer" />
 
-        {settings.showWordCount ? (
-          <span className="statusbar__item statusbar__item--compact" title="字数统计">
-            {props.counts.words.toLocaleString("zh-CN")} 字 · {props.counts.chars.toLocaleString("zh-CN")} 字符 · 约{" "}
-            {props.counts.minutes} 分钟
+        {props.htmlPage ? (
+          <span className="statusbar__item statusbar__item--compact" title="HTML 页面在应用内只读渲染">
+            <Icon name="lock" size={12} />
+            HTML 页面 · 只读
           </span>
+        ) : settings.showWordCount ? (
+          props.canvas ? (
+            <span className="statusbar__item statusbar__item--compact" title="画布统计">
+              {props.canvas.cards.toLocaleString("zh-CN")} 张卡片 · {props.canvas.edges.toLocaleString("zh-CN")} 条连线
+            </span>
+          ) : (
+            <span className="statusbar__item statusbar__item--compact" title="字数统计">
+              {props.counts.words.toLocaleString("zh-CN")} 字 · {props.counts.chars.toLocaleString("zh-CN")} 字符 · 约{" "}
+              {props.counts.minutes} 分钟
+            </span>
+          )
         ) : null}
 
-        <span className="statusbar__item statusbar__item--cursor" title="光标位置">
-          行 {props.cursor.line} · 列 {props.cursor.column}
-          {props.cursor.selected ? ` · 选中 ${props.cursor.selected}` : ""}
-        </span>
+        {props.canvas || props.htmlPage ? null : (
+          <CursorPosition />
+        )}
       </div>
 
       <div className="statusbar__actions">

@@ -49,11 +49,14 @@ export interface PanelAsset {
  */
 const ASSETS: Record<string, string> = {
   "index.html": "text/html; charset=utf-8",
-  "api.js": "text/javascript; charset=utf-8",
-  "views.js": "text/javascript; charset=utf-8",
+  "theme.js": "text/javascript; charset=utf-8",
   "icons.js": "text/javascript; charset=utf-8",
+  "api.js": "text/javascript; charset=utf-8",
+  "dom.js": "text/javascript; charset=utf-8",
+  "public.js": "text/javascript; charset=utf-8",
+  "console.js": "text/javascript; charset=utf-8",
   "app.js": "text/javascript; charset=utf-8",
-  "styles.css": "text/css; charset=utf-8",
+  "console.css": "text/css; charset=utf-8",
   "tokens.css": "text/css; charset=utf-8",
   "assets/fonts/figtree-latin-wght-normal.woff2": "font/woff2",
   "assets/fonts/newsreader-latin-opsz-normal.woff2": "font/woff2",

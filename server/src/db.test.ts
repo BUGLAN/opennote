@@ -21,17 +21,20 @@ describe("首次打开", () => {
       [
         "accounts",
         "audit",
-        "bootstrap_codes",
         "client_stats",
         "devices",
+        "identities",
         "invites",
         "memberships",
         "notebook_invites",
         "notebook_provisioning",
         "notebook_usage",
         "notebooks",
+        "password_resets",
         "quota_usage",
         "schema_version",
+        "server_settings",
+        "sessions",
         "sync_activity",
       ].sort(),
     );
@@ -91,37 +94,31 @@ describe("schema 的安全相关约束", () => {
     db.close();
   });
 
-  it("`accounts` 里**没有**口令字段（没有口令体系，§1.5）", () => {
+  it("`accounts` 只存密码哈希，没有明文密码或令牌列（v4，`docs/执行-同步重写-2026-11-02.md`）", () => {
     const db = openDatabase({ path: ":memory:" });
     const columns = (db.prepare("PRAGMA table_info(accounts)").all() as unknown as { name: string }[]).map((row) => row.name);
-    for (const forbidden of ["password", "password_hash", "salt", "username", "email"]) {
+    for (const forbidden of ["password", "token", "auth_hash", "salt"]) {
       expect(columns).not.toContain(forbidden);
     }
-    // 该有的要有。
-    expect(columns).toContain("auth_hash");
+    expect(columns).toContain("email");
+    expect(columns).toContain("password_hash");
     expect(columns).toContain("wrapped_enc_root");
     db.close();
   });
 
-  it("`accounts.auth_hash` 有唯一索引（认证走索引查找，§4.4）", () => {
+  it("`sessions.token_hash` 有唯一索引（鉴权走索引查找）", () => {
     const db = openDatabase({ path: ":memory:" });
-    const indexes = (db.prepare("PRAGMA index_list(accounts)").all() as unknown as { name: string; unique: number }[]).filter(
-      (row) => row.unique === 1,
-    );
-    expect(indexes.length).toBeGreaterThan(0);
-    // 唯一性真的生效。
+    db.prepare("INSERT INTO accounts (id, email, created_at) VALUES ('acc', 'a@example.com', 1)").run();
     const insert = (id: string) =>
-      db
-        .prepare("INSERT INTO accounts (id, auth_hash, wrapped_enc_root, is_admin, status, created_at) VALUES (?, 'same-hash', 'w', 0, 'active', 1)")
-        .run(id);
-    insert("a1");
-    expect(() => insert("a2")).toThrow();
+      db.prepare("INSERT INTO sessions (id, account_id, token_hash, kind, created_at) VALUES (?, 'acc', 'same-hash', 'device', 1)").run(id);
+    insert("s1");
+    expect(() => insert("s2")).toThrow();
     db.close();
   });
 
   it("`notebooks.db_name` 唯一（库名不透明且不冲突，§3.1）", () => {
     const db = openDatabase({ path: ":memory:" });
-    db.prepare("INSERT INTO accounts (id, auth_hash, wrapped_enc_root, is_admin, status, created_at) VALUES ('acc', 'h', 'w', 0, 'active', 1)").run();
+    db.prepare("INSERT INTO accounts (id, email, is_admin, status, created_at) VALUES ('acc', 'a@example.com', 0, 'active', 1)").run();
     const insert = (id: string) =>
       db
         .prepare("INSERT INTO notebooks (id, owner_id, name, db_name, crypto_mode, created_at) VALUES (?, 'acc', 'n', 'nb-same', 'none', 1)")
@@ -133,7 +130,7 @@ describe("schema 的安全相关约束", () => {
 
   it("`notebooks.crypto_mode` 默认 'none'（§11.3 A 拍板：P2 先明文，P4 再改默认值）", () => {
     const db = openDatabase({ path: ":memory:" });
-    db.prepare("INSERT INTO accounts (id, auth_hash, wrapped_enc_root, is_admin, status, created_at) VALUES ('acc', 'h', 'w', 0, 'active', 1)").run();
+    db.prepare("INSERT INTO accounts (id, email, is_admin, status, created_at) VALUES ('acc', 'a@example.com', 0, 'active', 1)").run();
     db.prepare("INSERT INTO notebooks (id, owner_id, name, db_name, created_at) VALUES ('nb', 'acc', 'n', 'nb-x', 1)").run();
     const row = db.prepare("SELECT crypto_mode FROM notebooks WHERE id = 'nb'").get() as unknown as { crypto_mode: string };
     expect(row.crypto_mode).toBe("none");

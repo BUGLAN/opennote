@@ -25,6 +25,7 @@ import { Modal } from "./Overlays";
 import { createStore, useStore } from "../lib/store";
 import { cn, formatRelativeTime } from "../lib/utils";
 import { setImportConflictResolver, type ImportConflictChoice } from "../lib/clip/receive";
+import { Leaving, usePresence } from "./presence";
 
 export type ConflictKind = "same-name" | "same-url" | "editing";
 
@@ -240,10 +241,15 @@ function settleConflict(choice: ConflictChoice): void {
 
 /** 挂在应用根部的宿主组件：没有冲突请求时渲染 `null`。 */
 export function ConflictDialogHost(): ReactNode {
-  const pending = useStore(conflictStore);
+  // 关掉后多留一拍放退场动画（见 `presence.tsx`）。
+  const { value: pending, leaving } = usePresence(useStore(conflictStore));
   if (!pending) return null;
   // key 用请求身份，保证换一条请求时内部选中态重新按推荐项初始化。
-  return <ConflictDialog key={String(pending.request.title) + pending.request.kind} {...pending.request} onResolve={settleConflict} />;
+  return (
+    <Leaving leaving={leaving}>
+      <ConflictDialog key={String(pending.request.title) + pending.request.kind} {...pending.request} onResolve={settleConflict} />
+    </Leaving>
+  );
 }
 
 /** 把 `receiveEnvelope()` 的「正在编辑」询问接到这个对话框上（C3 在根部调用一次）。 */

@@ -164,7 +164,7 @@ describe("★ L6 · 网页/移动端的发送必须有超时", () => {
         }),
     });
 
-    await expect(send({ method: "GET", url: "https://notes.example.com/v1/tree", headers: {} })).rejects.toThrow(/abort/i);
+    await expect(send({ method: "GET", url: "https://notes.example.com/v1/tree", headers: {} })).rejects.toThrow(/没有收到任何数据|abort/i);
   });
 
   it("正常响应不受影响（超时只是兜底）", async () => {
@@ -199,5 +199,47 @@ describe("★ L9 · 同一账号的多个工作区共用令牌桶", () => {
     new HttpTransport({ baseUrl: "https://notes.example.com", authToken: "token-a", notebookId: "nb-1", now, sleep });
     new HttpTransport({ baseUrl: "https://notes.example.com", authToken: "token-a", notebookId: "nb-2", now, sleep });
     expect(sharedPacerCount()).toBe(0);
+  });
+});
+
+/** 一个按节奏吐数据的响应：每 `everyMs` 来一块，`stallAfter` 块之后就再也不来（模拟挂死的连接）。 */
+function trickleResponse(chunks: number, everyMs: number, stallAfter = Infinity): Response {
+  let sent = 0;
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (sent >= stallAfter) return new Promise<void>(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, everyMs));
+      if (sent >= chunks) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(new Uint8Array([sent]));
+      sent += 1;
+    },
+  });
+  return new Response(body, { status: 200 });
+}
+
+describe("★ 超时是「无进展才超时」，不是总时限（真机：1.4 MB 笔记在慢线路上反复 30 秒超时）", () => {
+  it("数据一直在来：总时长远超 timeoutMs 也能读完", async () => {
+    const send = fetchSend({ timeoutMs: 60, fetchImpl: async () => trickleResponse(10, 20) });
+    const started = Date.now();
+    const response = await send({ method: "GET", url: "https://notes.example.com/v1/file", headers: {} });
+    expect(Date.now() - started).toBeGreaterThan(150);
+    expect([...response.bytes]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it("读到一半就不来了 ⇒ timeoutMs 后失败（挂死的连接仍然会被掐掉）", async () => {
+    const send = fetchSend({ timeoutMs: 40, fetchImpl: async (_url, init) => {
+      const response = trickleResponse(10, 5, 2);
+      init.signal?.addEventListener("abort", () => undefined);
+      return response;
+    } });
+    await expect(send({ method: "GET", url: "https://notes.example.com/v1/file", headers: {} })).rejects.toThrow(/没有收到任何数据|abort/i);
+  });
+
+  it("总上限 maxMs 兜底：一直有一点点数据也不会无限拖下去", async () => {
+    const send = fetchSend({ timeoutMs: 1000, maxMs: 60, fetchImpl: async () => trickleResponse(100, 10) });
+    await expect(send({ method: "GET", url: "https://notes.example.com/v1/file", headers: {} })).rejects.toThrow(/超过|abort/i);
   });
 });

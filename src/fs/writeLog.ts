@@ -60,6 +60,13 @@ export interface WorkspaceWrite {
    * 仍然报告出来是为了诊断 —— 「目录建了但一条都没写」是一个有意义的信号。
    */
   content: boolean;
+  /**
+   * 磁盘被**应用以外**改过，但**不知道是哪些路径**（`paths` 为空）。
+   *
+   * 来源：watcher 的旧载荷 / 平台不给文件名、浏览器与手机端「回到前台重扫」。
+   * 订阅方拿不到路径就没法按路径过滤，只能自己去核对一遍本地（同步层：`hasLocalChanges()`）。
+   */
+  pathsUnknown?: boolean;
 }
 
 export type WorkspaceWriteListener = (write: WorkspaceWrite) => void;
@@ -86,7 +93,7 @@ export function workspaceWriteListenerCount(): number {
 
 /** 把一次写入广播给所有订阅者。**只由 `writeObserver` 与库层的落盘点调用。** */
 export function emitWorkspaceWrite(write: WorkspaceWrite): void {
-  if (write.paths.length === 0) return;
+  if (write.paths.length === 0 && write.pathsUnknown !== true) return;
   for (const listener of [...listeners]) {
     try {
       listener(write);
@@ -160,6 +167,16 @@ export function reportWorkspaceWrite(write: WorkspaceWrite): void {
   if (paths.length === 0) return;
   const allowed = paths.filter((path) => !isSilenced(path));
   if (allowed.length > 0) emitWorkspaceWrite({ paths: allowed, content: write.content });
+}
+
+/**
+ * 报告一次**外部**改动，但说不出路径（见 `WorkspaceWrite.pathsUnknown`）。
+ *
+ * 只由库层的「外部改动」入口调用（watcher 拿不到路径时、聚焦重扫时）。
+ * 能拿到路径的外部改动走 `reportWorkspaceWrite`（那条会按路径过滤与静默）。
+ */
+export function reportUnknownWorkspaceWrite(): void {
+  emitWorkspaceWrite({ paths: [], content: true, pathsUnknown: true });
 }
 
 /** 测试用：清空静默表（订阅者列表不清 —— 那是订阅方自己的责任）。 */

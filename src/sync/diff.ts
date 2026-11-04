@@ -128,6 +128,17 @@ export function pushIsEmpty(plan: PushPlan): boolean {
 export interface PullPlan {
   /** 远端新增或远端已改、且本地没动 —— 可以直接覆盖本地。 */
   download: { path: string; sha: string }[];
+  /**
+   * 远端变了、但本地**已经是同一份**（内容标识相等）—— 不用下载，只把账本对齐到远端这一版。
+   *
+   * 两种来源：账本里还没有它而本地恰好已有同一份（上一轮写下来了、却在记账之前失败了；
+   * 或两台设备各有一份一样的），以及「两边都改成了同一份」（false conflict）。
+   * 少了它，前者每次重试都要把已经落盘的文件**重新下载一遍**（真机：一轮里一个大文件超时，
+   * 下一轮把前面几百篇全部重拉）；后者账本永远对不齐，每轮都重判一次。
+   *
+   * 只在同一个哈希空间里才会出现（GitHub 通道远端是 blob SHA-1，永远不等，这一项恒为空）。
+   */
+  inSync?: { path: string; sha: string }[];
   /** 远端删了、本地没动 —— 可以删本地。 */
   removeLocal: string[];
   /** 两边都改了（含「本地删了 / 远端改了」）：**不动**，列出来给人看。 */
@@ -145,11 +156,27 @@ export interface PullPlan {
  * 做判定，所以树不完整时**调用方必须拒绝执行 `removeLocal`**（§6.4 规则 1）。
  * 这样拆分是为了让「误删」这件最严重的事有一个**单一、可测**的闸门，
  * 而不是散在纯函数的条件分支里。
+ *
+ * ## `options.pullable`：拉取范围必须与**推送范围**一致
+ *
+ * 默认 `isMaterializable` 是 GitHub 通道的需要：那边的远端是一个**别人也在写的仓库**，
+ * 里面的源码我们从没导入过。`opennote` 通道不同 —— 远端只有我们自己的设备推上去的东西，
+ * 而推送侧推的是「同步范围内的一切」（`ignore.ts` 第 ③ 层）。两边范围不一致时，
+ * 第二台设备上已有的 `.py` / `Dockerfile` 永远进不了账本 ⇒ 每一轮都被当成「本地新增」去推、
+ * 每一轮撞 409、每一轮报一条冲突（真机：94 条只差换行符的「冲突」，一天 990 次）。
+ * 所以引擎传 `() => true`（忽略路径在进来之前已经滤掉了）。
  */
-export function planPull(baseline: BaselineLike, remote: RemoteTree, local: LocalFile[]): PullPlan {
+export function planPull(
+  baseline: BaselineLike,
+  remote: RemoteTree,
+  local: LocalFile[],
+  options: { pullable?: (path: string) => boolean } = {},
+): PullPlan {
+  const pullable = options.pullable ?? isMaterializable;
   const localByPath = new Map(local.map((file) => [file.path, file]));
   const remoteByPath = new Map(remote.entries.map((entry) => [entry.path, entry]));
   const download: PullPlan["download"] = [];
+  const inSync: NonNullable<PullPlan["inSync"]> = [];
   const removeLocal: string[] = [];
   const conflicts: PullPlan["conflicts"] = [];
 
@@ -159,7 +186,7 @@ export function planPull(baseline: BaselineLike, remote: RemoteTree, local: Loca
     const remoteChanged = !known || known.remoteHash !== entry.hash;
     if (!remoteChanged) continue;
 
-    if (!isMaterializable(path)) continue; // 源码 / 配置：只更新下面那一轮账本，绝不落地
+    if (!pullable(path)) continue; // 不在拉取范围（GitHub 通道的源码 / 配置）：绝不落地
     if (!known) {
       /*
        * 远端新增。分两种：
@@ -171,6 +198,11 @@ export function planPull(baseline: BaselineLike, remote: RemoteTree, local: Loca
       const localFile = localByPath.get(path);
       if (localFile !== undefined && localFile.hash !== entry.hash) {
         conflicts.push({ path, reason: "both-modified" });
+        continue;
+      }
+      if (localFile !== undefined) {
+        // 本地已经是同一份：只记账，不下载（见 `PullPlan.inSync`）。
+        inSync.push({ path, sha: entry.hash });
         continue;
       }
       download.push({ path, sha: entry.hash });
@@ -208,7 +240,8 @@ export function planPull(baseline: BaselineLike, remote: RemoteTree, local: Loca
        * 依据：rclone bisync 的官方定义；二次来源是 Unison 手册的 "false conflict"。
        */
       if (localFile.hash === entry.hash) {
-        // 已经同步过了：只更新账本（调用方负责），不进任何计划。
+        // 已经同步过了：不下载，只把账本对齐（调用方按 `inSync` 记账）。
+        inSync.push({ path, sha: entry.hash });
         continue;
       }
       conflicts.push({ path, reason: "both-modified" });
@@ -226,7 +259,7 @@ export function planPull(baseline: BaselineLike, remote: RemoteTree, local: Loca
      * 与下载分支用**同一个判据**（`isMaterializable`）：以前删除这一侧没判，
      * 于是图片会进 `removeLocal`，而引擎那一侧又只删 Markdown ⇒ 每轮重算、永远删不掉（L5）。
      */
-    if (!isMaterializable(path)) continue;
+    if (!pullable(path)) continue;
     const localFile = localByPath.get(path);
     if (!localFile) continue; // 两边都没了
     const localChanged = localFile.hash !== known.localHash;
@@ -234,7 +267,8 @@ export function planPull(baseline: BaselineLike, remote: RemoteTree, local: Loca
     else removeLocal.push(path);
   }
 
-  return { download, removeLocal, conflicts };
+  // `inSync` 只在非空时出现：GitHub 通道（恒为空）的计划形状保持原样。
+  return { download, ...(inSync.length > 0 ? { inSync } : {}), removeLocal, conflicts };
 }
 
 /**

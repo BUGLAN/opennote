@@ -14,7 +14,7 @@ import {
   PATH_MAP_DID,
   MIN_SUPPORTED_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
-  accountCreateRequestSchema,
+  encryptionUpdateRequestSchema,
   assertProtocolCompatible,
   changesResponseSchema,
   cryptoModeSchema,
@@ -59,34 +59,27 @@ describe("基础形状", () => {
   });
 });
 
-describe("账号契约 · 密钥材料不许出现在请求里（红线 3）", () => {
+describe("加密口令契约 · 明文密钥材料不许出现在请求里（红线 3）", () => {
   const valid = {
-    accountId: "a".repeat(32),
-    authToken: "t".repeat(43),
     wrappedEncRoot: "w".repeat(64),
-    inviteCode: "invite-code-12345678",
+    kdf: { alg: "scrypt", N: 32768, r: 8, p: 1, salt: "s".repeat(22) },
+    expected: null,
   };
 
   it("最小合法请求能过", () => {
-    expect(accountCreateRequestSchema.safeParse(valid).success).toBe(true);
+    expect(encryptionUpdateRequestSchema.safeParse(valid).success).toBe(true);
   });
 
-  it("`accountKey` / `encRoot` / `wrapKey` 这类字段**不在** schema 里（多余字段被丢弃）", () => {
-    const parsed = accountCreateRequestSchema.parse({
-      ...valid,
-      // 客户端如果哪天顺手把这些发上来，zod 默认会**剥掉**未声明字段——
-      // 但真正的护栏是 K1 断言（P2 实现）：服务端库里搜不到任何等于密钥的值。
-      accountKey: "should-never-be-sent",
-      encRoot: "should-never-be-sent",
-    });
-    expect("accountKey" in parsed).toBe(false);
+  it("`encRoot` / `passphrase` / `wrapKey` 这类字段**不在** schema 里（多余字段被丢弃）", () => {
+    const parsed = encryptionUpdateRequestSchema.parse({ ...valid, encRoot: "should-never-be-sent", passphrase: "should-never-be-sent", wrapKey: "x" });
     expect("encRoot" in parsed).toBe(false);
+    expect("passphrase" in parsed).toBe(false);
+    expect("wrapKey" in parsed).toBe(false);
   });
 
-  it("形状不对的 accountId / authToken 被拒", () => {
-    expect(accountCreateRequestSchema.safeParse({ ...valid, accountId: "short" }).success).toBe(false);
-    expect(accountCreateRequestSchema.safeParse({ ...valid, accountId: "A".repeat(32) }).success).toBe(false);
-    expect(accountCreateRequestSchema.safeParse({ ...valid, authToken: "too-short" }).success).toBe(false);
+  it("KDF 参数不合理（太弱 / 不是 scrypt）被拒", () => {
+    expect(encryptionUpdateRequestSchema.safeParse({ ...valid, kdf: { ...valid.kdf, N: 16 } }).success).toBe(false);
+    expect(encryptionUpdateRequestSchema.safeParse({ ...valid, kdf: { ...valid.kdf, alg: "md5" } }).success).toBe(false);
   });
 });
 
@@ -152,6 +145,9 @@ describe("syncinfo 与 health（协议 + 加密模式的双重闸门）", () => 
       minSupportedProtocolVersion: MIN_SUPPORTED_PROTOCOL_VERSION,
       webBuildHash: null,
       couchVersion: null,
+      auth: { password: true, github: false },
+      registration: "invite",
+      setupRequired: false,
     });
     expect(parsed.ok).toBe(true);
     expect(parsed.webBuildHash).toBeNull();

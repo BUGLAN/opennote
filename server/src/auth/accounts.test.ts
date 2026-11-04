@@ -1,269 +1,235 @@
 /**
- * 密钥即身份的用例（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §10.1 B 的 K1–K11、§1.5）。
+ * 账号 / 会话 / 邀请 / 重置密码（`docs/执行-同步重写-2026-11-02.md`「身份模型」）。
  *
- * 这个文件里最要紧的三条：
- *
- * - **K1**：注册之后，服务端的库里**搜不到任何等于 `accountKey` / `encRoot` / `wrapKey` 的值**
- *   —— 这是红线 3 的可执行形式，而不是一句声明；
- * - **K2**：没有码**一律拒绝**，且**不存在**「首次注册自动成管理员」这条路径（防抢注）；
- * - **K6**：轮换之后 `wrappedEncRoot` 解出来的 `encRoot` **完全相同** —— 零重加密的证明。
- *   这一条在真实世界里要靠客户端解密才能验；这里用「`wrappedEncRoot` 之外的字段一个都没动」
- *   来近似断言（`auth_hash` 变了、`enc_root` 无关字段都在），并注明真实验法在 P4。
+ * 用低成本 scrypt 参数（`testAccountStore`）：这里测的是流程，不是 KDF 的强度。
  */
+
 import { describe, expect, it } from "vitest";
 import { openDatabase } from "../db";
-import { AccountError, AccountStore, generateCode, hashAuthToken, hashesEqual, newAccountId, newAuthTokenForTests } from "./accounts";
+import { AccountError, hashToken, PANEL_SESSION_TTL_MS } from "./accounts";
+import { hashPassword, verifyPassword, FAST_PARAMS_FOR_TESTS } from "./passwords";
+import { seedAccount, testAccountStore } from "./testAccounts.test-helper";
 
-function makeStore(): { store: AccountStore; db: ReturnType<typeof openDatabase> } {
+function makeStore() {
   const db = openDatabase({ path: ":memory:" });
-  return { store: new AccountStore(db), db };
+  return { db, store: testAccountStore(db) };
 }
 
-/** 一份合法的注册输入（客户端会生成前三项）。 */
-function registration() {
-  return {
-    accountId: newAccountId(),
-    authToken: newAuthTokenForTests(),
-    wrappedEncRoot: `wrapped:${Math.random().toString(36).slice(2)}`,
-  };
+async function rejection(promise: Promise<unknown> | (() => unknown)): Promise<string> {
+  try {
+    await (typeof promise === "function" ? promise() : promise);
+  } catch (error) {
+    if (error instanceof AccountError) return error.rejection;
+    throw error;
+  }
+  throw new Error("预期抛 AccountError，结果成功了");
 }
 
-describe("K1 · 服务端只存哈希与密文（红线 3）", () => {
-  it("库里搜不到 accountKey / encRoot / wrapKey 的任何痕迹", () => {
-    const { store, db } = makeStore();
-    const bootstrap = store.createBootstrapCode();
-
-    /*
-     * 模拟客户端的真实行为：这些秘密**只存在于客户端**，注册请求里根本不该有它们。
-     * 为了让断言有牙齿，这里故意把它们也准备好，然后**证明它们没进库**。
-     */
-    const accountKey = "ACCOUNT_KEY_SHOULD_NEVER_REACH_SERVER";
-    const encRoot = "ENC_ROOT_SHOULD_NEVER_REACH_SERVER";
-    const wrapKey = "WRAP_KEY_SHOULD_NEVER_REACH_SERVER";
-    const input = registration();
-
-    store.create({ ...input, bootstrapCode: bootstrap.code, isAdmin: true });
-
-    // 把整库所有表的所有值拼成一个大字符串，然后搜。
-    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as unknown as { name: string }[];
-    const dump = tables
-      .map((table) => JSON.stringify(db.prepare(`SELECT * FROM ${table.name}`).all()))
-      .join("\n");
-
-    expect(dump).not.toContain(accountKey);
-    expect(dump).not.toContain(encRoot);
-    expect(dump).not.toContain(wrapKey);
-    // 反过来：该在的必须在。
-    expect(dump).toContain(hashAuthToken(input.authToken));
-    expect(dump).toContain(input.wrappedEncRoot);
-    // 而且**明文 authToken 绝不在库里**。
-    expect(dump).not.toContain(input.authToken);
+describe("密码哈希", () => {
+  it("同一个密码两次哈希结果不同（带盐），都能校验通过；错的密码不通过", async () => {
+    const a = await hashPassword("correct horse battery", FAST_PARAMS_FOR_TESTS);
+    const b = await hashPassword("correct horse battery", FAST_PARAMS_FOR_TESTS);
+    expect(a).not.toBe(b);
+    expect(a.startsWith("scrypt$16$1$1$")).toBe(true);
+    expect(await verifyPassword("correct horse battery", a)).toBe(true);
+    expect(await verifyPassword("correct horse batterY", a)).toBe(false);
   });
 
-  it("`auth_hash` 是 sha256(authToken)（不是明文，也不是别的构造）", () => {
-    const { store, db } = makeStore();
-    const bootstrap = store.createBootstrapCode();
-    const input = registration();
-    store.create({ ...input, bootstrapCode: bootstrap.code });
-    const row = db.prepare("SELECT auth_hash FROM accounts WHERE id = ?").get(input.accountId) as unknown as { auth_hash: string };
-    expect(row.auth_hash).toBe(hashAuthToken(input.authToken));
-    expect(row.auth_hash).toHaveLength(64);
+  it("坏掉的哈希串当作「不对」，不抛错", async () => {
+    expect(await verifyPassword("x", "")).toBe(false);
+    expect(await verifyPassword("x", "scrypt$abc$1$1$c2FsdA$aGFzaA")).toBe(false);
+    expect(await verifyPassword("x", "bcrypt$whatever")).toBe(false);
   });
 });
 
-describe("K2 · 没有码一律拒绝（不存在抢注路径）", () => {
-  it("引导码与邀请码都没有 → 拒绝", () => {
+describe("初始化（零账号时建第一个管理员）", () => {
+  it("零账号时可用，建出来的是管理员；之后再调就拒绝", async () => {
     const { store } = makeStore();
-    expect(() => store.create(registration())).toThrow(/必须凭一次性引导码或邀请码/);
-    expect(store.count()).toBe(0);
-  });
-
-  it("**第一个**注册也不会自动变成管理员 —— 库里空着也一样", () => {
-    const { store } = makeStore();
-    expect(store.count()).toBe(0);
-    expect(() => store.create({ ...registration(), isAdmin: true })).toThrow(AccountError);
-    expect(store.count()).toBe(0);
-  });
-
-  it("`isAdmin` 不由请求方自己说了算 —— 只有引导码能建管理员（调用方约定）", () => {
-    // 这是**契约层面**的约束（HTTP 层只在 bootstrapCode 分支才允许 isAdmin=true）。
-    // 这里钉住数据层的事实：邀请码建出来的账号 isAdmin 为 0。
-    const { store } = makeStore();
-    const admin = store.create({ ...registration(), bootstrapCode: store.createBootstrapCode().code, isAdmin: true });
-    const invite = store.createInvite({ createdBy: admin.id });
-    const plain = store.create({ ...registration(), inviteCode: invite.code });
+    expect(store.needsSetup()).toBe(true);
+    const admin = await store.setup({ email: "Admin@Example.com ", password: "long-enough-pw" });
     expect(admin.is_admin).toBe(1);
-    expect(plain.is_admin).toBe(0);
+    expect(admin.email).toBe("admin@example.com");
+    expect(store.needsSetup()).toBe(false);
+    expect(await rejection(store.setup({ email: "other@example.com", password: "long-enough-pw" }))).toBe("setup-done");
+  });
+
+  it("密码太短直接拒绝，不建号", async () => {
+    const { store } = makeStore();
+    expect(await rejection(store.setup({ email: "a@example.com", password: "short" }))).toBe("weak-password");
+    expect(store.count()).toBe(0);
   });
 });
 
-describe("K3 · 引导码一次性 / 过期", () => {
-  it("同一个引导码不能建两个管理员", () => {
+describe("登录", () => {
+  it("邮箱不区分大小写；密码对才行；错误不区分是邮箱错还是密码错", async () => {
     const { store } = makeStore();
-    const bootstrap = store.createBootstrapCode();
-    store.create({ ...registration(), bootstrapCode: bootstrap.code, isAdmin: true });
-    expect(() => store.create({ ...registration(), bootstrapCode: bootstrap.code, isAdmin: true })).toThrow(/已经被用过/);
-    expect(store.count()).toBe(1);
+    await store.create({ email: "lan@example.com", password: "long-enough-pw" });
+    expect((await store.login("LAN@example.com", "long-enough-pw")).email).toBe("lan@example.com");
+
+    const wrongPassword = await rejection(store.login("lan@example.com", "nope-nope-nope"));
+    const noSuchEmail = await rejection(store.login("ghost@example.com", "long-enough-pw"));
+    expect(wrongPassword).toBe("bad-credentials");
+    expect(noSuchEmail).toBe("bad-credentials");
   });
 
-  it("过期之后不能用", () => {
+  it("没设密码的账号（例如以后只用 GitHub 的）不能用密码登录", async () => {
     const { store } = makeStore();
-    const now = 1_000_000;
-    const bootstrap = store.createBootstrapCode({ now, ttlMs: 1000 });
-    expect(() => store.create({ ...registration(), bootstrapCode: bootstrap.code, now: now + 2000 })).toThrow(/已过期/);
+    await store.create({ email: "gh@example.com" });
+    expect(await rejection(store.login("gh@example.com", "anything-at-all"))).toBe("bad-credentials");
   });
 
-  it("胡编的引导码不能用（且错误文案不区分「没有」与「错了」）", () => {
+  it("停用的账号密码对也进不来，且说的是「停用」而不是「密码错」", async () => {
     const { store } = makeStore();
-    expect(() => store.create({ ...registration(), bootstrapCode: generateCode("boot") })).toThrow(/引导码无效/);
+    const row = await store.create({ email: "a@example.com", password: "long-enough-pw" });
+    store.setStatus(row.id, "disabled");
+    expect(await rejection(store.login("a@example.com", "long-enough-pw"))).toBe("disabled");
+  });
+
+  it("同一个邮箱不能注册两次", async () => {
+    const { store } = makeStore();
+    await store.create({ email: "a@example.com" });
+    expect(await rejection(store.create({ email: "A@example.com" }))).toBe("email-taken");
   });
 });
 
-describe("K4 · 邀请码 max_uses / 过期 / 作废", () => {
-  it("max_uses=2 能用两次，第三次拒绝", () => {
-    const { store } = makeStore();
-    const admin = store.create({ ...registration(), bootstrapCode: store.createBootstrapCode().code, isAdmin: true });
-    const invite = store.createInvite({ createdBy: admin.id, maxUses: 2 });
-    store.create({ ...registration(), inviteCode: invite.code });
-    store.create({ ...registration(), inviteCode: invite.code });
-    expect(() => store.create({ ...registration(), inviteCode: invite.code })).toThrow(/已用尽/);
-    expect(store.count()).toBe(3);
+describe("会话", () => {
+  it("令牌明文不进库，库里只有 sha256；能用令牌找回账号", () => {
+    const { db, store } = makeStore();
+    const account = seedAccount(store);
+    const row = db.prepare("SELECT token_hash FROM sessions WHERE account_id = ?").get(account.id) as unknown as { token_hash: string };
+    expect(row.token_hash).toBe(hashToken(account.token));
+    expect(row.token_hash).not.toContain(account.token);
+    expect(store.authenticate(account.token).id).toBe(account.id);
+    expect(account.token.startsWith("ons_")).toBe(true);
   });
 
-  it("过期与作废各自生效（且文案区分得开）", () => {
+  it("吊销 / 过期 / 乱写的令牌都是 unauthorized", async () => {
     const { store } = makeStore();
-    const admin = store.create({ ...registration(), bootstrapCode: store.createBootstrapCode().code, isAdmin: true });
-    const now = 5_000_000;
+    const account = seedAccount(store);
+    expect(await rejection(() => store.authenticate("ons_not-a-real-token"))).toBe("unauthorized");
 
-    const expiring = store.createInvite({ createdBy: admin.id, expiresInSeconds: 10, now });
-    expect(() => store.create({ ...registration(), inviteCode: expiring.code, now: now + 20_000 })).toThrow(/已过期/);
+    const { token, session } = store.createSession({ accountId: account.id, kind: "panel", now: 1_000 });
+    expect(session.expires_at).toBe(1_000 + PANEL_SESSION_TTL_MS);
+    expect(await rejection(() => store.authenticateSession(token, 1_000 + PANEL_SESSION_TTL_MS + 1))).toBe("unauthorized");
 
-    const revocable = store.createInvite({ createdBy: admin.id, now });
-    expect(store.revokeInvite(revocable.code, now)).toBe(true);
-    expect(() => store.create({ ...registration(), inviteCode: revocable.code, now })).toThrow(/已被作废/);
-    // 重复作废返回 false（不是错误）。
-    expect(store.revokeInvite(revocable.code, now)).toBe(false);
+    const { session: device } = store.authenticateSession(account.token);
+    store.revokeSession(device.id);
+    expect(await rejection(() => store.authenticate(account.token))).toBe("unauthorized");
+  });
+
+  it("停用账号：令牌还在但每次都回 disabled；重新启用立刻恢复", async () => {
+    const { store } = makeStore();
+    const account = seedAccount(store);
+    store.setStatus(account.id, "disabled");
+    expect(await rejection(() => store.authenticate(account.token))).toBe("disabled");
+    store.setStatus(account.id, "active");
+    expect(store.authenticate(account.token).id).toBe(account.id);
+  });
+
+  it("移除设备只吊销那台设备的会话", () => {
+    const { store } = makeStore();
+    const account = seedAccount(store);
+    const other = store.createSession({ accountId: account.id, kind: "device", deviceId: "b".repeat(32) });
+    expect(store.revokeDeviceSessions(account.id, "b".repeat(32))).toBe(1);
+    expect(() => store.authenticate(other.token)).toThrow(AccountError);
+    expect(store.authenticate(account.token).id).toBe(account.id);
+    expect(store.activeDeviceIds(account.id)).toEqual(new Set([account.deviceId]));
+  });
+
+  it("改密码：当前这台保留，其它设备全部下线；当前密码错就不改", async () => {
+    const { store } = makeStore();
+    const row = await store.create({ email: "a@example.com", password: "old-password-1" });
+    const here = store.createSession({ accountId: row.id, kind: "device", deviceId: "a".repeat(32) });
+    const there = store.createSession({ accountId: row.id, kind: "device", deviceId: "b".repeat(32) });
+
+    expect(await rejection(store.changePassword(row.id, "wrong-password", "new-password-1"))).toBe("bad-credentials");
+    await store.changePassword(row.id, "old-password-1", "new-password-1", { keepSessionId: here.session.id });
+
+    expect(store.authenticate(here.token).id).toBe(row.id);
+    expect(() => store.authenticate(there.token)).toThrow(AccountError);
+    expect((await store.login("a@example.com", "new-password-1")).id).toBe(row.id);
   });
 });
 
-describe("K5/K6 · 轮换 —— 零重加密（本设计的核心不变量）", () => {
-  it("K5 · 轮换之后**旧令牌立即 401**，新令牌可用", () => {
-    const { store } = makeStore();
-    const input = registration();
-    store.create({ ...input, bootstrapCode: store.createBootstrapCode().code });
+describe("邀请", () => {
+  it("明文码只出现一次，库里存哈希；接受后建号并带上邀请里的角色与配额", async () => {
+    const { db, store } = makeStore();
+    const created = store.createInvite({ createdBy: null, grantAdmin: true, quotaBytes: 5_000, expiresInSeconds: 3600 });
+    expect(created.code).toMatch(/^join_[0-9a-f]{48}$/);
+    const stored = db.prepare("SELECT code_hash FROM invites").get() as unknown as { code_hash: string };
+    expect(stored.code_hash).toBe(hashToken(created.code));
 
-    const newToken = newAuthTokenForTests();
-    const newWrapped = "wrapped-after-rotation";
-    const account = store.authenticate(input.authToken);
-    store.rotate(account.id, newToken, newWrapped);
-
-    expect(() => store.authenticate(input.authToken)).toThrow(AccountError);
-    expect(store.authenticate(newToken).id).toBe(account.id);
+    expect(store.inviteInfo(created.code)).toMatchObject({ email: null, grantAdmin: true, quotaBytes: 5_000 });
+    const row = await store.acceptInvite(created.code, { email: "new@example.com", password: "long-enough-pw", displayName: "  Chen " });
+    expect(row).toMatchObject({ email: "new@example.com", display_name: "Chen", is_admin: 1, quota_bytes: 5_000 });
+    expect(await rejection(() => store.inviteInfo(created.code))).toBe("invite-exhausted");
   });
 
-  it("K6 · 轮换**只**换 auth_hash 与 wrapped_enc_root，其它字段一个都没动", () => {
-    const { store, db } = makeStore();
-    const input = registration();
-    const created = store.create({ ...input, bootstrapCode: store.createBootstrapCode().code, isAdmin: true, label: "我的账号" });
-    const before = db.prepare("SELECT * FROM accounts WHERE id = ?").get(created.id) as unknown as Record<string, unknown>;
+  it("绑定了邮箱的邀请：只能用那个邮箱，且只能用一次", async () => {
+    const { store } = makeStore();
+    const created = store.createInvite({ createdBy: null, email: "Chen@Example.com", maxUses: 5 });
+    expect(created.maxUses).toBe(1);
+    expect(await rejection(store.acceptInvite(created.code, { email: "someone@example.com", password: "long-enough-pw" }))).toBe("invite-email-mismatch");
+    await store.acceptInvite(created.code, { email: "chen@example.com", password: "long-enough-pw" });
+  });
 
-    const newToken = newAuthTokenForTests();
-    store.rotate(created.id, newToken, "wrapped-after-rotation");
-    const after = db.prepare("SELECT * FROM accounts WHERE id = ?").get(created.id) as unknown as Record<string, unknown>;
+  it("过期 / 作废 / 不存在的邀请各有各的说法", async () => {
+    const { store } = makeStore();
+    const expired = store.createInvite({ createdBy: null, expiresInSeconds: 1, now: 0 });
+    expect(await rejection(() => store.inviteInfo(expired.code, 5_000))).toBe("invite-expired");
+    const revoked = store.createInvite({ createdBy: null });
+    store.revokeInvite(revoked.code);
+    expect(await rejection(() => store.inviteInfo(revoked.code))).toBe("invite-revoked");
+    expect(await rejection(() => store.inviteInfo("join_nope"))).toBe("bad-invite");
+  });
 
-    /*
-     * 「零重加密」的可测形式：**只有**这两个字段变了。
-     * `encRoot` 本身不在我们库里（我们从来没见过它），所以「它没变」在服务端这一侧
-     * 只能这样间接证：没有任何编号/版本/会话字段随之改变 —— 也就是说我们**没有**
-     * 因为轮换而重建任何与笔记内容相关的东西。
-     * 真正的证明在 P4：客户端用新 wrapKey 解开 wrappedEncRoot 得到同一个 encRoot（K6 原文）。
-     */
-    const changed = Object.keys(after).filter((key) => JSON.stringify(after[key]) !== JSON.stringify(before[key]));
-    expect(changed.sort()).toEqual(["auth_hash", "wrapped_enc_root"]);
-
-    // 身份与权限都没被顺手改掉。
-    expect(after.id).toBe(before.id);
-    expect(after.is_admin).toBe(before.is_admin);
-    expect(after.status).toBe("active");
-    expect(after.label).toBe("我的账号");
-    expect(after.created_at).toBe(before.created_at);
+  it("接受邀请时密码太短：不建号，邀请也没被用掉", async () => {
+    const { store } = makeStore();
+    const created = store.createInvite({ createdBy: null });
+    expect(await rejection(store.acceptInvite(created.code, { email: "a@example.com", password: "short" }))).toBe("weak-password");
+    expect(store.count()).toBe(0);
+    expect(store.inviteInfo(created.code).email).toBeNull();
   });
 });
 
-describe("K7 · 新设备用同一把密钥解锁", () => {
-  it("unlock 返回同一个 wrappedEncRoot（客户端据此解出同一个 encRoot）", () => {
+describe("重置密码", () => {
+  it("链接一次性；重置后旧密码失效、所有会话下线", async () => {
     const { store } = makeStore();
-    const input = registration();
-    store.create({ ...input, bootstrapCode: store.createBootstrapCode().code });
+    const row = await store.create({ email: "a@example.com", password: "old-password-1" });
+    const session = store.createSession({ accountId: row.id, kind: "device", deviceId: "a".repeat(32) });
+    const { code } = store.createPasswordReset({ accountId: row.id, createdBy: null });
+    expect(code).toMatch(/^reset_/);
+    expect(store.passwordResetInfo(code).email).toBe("a@example.com");
 
-    // 「新设备」只是同一个 authToken 的另一次请求 —— 没有第二样东西需要（§1.5 流程②）。
-    const first = store.unlock(input.authToken);
-    const second = store.unlock(input.authToken);
-    expect(first.wrappedEncRoot).toBe(input.wrappedEncRoot);
-    expect(second).toEqual(first);
+    await store.resetPassword(code, "brand-new-password");
+    expect(() => store.authenticate(session.token)).toThrow(AccountError);
+    expect(await rejection(store.login("a@example.com", "old-password-1"))).toBe("bad-credentials");
+    expect((await store.login("a@example.com", "brand-new-password")).id).toBe(row.id);
+    expect(await rejection(store.resetPassword(code, "another-password"))).toBe("reset-used");
+  });
+
+  it("过期的链接不能用", async () => {
+    const { store } = makeStore();
+    const row = await store.create({ email: "a@example.com" });
+    const { code } = store.createPasswordReset({ accountId: row.id, createdBy: null, ttlMs: 10, now: 0 });
+    expect(await rejection(() => store.passwordResetInfo(code, 100))).toBe("reset-expired");
   });
 });
 
-describe("K8/K9 · 伪造与泄露", () => {
-  it("K8 · 随机 32 字节令牌 → 401", () => {
+describe("管理员位", () => {
+  it("不能取消最后一个活跃管理员", async () => {
     const { store } = makeStore();
-    store.create({ ...registration(), bootstrapCode: store.createBootstrapCode().code });
-    expect(() => store.authenticate(newAuthTokenForTests())).toThrow(/令牌无效/);
+    const admin = await store.setup({ email: "admin@example.com", password: "long-enough-pw" });
+    expect(store.setAdmin(admin.id, false)).toEqual({ ok: false, reason: "last-admin" });
+    const other = await store.create({ email: "b@example.com" });
+    expect(store.setAdmin(other.id, true)).toEqual({ ok: true, changed: true });
+    expect(store.setAdmin(admin.id, false)).toEqual({ ok: true, changed: true });
   });
 
-  it("K9 · `auth_hash` 是 sha256，明文令牌不可从库里反推", () => {
-    const { store, db } = makeStore();
-    const input = registration();
-    store.create({ ...input, bootstrapCode: store.createBootstrapCode().code });
-    const row = db.prepare("SELECT auth_hash FROM accounts WHERE id = ?").get(input.accountId) as unknown as { auth_hash: string };
-    // 设计性断言：形状是 sha256 十六进制（64 位），且不等于任何明文片段。
-    expect(row.auth_hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(row.auth_hash).not.toContain(input.authToken.slice(0, 8));
-    // 恒定时间比较器本身也要对（长度不同不炸）。
-    expect(hashesEqual(row.auth_hash, row.auth_hash)).toBe(true);
-    expect(hashesEqual(row.auth_hash, "short")).toBe(false);
-  });
-});
-
-describe("K10 · 禁用账号", () => {
-  it("禁用之后所有请求立即 403；重新启用后恢复", () => {
-    const { store } = makeStore();
-    const input = registration();
-    const created = store.create({ ...input, bootstrapCode: store.createBootstrapCode().code });
-
-    expect(store.setStatus(created.id, "disabled")).toBe(true);
-    // 认证失败，但**数据保留**（不是删账号）。
-    expect(() => store.authenticate(input.authToken)).toThrow(/已被禁用/);
-    expect(store.findById2(created.id)).not.toBeNull();
-
-    expect(store.setStatus(created.id, "active")).toBe(true);
-    expect(store.authenticate(input.authToken).id).toBe(created.id);
-  });
-
-  it("账号不存在时 setStatus 返回 false（不是静默成功）", () => {
-    const { store } = makeStore();
-    expect(store.setStatus("nope", "disabled")).toBe(false);
-  });
-});
-
-describe("账号唯一性", () => {
-  it("同一个 accountId 不能建两次", () => {
-    const { store } = makeStore();
-    const input = registration();
-    const code1 = store.createBootstrapCode();
-    store.create({ ...input, bootstrapCode: code1.code });
-    const code2 = store.createBootstrapCode();
-    expect(() => store.create({ ...input, bootstrapCode: code2.code })).toThrow(/已被占用/);
-  });
-
-  it("撞 id 失败时**不消耗**引导码（事务整体回滚）", () => {
-    const { store } = makeStore();
-    const input = registration();
-    store.create({ ...input, bootstrapCode: store.createBootstrapCode().code });
-
-    const code = store.createBootstrapCode();
-    expect(() => store.create({ ...input, bootstrapCode: code.code })).toThrow(/已被占用/);
-    // 码还能用（换一个 accountId 就成了）—— 说明那次失败没有把它用掉。
-    expect(() => store.create({ ...registration(), bootstrapCode: code.code })).not.toThrow();
+  it("删账号会连带删掉它的会话（外键级联）", () => {
+    const { db, store } = makeStore();
+    const account = seedAccount(store);
+    expect(store.delete(account.id)).toBe(true);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 0 });
   });
 });

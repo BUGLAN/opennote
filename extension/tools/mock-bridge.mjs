@@ -69,7 +69,7 @@ const TOKEN_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123
 
 /**
  * 与真接收端 `src/lib/clip/frontmatter.ts:97 downgradeLeadingH1()` 同口径：
- * 正文首个非空行若已是 H1，降级为 H2（保证整篇只有一个 H1，`deriveTitle()` 才读得对）。
+ * 正文首个非空行若已是 H1，降级为 H2（保证整篇只有一个 H1）。
  * 插件抽取的正文会带自己的 H1，所以这一步不是可选项。
  */
 function downgradeLeadingH1(body) {

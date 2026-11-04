@@ -45,7 +45,11 @@ export type IconName =
   | "unlock"
   | "winMin"
   | "winMax"
-  | "winRestore";
+  | "winRestore"
+  | "expand"
+  | "shrink"
+  | "code"
+  | "canvas";
 
 const PATHS: Record<IconName, JSX.Element> = {
   file: (
@@ -241,6 +245,25 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M9.2 9.2V7.9a1.7 1.7 0 0 1 1.7-1.7h5.3a1.7 1.7 0 0 1 1.7 1.7v5.3a1.7 1.7 0 0 1-1.7 1.7h-1.3" />
       <rect x="6.1" y="9.2" width="8.7" height="8.7" rx="1.7" />
+    </>
+  ),
+  /* HTML 页面右上角的全屏 / 退出全屏（四角向外 / 向内），与上面同一套 1.7 描边。 */
+  expand: <path d="M4.5 9V4.5H9M15 4.5h4.5V9M19.5 15v4.5H15M9 19.5H4.5V15" />,
+  shrink: <path d="M9 4.5V9H4.5M19.5 9H15V4.5M15 19.5V15h4.5M4.5 15H9v4.5" />,
+  /* 侧栏里按种类区分文件：HTML 页面是一页带尖括号的纸，画布是摊开的一块板上散着几张卡片。 */
+  code: (
+    <>
+      <path d="M14 3.5V8h4.5" />
+      <path d="M15.5 3.5H7.5A2 2 0 0 0 5.5 5.5v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7z" />
+      <path d="m10 12.2-1.9 1.8 1.9 1.8M14 12.2l1.9 1.8-1.9 1.8" />
+    </>
+  ),
+  canvas: (
+    <>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+      <rect x="6.5" y="7.5" width="5" height="4" rx="0.8" />
+      <rect x="13" y="12.5" width="4.5" height="4" rx="0.8" />
+      <path d="M11.5 9.5h2.5v3" />
     </>
   ),
 };

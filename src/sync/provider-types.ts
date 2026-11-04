@@ -247,7 +247,8 @@ export class SyncProviderError extends Error {
   constructor(
     readonly code:
       | "unauthorized"
-      | "rotated"
+      | "signed-out"
+      | "disabled"
       | "forbidden"
       | "not-found"
       | "conflict"
@@ -258,6 +259,8 @@ export class SyncProviderError extends Error {
       | "server",
     message: string,
     readonly status: number | null = null,
+    /** 服务端响应体里的 `code`（例如 413 时区分 `quota` 与 `too-large`）；没有就是 undefined。 */
+    readonly serverCode?: string,
   ) {
     super(message);
     this.name = "SyncProviderError";

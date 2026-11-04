@@ -39,6 +39,16 @@ function createV1Database(path: string): void {
       label             TEXT,
       is_admin          INTEGER NOT NULL DEFAULT 0
     );
+    -- 真实的 v1 库一定有 devices（迁移 4 要给它加列）。
+    CREATE TABLE devices (
+      id           TEXT PRIMARY KEY,
+      account_id   TEXT NOT NULL REFERENCES accounts(id),
+      name         TEXT,
+      platform     TEXT,
+      created_at   INTEGER NOT NULL,
+      last_seen_at INTEGER,
+      last_ip      TEXT
+    );
     -- ★ v1 的形状：created_by 是 NOT NULL 且指向 accounts(id)
     CREATE TABLE invites (
       code_hash  TEXT PRIMARY KEY,
@@ -152,5 +162,47 @@ describe("迁移 2 · `invites.created_by` 允许为空", () => {
       ).toThrow(/UNIQUE|PRIMARY/i);
       db.close();
     });
+  });
+});
+
+describe("迁移 4 · 账号改为邮箱 + 密码（重建 accounts）", () => {
+  it("旧账号原样保留（没有邮箱和密码，登录不了），名字搬到 display_name", () => {
+    withTempDb((path) => {
+      createV1Database(path);
+      const db = openDatabase({ path });
+      const row = db.prepare("SELECT * FROM accounts").get() as unknown as Record<string, unknown>;
+      expect(row.id).toBe("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+      expect(row.email).toBeNull();
+      expect(row.password_hash).toBeNull();
+      expect(row.display_name).toBe("Alice");
+      expect(row.status).toBe("active");
+      expect(row.is_admin).toBe(1);
+      // 旧的密钥材料不带过来（不兼容旧账号，见 docs/执行-同步重写-2026-11-02.md）。
+      expect(row).not.toHaveProperty("auth_hash");
+      db.close();
+    });
+  });
+
+  it("重建之后引用 accounts 的外键仍然有效（邀请还指向 Alice，假账号插不进会话表）", () => {
+    withTempDb((path) => {
+      createV1Database(path);
+      const db = openDatabase({ path });
+      expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      const invite = db.prepare("SELECT created_by FROM invites WHERE code_hash = 'hash-of-old-invite'").get() as unknown as { created_by: string };
+      expect(invite.created_by).toBe("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+      expect(() =>
+        db
+          .prepare("INSERT INTO sessions (id, account_id, token_hash, kind, created_at) VALUES ('s1', 'nobody', 'h', 'device', 1)")
+          .run(),
+      ).toThrow();
+      db.close();
+    });
+  });
+
+  it("邮箱唯一且不区分大小写", () => {
+    const db = openDatabase({ path: ":memory:" });
+    db.prepare("INSERT INTO accounts (id, email, created_at) VALUES ('a1', 'lan@example.com', 1)").run();
+    expect(() => db.prepare("INSERT INTO accounts (id, email, created_at) VALUES ('a2', 'LAN@example.com', 1)").run()).toThrow();
+    db.close();
   });
 });

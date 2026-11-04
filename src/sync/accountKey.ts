@@ -1,15 +1,12 @@
 /**
- * 账号密钥的生成 / 派生 / 编解码（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §1.5、§3.9）。
+ * 端到端加密的密钥层级与编码工具（`docs/执行-同步重写-2026-11-02.md` 阶段 ④ 起）。
  *
  * ## 密钥层级（**必须这样分叉，否则 E2EE 是假的**）
  *
  * ```
- * accountId   16B 随机，公开（当 HKDF salt 与 AEAD AAD）
- * accountKey  32B CSPRNG，★ 秘密，★ 永不发给服务端
- *    │ HKDF-SHA256(salt = accountId, info = "opennote/v1/auth") → authToken → 唯一发给服务端的东西
- *    │ HKDF-SHA256(salt = accountId, info = "opennote/v1/wrap") → wrapKey   → ★ 永不外发
+ * 加密口令 ──scrypt──▶ wrapKey（`vault.ts`，★ 只在客户端）
  *    ▼
- * encRoot     32B CSPRNG，秘密
+ * encRoot     32B CSPRNG，账号级秘密
  *    │ AEAD(wrapKey, encRoot, aad = accountId) = wrappedEncRoot → 存服务端（服务端解不开）
  *    │ HKDF-SHA256(info = "opennote/v1/notebook/" + notebookId) → notebookKey
  *    ▼
@@ -19,47 +16,20 @@
  *    └── HKDF(info="id")  → 路径 HMAC（did）
  * ```
  *
- * **为什么 `auth` / `wrap` 必须分叉**：两者都由 `accountKey` 经 HKDF 导出，但**互相推不出来**
- * （HKDF 的输出在计算上独立）。所以服务端 —— 以及终结 TLS 的云边缘 —— 拿到 `authToken`
- * 也拿不到 `wrapKey`，解不开 `wrappedEncRoot`，拿不到 `encRoot`。**E2EE 成立。**
+ * 登录凭据（邮箱密码 / GitHub / 设备会话令牌）与这条链**完全无关**：管理员重置登录密码、
+ * 服务端泄露会话令牌，都碰不到 encRoot。旧的「账号密钥即身份」（`accountKey` 派生 `authToken`）
+ * 已随同步重写删除。
  *
- * 反例（一定要避免）：直接把 `accountKey` 当令牌发出去 ⇒ 服务端拿到了加密根 ⇒
- * **服务端能解开全部笔记**，E2EE 名存实亡。
- *
- * ## 三个刻意的实现决定
+ * ## 两个刻意的实现决定
  *
  * ### ① 用 `@noble/hashes` 而不是 WebCrypto
  *
- * §3.9 / §4.9 明确选了 noble，理由不是体积而是**一条代码路径**：WebCrypto 是异步的，
- * 且四个宿主（Electron 渲染层 / 主进程 / Capacitor WebView / 浏览器）在 HKDF 与 HMAC 的
- * 细节上有差异。noble 是纯 JS，四端跑同一份字节码，测试也只需要一套。
+ * noble 是纯 JS，四个宿主（Electron 渲染层 / 主进程 / Capacitor WebView / 浏览器）跑同一份字节码，
+ * 测试也只需要一套。（配对的 X25519 是例外，见 `vault.ts`。）
  *
- * ⚠️ 但**控制台**（`server/src/panel/app.js`）是「无构建步骤」的静态页，没法 import noble，
- * 只能用 WebCrypto。所以那里必须**逐参数对齐**（salt / info / 长度），并且
- * `accountKey.test.ts` 里有一条用例**把两种实现算出来的字节直接比对** ——
- * 光靠「它们应该一致」是不够的，HKDF 的参数差一个字就是完全不同的密钥，
- * 而症状会是「密钥输错了」（一个会把人引到错方向的报错）。
+ * ### ② `accountId` 当 AAD 用的是**那 16 个字节**，不是十六进制字符串的 ASCII
  *
- * ### ② `accountId` 当 salt 用的是**那 16 个字节**，不是十六进制字符串的 ASCII
- *
- * 这一点文档没有明写到字节级，而它是最容易在两个实现之间分叉的地方：
- * `accountId` 的**传输**编码是 32 位小写十六进制（见 `shared/contract.ts`），
- * 但它**本身**是「16B 随机」（§1.5 流程①第 1 步、§3.9 层级表）。所以：
- * salt = 十六进制解码后的 16 字节，AAD 同理。
- *
- * 选它的理由：文档两次都说「16B 随机」，而十六进制只是它的**表示**。
- * 用 ASCII 也能工作，但那样「accountId 是 16 字节」这句话在每个实现里都要重新解释一遍。
- * 有一条用例把这个决定钉住（改掉它会让 `deriveAuthToken` 的输出变掉）。
- *
- * ### ③ 密钥导出格式是**紧凑二进制**，不是 JSON
- *
- * §5.2 要求它支持**二维码**。JSON 会把 49 字节膨胀到 150+ 字符，
- * 而紧凑二进制 base64url 后是 66 字符 —— 二维码能小一大圈（也更不容易扫错）。
- *
- * 格式：`opennote-key-v1.` + base64url( version(1B) || accountId(16B) || accountKey(32B) )
- *
- * `accountId` **必须**在里面：`authToken` 的派生 salt 是它，少了它新设备就算拿到
- * `accountKey` 也派不出令牌（而它本来就是公开值，放进去不泄露任何东西）。
+ * `accountId` 的传输编码是 32 位小写十六进制，但它本身是「16B 随机」。所以 AAD = 解码后的 16 字节。
  */
 
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
@@ -75,11 +45,7 @@ import { randomBytes } from "@noble/hashes/utils.js";
 /** HKDF `info` 的统一前缀（§3.9：`"opennote/v1/…"`）。 */
 export const HKDF_INFO_PREFIX = "opennote/v1/";
 
-/** → `authToken`（唯一发给服务端的东西）。 */
-export const HKDF_INFO_AUTH = `${HKDF_INFO_PREFIX}auth`;
 
-/** → `wrapKey`（永不外发）。 */
-export const HKDF_INFO_WRAP = `${HKDF_INFO_PREFIX}wrap`;
 
 /** 每笔记本一把钥匙（§3.9）。 */
 export function hkdfInfoNotebook(notebookId: string): string {
@@ -98,15 +64,10 @@ export const NOTEBOOK_SUBKEY_INFO = {
 
 export type NotebookSubkeyUsage = keyof typeof NOTEBOOK_SUBKEY_INFO;
 
-/** 账号密钥导出的文本前缀。 */
-export const ACCOUNT_KEY_PREFIX = "opennote-key-v1.";
-
-/** 二进制 blob 的版本号（将来换格式时靠它区分）。 */
-const BLOB_VERSION = 1;
 
 /** 各材料的字节长度。 */
 export const ACCOUNT_ID_BYTES = 16;
-export const ACCOUNT_KEY_BYTES = 32;
+
 export const ENC_ROOT_BYTES = 32;
 /** XChaCha20-Poly1305 的 nonce（192 位 —— 随机 nonce 天然安全，§4.9）。 */
 const XCHACHA_NONCE_BYTES = 24;
@@ -170,16 +131,6 @@ function random(length: number): Uint8Array {
   return randomBytes(length);
 }
 
-/** 生成 `accountId`：16B 随机 → 32 位小写十六进制（**公开**值）。 */
-export function generateAccountId(): string {
-  return toHex(random(ACCOUNT_ID_BYTES));
-}
-
-/** 生成 `accountKey`：32B CSPRNG（**用户保存的唯一秘密**）。 */
-export function generateAccountKey(): Uint8Array {
-  return random(ACCOUNT_KEY_BYTES);
-}
-
 /** 生成 `encRoot`：32B CSPRNG（注册时生成一次，永不外发）。 */
 export function generateEncRoot(): Uint8Array {
   return random(ENC_ROOT_BYTES);
@@ -200,20 +151,6 @@ export function accountIdBytes(accountId: string): Uint8Array {
     throw new Error(`accountId 必须是 ${ACCOUNT_ID_BYTES} 字节（${ACCOUNT_ID_BYTES * 2} 位十六进制），实得 ${bytes.length} 字节`);
   }
   return bytes;
-}
-
-/**
- * `authToken = HKDF-SHA256(accountKey, salt = accountId, info = "opennote/v1/auth")` → 64 位小写十六进制。
- *
- * 这是**唯一**发给服务端的东西（服务端只存它的 `sha256`）。
- */
-export function deriveAuthToken(accountKey: Uint8Array, accountId: string): string {
-  return toHex(hkdf(sha256, accountKey, accountIdBytes(accountId), new TextEncoder().encode(HKDF_INFO_AUTH), 32));
-}
-
-/** `wrapKey = HKDF-SHA256(accountKey, salt = accountId, info = "opennote/v1/wrap")`。**永不外发。** */
-export function deriveWrapKey(accountKey: Uint8Array, accountId: string): Uint8Array {
-  return hkdf(sha256, accountKey, accountIdBytes(accountId), new TextEncoder().encode(HKDF_INFO_WRAP), 32);
 }
 
 /**
@@ -280,110 +217,6 @@ export function unwrapEncRoot(wrapKey: Uint8Array, wrapped: string, accountId: s
     // 两种可能，对用户是同一件事：密钥不对，或者包裹被人动过。
     throw new Error("解不开 wrappedEncRoot：账号密钥不对，或者包裹已损坏");
   }
-}
-
-/* ============================================================================
-   账号密钥的导出 / 导入（紧凑二进制 + base64url，为二维码优化）
-   ============================================================================ */
-
-export interface AccountKeyMaterial {
-  /** 32 位小写十六进制。 */
-  accountId: string;
-  accountKey: Uint8Array;
-}
-
-/**
- * 编码成可复制 / 可扫的文本。
- *
- * 格式：`opennote-key-v1.` + base64url( version(1B) || accountId(16B) || accountKey(32B) )
- * —— 49 字节 → 66 个 base64url 字符，二维码能小一大圈（§5.2 要求支持二维码）。
- */
-export function encodeAccountKey(material: AccountKeyMaterial): string {
-  const accountId = accountIdBytes(material.accountId);
-  if (material.accountKey.length !== ACCOUNT_KEY_BYTES) {
-    throw new Error(`accountKey 必须是 ${ACCOUNT_KEY_BYTES} 字节，实得 ${material.accountKey.length}`);
-  }
-  const blob = new Uint8Array(1 + ACCOUNT_ID_BYTES + ACCOUNT_KEY_BYTES);
-  blob[0] = BLOB_VERSION;
-  blob.set(accountId, 1);
-  blob.set(material.accountKey, 1 + ACCOUNT_ID_BYTES);
-  return ACCOUNT_KEY_PREFIX + toBase64Url(blob);
-}
-
-/**
- * 解码用户粘进来 / 扫进来的文本。
- *
- * 容忍：前后空白、没有前缀（用户可能只复制了 base64 部分）。
- * **不容忍**：版本不对、长度不对 —— 那两种都会导致「派生出错误的密钥」，
- * 而症状是「密钥不对」，会让人去怀疑密钥本身而不是粘贴格式。
- */
-export function decodeAccountKey(text: string): AccountKeyMaterial {
-  const trimmed = String(text ?? "").trim();
-  if (!trimmed) throw new Error("密钥是空的");
-  const body = trimmed.startsWith(ACCOUNT_KEY_PREFIX) ? trimmed.slice(ACCOUNT_KEY_PREFIX.length) : trimmed;
-
-  let blob: Uint8Array;
-  try {
-    blob = fromBase64Url(body);
-  } catch {
-    throw new Error("密钥不是合法的 base64url");
-  }
-  const expected = 1 + ACCOUNT_ID_BYTES + ACCOUNT_KEY_BYTES;
-  if (blob.length !== expected) {
-    throw new Error(`密钥长度不对：期待 ${expected} 字节，实得 ${blob.length} 字节`);
-  }
-  if (blob[0] !== BLOB_VERSION) {
-    throw new Error(`不认识的密钥版本：${blob[0]}（本版只认 ${BLOB_VERSION}）`);
-  }
-  return {
-    accountId: toHex(blob.slice(1, 1 + ACCOUNT_ID_BYTES)),
-    accountKey: blob.slice(1 + ACCOUNT_ID_BYTES),
-  };
-}
-
-/* ============================================================================
-   组合：注册与解锁（§1.5 的三个流程）
-   ============================================================================ */
-
-export interface RegistrationMaterial {
-  accountId: string;
-  accountKey: Uint8Array;
-  encRoot: Uint8Array;
-  /** 发给服务端的令牌。 */
-  authToken: string;
-  /** 发给服务端的包裹（服务端解不开）。 */
-  wrappedEncRoot: string;
-}
-
-/**
- * 流程①：注册时客户端生成**一切**密钥材料（§1.5）。
- *
- * ⚠️ 这个函数**只在客户端存在**。服务端生成任何一样东西都等于 E2EE 不成立（红线 3）。
- */
-export function createRegistrationMaterial(): RegistrationMaterial {
-  const accountId = generateAccountId();
-  const accountKey = generateAccountKey();
-  const encRoot = generateEncRoot();
-  return {
-    accountId,
-    accountKey,
-    encRoot,
-    authToken: deriveAuthToken(accountKey, accountId),
-    wrappedEncRoot: wrapEncRoot(deriveWrapKey(accountKey, accountId), encRoot, accountId),
-  };
-}
-
-/** 流程②：新设备导入 `accountKey` 之后能立刻派生的东西（还差服务端给 `wrappedEncRoot`）。 */
-export function deriveFromAccountKey(material: AccountKeyMaterial): { authToken: string; wrapKey: Uint8Array } {
-  return {
-    authToken: deriveAuthToken(material.accountKey, material.accountId),
-    wrapKey: deriveWrapKey(material.accountKey, material.accountId),
-  };
-}
-
-/** 流程②的后半：拿到服务端的 `wrappedEncRoot` 之后解开（**一个秘密搞定**）。 */
-export function unlockEncRoot(material: AccountKeyMaterial, wrappedEncRoot: string): Uint8Array {
-  return unwrapEncRoot(deriveWrapKey(material.accountKey, material.accountId), wrappedEncRoot, material.accountId);
 }
 
 /* ============================================================================

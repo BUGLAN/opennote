@@ -3,14 +3,11 @@
  *
  * ## 三件事，每一件都有一个容易被写错的细节
  *
- * ### ① 没有登录表单：`authToken` 从「密钥」派生，然后塞进 HttpOnly cookie
+ * ### ① 邮箱密码登录，令牌只进 HttpOnly cookie
  *
- * 控制台与客户端**共用同一个凭据**（§4.6：一个凭据贯穿所有入口）。所以这里是：
- * 浏览器上粘账号密钥 → 页面 JS 用 HKDF 派生 `authToken` → 提交给服务端 → 服务端
- * 把它写进 `HttpOnly` cookie → 之后浏览器每次请求自动带上。
- *
- * ⚠️ **服务端从不生成、也从不返回 `authToken`** —— 它只是把客户端递过来的那个存进 cookie。
- * 这与红线 3 一致：密钥材料只在客户端产生。
+ * `/admin` 用邮箱密码登录（`routes/panel.ts`）→ 服务端建一条 `kind = panel` 的会话（8 小时）→
+ * 令牌写进 `HttpOnly` cookie，页面 JS 读不到它，之后浏览器每次请求自动带上。
+ * 响应体里**不出现**令牌：XSS 拿不走一个它看不见的东西。
  *
  * ### ② CSRF 靠**自定义头**，不靠 token
  *
@@ -155,38 +152,6 @@ export function buildSessionCookie(token: string, options: { https: boolean; max
   const parts = [`${PANEL_COOKIE}=${encodeURIComponent(token)}`, "Path=/", "HttpOnly", "SameSite=Lax"];
   if (options.https) parts.push("Secure");
   if (options.maxAgeSeconds !== undefined) parts.push(`Max-Age=${Math.max(0, Math.floor(options.maxAgeSeconds))}`);
-  return parts.join("; ");
-}
-
-/**
- * 二次验证（step-up）标记的 cookie 名。
- *
- * 与主会话 cookie **分开**，因为它由另一条路径签发、有效期短得多、且只对
- * 破坏性动作有意义。混在同一个 cookie 里会让「我现在到底有没有二次验证过」
- * 变成一件要解 token 才知道的事。
- */
-export const STEP_UP_COOKIE = "opennote_step_up";
-
-/** step-up 标记的有效期：5 分钟（够点完一个确认框，不够被顺走）。 */
-export const STEP_UP_TTL_SECONDS = 5 * 60;
-
-/**
- * 造一个 step-up 标记。
- *
- * 值就是**当前会话的 authToken** —— 这里刻意不签一个新令牌：那样就多出一份
- * 可被伪造/可被长期持有的凭据。用 authToken 本身意味着「验证过」这件事等价于
- * 「此刻这个浏览器仍然持有那把密钥」，而它会在轮换时自动失效（这正是想要的）。
- */
-export function buildStepUpCookie(token: string, options: { https: boolean }): string {
-  const parts = [`${STEP_UP_COOKIE}=${encodeURIComponent(token)}`, "Path=/", "HttpOnly", "SameSite=Lax"];
-  if (options.https) parts.push("Secure");
-  parts.push(`Max-Age=${STEP_UP_TTL_SECONDS}`);
-  return parts.join("; ");
-}
-
-export function buildClearStepUpCookie(options: { https: boolean }): string {
-  const parts = [`${STEP_UP_COOKIE}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0"];
-  if (options.https) parts.push("Secure");
   return parts.join("; ");
 }
 

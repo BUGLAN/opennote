@@ -1,7 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { ACCENTS, FONTS, THEMES, WIDTHS, type Id, type Snapshot, type UiSettings } from "../data/types";
+/* 画布快照摘要需要解析 JSON Canvas：`canvas/types` 无三方依赖，静态 import 不破坏懒加载分包。 */
+import { parseCanvas } from "../canvas/types";
+import { ACCENTS, FONTS, THEMES, WIDTHS, isReadOnlyKind, noteKind, type Id, type Snapshot, type UiSettings } from "../data/types";
 import { hasLegacyData } from "../data/legacy";
-import { listSnapshots, restoreSnapshot, takeManualSnapshot } from "../data/library";
+import { getLibrary, listSnapshots, restoreSnapshot, takeManualSnapshot } from "../data/library";
 import type { WorkspaceRecord } from "../data/workspaces";
 import type { UpdateStatus } from "../desktop/bridge";
 import { patchUi, setTheme, toggleAppearance } from "../data/ui";
@@ -15,6 +17,11 @@ import { cn, formatBytes, formatDateTime } from "../lib/utils";
 import { Icon } from "./Icons";
 import { ImportApiPanel } from "./ImportApiPanel";
 import { Modal } from "./Overlays";
+import { SyncPane } from "./sync/SyncPane";
+import { useStore } from "../lib/store";
+import { syncUiStore } from "../sync/appSync";
+import { syncAccountStore } from "../sync/account";
+import type { NotebookSummary } from "../../shared/contract";
 
 /* ================================ settings ============================== */
 
@@ -27,6 +34,7 @@ import { Modal } from "./Overlays";
 const SECTIONS = [
   { id: "外观", hint: "主题、字体与排版" },
   { id: "文件", hint: "笔记本、导入与导出" },
+  { id: "同步", hint: "账号、设备与冲突" },
   { id: "编辑", hint: "写作模式与格式" },
   { id: "视图", hint: "布局、模式与导航" },
   { id: "帮助", hint: "快捷键与关于" },
@@ -56,6 +64,7 @@ export function SettingsDialog({
   updateStatus,
   onCheckUpdate,
   onUpdateAction,
+  onDownloadRemote,
 }: {
   settings: UiSettings;
   workspace: WorkspaceRecord | null;
@@ -77,8 +86,15 @@ export function SettingsDialog({
   updateStatus: UpdateStatus | null;
   onCheckUpdate(): void;
   onUpdateAction(action: UpdateAction): void;
+  /** 同步一栏「只在云端的」笔记本 → 在本机建一个笔记本并绑上它。 */
+  onDownloadRemote(notebook: NotebookSummary): Promise<void>;
 }): ReactNode {
   const [section, setSection] = useState<SectionId>(initialSection ?? "外观");
+  const syncUi = useStore(syncUiStore);
+  const syncAccount = useStore(syncAccountStore);
+  // 分类栏上「同步」带一个点：只在需要你处理时（冲突 / 待解锁 / 需要重新登录）。
+  const syncNeedsYou =
+    (syncUi.last?.conflicts.length ?? 0) > 0 || syncUi.reason === "locked" || syncAccount.needsSignIn || syncAccount.disabled;
   const [legacy, setLegacy] = useState(false);
   useEffect(() => {
     void hasLegacyData().then(setLegacy);
@@ -112,7 +128,10 @@ export function SettingsDialog({
               className={cn("settings__tab", section === entry.id && "is-active")}
               onClick={() => setSection(entry.id)}
             >
-              <span>{entry.id}</span>
+              <span>
+                {entry.id}
+                {entry.id === "同步" && syncNeedsYou ? <i className="sync-dot" aria-label="需要处理" /> : null}
+              </span>
               <small>{entry.hint}</small>
             </button>
           ))}
@@ -283,7 +302,7 @@ export function SettingsDialog({
                 「写完标题 5 秒后自动改名」的总开关（方案 #20）。
                 只对**文件名还是占位名**的笔记生效：只有「无标题」「未命名」「untitled」
                 这类名字才在候选集里，其余笔记本来就不会被自动改名。
-                默认开；关掉不会撤销已经改过的名字，只是之后不再跟随。
+                只改一次：改完名字就不再是占位名，之后文件名固定。默认开；关掉不会撤销已经改过的名字。
               */}
               <SettingRow label="占位名笔记自动改名" hint="写完标题 5 秒后，把「无标题」这类文件名改成标题">
                 <div className="switch-row">
@@ -293,12 +312,12 @@ export function SettingsDialog({
                       checked={settings.autoTitleFromPlaceholder}
                       onChange={(event) => patchUi({ autoTitleFromPlaceholder: event.target.checked })}
                     />
-                    自动跟随正文标题
+                    用第一个标题命名
                   </label>
                 </div>
                 <p className="dialog__note">
                   只有还叫「无标题」「未命名」的笔记会被改名，改的是文件名，正文一个字都不动；
-                  其他笔记的文件名一律不动。改过名的笔记（含你手动重命名过的）不再自动跟随。
+                  其他笔记的文件名一律不动。每篇只改一次，之后想改名请手动重命名。
                 </p>
               </SettingRow>
 
@@ -512,6 +531,8 @@ export function SettingsDialog({
             </>
           ) : null}
 
+          {section === "同步" ? <SyncPane workspace={workspace} onDownloadRemote={onDownloadRemote} /> : null}
+
           {section === "帮助" ? (
             <>
               <SettingRow label="快捷键" hint="也可以按 Ctrl/⌘ + / 随时查看">
@@ -665,6 +686,15 @@ function workspaceHint(workspace: WorkspaceRecord): string {
 export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void }): ReactNode {
   const [snapshots, setSnapshots] = useState<Snapshot[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  /*
+   * 画布的快照是 JSON Canvas，整篇摊开是噪声：预览改摘要、原文折叠。
+   * kind 从数据层现取（快照本身不带 kind）；它由路径扩展名决定，对话框开着的
+   * 这一会儿不会变。
+   */
+  const note = getLibrary().notes[noteId] ?? getLibrary().trash[noteId] ?? null;
+  const canvasHistory = note !== null && noteKind(note) === "canvas";
+  /* HTML 页面应用内只读：历史可以看（外部改动前的版本会留档），但不能在应用内「恢复」回去。 */
+  const readOnlyHistory = note !== null && isReadOnlyKind(note);
 
   const load = () => {
     void listSnapshots(noteId).then((list) => {
@@ -703,9 +733,10 @@ export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void
           <button
             type="button"
             className="btn btn--primary"
-            disabled={!current}
+            disabled={!current || readOnlyHistory}
+            title={readOnlyHistory ? "HTML 页面在应用内只读，不能恢复历史版本" : undefined}
             onClick={async () => {
-              if (!current) return;
+              if (!current || readOnlyHistory) return;
               const ok = await askConfirm({
                 title: "恢复这个版本？",
                 message: `将用 ${formatDateTime(current.createdAt)} 的内容替换当前正文，现在的版本会先被存进历史。`,
@@ -752,11 +783,31 @@ export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void
               </button>
             ))}
           </div>
-          <pre className="history__preview">{current?.content ?? ""}</pre>
+          {canvasHistory ? (
+            <div>
+              <p className="dialog__message">{canvasSnapshotSummary(current?.content ?? "")}</p>
+              <details>
+                <summary>查看画布原文</summary>
+                <pre className="history__preview">{current?.content ?? ""}</pre>
+              </details>
+            </div>
+          ) : (
+            <pre className="history__preview">{current?.content ?? ""}</pre>
+          )}
         </div>
       )}
     </Modal>
   );
+}
+
+/**
+ * 画布快照的一句话摘要。整篇级解析失败（`error.ref` 缺省 = JSON 语法错 / 根不是对象，
+ * 见 `canvas/jsonCanvas` 的处置表）如实说读不出；其余按解析产物报卡片与连线数。
+ */
+function canvasSnapshotSummary(content: string): string {
+  const { doc, errors } = parseCanvas(content);
+  if (errors.some((error) => error.ref === undefined)) return "（无法解析的画布快照）";
+  return `${doc.nodes.length} 张卡片 · ${doc.edges.length} 条连线`;
 }
 
 /* =============================== shortcuts ============================== */

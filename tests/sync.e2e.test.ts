@@ -32,7 +32,8 @@
  * 4. E2EE 模式两设备互同步 + 服务端库里**看不到明文**；
  * 5. 冲突：两边都改 → 只报不猜；
  * 6. 多账号隔离：B 拿不到 A 的任何东西（404 不可区分）；
- * 7. 401 → `key-rotated` 独立状态与指定文案；
+ * 7. 401 → `signed-out` 独立状态与「需要重新登录」；
+ * 10. 加密口令：第一台设备设口令、第二台设备用口令解锁、第三台设备用配对码拿到 encRoot（真实 X25519）；
  * 8. （真实 CouchDB 模式）置备验收：`_design`/`_security`/`_revs_limit` 真实落在库上；
  * 9. （真实 CouchDB 模式）`/v1/events` SSE：另一设备写入 → 本设备收到 `change` 信号。
  *
@@ -46,6 +47,7 @@ import { serve } from "@hono/node-server";
 import { createRequire } from "node:module";
 import type { DatabaseSync } from "node:sqlite";
 
+import { PROTOCOL_VERSION } from "../shared/contract";
 import { FakeCouch, couchClient } from "../server/src/couch/fakeCouch.test-helper";
 import { loadConfig } from "../server/src/config";
 import { openDatabase } from "../server/src/db";
@@ -55,11 +57,12 @@ import { AccountStore } from "../server/src/auth/accounts";
 import { NotebookStore } from "../server/src/notebooks";
 
 import { createSyncLedger, readSyncLedger, writeSyncLedger } from "../src/sync/state";
+import { createPairingKeys, createVault, openFromPeer, openVault, pairingSecrets, sealForPeer } from "../src/sync/vault";
 import { createSyncSession } from "../src/sync/session";
 import { createOpenNoteProvider } from "../src/sync/providers/opennote";
-import { deriveFromAccountKey, createRegistrationMaterial, encodeAccountKey, decodeAccountKey, deriveNotebookKey, unwrapEncRoot, deriveFromAccountKey as deriveToken } from "../src/sync/accountKey";
+import { deriveNotebookKey } from "../src/sync/accountKey";
+import { derivePathMapKey } from "../src/sync/crypto";
 import { describeSyncStatus, type SyncStatus } from "../src/sync/runner";
-import { openAccountApi } from "../src/sync/accountApi";
 import { desktopSend, type HttpSend } from "../src/sync/http";
 import type { FileSystemBackend } from "../src/fs/types";
 
@@ -206,10 +209,10 @@ interface World {
   db: DatabaseSync;
   /** 假 CouchDB（仅默认模式）；真实模式下为 null，断言走 HTTP 层。 */
   fake: FakeCouch | null;
-  /** 服务端的账号存储：**只**用来签发一次性引导码（等价于 CLI 的 `bootstrap-admin`）。 */
+  /** 服务端的账号存储：用来直接建号（等价于管理员发邀请、对方接受）。 */
   accounts: AccountStore;
   /** 按需建一台设备（临时目录在 afterAll 统一清理）。 */
-  device(options: { cryptoMode: "none" | "user-key"; notebookKey?: Uint8Array; authToken: string; notebookId: string; gitignoreText?: string }): Promise<DeviceHandle>;
+  device(options: { cryptoMode: "none" | "user-key"; notebookKey?: Uint8Array; pathMapKey?: Uint8Array; authToken: string; notebookId: string; gitignoreText?: string }): Promise<DeviceHandle>;
   cleanup: () => Promise<void>;
 }
 
@@ -233,7 +236,7 @@ async function makeWorld(): Promise<World> {
     if (code !== 0) throw new Error(`setup-couch-user 失败(exit ${code}):${errLines.join(" / ")}`);
   }
 
-  const device: World["device"] = async ({ cryptoMode, notebookKey, authToken, notebookId, gitignoreText }) => {
+  const device: World["device"] = async ({ cryptoMode, notebookKey, pathMapKey, authToken, notebookId, gitignoreText }) => {
     const root = await mkdtemp(join(tmpdir(), "opennote-sync-e2e-"));
     tempRoots.push(root);
     const ledger = createSyncLedger({
@@ -273,6 +276,7 @@ async function makeWorld(): Promise<World> {
       },
       notebookId,
       ...(notebookKey === undefined ? {} : { notebookKey }),
+      ...(pathMapKey === undefined ? {} : { pathMapKey }),
       ...(gitignoreText === undefined ? {} : { gitignoreText }),
     });
     return { root, disk, ledger, session };
@@ -292,55 +296,65 @@ async function makeWorld(): Promise<World> {
 }
 
 /* ============================================================================
-   注册（真实 /v1/account 契约）
+   账号（v2：邮箱 + 密码 + 会话令牌，`docs/执行-同步重写-2026-11-02.md`）
    ============================================================================ */
 
 interface AccountMaterial {
   accountId: string;
-  keyText: string;
+  email: string;
+  password: string;
   authToken: string;
-  wrappedEncRoot: string;
+  /** 加密口令（第一台设备设的；其它设备用它解锁）。 */
+  passphrase: string;
+  /** 端到端加密的根密钥。第一台设备生成并用口令包好上传；服务端永远拿不到明文。 */
   encRoot: Uint8Array;
 }
 
-/** 客户端生成材料 → POST /v1/account（与 onboarding 的默认注册路径同构）。 */
-async function registerAccount(base: string, bootstrapCode: string): Promise<AccountMaterial> {
-  const material = createRegistrationMaterial();
-  const response = await fetch(`${base}/v1/account`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      accountId: material.accountId,
-      authToken: material.authToken,
-      wrappedEncRoot: material.wrappedEncRoot,
-      bootstrapCode,
-    }),
-  });
-  expect(response.status).toBe(201);
-  const body = (await response.json()) as { accountId: string; isAdmin: boolean };
-  expect(body.isAdmin).toBe(true);
-  return {
-    accountId: body.accountId,
-    keyText: encodeAccountKey({ accountId: material.accountId, accountKey: material.accountKey }),
-    authToken: material.authToken,
-    wrappedEncRoot: material.wrappedEncRoot,
-    encRoot: material.encRoot,
-  };
+let accountCounter = 0;
+let deviceCounter = 0;
+
+function newDeviceId(): string {
+  deviceCounter += 1;
+  return deviceCounter.toString(16).padStart(32, "0");
 }
 
-/** 新设备导入密钥 → POST /v1/account/unlock 换回 wrappedEncRoot → 本地解开。 */
-async function unlockOnDevice(base: string, keyText: string): Promise<{ authToken: string; encRoot: Uint8Array }> {
-  const parsed = decodeAccountKey(keyText);
-  const { authToken } = deriveFromAccountKey(parsed);
-  const response = await fetch(`${base}/v1/account/unlock`, {
+/** 真实 HTTP 登录（`POST /v1/auth/login`），返回这台设备的会话令牌。 */
+async function login(base: string, email: string, password: string): Promise<string> {
+  const response = await fetch(`${base}/v1/auth/login`, {
     method: "POST",
-    headers: { authorization: `Bearer ${authToken}` },
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password, device: { deviceId: newDeviceId(), name: "e2e 设备", platform: "desktop" } }),
   });
   expect(response.status).toBe(200);
-  const body = (await response.json()) as { wrappedEncRoot: string; accountId: string };
-  const wrapKey = deriveToken(parsed).wrapKey;
-  const encRoot = unwrapEncRoot(wrapKey, body.wrappedEncRoot, body.accountId);
-  return { authToken, encRoot };
+  return ((await response.json()) as { token: string }).token;
+}
+
+/** 建号（等价于接受邀请）→ 第一台设备登录。 */
+async function registerAccount(base: string): Promise<AccountMaterial> {
+  accountCounter += 1;
+  const email = `e2e-${accountCounter}-${Date.now()}@example.test`;
+  const password = "e2e-password-123";
+  const row = await world.accounts.create({ email, password });
+  const authToken = await login(base, email, password);
+  // 第一台设备设加密口令：本机生成 encRoot、用口令包好上传（真实 `vault.ts` + `PUT /v1/me/encryption`）。
+  const passphrase = "e2e-passphrase";
+  const vault = await createVault(passphrase, row.id);
+  const put = await fetch(`${base}/v1/me/encryption`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${authToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ wrappedEncRoot: vault.wrappedEncRoot, kdf: vault.kdf, expected: null }),
+  });
+  expect(put.status).toBe(200);
+  return { accountId: row.id, email, password, authToken, passphrase, encRoot: vault.encRoot };
+}
+
+/** 同一账号的另一台设备：自己登录拿令牌，再用加密口令解开服务端存的那份 encRoot。 */
+async function loginOnAnotherDevice(base: string, account: AccountMaterial): Promise<{ authToken: string; encRoot: Uint8Array }> {
+  const authToken = await login(base, account.email, account.password);
+  const response = await fetch(`${base}/v1/me/encryption`, { headers: { authorization: `Bearer ${authToken}` } });
+  const state = (await response.json()) as { configured: true; wrappedEncRoot: string; kdf: Parameters<typeof openVault>[2] };
+  expect(state.configured).toBe(true);
+  return { authToken, encRoot: await openVault(account.passphrase, state.wrappedEncRoot, state.kdf, account.accountId) };
 }
 
 async function createNotebook(base: string, authToken: string, name: string, cryptoMode: "none" | "user-key"): Promise<string> {
@@ -430,26 +444,27 @@ async function syncAndPersist(device: DeviceHandle) {
    ============================================================================ */
 
 describe("账号与笔记本链路（真实 /v1/* 契约）", () => {
-  it("健康检查公开可用，协议版本 = 1", async () => {
+  it("健康检查公开可用，协议版本与契约一致，并报出登录方式", async () => {
     const response = await fetch(`${world.base}/v1/health`);
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { ok: boolean; protocolVersion: number };
+    const body = (await response.json()) as { ok: boolean; protocolVersion: number; auth: { password: boolean } };
     expect(body.ok).toBe(true);
-    expect(body.protocolVersion).toBe(1);
+    expect(body.protocolVersion).toBe(PROTOCOL_VERSION);
+    expect(body.auth.password).toBe(true);
   });
 
-  it("注册 → 解锁：新设备拿回 wrappedEncRoot 并解开 encRoot", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
-    const unlocked = await unlockOnDevice(world.base, account.keyText);
-    // 解开的 encRoot 必须与注册时客户端手里的那一份逐字节一致。
-    expect(Buffer.from(unlocked.encRoot).equals(Buffer.from(account.encRoot))).toBe(true);
-    expect(unlocked.authToken).toBe(account.authToken);
+  it("同一账号两台设备各自登录：令牌不同，都能列出同一个笔记本", async () => {
+    const account = await registerAccount(world.base);
+    const notebookId = await createNotebook(world.base, account.authToken, "两台设备", "none");
+    const other = await loginOnAnotherDevice(world.base, account);
+    expect(other.authToken).not.toBe(account.authToken);
+    const response = await fetch(`${world.base}/v1/notebooks`, { headers: { authorization: `Bearer ${other.authToken}` } });
+    const body = (await response.json()) as { notebooks: { notebookId: string }[] };
+    expect(body.notebooks.map((item) => item.notebookId)).toContain(notebookId);
   });
 
-  it("带引导码注册 → isAdmin = true；建 E2EE 笔记本成功", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+  it("登录后能建 E2EE 笔记本", async () => {
+    const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "E2EE 笔记本", "user-key");
     expect(notebookId).toBeTruthy();
   });
@@ -461,8 +476,7 @@ describe("账号与笔记本链路（真实 /v1/* 契约）", () => {
 
 describe("明文模式：两台真实设备经真实 HTTP 互相同步", () => {
   it("设备 A 写 → 推上;设备 B 拉 → 内容一致", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+    const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "明文", "none");
 
     const a = await world.device({ cryptoMode: "none", authToken: account.authToken, notebookId });
@@ -477,8 +491,7 @@ describe("明文模式：两台真实设备经真实 HTTP 互相同步", () => {
   });
 
   it("B 修改 → A 增量同步拿到新版本", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+    const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "明文2", "none");
 
     const a = await world.device({ cryptoMode: "none", authToken: account.authToken, notebookId });
@@ -496,8 +509,7 @@ describe("明文模式：两台真实设备经真实 HTTP 互相同步", () => {
   });
 
   it("A 删除 → 传播到 B（B 上的文件消失）", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+    const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "明文3", "none");
 
     const a = await world.device({ cryptoMode: "none", authToken: account.authToken, notebookId });
@@ -513,8 +525,7 @@ describe("明文模式：两台真实设备经真实 HTTP 互相同步", () => {
   });
 
   it("忽略规则生效：.git/ 与 build/ 不进远端", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+    const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "明文4", "none");
 
     const a = await world.device({ cryptoMode: "none", authToken: account.authToken, notebookId, gitignoreText: "build/" });
@@ -533,13 +544,11 @@ describe("明文模式：两台真实设备经真实 HTTP 互相同步", () => {
 
 describe("E2EE：两台设备互相同步，库里看不到明文", () => {
   it("A 写 → B 拉:密文落库,两端明文一致", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+    const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "E2EE1", "user-key");
 
-    // A 是注册设备（手里有 encRoot）；B 通过导入密钥 + unlock 重建。
-    const aKey = decodeAccountKey(account.keyText);
-    const aToken = deriveFromAccountKey(aKey).authToken;
+    // A 是第一台设备（设口令时生成了 encRoot）；B 登录后用加密口令解开同一份。
+    const aToken = account.authToken;
     const encRoot = account.encRoot;
     const notebookKeyA = deriveNotebookKey(encRoot, notebookId);
 
@@ -548,11 +557,9 @@ describe("E2EE：两台设备互相同步，库里看不到明文", () => {
     const r1 = await syncAndPersist(a);
     expect(r1.pushed).toBe(1);
 
-    // ★ B 必须**知道这条路径**才能反解 did（P4-c 的 did↔path 映射同步尚未接线，
-    //   见 7fa5209 的「尚未做」注记）。这里直接把「账本里记着这一条、但从未物化过」
-    //   写进账本 —— 等价于真实流程里「映射已重建」的状态，且不会伪造本地内容。
-    //   全新空设备拿不出路径、只能看到 unknownDids 的情况见下一条用例。
-    const b = await unlockOnDevice(world.base, account.keyText);
+    // ★ 这一条**不带**文件名对照表的密钥：B 靠「账本里记着这一条、但从未物化过」认出路径。
+    //   全新空设备靠对照表（`m:pathmap`）认路的情况见下面两条用例。
+    const b = await loginOnAnotherDevice(world.base, account);
     const notebookKeyB = deriveNotebookKey(b.encRoot, notebookId);
     expect(Buffer.from(notebookKeyB).equals(Buffer.from(notebookKeyA))).toBe(true);
 
@@ -569,27 +576,59 @@ describe("E2EE：两台设备互相同步，库里看不到明文", () => {
     await expectNoPlaintextOnServer({ plaintext: "张三 13800000000", pathHint: "名单" });
   });
 
-  it("★ 全新空设备（没有 did↔path 映射）⇒ 如实报 unknownDids，盘上不写任何东西", async () => {
+  it("★ 全新空设备 + 文件名对照表 ⇒ 拉得下来，且对照表在服务端只是密文", async () => {
     /*
-     * 这是 P4-c **尚未接线**的部分（7fa5209 / fe699fe 的「尚未做」注记）：
-     * session 的 push/pull 还不写/读 `m:pathmap`，新设备重建流程也没有。
-     * 所以模式 B 下 did 不可逆 ⇒ 全新设备认不出路径。
-     *
-     * 这里钉住的是「引擎的行为是**对的**」：认不出来的 did 如实上报，**绝不猜路径、
-     * 绝不往盘上写密文**（那会把用户的笔记变成乱码，而且是静默的）。
-     * 等 m:pathmap 接上之后，这条用例应当改成「pulled = 1」。
+     * 模式 B 的 did 不可逆：全新设备（空目录、空账本）只能靠 A 推上去的 `m:pathmap`
+     * （用 encRoot 派生的密钥加密）把 did 翻回文件名。
      */
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+    const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "E2EE-全新设备", "user-key");
+    const notebookKey = deriveNotebookKey(account.encRoot, notebookId);
+    const pathMapKey = derivePathMapKey(account.encRoot);
+
+    const a = await world.device({ cryptoMode: "user-key", authToken: account.authToken, notebookKey, pathMapKey, notebookId });
+    await a.disk.write("notes/极密档案.md", "# 机密 QZX-7731");
+    await syncAndPersist(a);
+
+    // 另一台设备：自己登录、用加密口令解开 encRoot，空目录、空账本。
+    const b = await loginOnAnotherDevice(world.base, account);
+    const fresh = await world.device({
+      cryptoMode: "user-key",
+      authToken: b.authToken,
+      notebookKey: deriveNotebookKey(b.encRoot, notebookId),
+      pathMapKey: derivePathMapKey(b.encRoot),
+      notebookId,
+    });
+    const result = await syncAndPersist(fresh);
+    expect(result.unknownDids).toHaveLength(0);
+    expect(result.pulled).toBe(1);
+    expect(await fresh.disk.read("notes/极密档案.md")).toBe("# 机密 QZX-7731");
+
+    // 对照表本身也不能把路径漏给服务端。
+    await expectNoPlaintextOnServer({ plaintext: "QZX-7731", pathHint: "极密档案" });
+  });
+
+  it("★ 没有对照表密钥的全新设备 ⇒ 如实报 unknownDids，盘上不写任何东西", async () => {
+    /*
+     * 钉住「引擎的行为是**对的**」：认不出来的 did 如实上报，**绝不猜路径、
+     * 绝不往盘上写密文**（那会把用户的笔记变成乱码，而且是静默的）。
+     * 真实客户端总会带上对照表密钥；这里模拟的是「建这篇的设备还是旧版、没写过表」。
+     */
+    const account = await registerAccount(world.base);
+    const notebookId = await createNotebook(world.base, account.authToken, "E2EE-无对照表", "user-key");
     const notebookKey = deriveNotebookKey(account.encRoot, notebookId);
 
     const a = await world.device({ cryptoMode: "user-key", authToken: account.authToken, notebookKey, notebookId });
     await a.disk.write("notes/secret.md", "# 机密");
     await syncAndPersist(a);
 
-    // 全新设备：同一把密钥、空目录、空账本。
-    const fresh = await world.device({ cryptoMode: "user-key", authToken: account.authToken, notebookKey, notebookId });
+    const fresh = await world.device({
+      cryptoMode: "user-key",
+      authToken: account.authToken,
+      notebookKey,
+      pathMapKey: derivePathMapKey(account.encRoot),
+      notebookId,
+    });
     const result = await syncAndPersist(fresh);
     expect(result.pulled).toBe(0);
     expect(result.unknownDids).toHaveLength(1);
@@ -651,8 +690,7 @@ async function expectNoPlaintextOnServer(options: { plaintext: string; pathHint:
 
 describe("冲突：只报不猜", () => {
   it("两边都改同一条 → conflicts 列出,且不被自动覆盖", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+    const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "冲突", "none");
 
     const a = await world.device({ cryptoMode: "none", authToken: account.authToken, notebookId });
@@ -678,12 +716,10 @@ describe("冲突：只报不猜", () => {
 
 describe("多账号隔离", () => {
   it("账号 B 访问账号 A 的笔记本 → 404（与不存在不可区分）", async () => {
-    const codeA = world.accounts.createBootstrapCode().code;
-    const accountA = await registerAccount(world.base, codeA);
+    const accountA = await registerAccount(world.base);
     const notebookA = await createNotebook(world.base, accountA.authToken, "A 的笔记本", "none");
 
-    const codeB = world.accounts.createBootstrapCode().code;
-    const accountB = await registerAccount(world.base, codeB);
+    const accountB = await registerAccount(world.base);
 
     const response = await fetch(`${world.base}/v1/tree?nb=${notebookA}`, {
       headers: { authorization: `Bearer ${accountB.authToken}` },
@@ -698,31 +734,78 @@ describe("多账号隔离", () => {
 });
 
 /* ============================================================================
-   ⑥ 401 → key-rotated 独立状态
+   ⑥ 401 → signed-out 独立状态
    ============================================================================ */
 
 describe("401 语义", () => {
-  it("令牌失效 → runner 进 key-rotated,文案是指定的那句", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+  it("令牌失效 → runner 进 signed-out，文案是「需要重新登录」", async () => {
+    const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "轮换", "none");
     const a = await world.device({ cryptoMode: "none", authToken: account.authToken, notebookId });
 
-    // 轮换:旧 authToken 立即失效。
-    const material = createRegistrationMaterial();
-    await fetch(`${world.base}/v1/account/rotate`, {
+    // 登出（等价于在另一台设备上「移除这台设备」）：令牌立即失效。
+    await fetch(`${world.base}/v1/auth/logout`, {
       method: "POST",
-      headers: { authorization: `Bearer ${account.authToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ newAuthToken: material.authToken, newWrappedEncRoot: material.wrappedEncRoot }),
+      headers: { authorization: `Bearer ${account.authToken}` },
     });
 
     const statuses: SyncStatus[] = [];
     a.session.runner = a.session.runner; // runner 由 session 内部持有;通过 status() 读取
     await a.session.syncNow().catch(() => undefined);
     const status = a.session.status();
-    expect(status.phase).toBe("key-rotated");
+    expect(status.phase).toBe("signed-out");
     const text = describeSyncStatus(status);
-    expect(text.label).toContain("此设备的密钥已被轮换");
+    expect(text.label).toContain("需要重新登录");
+  });
+});
+
+/* ============================================================================
+   加密口令与配对（阶段 ④）：真实 HTTP + 真实 X25519
+   ============================================================================ */
+
+describe("配对码：新设备拿到自己的会话与同一个 encRoot", () => {
+  it("A 发码 → C 认领 → 两边校验码一致 → A 确认 → C 解开的 encRoot 与 A 的相同，服务端只见密文", async () => {
+    const account = await registerAccount(world.base);
+    const aKeys = await createPairingKeys();
+    const created = await (
+      await fetch(`${world.base}/v1/pairing`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${account.authToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: aKeys.publicKey }),
+      })
+    ).json() as { id: string; code: string };
+
+    const cKeys = await createPairingKeys();
+    const claim = await (
+      await fetch(`${world.base}/v1/pairing/claim`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: created.code, publicKey: cKeys.publicKey, device: { deviceId: newDeviceId(), name: "新手机", platform: "android" } }),
+      })
+    ).json() as { id: string; claimToken: string; publicKey: string };
+
+    const seen = await (await fetch(`${world.base}/v1/pairing/${created.id}`, { headers: { authorization: `Bearer ${account.authToken}` } })).json() as { publicKey: string };
+    const onA = await pairingSecrets({ own: aKeys, peerPublicKey: seen.publicKey, initiatorPublicKey: aKeys.publicKey, claimantPublicKey: seen.publicKey });
+    const onC = await pairingSecrets({ own: cKeys, peerPublicKey: claim.publicKey, initiatorPublicKey: claim.publicKey, claimantPublicKey: cKeys.publicKey });
+    expect(onA.check).toBe(onC.check);
+
+    const sealed = sealForPeer(onA.key, account.encRoot, account.accountId);
+    await fetch(`${world.base}/v1/pairing/${created.id}/approve`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${account.authToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ sealed }),
+    });
+    const result = await (
+      await fetch(`${world.base}/v1/pairing/${created.id}/result`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ claimToken: claim.claimToken }),
+      })
+    ).json() as { status: string; token: string; sealed: string; me: { accountId: string } };
+    expect(result.status).toBe("done");
+    const encRoot = openFromPeer(onC.key, result.sealed, result.me.accountId);
+    expect(Buffer.from(encRoot).equals(Buffer.from(account.encRoot))).toBe(true);
+    expect((await fetch(`${world.base}/v1/me`, { headers: { authorization: `Bearer ${result.token}` } })).status).toBe(200);
   });
 });
 
@@ -732,8 +815,7 @@ describe("401 语义", () => {
 
 (REAL_COUCH ? describe : describe.skip)("真实 CouchDB", () => {
   it("置备验收:_design / _security / _revs_limit 真实落在库上", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+    const account = await registerAccount(world.base);
     await createNotebook(world.base, account.authToken, "真库置备", "none");
     // 找到刚建的库(命名规则见 NotebookStore)。
     const adminAuth = `Basic ${Buffer.from(`${REAL_COUCH_ADMIN_USER}:${REAL_COUCH_ADMIN_PASSWORD}`).toString("base64")}`;
@@ -752,8 +834,7 @@ describe("401 语义", () => {
   });
 
   it("SSE:设备 B 写入 → 设备 A 收到 change 信号(真实 _changes 中继)", async () => {
-    const code = world.accounts.createBootstrapCode().code;
-    const account = await registerAccount(world.base, code);
+    const account = await registerAccount(world.base);
     const notebookId = await createNotebook(world.base, account.authToken, "SSE", "none");
 
     const a = await world.device({ cryptoMode: "none", authToken: account.authToken, notebookId });
@@ -807,7 +888,7 @@ describe("桌面端主进程代理路径（真实 createSyncProxy）", () => {
    * 这条用例把**真实的** `desktopSend` 与**真实的** `createSyncProxy`（主进程
    * 实际使用的模块）接上真实服务端，锁住整条序列化链路。
    */
-  it("注册请求经 IPC 数组序列化后，服务端仍能解析 JSON", async () => {
+  it("登录请求经 IPC 数组序列化后，服务端仍能解析 JSON", async () => {
     const require = createRequire(import.meta.url);
     const { createSyncProxy } = require("../electron/sync.cjs") as {
       createSyncProxy: (options: {
@@ -824,8 +905,8 @@ describe("桌面端主进程代理路径（真实 createSyncProxy）", () => {
       };
     };
 
-    const code = world.accounts.createBootstrapCode().code;
-    const material = createRegistrationMaterial();
+    const email = `e2e-proxy-${Date.now()}@example.test`;
+    await world.accounts.create({ email, password: "e2e-password-123" });
 
     // 与 main.cjs 的 `configureSyncProxy` 同构：authToken 由主进程持有，
     // transport 负责真正出网（含真机回归的字节转换）。
@@ -875,25 +956,27 @@ describe("桌面端主进程代理路径（真实 createSyncProxy）", () => {
       return desktopSend(bridge as never, world.base);
     };
 
-    const api = await openAccountApi({ baseUrl: world.base }, await sendFor(""));
+    const decode = (bytes: Uint8Array): Record<string, unknown> => JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
 
-    const response = await api.register({
-      accountId: material.accountId,
-      authToken: material.authToken,
-      wrappedEncRoot: material.wrappedEncRoot,
-      bootstrapCode: code,
+    const anonymous = await sendFor("");
+    const loginResponse = await anonymous({
+      method: "POST",
+      url: `${world.base}/v1/auth/login`,
+      headers: { "content-type": "application/json" },
+      body: new TextEncoder().encode(
+        JSON.stringify({ email, password: "e2e-password-123", device: { deviceId: newDeviceId(), name: "桌面端代理", platform: "desktop" } }),
+      ),
     });
     // ★ 服务端把请求体**当 JSON 解析成功**了 —— body 没有在序列化链路上变成数字串。
-    expect(response.isAdmin).toBe(true);
-    expect(response.accountId).toBe(material.accountId);
+    expect(loginResponse.status).toBe(200);
+    const token = decode(loginResponse.bytes).token as string;
+    expect(token.startsWith("ons_")).toBe(true);
 
     // 带令牌的请求：渲染层头会被剥离，主进程注入自己保管的令牌。
-    const notebooks = await (
-      await openAccountApi(
-        { baseUrl: world.base, authToken: material.authToken },
-        await sendFor(material.authToken),
-      )
-    ).listNotebooks();
+    const authed = await sendFor(token);
+    const notebooksResponse = await authed({ method: "GET", url: `${world.base}/v1/notebooks`, headers: {} });
+    expect(notebooksResponse.status).toBe(200);
+    const notebooks = decode(notebooksResponse.bytes) as { notebooks: unknown };
     expect(Array.isArray(notebooks.notebooks)).toBe(true);
   });
 });

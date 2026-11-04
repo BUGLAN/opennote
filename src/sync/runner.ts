@@ -48,7 +48,8 @@ export type SyncStatus =
       progress: SyncProgress | null }
   | { phase: "offline"; error: string; lastSyncedAt: number | null }
   /** 密钥已被轮换 / 账号被禁用 —— **独立状态**，不是「错误」的一种（§1.5 代价 2）。 */
-  | { phase: "key-rotated"; lastSyncedAt: number | null }
+  | { phase: "signed-out"; lastSyncedAt: number | null }
+  | { phase: "disabled"; lastSyncedAt: number | null }
   | { phase: "error"; error: string; code: string; lastSyncedAt: number | null };
 
 /** 触发这次同步的原因（日志与诊断用；也便于用例断言「谁触发的」）。 */
@@ -77,6 +78,13 @@ export interface SyncRunnerDeps {
   onApplied?: (paths: string[]) => void;
   /** 本地写之后等多久才推（去抖）。默认 1200ms。 */
   localWriteDebounceMs?: number;
+  /**
+   * 去抖的**最长等待**：从第一次本地写起算，最迟多久必须推一次。默认 10000ms。
+   *
+   * 没有它，持续编辑（自动保存每 450ms 落一次盘，间隔都小于去抖）会让去抖被无限顺延 ——
+   * 写了几分钟一个字都没推上去，另一台设备看到的就是「改了没同步」。
+   */
+  localWriteMaxWaitMs?: number;
   /**
    * 一轮失败之后**多久自动重试**（指数增长，带上限）。默认 5000ms 起、120000ms 封顶。
    *
@@ -128,6 +136,8 @@ export interface SyncRunner {
 
 /** 默认去抖：1200ms。比自动保存的 450ms 长一些，让一次连续编辑只推一次。 */
 const DEFAULT_DEBOUNCE_MS = 1200;
+/** 去抖最长等待：10 秒（见 `localWriteMaxWaitMs`）。 */
+const DEFAULT_DEBOUNCE_MAX_WAIT_MS = 10_000;
 
 /** 自动重试：首次 5 秒，之后翻倍，2 分钟封顶（见 `retryBaseDelayMs`）。 */
 const DEFAULT_RETRY_BASE_MS = 5000;
@@ -136,8 +146,9 @@ const DEFAULT_RETRY_MAX_MS = 120_000;
 /** 把一次失败翻成状态。**401 单独成一种状态**，见模块头 ②。 */
 export function statusForError(error: unknown, lastSyncedAt: number | null): SyncStatus {
   if (error instanceof SyncProviderError) {
-    // ★ 「密钥已轮换」不是错误，是一个**要用户动手**的状态。
-    if (error.code === "rotated") return { phase: "key-rotated", lastSyncedAt };
+    // ★ 「需要重新登录」「账号停用」不是错误，是**要用户动手**的状态。
+    if (error.code === "signed-out") return { phase: "signed-out", lastSyncedAt };
+    if (error.code === "disabled") return { phase: "disabled", lastSyncedAt };
     // 网络类问题报「离线」——它对用户的含义与「服务端 500」不同（前者等等就好）。
     if (error.code === "network") return { phase: "offline", error: error.message, lastSyncedAt };
     return { phase: "error", error: error.message, code: error.code, lastSyncedAt };
@@ -156,6 +167,7 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
   const setTimer = deps.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimeoutFn ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   const debounceMs = deps.localWriteDebounceMs ?? DEFAULT_DEBOUNCE_MS;
+  const debounceMaxWaitMs = Math.max(debounceMs, deps.localWriteMaxWaitMs ?? DEFAULT_DEBOUNCE_MAX_WAIT_MS);
   const retryBase = deps.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_MS;
   const retryMax = deps.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_MS;
 
@@ -169,6 +181,8 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
   /** 进行中时又来了请求 ⇒ 跑完再来一次（**只记一次**，不排队）。 */
   let pendingAgain = false;
   let debounceHandle: unknown = null;
+  /** 这一串去抖里**第一次**本地写的时间（算最长等待用）；没有挂着的去抖时为 null。 */
+  let debounceFirstAt: number | null = null;
   /** 自动重试的定时器（`retryHandle`）与已经重试过几次（决定退避长度）。 */
   let retryHandle: unknown = null;
   let retryAttempt = 0;
@@ -242,6 +256,8 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
     noteUpToDate(): void {
       // 只把「上次同步时间」推到现在：我们确实刚和服务端核对过，内容也一致。
       lastSyncedAt = now();
+      // 正在跑的那一轮会自己发布结束状态；这里抢先发 idle 会让界面在同步中途显示「已同步」。
+      if (inFlight) return;
       publish({ phase: "idle", lastSyncedAt, conflicts });
     },
 
@@ -272,12 +288,20 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
       inFlight = (async () => {
         try {
           let last: SyncOnceResult | null = null;
-          // 先跑一次；如果期间又有人请求，就再跑一次（最多两轮，避免活锁）。
-          last = await runOnce();
-          if (pendingAgain) {
+          /*
+           * 先跑一次；期间又有人请求，就接着再跑，直到跑完一轮期间**没有**新请求为止。
+           *
+           * ★ 以前是「最多两轮」，然后在 finally 里把 `pendingAgain` 清掉 ——
+           * 第二轮期间到来的请求（典型：第二轮还在推，用户又保存了一次）被**静默丢弃**，
+           * 而去抖定时器早已触发过、不会再来：这次保存要等下一个不相干的触发才推上去。
+           * 不会活锁：只有真的又来了请求才多跑一轮，而同步自己的写入已经被静默。
+           *
+           * 失败时停下来：可重试的失败已经排了自动重试，接着空转只会连撞同一堵墙。
+           */
+          do {
             pendingAgain = false;
             last = await runOnce();
-          }
+          } while (pendingAgain && last !== null && !disposed);
           return last;
         } finally {
           inFlight = null;
@@ -290,10 +314,15 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
     scheduleAfterLocalWrite() {
       if (disposed) return;
       if (debounceHandle !== null) clearTimer(debounceHandle);
+      const at = now();
+      if (debounceFirstAt === null) debounceFirstAt = at;
+      // 去抖可以顺延，但不能越过最长等待（见 `localWriteMaxWaitMs`）。
+      const delay = Math.max(0, Math.min(debounceMs, debounceFirstAt + debounceMaxWaitMs - at));
       debounceHandle = setTimer(() => {
         debounceHandle = null;
-        void this.request("local-write");
-      }, debounceMs);
+        debounceFirstAt = null;
+        void api.request("local-write");
+      }, delay);
     },
 
     dispose() {
@@ -302,6 +331,7 @@ export function createSyncRunner(deps: SyncRunnerDeps): SyncRunner {
         clearTimer(debounceHandle);
         debounceHandle = null;
       }
+      debounceFirstAt = null;
       clearRetry();
     },
   };
@@ -329,9 +359,8 @@ export interface SyncStatusText {
  *
  * 三种情况都要求「**说准**」，而它们很容易被写成一句笼统的「同步失败」：
  *
- * 1. **`key-rotated` 有指定文案**（§1.5 代价 2、第 2030 行）：
- *    「此设备的密钥已被轮换，请导入新密钥」。写成「同步失败」会让用户去查网络 ——
- *    而这条**只有他自己能解决**（重新导入密钥），所以要 `actionable: true`。
+ * 1. **`signed-out` / `disabled` 要说准**：「需要重新登录」「账号已被停用」。写成「同步失败」
+ *    会让用户去查网络 —— 而这两条**只有用户自己能解决**，所以要 `actionable: true`。
  * 2. **`offline` 与 `error` 不是一回事**：前者「等等就好」，后者要人管。
  * 3. **冲突数必须露出来**（§5.3 的「N 冲突」）：冲突是**只报不猜**的
  *    （引擎绝不动它们），所以用户不知道就等于永远不解决。
@@ -344,15 +373,17 @@ export function describeSyncStatus(status: SyncStatus): SyncStatusText {
     case "syncing":
       return { label: "同步中…", detail: null, tone: "busy", actionable: false };
 
-    case "key-rotated":
+    case "signed-out":
       return {
-        // ★ 这句是文档指定的，不要改写成「同步失败」。
-        label: "此设备的密钥已被轮换",
-        detail: "请导入新的账号密钥。",
+        label: "需要重新登录",
+        detail: "这台设备的登录已失效（密码改过，或在别处被移除了）。请在「设置 → 同步」里重新登录。",
         tone: "error",
-        // 只有用户自己能解决 —— 状态栏要给他一个入口。
+        // 只有用户自己能解决 —— 状态栏要给一个入口。
         actionable: true,
       };
+
+    case "disabled":
+      return { label: "账号已被停用", detail: "请联系同步服务器的管理员。", tone: "error", actionable: true };
 
     case "offline":
       return { label: "离线", detail: "网络恢复后会自动重试。", tone: "warn", actionable: false };

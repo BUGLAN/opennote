@@ -66,6 +66,48 @@ describe("§6.2 · false conflict（两边都改但内容相同）", () => {
   });
 });
 
+describe("画布（.canvas）进物化判据：拉得下来、删得掉（docs/canvas/00 §7.2 的缺口）", () => {
+  it("远端新增 / 远端已改的画布 ⇒ 进 download（不再只更新账本）", () => {
+    // 远端新增（基线没见过）
+    const added = planPull(
+      baselineOf({}),
+      { entries: [{ path: "看板/读书.canvas", hash: h("v1") }] },
+      [],
+    );
+    expect(added.download).toEqual([{ path: "看板/读书.canvas", sha: h("v1") }]);
+
+    // 远端改了、本地没动
+    const updated = planPull(
+      baselineOf({ "看板/读书.canvas": { remoteHash: h("old"), localHash: h("base"), imported: true } }),
+      { entries: [{ path: "看板/读书.canvas", hash: h("new") }] },
+      [{ path: "看板/读书.canvas", hash: h("base"), bytes: 10 }],
+    );
+    expect(updated.download).toEqual([{ path: "看板/读书.canvas", sha: h("new") }]);
+    expect(updated.conflicts).toEqual([]);
+  });
+
+  it("远端删了画布、本地没动 ⇒ 进 removeLocal（与下载分支同一个判据）", () => {
+    const plan = planPull(
+      baselineOf({
+        "看板/读书.canvas": { remoteHash: h("v1"), localHash: h("v1"), imported: true },
+        "notes/a.ts": { remoteHash: h("x"), localHash: h("x"), imported: true },
+      }),
+      { entries: [] },
+      [
+        { path: "看板/读书.canvas", hash: h("v1"), bytes: 10 },
+        { path: "notes/a.ts", hash: h("x"), bytes: 5 },
+      ],
+    );
+    expect(plan.removeLocal).toEqual(["看板/读书.canvas"]);
+  });
+
+  it("源码 / 配置仍然永不落地（画布并入不是「什么都物化」）", () => {
+    const plan = planPull(baselineOf({}), { entries: [{ path: "src/main.ts", hash: h("ts") }] }, []);
+    expect(plan.download).toEqual([]);
+    expect(plan.removeLocal).toEqual([]);
+  });
+});
+
 describe("§6.3 · 删除保护阈值", () => {
   it("小批量放行（`max(20, 总量×25%)` 以内）", () => {
     expect(assertDeletionBudget(4, 1)).toBeNull();

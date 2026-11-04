@@ -11,8 +11,10 @@
  * 这里只做 re-export，于是既有 import 路径（`../fs/paths`）一行不用改，
  * 而实现只有一份 —— 不是「两端各照规格实现一遍」。
  *
- * 留在本文件的只有**客户端自己的**东西：扩展名判据（`isMarkdownPath` / `isImagePath`）
- * 与 `.opennote/` 下的具体文件名常量。
+ * 留在本文件的只有**客户端自己的**东西：`.opennote/` 下的具体文件名常量与展示用的
+ * 时间格式化。扩展名判据（含画布 `isCanvasPath`）全部住在 `shared/paths.ts` ——
+ * 画布并入 `isMaterializable()` 之后它成了导入与拉取也要认的判据，与
+ * `isMarkdownPath` / `isImagePath` 同源。
  */
 
 export {
@@ -25,7 +27,9 @@ export {
   findCaseFoldCollisions,
   foldCaseKey,
   idForPath,
+  isCanvasPath,
   isHiddenPath,
+  isHtmlPath,
   isImagePath,
   isMarkdownPath,
   isMaterializable,

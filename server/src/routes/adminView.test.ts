@@ -1,36 +1,20 @@
 /**
- * 管理员二次验证（step-up）、删除账号、管理员位与聚合读端点。
- *
- * ## 这一组钉的是什么
- *
- * 1. **step-up 是独立的一条闸门**：`requireAdmin()` 通过 ≠ 可以删东西。
- * 2. **step-up 标记必须对应同一个账号** —— 否则普通账号能拿自己的密钥
- *    通过验证，再去执行管理动作（那样这道门就白装了）。
- * 3. **不能删最后一个管理员**，也不能删自己。
- * 4. **提权/降权只在 CLI**：HTTP 上没有这个端点（有反证断言）。
- * 5. 管理端聚合端点**绝不返回密钥材料**。
+ * 控制台的聚合读（`adminView.ts`）与阶段 ② 新加的管理动作（移除设备、邀请延长 / 按 id 作废、
+ * 关不掉的密码登录、关闭注册挡住邀请）。
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DatabaseSync } from "node:sqlite";
+
+import { describe, expect, it } from "vitest";
 import { Hono } from "hono";
-import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
-import { AccountStore, newAccountId, newAuthTokenForTests } from "../auth/accounts";
-import { NotebookStore } from "../notebooks";
-import { createPanelApi } from "./panel";
-import { createAdminViewRoutes } from "./adminView";
-import { CSRF_VALUE, PANEL_COOKIE, STEP_UP_COOKIE, csrfGuard } from "../panelSecurity";
-import { loadConfig, type ServerConfig } from "../config";
-
-vi.mock("../db", async (importOriginal) => {
-  const actual = await importOriginal();
-  return {
-    ...(actual as object),
-    openDatabase: (options: { path: string }) =>
-      (actual as { openDatabase: (o: unknown) => DatabaseSync }).openDatabase({ ...options, path: ":memory:" }),
-  };
-});
-
 import { openDatabase } from "../db";
+import { loadConfig } from "../config";
+import { NotebookStore } from "../notebooks";
+import { SettingsStore } from "../settings";
+import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
+import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
+import { buildTimeline, describeAudit, describeSyncActivity } from "../activity";
+import { createAuthRoutes } from "./auth";
+import { createAdminRoutes } from "./admin";
+import { createAdminViewRoutes } from "./adminView";
 
 const ENV: Record<string, string> = {
   EXTERNAL_BASE_URL: "https://notes.example.com",
@@ -39,420 +23,239 @@ const ENV: Record<string, string> = {
   COUCH_PASSWORD: "pw",
   COUCH_ADMIN_USER: "admin",
   COUCH_ADMIN_PASSWORD: "apw",
+  DEFAULT_ACCOUNT_QUOTA_BYTES: String(1000),
 };
+const DAY = 86_400_000;
+const NOW = Date.parse("2026-11-02T12:00:00Z");
+const TODAY = "2026-11-02";
 
-interface World {
-  app: Hono;
-  accounts: AccountStore;
-  notebooks: NotebookStore;
-  config: ServerConfig;
-  admin(): { id: string; token: string };
-  member(): { id: string; token: string };
-}
-
-function makeWorld(): World {
+function makeWorld() {
   const db = openDatabase({ path: ":memory:" });
-  const fake = new FakeCouch();
-  const accounts = new AccountStore(db);
-  const notebooks = new NotebookStore(db);
   const config = loadConfig(ENV);
-  const couch = couchClient(fake);
+  const accounts = testAccountStore(db);
+  const notebooks = new NotebookStore(db);
+  const settings = new SettingsStore(db, config);
+  const couch = couchClient(new FakeCouch());
+  const audit = (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit({ ...event, now: NOW });
+  const now = () => NOW;
   const app = new Hono();
-  app.use("/panel/api/*", csrfGuard());
-  const audit = (event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null }): void =>
-    notebooks.audit(event);
-  const deps = { accounts, notebooks, config, couch, couchAdmin: couch, audit };
-  app.route("/panel/api", createPanelApi(deps));
-  app.route("/panel/api/admin", createAdminViewRoutes(deps));
-  const create = (isAdmin: boolean): { id: string; token: string } => {
-    const token = newAuthTokenForTests();
-    const row = accounts.create({
-      accountId: newAccountId(),
-      authToken: token,
-      wrappedEncRoot: "wrapped-fake-0001",
-      isAdmin,
-      bootstrapCode: accounts.createBootstrapCode().code,
+  app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, now }));
+  app.route("/v1/admin", createAdminViewRoutes({ accounts, notebooks, config, couch, settings, now, startedAt: NOW - 3600_000 }));
+  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, config, couch, settings, audit, now }));
+  const call = async (path: string, init: { method?: string; token?: string; body?: unknown } = {}) => {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (init.token) headers.authorization = `Bearer ${init.token}`;
+    const response = await app.request(`http://localhost${path}`, {
+      method: init.method ?? (init.body === undefined ? "GET" : "POST"),
+      headers,
+      ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
     });
-    return { id: row.id, token };
+    const text = await response.text();
+    return { status: response.status, text, body: text ? (JSON.parse(text) as Record<string, any>) : null };
   };
-  return { app, accounts, notebooks, config, admin: () => create(true), member: () => create(false) };
-}
-
-const call = (world: World, path: string, init: RequestInit = {}): Promise<Response> =>
-  Promise.resolve(world.app.request("http://localhost/panel/api" + path, init));
-
-/** 带会话 cookie 的请求；变更类自动补 CSRF 头。 */
-function as(token: string, method = "GET", extra: Record<string, string> = {}): RequestInit {
-  return {
-    method,
-    headers: {
-      cookie: PANEL_COOKIE + "=" + encodeURIComponent(token),
-      ...(method === "GET" || method === "HEAD" ? {} : { "x-requested-with": CSRF_VALUE, "content-type": "application/json" }),
-      ...extra,
-    },
+  const notebook = (ownerId: string, name: string, bytes: number, cryptoMode: "none" | "user-key" = "none") => {
+    const row = notebooks.create({ ownerId, name, cryptoMode, now: NOW - 10 * DAY });
+    notebooks.addNotebookBytes(row.id, bytes, NOW - 3600_000);
+    return row;
   };
+  return { db, accounts, notebooks, settings, call, notebook };
 }
 
-/** 已经通过二次验证的请求（多带一个 step-up cookie）。 */
-function stepped(token: string, method = "POST", extra: Record<string, string> = {}): RequestInit {
-  const base = as(token, method, extra);
-  const headers = { ...(base.headers as Record<string, string>) };
-  headers.cookie = headers.cookie + "; " + STEP_UP_COOKIE + "=" + encodeURIComponent(token);
-  return { ...base, headers };
-}
-
-beforeEach(() => {
-  vi.spyOn(console, "warn").mockImplementation(() => undefined);
-});
-
-describe("二次验证（step-up）", () => {
-  it("没验证过 → 删账号被拒，且 code 是 step-up-required（不是 403 forbidden）", async () => {
+describe("闸门", () => {
+  it("普通账号访问每个聚合读都是 403，且不带任何数据", async () => {
     const world = makeWorld();
-    const admin = world.admin();
-    const victim = world.member();
-    const response = await call(world, "/admin/accounts/" + victim.id, as(admin.token, "DELETE"));
-    expect(response.status).toBe(403);
-    const body = (await response.json()) as { code: string };
-    // ★ 与「你不是管理员」区分开：页面据此弹密钥框，而不是显示「无权限」。
-    expect(body.code).toBe("step-up-required");
-    // 账号必须还在。
-    expect(world.accounts.findById2(victim.id)).not.toBeNull();
-  });
-
-  it("POST /session/verify 成功 → 回 step-up cookie，且响应体里没有令牌", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const response = await call(world, "/session/verify", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-requested-with": CSRF_VALUE,
-        cookie: PANEL_COOKIE + "=" + encodeURIComponent(admin.token),
-      },
-      body: JSON.stringify({ authToken: admin.token }),
-    });
-    expect(response.status).toBe(200);
-    const setCookie = response.headers.get("set-cookie") ?? "";
-    expect(setCookie).toContain(STEP_UP_COOKIE + "=");
-    expect(setCookie).toContain("HttpOnly");
-    // 5 分钟，不是 8 小时。
-    expect(setCookie).toContain("Max-Age=300");
-    expect(await response.text()).not.toContain(admin.token);
-  });
-
-  it("★ 拿**别人的**密钥验证 → 403（否则普通账号能自己给自己盖章）", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const member = world.member();
-    const response = await call(world, "/session/verify", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-requested-with": CSRF_VALUE,
-        cookie: PANEL_COOKIE + "=" + encodeURIComponent(member.token),
-      },
-      body: JSON.stringify({ authToken: admin.token }),
-    });
-    expect(response.status).toBe(403);
-    expect((await response.json() as { code: string }).code).toBe("forbidden");
-    expect(response.headers.get("set-cookie") ?? "").not.toContain(STEP_UP_COOKIE + "=");
-  });
-
-  it("验证之后可以删账号，且独占库一并清理", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const victim = world.member();
-    const notebook = world.notebooks.create({ ownerId: victim.id, name: "他的库", cryptoMode: "none" });
-    expect(world.notebooks.findById(notebook.id)).not.toBeNull();
-
-    const response = await call(world, "/admin/accounts/" + victim.id, stepped(admin.token, "DELETE"));
-    expect(response.status).toBe(200);
-    expect(world.accounts.findById2(victim.id)).toBeNull();
-    expect(world.notebooks.findById(notebook.id)).toBeNull();
-  });
-
-  it("★ step-up 标记必须属于**当前会话账号**：两个管理员之间也不能借用", async () => {
-    const world = makeWorld();
-    const alice = world.admin();
-    const bob = world.admin();
-    const victim = world.member();
-    /*
-     * alice 用**bob 的** step-up 标记来删账号。
-     * 两个都是管理员，所以管理员闸门会放行 —— 拦住它的必须是
-     * requireStepUp 里那一条「标记对应的是不是当前会话的账号」。
-     */
-    const borrowed: RequestInit = {
-      method: "DELETE",
-      headers: {
-        // ★ 会话是 alice 的，step-up 标记是 bob 的 —— 这正是要拦的那个形状。
-        cookie: PANEL_COOKIE + "=" + encodeURIComponent(alice.token) + "; " + STEP_UP_COOKIE + "=" + encodeURIComponent(bob.token),
-        "x-requested-with": CSRF_VALUE,
-        "content-type": "application/json",
-      },
-    };
-    const response = await call(world, "/admin/accounts/" + victim.id, borrowed);
-    expect(response.status).toBe(403);
-    expect((await response.json() as { code: string }).code).toBe("step-up-required");
-    expect(world.accounts.findById2(victim.id)).not.toBeNull();
-    // 用 alice 自己的标记则通过。
-    const ok = await call(world, "/admin/accounts/" + victim.id, stepped(alice.token, "DELETE"));
-    expect(ok.status).toBe(200);
-  });
-
-  it("不能删自己，也不能删最后一个管理员", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const self = await call(world, "/admin/accounts/" + admin.id, stepped(admin.token, "DELETE"));
-    expect(self.status).toBe(400);
-
-    const other = world.admin();
-    // 现在有两个活跃管理员。删掉 other 是允许的（还剩一个）。
-    const okDelete = await call(world, "/admin/accounts/" + other.id, stepped(admin.token, "DELETE"));
-    expect(okDelete.status).toBe(200);
-    // 只剩自己了，但「不能删自己」先拦住。
-    const again = await call(world, "/admin/accounts/" + admin.id, stepped(admin.token, "DELETE"));
-    expect(again.status).toBe(400);
-  });
-
-  it("退出登录时**同时清掉** step-up 标记", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const response = await call(world, "/session", as(admin.token, "DELETE"));
-    expect(response.status).toBe(204);
-    const cookies = response.headers.getSetCookie ? response.headers.getSetCookie() : [response.headers.get("set-cookie") ?? ""];
-    const joined = cookies.join("\n");
-    expect(joined).toContain(PANEL_COOKIE + "=");
-    expect(joined).toContain(STEP_UP_COOKIE + "=");
-    expect(joined).toContain("Max-Age=0");
-  });
-});
-
-describe("管理员位：只能从 CLI 改（§4.12 根信任通道）", () => {
-  it("★ HTTP 上**没有**提权端点（有它就是「被盗管理员能无限造管理员」）", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const member = world.member();
-    for (const path of ["/admin/accounts/" + member.id + "/admin", "/admin/grant", "/admin/accounts/" + member.id + "/role"]) {
-      const response = await call(world, path, as(admin.token, "POST", { "content-type": "application/json" }));
-      // 404（没这个路由）才算对；201/200 就是开了一个提权口子。
-      expect(response.status, path + " 不该存在").toBe(404);
-    }
-    expect(world.accounts.findById2(member.id)?.is_admin).toBe(0);
-  });
-
-  it("setAdmin 提升之后，该账号立刻能打开管理区块（不用重新登录）", async () => {
-    const world = makeWorld();
-    const member = world.member();
-    expect((await call(world, "/admin/overview", as(member.token))).status).toBe(403);
-    const result = world.accounts.setAdmin(member.id, true);
-    expect(result.ok).toBe(true);
-    expect((await call(world, "/admin/overview", as(member.token))).status).toBe(200);
-  });
-
-  it("★ 不能降权最后一个活跃管理员", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const result = world.accounts.setAdmin(admin.id, false);
-    expect(result).toEqual({ ok: false, reason: "last-admin" });
-    expect(world.accounts.findById2(admin.id)?.is_admin).toBe(1);
-  });
-
-  it("有两个管理员时可以降掉其中一个", async () => {
-    const world = makeWorld();
-    const first = world.admin();
-    const second = world.admin();
-    expect(world.accounts.setAdmin(second.id, false)).toEqual({ ok: true, changed: true });
-    expect(world.accounts.countAdmins()).toBe(1);
-    // 剩下的那个仍然降不掉。
-    expect(world.accounts.setAdmin(first.id, false)).toEqual({ ok: false, reason: "last-admin" });
-  });
-});
-
-describe("管理端聚合读端点", () => {
-  it("普通账号访问每一个新端点 → 403", async () => {
-    const world = makeWorld();
-    const member = world.member();
-    for (const path of ["/admin/overview", "/admin/notebooks", "/admin/devices", "/admin/invites", "/admin/config"]) {
-      const response = await call(world, path, as(member.token));
+    const member = seedAccount(world.accounts, { email: "secret-member@example.com" });
+    for (const path of ["/v1/admin/overview", "/v1/admin/activity", "/v1/admin/notebooks", "/v1/admin/devices", `/v1/admin/accounts/${member.id}`]) {
+      const response = await world.call(path, { token: member.token });
       expect(response.status, path).toBe(403);
+      expect(response.text, path).not.toContain("secret-member");
     }
-  });
-
-  it("未登录 → 401（与 403 分开）", async () => {
-    const world = makeWorld();
-    const response = await call(world, "/admin/overview");
-    expect(response.status).toBe(401);
-  });
-
-  it("★ 响应里不出现任何密钥材料", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    for (const path of ["/admin/overview", "/admin/notebooks", "/admin/devices", "/admin/invites", "/admin/config"]) {
-      const text = await (await call(world, path, as(admin.token))).text();
-      for (const forbidden of ["auth_hash", "authHash", "wrapped_enc_root", "wrappedEncRoot"]) {
-        expect(text, path + " 泄露了 " + forbidden).not.toContain(forbidden);
-      }
-    }
-  });
-
-  it("overview 的 attention 是**判读**（随数据下发，不是前端算）", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const response = await call(world, "/admin/overview", as(admin.token));
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { attention: unknown[]; health: { couchOk: boolean }; accounts: { admins: number } };
-    expect(Array.isArray(body.attention)).toBe(true);
-    expect(body.health.couchOk).toBe(true);
-    expect(body.accounts.admins).toBe(1);
-  });
-
-  it("config 只读，且不下发密钥类配置", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const response = await call(world, "/admin/config", as(admin.token));
-    const body = (await response.json()) as { readOnly: boolean; config: Record<string, unknown> };
-    expect(body.readOnly).toBe(true);
-    expect(body.config.couchAdminUserConfigured).toBe(true);
-    // 口令本身不能出现。
-    expect(JSON.stringify(body)).not.toContain("apw");
-    expect(JSON.stringify(body)).not.toContain("couchAdminPassword");
-  });
-
-  it("对单个库做核对会写进 notebook_provisioning 并留审计", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const notebook = world.notebooks.create({ ownerId: admin.id, name: "核对我", cryptoMode: "none" });
-    const response = await call(world, "/admin/notebooks/" + notebook.id + "/inspection", as(admin.token));
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { inspection: { databaseExists: boolean; problems: string[] } };
-    // FakeCouch 里没建过这个库，所以它诚实地说「不存在」而不是编一个健康的结论。
-    expect(body.inspection.databaseExists).toBe(false);
-    expect(body.inspection.problems.length).toBeGreaterThan(0);
-  });
-
-  it("核对不存在的笔记本 → 404", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const response = await call(world, "/admin/notebooks/does-not-exist/inspection", as(admin.token));
-    expect(response.status).toBe(404);
+    expect((await world.call("/v1/admin/overview")).status).toBe(401);
   });
 });
 
-describe("按哈希作废邀请码（管理页只有哈希，没有明文）", () => {
-  it("作废成功后列表里变成「已作废」；重复作废仍是 204（幂等）", async () => {
+describe("概览", () => {
+  it("计数、需要处理（配额 ≥ 90%、一天内过期的邀请）、值得留意、今日变更", async () => {
     const world = makeWorld();
-    const admin = world.admin();
-    world.accounts.createInvite({ createdBy: admin.id, expiresInSeconds: 3600, maxUses: 1 });
-    const before = await call(world, "/admin/invites", as(admin.token));
-    const list = (await before.json()) as { invites: { codeHash: string; revokedAt: number | null }[] };
-    const hash = list.invites.find((row) => row.revokedAt === null)!.codeHash;
+    const admin = seedAccount(world.accounts, { isAdmin: true, now: NOW - 30 * DAY });
+    const mia = seedAccount(world.accounts, { email: "mia@example.com", displayName: "Mia", now: NOW - 30 * DAY });
+    const nb = world.notebook(mia.id, "摄影", 950);
+    world.notebooks.recordActivity({ accountId: mia.id, notebookId: nb.id, day: TODAY, kind: "push", amount: 7, now: NOW - 60_000 });
+    world.notebooks.recordActivity({ accountId: mia.id, notebookId: nb.id, day: TODAY, kind: "delete", amount: 2, now: NOW - 60_000 });
+    world.notebooks.recordActivity({ accountId: mia.id, notebookId: nb.id, day: TODAY, kind: "conflict", now: NOW - 60_000 });
+    world.accounts.createInvite({ createdBy: admin.id, email: "chen@example.com", expiresInSeconds: 3600, now: NOW });
+    world.accounts.createInvite({ createdBy: admin.id, expiresInSeconds: 7 * 24 * 3600, now: NOW });
+    // mia 的设备刚同步过（在线）；管理员的设备 100 天没动。
+    world.notebooks.upsertDevice({ deviceId: mia.deviceId, accountId: mia.id, name: "Mac", platform: "desktop", now: NOW - 60_000 });
+    world.notebooks.upsertDevice({ deviceId: admin.deviceId, accountId: admin.id, name: "Old", platform: "desktop", now: NOW - 100 * DAY });
+    world.db.prepare("UPDATE sessions SET last_used_at = ? WHERE account_id = ?").run(NOW - 100 * DAY, admin.id);
 
-    const first = await call(world, "/admin/invites/" + hash, as(admin.token, "DELETE"));
-    expect(first.status).toBe(204);
-    const after = (await (await call(world, "/admin/invites", as(admin.token))).json()) as { invites: { codeHash: string; revokedAt: number | null }[] };
-    expect(after.invites.find((row) => row.codeHash === hash)!.revokedAt).not.toBeNull();
-
-    // 幂等：目标状态已达成，再作废一次不是错误。
-    expect((await call(world, "/admin/invites/" + hash, as(admin.token, "DELETE"))).status).toBe(204);
-  });
-
-  it("★ 哈希形状不对 → 400（挡住「把明文码当哈希传进来」这种静默失败）", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    for (const bad of ["inv_abc", "not-a-hash", "zz".repeat(32)]) {
-      const response = await call(world, "/admin/invites/" + bad, as(admin.token, "DELETE"));
-      expect(response.status, bad).toBe(400);
-    }
-  });
-
-  it("普通账号不能作废（先撞管理员闸门）", async () => {
-    const world = makeWorld();
-    const member = world.member();
-    const response = await call(world, "/admin/invites/" + "a".repeat(64), as(member.token, "DELETE"));
-    expect(response.status).toBe(403);
-  });
-});
-
-describe("冲突热点是**全站**聚合（不是当前账号）", () => {
-  it("★ 两个账号的冲突分别归到自己名下", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const other = world.member();
-    const nbA = world.notebooks.create({ ownerId: admin.id, name: "甲的库", cryptoMode: "none" });
-    const nbB = world.notebooks.create({ ownerId: other.id, name: "乙的库", cryptoMode: "none" });
-    world.notebooks.reportStats({ accountId: admin.id, notebookId: nbA.id, day: "2026-10-20", conflicts: 3, errors: 1, pushes: 10, pulls: 12, deletes: 0 });
-    world.notebooks.reportStats({ accountId: other.id, notebookId: nbB.id, day: "2026-10-20", conflicts: 7, errors: 0, pushes: 8, pulls: 9, deletes: 0 });
-
-    const body = (await (await call(world, "/admin/overview", as(admin.token))).json()) as {
-      conflictHotspots: { accountId: string; conflicts: number; errors: number; notebooks: number }[];
-    };
-    expect(body.conflictHotspots.length).toBe(2);
-    // 按影响排序：乙（7）在甲（4）前面。
-    expect(body.conflictHotspots[0]!.accountId).toBe(other.id);
-    expect(body.conflictHotspots[0]!.conflicts).toBe(7);
-    expect(body.conflictHotspots[1]!.accountId).toBe(admin.id);
-    expect(body.conflictHotspots[1]!.conflicts).toBe(3);
-    expect(body.conflictHotspots[1]!.notebooks).toBe(1);
-  });
-
-  it("没有冲突时热点是空数组（不是 null）", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const body = (await (await call(world, "/admin/overview", as(admin.token))).json()) as { conflictHotspots: unknown[] };
-    expect(Array.isArray(body.conflictHotspots)).toBe(true);
-    expect(body.conflictHotspots.length).toBe(0);
+    // 用控制台会话来问（没有 device_id）：拿设备令牌问会把那台设备自己刷成「在线」。
+    const { token: panelToken } = world.accounts.createSession({ accountId: admin.id, kind: "panel", now: NOW });
+    const { status, body } = await world.call("/v1/admin/overview", { token: panelToken });
+    expect(status).toBe(200);
+    expect(body!.users).toMatchObject({ total: 2, admins: 1, pendingInvites: 2 });
+    expect(body!.devices).toEqual({ total: 2, online: 1 });
+    expect(body!.storage.usedBytes).toBe(950);
+    expect(body!.today).toEqual({ changes: 9, conflicts: 1 });
+    expect(body!.attention).toEqual([
+      expect.objectContaining({ kind: "quota", accountId: mia.id, bytesUsed: 950, bytesLimit: 1000 }),
+      expect.objectContaining({ kind: "invite-expiring", email: "chen@example.com" }),
+    ]);
+    expect(body!.noteworthy).toMatchObject({ staleDevices: 1, conflictsThisWeek: 1 });
+    expect(body!.server).toMatchObject({ uptimeSeconds: 3600, externalBaseUrl: "https://notes.example.com" });
+    expect(body!.recent.length).toBeGreaterThan(0);
   });
 });
 
-describe("全站流量：客户端上报与服务端实测**合并**（不是只信上报）", () => {
-  /*
-   * 背景：`traffic` 原先只读 `client_stats`，而当前客户端从不调 `POST /v1/stats`
-   * ⇒ 概览页的流量图在生产上**永远是一条空线**，哪怕同步一直在跑。
-   *
-   * 现在服务端在 `/v1` 数据面上自己数一份（`sync_activity`），两份按天取较大值合并。
-   * 这组用例钉住「只有实测」「只有上报」「两者都有」三种情况。
-   */
-
-  it("★ 只有服务端实测（客户端不上报）时，流量图也有数", async () => {
+describe("活动日志", () => {
+  it("审计与同步计数合成一条线，按类别 / 关键词筛，按偏移翻页", async () => {
     const world = makeWorld();
-    const admin = world.admin();
-    const notebook = world.notebooks.create({ ownerId: admin.id, name: "n", cryptoMode: "none" });
-    world.notebooks.recordActivity({ accountId: admin.id, notebookId: notebook.id, day: "2026-10-20", kind: "pull", amount: 4 });
-    world.notebooks.recordActivity({ accountId: admin.id, notebookId: notebook.id, day: "2026-10-20", kind: "push", amount: 2 });
-    world.notebooks.recordActivity({ accountId: admin.id, notebookId: notebook.id, day: "2026-10-20", kind: "conflict" });
+    const admin = seedAccount(world.accounts, { isAdmin: true, displayName: "Admin" });
+    const lan = seedAccount(world.accounts, { displayName: "Lan" });
+    const nb = world.notebook(lan.id, "读书笔记", 10);
+    world.notebooks.recordActivity({ accountId: lan.id, notebookId: nb.id, day: TODAY, kind: "push", amount: 3, now: NOW - 5000 });
+    world.notebooks.recordActivity({ accountId: lan.id, notebookId: nb.id, day: TODAY, kind: "conflict", now: NOW - 5000 });
+    world.notebooks.audit({ actorId: admin.id, action: "grant_admin", target: lan.id, now: NOW - 1000 });
+    world.notebooks.audit({ actorId: lan.id, action: "login", target: lan.deviceId, detail: "MacBook", now: NOW - 9000 });
 
-    const body = (await (await call(world, "/admin/overview", as(admin.token))).json()) as {
-      traffic: { days: { day: string; pulls: number; pushes: number; conflicts: number }[]; total: { pulls: number; pushes: number; conflicts: number } };
-    };
-    expect(body.traffic.days).toHaveLength(1);
-    expect(body.traffic.days[0]).toMatchObject({ day: "2026-10-20", pulls: 4, pushes: 2, conflicts: 1 });
-    expect(body.traffic.total).toMatchObject({ pulls: 4, pushes: 2, conflicts: 1 });
+    const all = (await world.call("/v1/admin/activity", { token: admin.token })).body!;
+    expect(all.entries.map((entry: { category: string }) => entry.category)).toEqual(["admin", "sync", "conflict", "account"]);
+    expect(all.entries[0]).toMatchObject({ actor: "Admin", text: "把 Lan 设为管理员" });
+    expect(all.entries[1].text).toBe("「读书笔记」写入 3 次");
+
+    const conflicts = (await world.call("/v1/admin/activity?category=conflict", { token: admin.token })).body!;
+    expect(conflicts.entries).toHaveLength(1);
+    const search = (await world.call(`/v1/admin/activity?q=${encodeURIComponent("macbook")}`, { token: admin.token })).body!;
+    expect(search.entries).toHaveLength(1);
+
+    const page1 = (await world.call("/v1/admin/activity?limit=3", { token: admin.token })).body!;
+    expect(page1.nextOffset).toBe(3);
+    const page2 = (await world.call("/v1/admin/activity?limit=3&offset=3", { token: admin.token })).body!;
+    expect(page2.entries).toHaveLength(1);
+    expect(page2.nextOffset).toBeNull();
   });
 
-  it("两边都有时取**较大值**（同一批请求不该被数两遍）", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const notebook = world.notebooks.create({ ownerId: admin.id, name: "n", cryptoMode: "none" });
-    // 客户端说 3 次拉取，服务端数到 5 次。
-    world.notebooks.reportStats({ accountId: admin.id, notebookId: notebook.id, day: "2026-10-20", pulls: 3, pushes: 0, deletes: 0, conflicts: 0, errors: 0 });
-    world.notebooks.recordActivity({ accountId: admin.id, notebookId: notebook.id, day: "2026-10-20", kind: "pull", amount: 5 });
-
-    const body = (await (await call(world, "/admin/overview", as(admin.token))).json()) as { traffic: { total: { pulls: number } } };
-    // 相加会得到 8；正确答案是 5。
-    expect(body.traffic.total.pulls).toBe(5);
-  });
-
-  it("实测到的冲突也会进热点榜（否则「图上有冲突、榜上没有账号」）", async () => {
-    const world = makeWorld();
-    const admin = world.admin();
-    const notebook = world.notebooks.create({ ownerId: admin.id, name: "n", cryptoMode: "none" });
-    world.notebooks.recordActivity({ accountId: admin.id, notebookId: notebook.id, day: "2026-10-20", kind: "conflict", amount: 3 });
-
-    const body = (await (await call(world, "/admin/overview", as(admin.token))).json()) as {
-      conflictHotspots: { accountId: string; conflicts: number; notebooks: number }[];
-    };
-    expect(body.conflictHotspots).toHaveLength(1);
-    expect(body.conflictHotspots[0]).toMatchObject({ accountId: admin.id, conflicts: 3, notebooks: 1 });
+  it("文案：未知动作原样写出；计数为 0 的列不出现；旧行没有 last_at 时按当天末尾、且不晚于现在", () => {
+    const labels = { account: (id: string) => `@${id}`, notebook: (id: string) => `#${id}` };
+    expect(describeAudit({ at: 1, actorId: null, action: "mystery_action", target: null, ip: null, detail: "x" }, labels)).toMatchObject({ actor: "系统", text: "mystery_action（x）" });
+    expect(describeAudit({ at: 1, actorId: null, action: "cli_reset_password", target: "a", ip: null, detail: null }, labels).actor).toBe("命令行");
+    const rows = describeSyncActivity({ accountId: "a", notebookId: "n", day: "2026-11-01", pulls: 4, pushes: 0, deletes: 0, conflicts: 0, errors: 2, lastAt: null }, labels, NOW);
+    expect(rows.map((row) => [row.category, row.text])).toEqual([
+      ["sync", "「#n」读取 4 次"],
+      ["error", "「#n」2 次请求在存储那一侧出错"],
+    ]);
+    expect(rows[0]!.at).toBe(Date.parse("2026-11-01T23:59:59.999Z"));
+    const today = describeSyncActivity({ accountId: "a", notebookId: "n", day: TODAY, pulls: 1, pushes: 0, deletes: 0, conflicts: 0, errors: 0, lastAt: null }, labels, NOW);
+    expect(today[0]!.at).toBe(NOW);
+    expect(buildTimeline({ audit: [], activity: [], labels, now: NOW, limit: 10 })).toEqual({ entries: [], nextOffset: null });
   });
 });
 
+describe("用户", () => {
+  it("列表带笔记本数、登录中的设备数、最近同步", async () => {
+    const world = makeWorld();
+    const admin = seedAccount(world.accounts, { isAdmin: true });
+    const mia = seedAccount(world.accounts);
+    world.notebook(mia.id, "a", 1);
+    world.notebook(mia.id, "b", 1);
+    world.notebooks.upsertDevice({ deviceId: mia.deviceId, accountId: mia.id, name: "Mac", platform: "desktop", now: NOW - 5000 });
+    const row = (await world.call("/v1/admin/accounts", { token: admin.token })).body!.accounts.find((x: { accountId: string }) => x.accountId === mia.id);
+    expect(row).toMatchObject({ notebookCount: 2, deviceCount: 1 });
+    expect(row.lastSyncAt).toBeGreaterThanOrEqual(NOW - 5000);
+  });
+
+  it("详情：笔记本、设备、最近活动；不存在 404；响应里没有哈希", async () => {
+    const world = makeWorld();
+    const admin = seedAccount(world.accounts, { isAdmin: true });
+    const mia = seedAccount(world.accounts);
+    world.notebook(mia.id, "私密", 5, "user-key");
+    world.notebooks.upsertDevice({ deviceId: mia.deviceId, accountId: mia.id, name: "Mac", platform: "desktop", os: "macos", now: NOW });
+    world.notebooks.audit({ actorId: admin.id, action: "set_quota", target: mia.id, detail: "2048", now: NOW });
+
+    const detail = await world.call(`/v1/admin/accounts/${mia.id}`, { token: admin.token });
+    expect(detail.status).toBe(200);
+    expect(detail.body!.notebooks).toEqual([expect.objectContaining({ name: "私密", cryptoMode: "user-key", role: "owner", bytesUsed: 5 })]);
+    expect(detail.body!.devices).toEqual([expect.objectContaining({ deviceId: mia.deviceId, os: "macos", signedIn: true, online: true })]);
+    expect(detail.body!.recent[0].text).toContain("空间配额改为 2.0 KB");
+    expect(detail.body!.isSelf).toBe(false);
+    expect(detail.text).not.toMatch(/token_hash|password_hash|wrapped_enc_root/);
+    expect((await world.call(`/v1/admin/accounts/${"0".repeat(32)}`, { token: admin.token })).status).toBe(404);
+  });
+});
+
+describe("设备", () => {
+  it("移除：账本标记 + 吊销会话，那台设备的令牌立刻 401", async () => {
+    const world = makeWorld();
+    const admin = seedAccount(world.accounts, { isAdmin: true });
+    const mia = seedAccount(world.accounts);
+    world.notebooks.upsertDevice({ deviceId: mia.deviceId, accountId: mia.id, name: "Mac", platform: "desktop", now: NOW });
+    expect((await world.call("/v1/me", { token: mia.token })).status).toBe(200);
+
+    const removed = await world.call(`/v1/admin/devices/${mia.deviceId}`, { method: "DELETE", token: admin.token });
+    expect(removed.status).toBe(200);
+    expect(removed.body!.revokedSessions).toBe(1);
+    expect((await world.call("/v1/me", { token: mia.token })).status).toBe(401);
+    const list = (await world.call("/v1/admin/devices", { token: admin.token })).body!.devices;
+    expect(list.find((device: { deviceId: string }) => device.deviceId === mia.deviceId)).toMatchObject({ signedIn: false, online: false });
+    expect((await world.call(`/v1/admin/devices/${"f".repeat(32)}`, { method: "DELETE", token: admin.token })).status).toBe(404);
+  });
+
+  it("批量移除只动「登录着、超过 N 天没同步」的", async () => {
+    const world = makeWorld();
+    const admin = seedAccount(world.accounts, { isAdmin: true });
+    const fresh = seedAccount(world.accounts);
+    const stale = seedAccount(world.accounts);
+    world.notebooks.upsertDevice({ deviceId: fresh.deviceId, accountId: fresh.id, name: "new", platform: "desktop", now: NOW - DAY });
+    world.notebooks.upsertDevice({ deviceId: stale.deviceId, accountId: stale.id, name: "old", platform: "desktop", now: NOW - 120 * DAY });
+    world.db.prepare("UPDATE sessions SET last_used_at = ? WHERE account_id = ?").run(NOW - 120 * DAY, stale.id);
+
+    const pruned = await world.call("/v1/admin/devices/prune", { token: admin.token, body: { inactiveDays: 90 } });
+    expect(pruned.body).toEqual({ removed: 1 });
+    expect((await world.call("/v1/me", { token: stale.token })).status).toBe(401);
+    expect((await world.call("/v1/me", { token: fresh.token })).status).toBe(200);
+  });
+});
+
+describe("邀请", () => {
+  it("列表给 id 与状态；按 id 延长、作废", async () => {
+    const world = makeWorld();
+    const admin = seedAccount(world.accounts, { isAdmin: true });
+    await world.call("/v1/admin/invites", { token: admin.token, body: { email: "chen@example.com", expiresInSeconds: 3600 } });
+    const [invite] = (await world.call("/v1/admin/invites", { token: admin.token })).body!.invites;
+    expect(invite).toMatchObject({ state: "open", email: "chen@example.com" });
+    expect(invite.id).toMatch(/^[0-9a-f]{64}$/);
+
+    const extended = await world.call(`/v1/admin/invites/${invite.id}`, { method: "PATCH", token: admin.token, body: { extendSeconds: 2 * 86_400 } });
+    expect(extended.body!.expiresAt).toBe(invite.expiresAt + 2 * DAY);
+
+    expect((await world.call(`/v1/admin/invites/${invite.id}`, { method: "DELETE", token: admin.token })).status).toBe(204);
+    const [after] = (await world.call("/v1/admin/invites", { token: admin.token })).body!.invites;
+    expect(after.state).toBe("revoked");
+    expect((await world.call(`/v1/admin/invites/${invite.id}`, { method: "PATCH", token: admin.token, body: {} })).status).toBe(404);
+  });
+
+  it("「关闭注册」时邀请链接也用不了；/join 页拿到的信息带发邀请的人", async () => {
+    const world = makeWorld();
+    const admin = seedAccount(world.accounts, { isAdmin: true, displayName: "Admin" });
+    const created = await world.call("/v1/admin/invites", { token: admin.token, body: {} });
+    const code = created.body!.code as string;
+    expect((await world.call(`/v1/auth/invites/${code}`)).body).toMatchObject({ invitedBy: "Admin" });
+
+    world.settings.set({ registration: "closed" });
+    expect((await world.call(`/v1/auth/invites/${code}`)).status).toBe(403);
+    const accept = await world.call(`/v1/auth/invites/${code}`, { body: { email: "x@example.com", password: "long-enough-pw" } });
+    expect(accept.status).toBe(403);
+    expect(accept.body!.code).toBe("registration-closed");
+  });
+});
+
+describe("服务设置", () => {
+  it("在有第二种登录方式之前，不许关掉邮箱密码登录", async () => {
+    const world = makeWorld();
+    const admin = seedAccount(world.accounts, { isAdmin: true });
+    const response = await world.call("/v1/admin/settings", { method: "PATCH", token: admin.token, body: { passwordLogin: false } });
+    expect(response.status).toBe(409);
+    expect(world.settings.get("passwordLogin")).toBe(true);
+  });
+});

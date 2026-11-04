@@ -13,7 +13,6 @@ function makeNote(tags: string[], extra: Partial<Note> = {}): Note {
     id: `note-${seq}`,
     folderId: null,
     title: `笔记${seq}`,
-    titleOverride: null,
     content: "",
     createdAt: seq,
     updatedAt: seq,

@@ -7,7 +7,9 @@ import {
   baseName,
   extName,
   formatStamp,
+  isCanvasPath,
   isHiddenPath,
+  isHtmlPath,
   isMarkdownPath,
   joinPath,
   normalizePath,
@@ -24,7 +26,6 @@ import {
   countText,
   derivePlaceholderTitle,
   deriveTags,
-  deriveTitle,
   isPlaceholderName,
   normalizeEol,
   splitFrontMatter,
@@ -43,6 +44,13 @@ import {
   sharedAssetFilesIn,
 } from "../lib/clip/landing";
 import { desktopBridge, type WorkspaceFileChange } from "../desktop/bridge";
+// 画布（JSON Canvas）的纯逻辑：解析/序列化与引用改写都住在 src/canvas，
+// 本文件只负责把它们接进「扫描 → 内存镜像 → 防抖落盘」的既有链路。
+import { parseCanvas, serializeCanvas } from "../canvas/jsonCanvas";
+// HTML 页面的纯文本（搜索用）：只取文字，不让内联的 base64 / 脚本污染检索。
+import { htmlPlainText } from "../html/bundle";
+import { canvasesReferencing as findCanvasRefs, rewriteFileRefs } from "../canvas/refs";
+import { canvasPlainText } from "../canvas/search";
 import { sha256Hex } from "../lib/clip/hash";
 // 同步层（P0）：冲突账本与「有没有开同步」这个开关。**方向永远是 data/ → sync/**，
 // 不许反过来（`src/sync/*` 不 import `data/*`），否则两边互相 import 成环。
@@ -50,7 +58,19 @@ import { clearConflicts, recordConflict, remapConflict, resolveConflict } from "
 import { isSyncActive } from "../sync/mode";
 import { beginWrite, fileStates, type FileRecord, type FileStamp } from "./fileStates";
 import { listOptionalDirectory, readOptionalText } from "./optionalFiles";
-import type { Folder, FolderChoice, Id, Note, SidebarTab, Snapshot, SnapshotReason, SortKey } from "./types";
+import {
+  isReadOnlyKind,
+  noteKind,
+  type Folder,
+  type FolderChoice,
+  type Id,
+  type Note,
+  type NoteKind,
+  type SidebarTab,
+  type Snapshot,
+  type SnapshotReason,
+  type SortKey,
+} from "./types";
 import { getUi, patchUi } from "./ui";
 import { activeWorkspaceRecord, resolveBackend, setActiveWorkspace, type WorkspaceRecord } from "./workspaces";
 /*
@@ -59,6 +79,7 @@ import { activeWorkspaceRecord, resolveBackend, setActiveWorkspace, type Workspa
  * 见 `src/fs/writeLog.ts` 模块头（含本次缺陷的完整证据链）。
  */
 import { observeWrites } from "../fs/writeObserver";
+import { reportUnknownWorkspaceWrite, reportWorkspaceWrite } from "../fs/writeLog";
 
 /* ============================================================================
    The vault: a folder on disk, mirrored in memory for instant search and
@@ -109,60 +130,47 @@ interface WorkspaceMeta {
   lastOpened: Id | null;
   /** UI bits that belong to this notebook rather than to this machine (D27). */
   ui?: { sidebarTab: SidebarTab };
-  /**
-   * 手动改过的显示名（`renameNote`），按笔记路径存。
-   *
-   * 为什么必须存在这里：`Note.title` 是**派生字段** —— `makeNote()` / `refresh()` 都拿
-   * `deriveTitle(正文, 文件名)` 现算（正文里第一个标题赢，文件名只是兜底）。用户实测
-   * （0.5.0）：「重命名完成后，再点击其他地方，文件名又会恢复，或者直接就不修改」——
-   * 就是只写了内存里的 `title`，随后任何一次 `refresh()`（在编辑器里打字）或
-   * `rescanWorkspace()`（桌面端文件监听、Ctrl+S、外部改动都会触发）把它算了回去。
-   *
-   * 「重命名只改显示名；正文里的一级标题不会被改写」（重命名对话框的原话）要成立，
-   * 新名字就得是**这一态的真源**：写进 `state.json`，重扫时挂回 `Note.titleOverride`，
-   * 键跟着笔记走（重命名 / 移动 / 进回收站 / 恢复）。
+  /*
+   * 曾经还有 `titleOverrides` / `titlePinnedAt`（手动改过的显示名及其时间戳）。
+   * 现在**文件名就是标题**（见 `titleOf`），显示名没有第二个真源可存；旧 `state.json`
+   * 里的这两个键读的时候直接丢掉，下一次写盘自然消失。
    */
-  titleOverrides?: Record<Id, string>;
   /**
-   * 「这个名字是用户手定的」的**来源标记与时间戳**，按笔记路径存，与 `titleOverrides`
-   * 一一对应。并行映射而不是把 `titleOverrides` 的值升级成对象 —— 后者是 `state.json`
-   * 的破坏性格式变更（旧版本读不了新文件），这里只加一个键。
-   *
-   * 用途：① 排查「这个名字是谁写的」（用户手定的 vs 正文派生的）；
-   *       ② 将来做「撤销自动改名」时判断来源。
-   * 语义边界：**存在** = 用户手定过这个名字，不代表当前文件名的来源 ——
-   * 自动改名（`autoRenameFromPlaceholder`）**不写、不删**这张表，所以它永远不会
-   * 因为一次自动改名而被写上。
-   *
-   * 旧的 `state.json` 没有这个键 → `undefined` → 所有既有笔记视为「早已过静默期」，
-   * 行为与不引入该字段时一致。
+   * 每张画布的视口（平移 + 缩放），按画布路径存：键跟着文件走
+   * （改名/移动/进回收站/恢复），文件真删了才清账。
    */
-  titlePinnedAt?: Record<Id, number>;
+  canvasViewport?: Record<Id, CanvasViewport>;
+}
+
+/** 画布视口：视图层（B 端）读它恢复「上次看到的位置」，写它持久化。 */
+export interface CanvasViewport {
+  x: number;
+  y: number;
+  zoom: number;
 }
 
 const defaultMeta: WorkspaceMeta = { version: 1, starred: [], expanded: [], lastOpened: null };
 
-/** `state.json` 里的 `titleOverrides`：只留「非空字符串 → 非空字符串」，别的一律丢掉。 */
-function readTitleOverrides(value: unknown): Record<Id, string> | null {
+/**
+ * `state.json` 里的 `canvasViewport`：只留「非空路径 → x/y/zoom 三个有限数、
+ * zoom 为正」，别的一律丢掉。坏条目静默
+ * 丢弃而不是整张表作废 —— 一张坏视口不该让其它画布的位置也丢掉。
+ */
+function readCanvasViewports(value: unknown): Record<Id, CanvasViewport> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const out: Record<Id, string> = {};
-  for (const [path, title] of Object.entries(value as Record<string, unknown>)) {
-    if (path && typeof title === "string" && title) out[path] = title;
+  const out: Record<Id, CanvasViewport> = {};
+  for (const [path, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!path || !raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const { x, y, zoom } = raw as Record<string, unknown>;
+    if (typeof x !== "number" || !Number.isFinite(x)) continue;
+    if (typeof y !== "number" || !Number.isFinite(y)) continue;
+    if (typeof zoom !== "number" || !Number.isFinite(zoom) || zoom <= 0) continue;
+    out[path] = { x, y, zoom };
   }
   return Object.keys(out).length ? out : null;
 }
 
-/** `state.json` 里的 `titlePinnedAt`：只留「非空路径 → 有限正数」，别的一律丢掉（照 `readTitleOverrides`）。 */
-function readTitlePinnedAt(value: unknown): Record<Id, number> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const out: Record<Id, number> = {};
-  for (const [path, at] of Object.entries(value as Record<string, unknown>)) {
-    if (path && typeof at === "number" && Number.isFinite(at) && at > 0) out[path] = at;
-  }
-  return Object.keys(out).length ? out : null;
-}
-
-const SIDEBAR_TABS: SidebarTab[] = ["files", "search", "tags", "starred"];
+const SIDEBAR_TABS: SidebarTab[] = ["files", "search", "tags", "starred", "trash"];
 
 function isSidebarTab(value: unknown): value is SidebarTab {
   return typeof value === "string" && (SIDEBAR_TABS as string[]).includes(value);
@@ -200,32 +208,28 @@ const SNAPSHOT_KEEP = 60;
 const SNAPSHOT_NAME_MEMORY = 200;
 /** Backend calls a workspace scan keeps in flight — the walk used to be one IPC call at a time (D25). */
 const SCAN_CONCURRENCY = 12;
+/**
+ * 扫描时读入内存的 HTML 页面上限：与入库路径的单页上限（receive 的 `MAX_HTML_PAGE_BYTES`）同值。
+ * 更大的只可能是外部塞进来的（coverage 报告之类）：读进来会常驻几十 MB、搜索还要对它跑正则，
+ * 宁可不把它当一篇笔记（文件本身仍在磁盘与同步基线里，不受影响）。
+ */
+const MAX_HTML_SCAN_BYTES = 24 * 1024 * 1024;
 
 /* ------------------------------------------------- 占位名笔记的自动改名（停笔 5 秒）
 
-   背景（用户实测 0.5.0）：「重命名完成后，文件名又会恢复，或者直接就不修改」的镜像问题 ——
-   用户在 `无标题.md` 里写了个标题，**磁盘文件名一格不动**。全仓 14 个 `target.move(`
-   调用点里没有一处的输入是正文标题，这条通道从来没有存在过。
+   **文件名就是标题**（`titleOf`）：显示名永远等于文件名 stem，不从正文派生。于是
+   「正文标题 → 文件名」只剩这一条通道，而且只走**一次**：
 
-   三条硬约束（调研报告 t2 的阻断级发现，实现里逐条落地）：
-     1. **绝不复用 `renameNote()`** —— 它写 `titleOverride`，而 `refresh()` 是
-        `titleOverride ?? deriveTitle(...)`。复用一次就把该笔记的「正文标题 → 文件名」
-        通道**永久锁死**，用户第二次改标题时文件名不再跟随（现象与修复前完全一样）。
-        所以另开一条 `autoRenameFromPlaceholder()`，不写 override、不写 pinnedAt。
-     2. **必须抑制「用户手改过名字」的笔记** —— `titleOverride` 存在即永久跳过，
-        另外给「刚显式重命名过」加 30 秒静默期（防止用户点了重命名、旧标题立刻顶回去）。
-     3. **光标行判定不能用 React state** —— 此条已随「光标还在标题行」判据一起删除
-        （真机教训 2026-10-09：打完标题光标必然停在标题行，该判据让功能永不触发；
-        「用户还在编辑标题」由 5 秒防抖保证，不需要光标位置）。
+     - 只有**当前文件名是占位名**（`无标题` / `未命名` / `untitled` 及带序号变体）的
+       笔记在候选集里。写下第一个标题行、停笔 5 秒后改一次名；改完名字就不再是占位名，
+       之后文件名固定，用户想改就手动重命名。不需要记「这篇是占位名出身」之类的状态
+       （那种状态只能存在本机，跨设备、重启后都会和文件名对不上）。
+     - 只认 H1–H6 标题行（`derivePlaceholderTitle`），不拿正文首行兜底。
+     - 光标位置不参与判定（真机教训 2026-10-09：打完标题光标必然停在标题行，那条
+       判据让功能永不触发；「用户还在编辑标题」由 5 秒防抖保证）。
 
-   范围**只有占位名**（`无标题` / `未命名` / `untitled` 及带序号变体）：真实笔记本
-   （`E:\repo\notes`）的占位名笔记只有个位数，其余几百篇一律不动 —— 入口条件唯一，
-   爆炸半径因此为 0。
-
-   ⚠️ **不要在注释里写死「N 篇」**：真实笔记本每天都在变（本方案定稿时 5 篇占位名，
-   到复核时已经是 7 篇）。**当前读数与逐篇判定统一记在
-   `docs/标题命名规则-改动方案.md` §3**（附只读盘点脚本与日期），要引用数字就引用那里。
-   代码里只表达机制：「只有占位名出身的笔记进候选集」。 */
+   ⚠️ **不要在注释里写死「N 篇」**：真实笔记本每天都在变。**当前读数与逐篇判定统一记在
+   `docs/标题命名规则-改动方案.md` §3**（附只读盘点脚本与日期），要引用数字就引用那里。 */
 
 /** 停笔多久才落盘（方案 §2.4：窗口内再敲字 = 取消 + 重排，不是排队）。 */
 const AUTO_RENAME_DELAY = 5000;
@@ -283,18 +287,6 @@ const explicitRenamedAt = new Map<Id, number>();
 const lastAutoRenameAt = new Map<Id, number>();
 /** 界面下推的输入法合成状态：中文输入法合成期间用户可能停顿数秒，不许在这期间搬文件。 */
 const editorComposing = new Map<Id, boolean>();
-/**
- * **占位名出身的笔记**（当前文件名是占位名，或者曾经是 —— 被自动改名之后就不再是了）。
- *
- * 为什么需要它：入口条件不能只看「当前文件名是不是占位名」。第一次自动改名之后文件名
- * 就变成正文标题了，若按当前名字判定，用户**第二次**改标题时文件名不会再跟随 ——
- * 那正是本次要修的原始缺陷，等于没修。所以记住「这篇笔记是占位名出身的」：
- *   ① 扫描时：文件名匹配占位名的笔记入集；
- *   ② `createNote()`：新建笔记（`无标题.md` / `无标题 2.md`）入集；
- *   ③ 自动改名：**留在集里**（键跟着新路径走），所以下一次改标题还会跟随；
- *   ④ 用户显式重命名：出集（用户手定的名字之后不再自动跟随，见 `renameNote`）。
- */
-const placeholderOrigin = new Set<Id>();
 
 /** 一次自动改名的结果，供测试与排查用（只增不改，测试读它当证据）。 */
 export interface AutoRenameOutcome {
@@ -359,17 +351,56 @@ function makeFolder(path: string, mtimeMs: number): Folder {
   };
 }
 
+/**
+ * 「这个文件是笔记本里的一篇」：Markdown 笔记、画布、HTML 页面。扫描、外部变更、
+ * 树里的「文件 vs 目录」分派共用这一条，不在各处各写一遍 `isMarkdownPath || …`。
+ */
+function isNoteFilePath(path: string): boolean {
+  return isMarkdownPath(path) || isCanvasPath(path) || isHtmlPath(path);
+}
+
+/**
+ * 一篇笔记的显示名：**永远是文件名去掉扩展名**，不从正文派生。
+ *
+ * 显示名和文件名只有一个真源，跨设备、外部改名、重扫都天然一致；正文里写什么标题
+ * 都不影响侧栏（占位名笔记的自动改名改的是文件名，显示名跟着文件名走）。
+ */
+function titleOf(path: Id): string {
+  return stripExtension(baseName(path));
+}
+
 function makeNote(path: string, content: string, mtimeMs: number, options: { starred?: boolean; trashed?: boolean } = {}): Note {
+  const stamp = mtimeMs || Date.now();
+  // 画布不是 Markdown：不按正文派生标签/字数，正文也**不归一化行尾** ——
+  // JSON Canvas 是机器读写的格式，content 必须永远是磁盘原文的镜像，
+  // 否则「外部工具改一字节 → 重扫 → 行尾全变」会制造无穷无尽的伪冲突。
+  // HTML 页面同一套口径（无标签、正文是磁盘原文镜像）：它是
+  // 浏览器读的格式，行尾归一化同样只会制造伪冲突；应用内也从不改写它（只读）。
+  if (isCanvasPath(path) || isHtmlPath(path)) {
+    return {
+      id: path,
+      folderId: parentPath(path) || null,
+      kind: isCanvasPath(path) ? "canvas" : "html",
+      title: titleOf(path),
+      content,
+      createdAt: stamp,
+      updatedAt: stamp,
+      openedAt: stamp,
+      starred: Boolean(options.starred),
+      tags: [],
+      chars: content.length,
+      words: 0,
+      trashed: Boolean(options.trashed),
+      trashedAt: options.trashed ? stamp : null,
+    };
+  }
   const text = normalizeEol(content);
   const counts = countText(text);
-  const stamp = mtimeMs || Date.now();
-  // 占位名出身：扫描到的第一篇 `无标题.md` 就靠这一行进候选集（自动改名的入口条件）。
-  if (!options.trashed && isPlaceholderName(stripExtension(baseName(path)))) placeholderOrigin.add(path);
   return {
     id: path,
     folderId: parentPath(path) || null,
-    title: deriveTitle(text, stripExtension(baseName(path))),
-    titleOverride: null,
+    kind: "note",
+    title: titleOf(path),
     content: text,
     createdAt: stamp,
     updatedAt: stamp,
@@ -384,13 +415,24 @@ function makeNote(path: string, content: string, mtimeMs: number, options: { sta
 }
 
 function refresh(note: Note, content: string): Note {
+  // 画布：与 makeNote 的画布分支同一套口径（tags 空、words 0、content 原样）。
+  if (noteKind(note) !== "note") {
+    return {
+      ...note,
+      content,
+      title: titleOf(note.id),
+      tags: [],
+      chars: content.length,
+      words: 0,
+    };
+  }
   const text = normalizeEol(content);
   const counts = countText(text);
   return {
     ...note,
     content: text,
-    // 手动改过显示名的笔记（`renameNote`）不被正文的 H1 顶回去；没改过的照旧由正文派生。
-    title: note.titleOverride ?? deriveTitle(text, stripExtension(baseName(note.id))),
+    // 正文怎么改都不影响显示名：标题就是文件名。
+    title: titleOf(note.id),
     tags: deriveTags(text),
     chars: counts.chars,
     words: counts.words,
@@ -471,16 +513,14 @@ async function readMeta(target: FileSystemBackend): Promise<WorkspaceMeta> {
   try {
     const parsed = JSON.parse(raw) as Partial<WorkspaceMeta>;
     const sidebarTab = parsed.ui?.sidebarTab;
-    const titleOverrides = readTitleOverrides(parsed.titleOverrides);
-    const titlePinnedAt = readTitlePinnedAt(parsed.titlePinnedAt);
+    const canvasViewport = readCanvasViewports(parsed.canvasViewport);
     return {
       version: 1,
       starred: Array.isArray(parsed.starred) ? parsed.starred.map(String) : [],
       expanded: Array.isArray(parsed.expanded) ? parsed.expanded.map(String) : [],
       lastOpened: parsed.lastOpened ? String(parsed.lastOpened) : null,
       ...(isSidebarTab(sidebarTab) ? { ui: { sidebarTab } } : {}),
-      ...(titleOverrides ? { titleOverrides } : {}),
-      ...(titlePinnedAt ? { titlePinnedAt } : {}),
+      ...(canvasViewport ? { canvasViewport } : {}),
     };
   } catch (error) {
     const backup = await backupCorruptState(target, raw);
@@ -592,8 +632,11 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
     for (const entry of node.entries) {
       if (entry.kind !== "file") continue;
       const path = joinPath(node.path, entry.name);
-      if (!isMarkdownPath(path)) continue;
-      pending.push({ path, size: entry.size, mtimeMs: entry.mtimeMs });
+      // 画布、HTML 页面与笔记同一待遇：一并读入内存（makeNote 按扩展名分派 kind）。
+      // 例外：超过扫描上限的 HTML 不读 —— Phase 3 里 contents 没有它，自然不会成为一篇笔记。
+      if (isNoteFilePath(path) && !(isHtmlPath(path) && entry.size > MAX_HTML_SCAN_BYTES)) {
+        pending.push({ path, size: entry.size, mtimeMs: entry.mtimeMs });
+      }
     }
   }
   const contents = new Map<Id, string>();
@@ -617,7 +660,7 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
         emit(child);
         continue;
       }
-      if (!isMarkdownPath(path)) continue;
+      if (!isNoteFilePath(path)) continue;
       const content = contents.get(path);
       if (content === undefined) continue;
       files += 1;
@@ -634,23 +677,6 @@ export async function scanWorkspace(target: FileSystemBackend): Promise<ScanResu
   const workspaceMeta = await readMeta(target);
   for (const path of workspaceMeta.starred) {
     if (notes[path]) notes[path] = { ...notes[path], starred: true };
-  }
-  /*
-   * 手动改过的显示名挂回去 —— 这一步就是「重命名之后重扫，名字不许被正文 H1 顶回去」的落点。
-   *
-   * 这里**不**顺手清理「路径已经不在扫描结果里」的条目：一次与 move 擦肩而过的重扫
-   * （桌面端文件监听 / OPFS 的非原子 move）可能短暂看不到文件，那会把用户刚改的名字静静丢掉。
-   * 真正确定删除的路径由 `purgeNote` / `emptyTrash` / 删文件夹负责清账。
-   */
-  const overrides = workspaceMeta.titleOverrides;
-  if (overrides) {
-    for (const [path, title] of Object.entries(overrides)) {
-      const note = notes[path] ?? trash[path];
-      if (!note) continue;
-      const pinned = { ...note, titleOverride: title, title };
-      if (notes[path]) notes[path] = pinned;
-      else trash[path] = pinned;
-    }
   }
   return { notes, folders, trash, meta: workspaceMeta, files, bytes, stamps };
 }
@@ -781,7 +807,6 @@ function resetWorkspaceTransients(): void {
   explicitRenamedAt.clear();
   lastAutoRenameAt.clear();
   editorComposing.clear();
-  placeholderOrigin.clear();
   autoRenameDelay = AUTO_RENAME_DELAY;
   // 冲突是**按路径**记的，而同一路径在另一个笔记本是另一篇笔记 —— 不得跨库携带（同 D22 规则）。
   clearConflicts();
@@ -846,10 +871,17 @@ function startWatching(root: string): void {
         if (!sameRoot(root, watchedRoot)) return;
         const target = backend;
         const changes = typeof changed === "string" ? null : (changed?.changes ?? null);
+        /*
+         * 外部改动同样是「有字节落盘了」，要告诉同步层 —— 否则用别的编辑器 / Finder /
+         * git 改过的文件只会刷新界面，**不会推上去**（直到下一次碰巧有应用内保存）。
+         * 主进程已滤掉应用自己经 IPC 写的路径，这里不会把同步自己的拉取再报一遍。
+         */
         if (!target || !changes || changes.length === 0) {
+          reportUnknownWorkspaceWrite();
           scheduleWatchRescan();
           return;
         }
+        reportWorkspaceWrite({ paths: changes.map((change) => change.path), content: true });
         queuePathRefresh(target, changes);
       }),
     );
@@ -863,7 +895,10 @@ function startWatching(root: string): void {
     typeof document !== "undefined"
   ) {
     const onFocus = () => {
-      if (document.visibilityState === "visible") scheduleWatchRescan();
+      if (document.visibilityState !== "visible") return;
+      scheduleWatchRescan();
+      // 不在前台期间文件可能被别的应用改过（同上：同步层自己核对本地再决定推不推）。
+      reportUnknownWorkspaceWrite();
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onFocus);
@@ -994,11 +1029,22 @@ export function applyExternalPaths(paths: readonly string[], options: { type?: W
   return tail;
 }
 
+/** 这条路径在磁盘上是不是**目录**（看父目录的列表；读不到就当不是）。 */
+async function isDirectoryEntry(target: FileSystemBackend, path: string): Promise<boolean> {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const entries = await target.list(parentPath(path) || "").catch(() => null);
+  return entries?.some((entry) => entry.name === name && entry.kind === "directory") ?? false;
+}
+
 async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileChange[]): Promise<void> {
   const myGen = generation;
   if (backend !== target) return;
-  const md = changes.filter((change) => isMarkdownPath(change.path));
-  const dirs = changes.filter((change) => !isMarkdownPath(change.path) && !isHiddenPath(change.path) && change.type !== "delete");
+  // 画布与笔记同集：外部新建的 .canvas 若掉进下面的「目录」分支，会被当成
+  // 文件夹节点挂进树里（exists() 对文件也答 true）。
+  const md = changes.filter((change) => isNoteFilePath(change.path));
+  const dirs = changes.filter(
+    (change) => !isNoteFilePath(change.path) && !isHiddenPath(change.path) && change.type !== "delete",
+  );
   if (md.length > PATH_REFRESH_LIMIT) {
     await rescanWorkspace();
     return;
@@ -1026,6 +1072,25 @@ async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileCha
       continue;
     }
     const stat = await target.stat(id).catch(() => null);
+    // 超大 HTML 页面：与 scanWorkspace 同一条上限，不读入内存。已在树里的（外部把它撑大的）
+    // 同步出树 —— 全量重扫对它的结论也是「不是一篇」，两条路径必须一致。
+    if (stat !== null && isHtmlPath(id) && stat.size > MAX_HTML_SCAN_BYTES) {
+      if (known) {
+        console.warn("[opennote] HTML 页面超过扫描上限，未载入", id, stat.size);
+        setState((prev) => {
+          const notes = { ...prev.notes };
+          delete notes[id];
+          const trash = { ...prev.trash };
+          delete trash[id];
+          return { ...prev, notes, trash };
+        });
+        fileStates.delete(id);
+        invalidateSearchCache(id);
+        closeTab(id);
+        reconcileTabs();
+      }
+      continue;
+    }
     const onDisk = stat === null ? null : await target.readText(id).catch(() => null);
     if (stat === null || onDisk === null) continue;
     if (known) {
@@ -1065,6 +1130,12 @@ async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileCha
     if (change.type === "delete") continue;
     if (libraryStore.get().folders[change.path]) continue;
     if (!(await target.exists(change.path).catch(() => false))) continue;
+    /*
+     * ★ `exists()` 对文件也答 true —— 同步拉下来的图片、`.py`、`Dockerfile` 都会走到这里，
+     * 不再确认一次「它真是目录」，侧栏就会冒出一个叫 `1.py` 的文件夹。
+     * `stat()` 对目录不受保证（D33），所以看父目录的列表里它是不是 directory。
+     */
+    if (!(await isDirectoryEntry(target, change.path))) continue;
     patchFolders((folders) => ({ ...folders, [change.path]: makeFolder(change.path, Date.now()) }));
   }
   reconcileTabs();
@@ -1097,9 +1168,6 @@ export async function rescanWorkspace(): Promise<void> {
   // writes it, but a scan that raced with a slow write can still read the older
   // bytes, so these ids are compared against the scan before publishing (D01/D08).
   const dirtyBefore = new Set(Object.keys(libraryStore.get().dirty));
-  // 重扫会重建整个 `notes`，但「占位名出身」不是能从磁盘读出来的事实（自动改名之后的
-  // 文件名已经是正文标题了）—— 所以这一份必须原样保住，否则重扫一次第二次改名就没了。
-  const originBefore = new Set(placeholderOrigin);
   await flushAll();
   if (myGen !== generation || target !== backend) return;
   const scanned = await scanWorkspace(target);
@@ -1168,8 +1236,6 @@ export async function rescanWorkspace(): Promise<void> {
       notes[id] = {
         ...disk,
         content: local.content,
-        title: local.title,
-        titleOverride: local.titleOverride,
         tags: local.tags,
         words: local.words,
         chars: local.chars,
@@ -1193,9 +1259,6 @@ export async function rescanWorkspace(): Promise<void> {
   // A kept note whose write already finished has no timer left: arm one so the
   // "unsaved" marker clears by itself instead of staying forever.
   for (const id of keptDirty) if (!writeTimers.has(id)) persistNoteSoon(id, 300);
-  // 扫描会把当前名字仍是占位名的笔记补进集里（新出现的 `无标题.md`）；这一句保住
-  // 「已经被自动改名过、名字不再是占位名」的那些（见上面 `originBefore` 的注释）。
-  for (const id of originBefore) if (libraryStore.get().notes[id] || libraryStore.get().trash[id]) placeholderOrigin.add(id);
   reconcileTabs();
   flushMetaWarning();
 }
@@ -1498,7 +1561,6 @@ export function createNote(options: { folderId?: Id | null; content?: string; ti
   const taken = new Set(Object.keys(libraryStore.get().notes));
   const path = target ? uniquePath(joinPath(folderId ?? "", fileName), taken) : fileName;
   const content = options.content ?? "";
-  // `makeNote` 会把名字匹配占位名的笔记记进「占位名出身」（新建笔记走的就是这条）。
   const note = makeNote(path, content, Date.now());
   patchNotes((notes) => ({ ...notes, [note.id]: note }));
   markDirty(note.id);
@@ -1537,6 +1599,115 @@ function preflightCreateNote(target: FileSystemBackend, id: Id): void {
   })();
 }
 
+/* ------------------------------------------------------------------ canvas */
+
+/** 新建画布的默认文件名（占位语义与 `无标题.md` 同类，但不进占位名自动改名集）。 */
+const CANVAS_PLACEHOLDER = "未命名画布";
+
+/**
+ * 新建一篇画布 —— `createCanvas` 的全量内参版本，`duplicateNote` 复制画布时也走这里。
+ * 链路与 `createNote` **逐句同构**：内存先占名 → preflight 对磁盘复核让位 → 防抖落盘，
+ * 差别只有扩展名（`.canvas`）与初始内容（`serializeCanvas(空文档)`）。
+ */
+function createCanvasNote(options: { folderId?: Id | null; content?: string; title?: string; open?: boolean } = {}): Note {
+  return createFileNote(".canvas", CANVAS_PLACEHOLDER, {
+    ...options,
+    content: options.content ?? serializeCanvas({ nodes: [], edges: [] }),
+  });
+}
+
+/**
+ * 「非 Markdown 的一篇」的新建链路（画布、HTML 页面副本）：差别只在扩展名与初始内容，
+ * 占名 → preflight → 防抖落盘与 `createNote` 逐句同构。
+ */
+function createFileNote(
+  ext: string,
+  placeholder: string,
+  options: { folderId?: Id | null; content: string; title?: string; open?: boolean },
+): Note {
+  const target = backend;
+  const folderId = options.folderId ?? null;
+  const title = options.title ?? placeholder;
+  const fileName = `${sanitizeName(title, placeholder)}${ext}`;
+  const taken = new Set(Object.keys(libraryStore.get().notes));
+  const path = target ? uniquePath(joinPath(folderId ?? "", fileName), taken) : fileName;
+  const content = options.content;
+  const note = makeNote(path, content, Date.now());
+  patchNotes((notes) => ({ ...notes, [note.id]: note }));
+  markDirty(note.id);
+  if (folderId) expandFolder(folderId);
+  if (options.open !== false) openNote(note.id);
+  if (target) preflightCreateNote(target, note.id);
+  else void flushNote(note.id).catch(() => undefined);
+  return note;
+}
+
+/**
+ * 新建一篇空画布（契约导出，视图层 B 端消费）：
+ * `未命名画布.canvas`（`resolveAvailablePath` 防重名：未命名画布 2、3…）、
+ * 内容为 `serializeCanvas(空文档)`，默认打开并激活标签。
+ */
+export function createCanvas(options: { folderId?: Id | null } = {}): Note {
+  return createCanvasNote(options);
+}
+
+/**
+ * 反向定位：哪些画布的哪些文件卡片引用了 `noteId`（契约导出）。
+ * 纯逻辑在 `../canvas/refs`（`findCanvasRefs`），这里只负责把当前工作区里
+ * 所有 `kind=canvas` 的笔记喂进去；回收站里的画布不参与（它们自己就是被弃置的）。
+ */
+export function canvasesReferencing(noteId: string): { canvasId: string; nodeId: string }[] {
+  const canvases = Object.values(libraryStore.get().notes)
+    .filter((note) => noteKind(note) === "canvas")
+    .map((note) => ({ id: note.id, content: note.content }));
+  return findCanvasRefs(noteId, canvases);
+}
+
+/**
+ * 笔记/目录落盘移动成功后，让所有画布里的文件卡片引用跟着改写（`file` 卡片
+ * 指向的是**路径**，路径变了引用不跟着变就是裂链）。
+ *
+ * - 比较在 `normalizeFileRef` 规范化之后做（反斜杠 / `./` 前缀的引用同样命中）；
+ * - `prefix: true` 只用于**移动目录**（目录下的所有笔记路径整体换前缀）；
+ * - 改写走既有防抖写链路（`updateNoteContent` → refresh → markDirty →
+ *   `persistNoteSoon`），不自建第二条写通道；
+ * - 致命解析失败的画布（`error.ref` 缺省 = JSON 语法错/根不是对象）跳过不动并
+ *   `console.warn` —— 宁可留着一条失效引用，也不把别人写坏的文件再写一遍。
+ * - 目标笔记进回收站**不跟随**（`trashNote` 不调用本函数）：失效态由视图层判断，
+ *   恢复时（`restoreNote`）才把引用落到最终路径。
+ */
+function rewriteCanvasRefs(from: Id, to: Id, options: { prefix?: boolean } = {}): void {
+  if (from === to) return;
+  for (const canvas of Object.values(libraryStore.get().notes)) {
+    if (noteKind(canvas) !== "canvas") continue;
+    const { doc, errors } = parseCanvas(canvas.content);
+    if (errors.some((error) => error.ref === undefined)) {
+      console.warn("[opennote] 画布解析失败，引用未跟随改写", canvas.id);
+      continue;
+    }
+    const rewrite = rewriteFileRefs(doc, from, to, options);
+    if (!rewrite.changed) continue;
+    updateNoteContent(canvas.id, serializeCanvas(rewrite.doc));
+  }
+}
+
+/** 读一张画布持久化的视口；没有（或被净化丢弃）返回 `null`。 */
+export function getCanvasViewport(id: string): CanvasViewport | null {
+  const viewport = meta.canvasViewport?.[id];
+  return viewport ? { ...viewport } : null;
+}
+
+/**
+ * 记一张画布的视口（契约导出）。非法输入（NaN / zoom≤0）静默忽略 ——
+ * 视口是缓存性质的状态，坏一次不值得弹错误打断用户。
+ */
+export function setCanvasViewport(id: string, viewport: { x: number; y: number; zoom: number }): void {
+  const clean: CanvasViewport = { x: Number(viewport.x), y: Number(viewport.y), zoom: Number(viewport.zoom) };
+  if (![clean.x, clean.y, clean.zoom].every((value) => Number.isFinite(value)) || clean.zoom <= 0) return;
+  meta = { ...meta, canvasViewport: { ...(meta.canvasViewport ?? {}), [id]: clean } };
+  scheduleMeta();
+}
+
 function replaceExpandedId(oldId: Id, newId: Id): void {
   const ui = getUi();
   if (!ui.expanded.includes(oldId)) return;
@@ -1551,12 +1722,10 @@ export interface AutoRenameContext {
   id: Id;
   /** `stripExtension(baseName(id))`。 */
   stem: string;
-  /** 这篇笔记是不是**占位名出身**（当前名字是占位名，或曾经是）。 */
-  placeholderOrigin: boolean;
+  /** 当前文件名是不是占位名（`isPlaceholderName(stem)`）。 */
+  placeholderName: boolean;
   /** 正文（已 `normalizeEol`）。 */
   content: string;
-  /** `Note.titleOverride`。 */
-  titleOverride: string | null;
   /** 是否在回收站里。 */
   trashed: boolean;
   /** 创建时间（毫秒）。 */
@@ -1573,12 +1742,15 @@ export interface AutoRenameContext {
   lastAutoRenameAt: number | null;
   /** 用户显式重命名的时间戳（本会话）。 */
   explicitRenamedAt: number | null;
-  /** `state.json` 里持久化的「这个名字是用户手定的」时间戳。 */
-  pinnedAt: number | null;
   /** 正在改名途中。 */
   inFlight: boolean;
   /** 设置里的总开关（`ui.autoTitleFromPlaceholder`，默认开、可关）。 */
   autoTitleFromPlaceholder: boolean;
+  /**
+   * 笔记种类（可选，缺省视为 note）：画布没有「正文标题 → 文件名」语义，
+   * 永不参与占位名自动改名。可选是为了不破坏既有测试对上下文对象的完整构造。
+   */
+  kind?: NoteKind;
 }
 
 /**
@@ -1591,14 +1763,16 @@ export function shouldAutoRename(ctx: AutoRenameContext): string | null {
   // 条件 -1：设置里的总开关（设置 · 文件 → 「写完标题自动改名」，默认开）。
   // 关掉之后**所有**占位名笔记一律不动 —— 这是用户能自己收回这个功能的那条路。
   if (!ctx.autoTitleFromPlaceholder) return "设置里已关闭自动改名";
-  // 条件 0 ★ 本次收窄的核心：只有**占位名出身**的笔记才在候选集里，其余笔记一律不动。
-  // （`placeholderOrigin` 而不是「当前名字是占位名」：第一次自动改名之后名字就变了，
-  //   按当前名字判定会让第二次改标题不再跟随 —— 那正是本次要修的缺陷。）
-  if (!ctx.placeholderOrigin) return "非占位名笔记";
-  // 条件 1：回收站里的名字是「还原后的名字」，自动改会与 `moveTitleOverride` 打架。
+  // 条件 -2：画布没有「正文标题 → 文件名」语义（title 就是文件名 stem），自动改名
+  // 对它无意义。稳定原因（不在瞬态表里）⇒ scheduleAutoRename 的预检直接放弃，不排定时器。
+  if ((ctx.kind ?? "note") === "canvas") return "画布不参与自动改名";
+  // HTML 页面同理：标题就是文件名，而且应用内根本不会改它的正文。
+  if (ctx.kind === "html") return "HTML 页面不参与自动改名";
+  // 条件 0 ★ 只有**当前文件名是占位名**的笔记才在候选集里，其余笔记一律不动。
+  // 自动改过一次、或用户手动改过名，名字就不再是占位名 ⇒ 之后文件名固定，不再跟随。
+  if (!ctx.placeholderName) return "非占位名笔记";
+  // 条件 1：回收站里的名字是「还原后的名字」，不该被应用改。
   if (ctx.trashed) return "在回收站里";
-  // 条件 2 ★ 用户显式命名过 ⇒ 永久停用（【实测】A7b：不判就会顶掉用户手改的名字）。
-  if (ctx.titleOverride) return "有 titleOverride（用户显式命名过）";
   // 条件 3/4：正文里必须有**真正的标题行**（H1–H6），且绝不是「正文首行」兜底。
   const title = derivePlaceholderTitle(ctx.content);
   if (!title) return "正文里没有真标题行";
@@ -1609,7 +1783,8 @@ export function shouldAutoRename(ctx: AutoRenameContext): string | null {
   // 条件 7：刚新建的笔记正文还空着/还在变，先让它安静下来。
   if (ctx.now - ctx.createdAt <= NEW_NOTE_QUIET_MS) return "新建笔记静默期（10 秒）";
   // 条件 8 ★ 用户刚点了「重命名」：别让旧标题立刻把名字顶回去（30 秒静默期）。
-  const renamedAt = Math.max(ctx.explicitRenamedAt ?? 0, ctx.pinnedAt ?? 0);
+  //   （只在用户把名字改成另一个占位名时才会走到这里，比如改回「无标题」。）
+  const renamedAt = ctx.explicitRenamedAt ?? 0;
   if (renamedAt && ctx.now - renamedAt < EXPLICIT_RENAME_QUIET_MS) return "刚显式重命名过（30 秒静默期）";
   // 条件 10：`createGuards` 的 gate 不参与 `remapIds`，改名会让写入闸门指错 id。
   if (ctx.creating) return "新建 preflight 还没落定";
@@ -1654,9 +1829,9 @@ function autoRenameContext(id: Id, now = Date.now()): AutoRenameContext | null {
   return {
     id,
     stem: stripExtension(baseName(id)),
-    placeholderOrigin: placeholderOrigin.has(id) || isPlaceholderName(stripExtension(baseName(id))),
+    placeholderName: isPlaceholderName(stripExtension(baseName(id))),
+    kind: noteKind(subject),
     content: subject.content,
-    titleOverride: subject.titleOverride,
     trashed,
     createdAt: subject.createdAt,
     now,
@@ -1665,7 +1840,6 @@ function autoRenameContext(id: Id, now = Date.now()): AutoRenameContext | null {
     locked: getUi().lockedNotes.includes(id),
     lastAutoRenameAt: lastAutoRenameAt.get(id) ?? null,
     explicitRenamedAt: explicitRenamedAt.get(id) ?? null,
-    pinnedAt: meta.titlePinnedAt?.[id] ?? null,
     inFlight: autoRenameInFlight.has(id),
     // 兜底成「开」：`data/ui.ts` 的 `load()` 已经用 `{ ...DEFAULT_UI, ...parsed }` 覆盖了
     // 「旧 localStorage 缺键」，这里再兜一次手改 localStorage 塞进来的非布尔值 ——
@@ -1757,16 +1931,6 @@ function moveAutoRenameState(oldId: Id, newId: Id, replace: (id: Id) => Id): voi
     clearTimeout(timer);
     autoRenameTimers.delete(oldId);
   }
-  // 「占位名出身」的键跟着笔记走：**自动改名之后必须留在集里**，否则用户第二次改标题
-  // 时文件名不再跟随（那正是本次要修的缺陷）。用户显式重命名会在 `renameNote` 里先出集。
-  //
-  // 第二半（`|| isPlaceholderName(newId 的 stem)`）是安全网：只要**新名字本身就是占位名**，
-  // 无条件入集。它与 `autoRenameContext()` 的 `|| isPlaceholderName(...)` 同一条口径，
-  // 保证「名字是占位名 ⇒ 一定在候选集里」这条不变式不会因为某条搬键路径漏掉而破掉。
-  if (placeholderOrigin.has(oldId) || isPlaceholderName(stripExtension(baseName(newId)))) {
-    placeholderOrigin.delete(oldId);
-    placeholderOrigin.add(newId);
-  }
   remapKeyed(explicitRenamedAt, replace);
   remapKeyed(lastAutoRenameAt, replace);
   remapKeyed(editorComposing, replace);
@@ -1787,7 +1951,7 @@ function moveAutoRenameState(oldId: Id, newId: Id, replace: (id: Id) => Id): voi
 
 /**
  * 文件真的没了：把它那一份自动改名状态一起清账
- * （删文件夹 / 彻底删除 / 清空回收站，与 `dropTitleOverrides` 同款谓词）。
+ * （删文件夹 / 彻底删除 / 清空回收站，与 `dropCanvasViewport` 同款谓词）。
  */
 function dropAutoRenameState(within: (path: Id) => boolean): void {
   for (const [id, timer] of [...autoRenameTimers]) {
@@ -1799,16 +1963,12 @@ function dropAutoRenameState(within: (path: Id) => boolean): void {
     for (const id of [...map.keys()]) if (within(id)) map.delete(id);
   }
   for (const id of [...autoRenameInFlight]) if (within(id)) autoRenameInFlight.delete(id);
-  for (const id of [...placeholderOrigin]) if (within(id)) placeholderOrigin.delete(id);
 }
 
 /**
- * 改名动作的**独立路径**（§2.6）。与 `renameNote()` 的唯一差别在第 11 步：
- * **不写 `titleOverride`、不写 `titlePinnedAt`、不 `flushMeta`**。
- *
- * 为什么这条差别是阻断级的：`refresh()` 是 `titleOverride ?? deriveTitle(...)`。
- * 复用 `renameNote()` 的话，第一次自动改名就把该笔记的「正文标题 → 文件名」通道
- * 永久锁死 —— 用户第二次改标题时文件名不再跟随，现象与修复前一模一样。
+ * 占位名笔记的自动改名执行体（§2.6）：搬文件的顺序与 `renameNote()` 相同，差别在于
+ * 不打「显式重命名」时间戳、结果记进 `autoRenameOutcomes`。显示名跟着文件名走
+ * （`remapIds` 按新路径重算 `title`），改完名字不再是占位名，之后不再自动改。
  */
 export async function autoRenameFromPlaceholder(id: Id): Promise<AutoRenameOutcome> {
   const target = backend;
@@ -1845,30 +2005,13 @@ export async function autoRenameFromPlaceholder(id: Id): Promise<AutoRenameOutco
     // ★ 必须在 `remapIds` **之前**摘掉「在途」标记：`moveAutoRenameState` 靠它判断
     //   「改名途中又被敲字、有一个待执行的定时器要按新路径重挂」。不摘的话，它会以为
     //   旧 id 上还挂着一个定时器，于是在新 id 上重挂一个 —— 那一拍到点后撞上
-    //   「正在改名途中」，而且会把 30 秒节流重新计时（用户第二次改标题就再也不跟随了）。
+    //   「正在改名途中」，白跑一轮还把 30 秒节流重新计时。
     autoRenameInFlight.delete(id);
     // `remapIds` 会把改名期间敲进来的正文、dirty、writeTimers、ui.tabs/activeId 一起搬到新 id。
     remapIds(id, nextPath);
     await moveHistory(target, id, nextPath);
-    // ★ 与 `renameNote()` 的**唯一**差别：只把派生标题同步到内存，**不写** override。
-    //   `refresh()` 之后 `title` 仍由正文标题现算，所以下一次改标题文件名还会跟随。
-    patchNotes((notes) => {
-      const moved = notes[nextPath];
-      if (!moved) return notes;
-      return { ...notes, [nextPath]: { ...moved, title: deriveTitle(moved.content, stripExtension(baseName(nextPath))), titleOverride: null, updatedAt: Date.now() } };
-    });
-    // 防御性：正常路径下新 id 上不该有 pin（自动改名从不写它），有就清掉，免得它把
-    // 之后的自动改名按 30 秒静默期一直拦住。
-    //
-    // 为什么敢在这里直接改 `meta`：上面那次 `remapIds()` 已经 `scheduleMeta(400)`，
-    // 这份 meta 会被那次去抖写盘带上；这里不需要再排一个（多排一次只是多写一次文件）。
-    // 判据：「防御分支」那条用例（先手工往 `state.json` 里塞一个 pin，再触发自动改名，
-    // 断言改名后 `titlePinnedAt` 被清掉）。
-    if (meta.titlePinnedAt?.[nextPath] !== undefined) {
-      const next = { ...meta.titlePinnedAt };
-      delete next[nextPath];
-      meta = { ...meta, titlePinnedAt: Object.keys(next).length ? next : undefined };
-    }
+    // 引用跟随（与 renameNote 同一条纪律：自动改名也是改路径，画布引用不能指空）。
+    rewriteCanvasRefs(id, nextPath);
     lastAutoRenameAt.delete(id);
     lastAutoRenameAt.set(nextPath, Date.now());
     explicitRenamedAt.delete(id);
@@ -1932,7 +2075,12 @@ export function updateNoteContent(id: Id, content: string, options: { immediate?
   // 恢复时照旧只是把文件搬回去 —— 编辑不会因为「在回收站里」而丢。
   const inTrash = Boolean(state.trash[id]);
   const previous = state.notes[id] ?? state.trash[id];
-  if (!previous || previous.content === normalizeEol(content)) return;
+  // HTML 页面应用内只读：任何编辑入口（快照恢复、未来的批量替换…）走到这里一律拒收。
+  // 磁盘上的外部改动不经过本函数（重扫 / 外部变更走 refresh），照常读进来。
+  if (previous && isReadOnlyKind(previous)) return;
+  // 画布正文不做行尾归一化（磁盘原文镜像），早退比较也要用同一口径，
+  // 否则 CRLF 的画布每次都会被判成「变了」而白写一次盘。
+  if (!previous || previous.content === (noteKind(previous) === "canvas" ? content : normalizeEol(content))) return;
   // 记录「内存这一版是第几次编辑」：跨设备同步的本地改动判据（取代 mtime 比较）。
   fileStates.noteEdited(id);
   const next = refresh(previous, content);
@@ -2005,61 +2153,25 @@ async function mergeHistory(target: FileSystemBackend, from: Id, to: Id): Promis
   await target.remove(from, { recursive: true }).catch(() => undefined);
 }
 
-/**
- * 把「手动改过的显示名」写进笔记本状态（`.opennote/state.json`）—— 这条路的**唯一真源**。
- *
- * `Note.title` 是派生字段（`makeNote()` / `refresh()` 都拿 `deriveTitle(正文, 文件名)` 现算），
- * 只写内存会被下一次 `refresh()`（在编辑器里打字）或 `rescanWorkspace()`（文件监听 / Ctrl+S）
- * 算回去 —— 用户实测的「重命名完成后，再点击其他地方，文件名又会恢复」就是这个。
- */
-function setTitleOverride(id: Id, title: string | null): void {
-  const next: Record<Id, string> = { ...(meta.titleOverrides ?? {}) };
-  if (title) next[id] = title;
-  else delete next[id];
-  const keys = Object.keys(next);
-  meta = { ...meta, titleOverrides: keys.length ? next : undefined };
-  scheduleMeta(200);
-}
-
-/** 显示名的键跟着文件走：重命名 / 移动走 `remapIds()`，进回收站与恢复这两条不走。 */
-function moveTitleOverride(from: Id, to: Id): void {
-  const title = meta.titleOverrides?.[from];
-  if (!title) return;
-  const next: Record<Id, string> = { ...meta.titleOverrides };
+/** 画布视口的键跟着文件走（进回收站与恢复这两条不走 `remapIds()`，要单独搬）。 */
+function moveCanvasViewport(from: Id, to: Id): void {
+  const viewport = meta.canvasViewport?.[from];
+  if (!viewport) return;
+  const next: Record<Id, CanvasViewport> = { ...(meta.canvasViewport ?? {}) };
   delete next[from];
-  next[to] = title;
-  meta = { ...meta, titleOverrides: next };
+  next[to] = viewport;
+  meta = { ...meta, canvasViewport: next };
   scheduleMeta(400);
 }
 
-/**
- * 「这个名字是用户手定的」的**唯一写入点**（`renameNote`）。
- *
- * 自动改名（`autoRenameFromPlaceholder`）**不写这张表** —— 这是「正文标题 → 文件名」
- * 通道不被永久锁死的关键：pin 的存在意味着「用户手定过这个名字」，而自动改名写的是
- * 正文派生的名字，写进去就等于把用户的名字锁住了。
- */
-function pinTitle(id: Id, at: number): void {
-  meta = { ...meta, titlePinnedAt: { ...(meta.titlePinnedAt ?? {}), [id]: at } };
-  scheduleMeta(400);
-}
-
-/** 文件真的没了：把它的显示名与 pin 一起清账（删文件夹 / 彻底删除 / 清空回收站）。 */
-function dropTitleOverrides(within: (path: Id) => boolean): void {
-  if (meta.titleOverrides) {
-    const next: Record<Id, string> = {};
-    for (const [path, title] of Object.entries(meta.titleOverrides)) {
-      if (!within(path)) next[path] = title;
-    }
-    meta = { ...meta, titleOverrides: Object.keys(next).length ? next : undefined };
+/** 画布真的没了：视口一起清账（删文件夹 / 彻底删除 / 清空回收站）。 */
+function dropCanvasViewport(within: (path: Id) => boolean): void {
+  if (!meta.canvasViewport) return;
+  const next: Record<Id, CanvasViewport> = {};
+  for (const [path, viewport] of Object.entries(meta.canvasViewport)) {
+    if (!within(path)) next[path] = viewport;
   }
-  if (meta.titlePinnedAt) {
-    const next: Record<Id, number> = {};
-    for (const [path, at] of Object.entries(meta.titlePinnedAt)) {
-      if (!within(path)) next[path] = at;
-    }
-    meta = { ...meta, titlePinnedAt: Object.keys(next).length ? next : undefined };
-  }
+  meta = { ...meta, canvasViewport: Object.keys(next).length ? next : undefined };
   scheduleMeta(400);
 }
 
@@ -2071,10 +2183,9 @@ export async function renameNote(id: Id, title: string): Promise<void> {
   const requested = joinPath(parentPath(id), `${clean}${extName(id) || ".md"}`);
   if (requested === id) return;
   // 用户显式改名 ⇒ 这篇笔记的自动改名必须立刻收手：取消待执行的定时器 + 打 30 秒静默期
-  // 时间戳（否则「用户点了重命名 → 旧标题 5 秒后把名字顶回去」），并且**退出占位名出身**
-  // （`titleOverride` 已经是永久停用，这里再退一层：用户手定的名字之后不再自动跟随）。
+  // 时间戳（否则「用户点了重命名 → 旧标题 5 秒后把名字顶回去」）。新名字不是占位名的话，
+  // 它本来就不再是自动改名的候选。
   cancelAutoRename(id);
-  placeholderOrigin.delete(id);
   const renamedAt = Date.now();
   explicitRenamedAt.set(id, renamedAt);
   // Only the casing changes: a temp-name round trip is what every backend
@@ -2090,27 +2201,12 @@ export async function renameNote(id: Id, title: string): Promise<void> {
     else await target.move(id, nextPath);
     remapIds(id, nextPath);
     await moveHistory(target, id, nextPath);
-    // 新名字**同时**写进 `Note.titleOverride` 与笔记本状态：只写 `title` 会被下一次
-    // `refresh()` / 重扫按正文 H1 算回去（用户实测：改完名再点别处又变回去）。
-    //
-    // ★ 写的是**落盘名**（`nextPath` 的 stem），不是请求名 `clean`（方案 §2.6 第 1 点、
-    //   §7.1 指定的断言）。撞名时两者会分叉：请求「系统设计」而磁盘上让位成
-    //   `系统设计 2.md`，若把请求名写进 override，侧栏显示名是「系统设计」、磁盘叫
-    //   `系统设计 2.md`，而 `refresh()` 是 `titleOverride ?? deriveTitle(...)` —— override
-    //   赢，于是这个分叉**永久**存在（重扫也按 override 挂回「系统设计」）。
-    const landed = stripExtension(baseName(nextPath));
-    patchNotes((notes) => ({
-      ...notes,
-      [nextPath]: { ...notes[nextPath], title: landed, titleOverride: landed, updatedAt: Date.now() },
-    }));
-    setTitleOverride(nextPath, landed);
-    // 「这个名字是用户手定的」的来源标记：与 `titleOverrides` 一一对应，跟着键走。
-    pinTitle(nextPath, renamedAt);
+    // 引用跟随：所有画布里 file===旧路径 的文件卡片改写到新路径（详见 rewriteCanvasRefs）。
+    rewriteCanvasRefs(id, nextPath);
+    // 显示名就是文件名：`remapIds` 已按落盘名（撞名时是 `系统设计 2`）重算了 `title`。
+    patchNotes((notes) => (notes[nextPath] ? { ...notes, [nextPath]: { ...notes[nextPath], updatedAt: Date.now() } } : notes));
     explicitRenamedAt.delete(id);
     explicitRenamedAt.set(nextPath, renamedAt);
-    // 立刻落盘，别等 200ms 去抖：重命名一返回，**随后任何一次重扫**都必须读到这条记录
-    // （桌面端文件监听是 500ms 去抖，但不能指望每个触发源都比去抖慢 —— Ctrl+S 就能随时重扫）。
-    await flushMeta();
   } catch (error) {
     reportError(error, "重命名失败");
   }
@@ -2174,6 +2270,8 @@ export async function moveNote(id: Id, folderId: Id | null): Promise<MoveNoteRes
     // 换目录 = 引用前缀变了 ⇒ 把指向共享 `.assets/` 的引用按新位置重算（图片本身不搬）。
     const assets = await rebaseNoteAssets(target, id, nextPath);
     if (assets.content) patchNoteContent(nextPath, assets.content);
+    // 引用跟随：目录层数变了，卡片里的路径要落到新位置。
+    rewriteCanvasRefs(id, nextPath);
     return { path: nextPath, assetsWarning: assets.warning };
   } catch (error) {
     reportError(error, "移动笔记失败");
@@ -2184,6 +2282,19 @@ export async function moveNote(id: Id, folderId: Id | null): Promise<MoveNoteRes
 export function duplicateNote(id: Id): Note | null {
   const note = libraryStore.get().notes[id];
   if (!note) return null;
+  // 画布副本：扩展名必须是 .canvas、内容原样拷贝 —— 走 createNote 会产出
+  // 「装着 JSON 的 .md」，视图层按 kind 打开就废了。
+  if (noteKind(note) === "canvas") {
+    return createCanvasNote({ folderId: note.folderId, content: note.content, title: `${note.title} 副本` });
+  }
+  // HTML 页面副本同理：保留原扩展名（`.html` / `.htm`），正文逐字节拷贝。
+  if (noteKind(note) === "html") {
+    return createFileNote(extName(note.id) || ".html", "未命名页面", {
+      folderId: note.folderId,
+      content: note.content,
+      title: `${note.title} 副本`,
+    });
+  }
   const copy = createNote({ folderId: note.folderId, content: note.content, title: `${note.title} 副本` });
   return copy;
 }
@@ -2219,6 +2330,10 @@ async function rebaseNoteAssets(
 ): Promise<{ content: string | null; warning: string | null }> {
   const nothing = { content: null, warning: null };
   if (fromNote === toNote) return nothing;
+  // 画布里没有 Markdown 图片引用可重算（file 卡片指笔记、不指图片），
+  // 把 JSON 正文送进 rebaseSharedAssetRefs 只会白读白写一次。
+  // HTML 页面同理：入库时资源已内联，没有 `.assets/` 引用要跟着目录层数重算。
+  if (!isMarkdownPath(fromNote) || !isMarkdownPath(toNote)) return nothing;
   if (parentPath(fromNote) === parentPath(toNote)) return nothing;
   const content = await readOptionalText(target, toNote).catch(() => undefined);
   if (content === undefined) {
@@ -2248,18 +2363,11 @@ export async function trashNote(id: Id): Promise<void> {
     const trashPath = await resolveAvailablePath(target, requested, taken, id);
     await target.move(id, trashPath);
     await moveHistory(target, id, trashPath);
-    // 「占位名出身」跟着进回收站。**必须搬**，不能留在旧的工作区路径上：一次重扫
-    // （桌面端文件监听 500ms 就会来）的 `originBefore` 只保住「还存在的 id」，留在旧路径
-    // 的那一条会被丢掉，还原之后这篇笔记再也不自动改名 —— 与本次要修的缺陷同一现象。
-    if (placeholderOrigin.has(id)) {
-      placeholderOrigin.delete(id);
-      placeholderOrigin.add(trashPath);
-    }
     // 回收站比工作区深两层 ⇒ 指向共享 `.assets/` 的引用要跟着加前缀，
     // 否则「删了再恢复」或「在回收站里看一眼」时图片全是裂图（而且不报错）。
     const assets = await rebaseNoteAssets(target, id, trashPath);
-    // 显示名的键跟到回收站路径下：重扫时回收站里的这一条也要保持用户改过的名字。
-    moveTitleOverride(id, trashPath);
+    // 画布视口跟到回收站路径下：恢复时还要用（restoreNote 会把它搬到最终路径）。
+    moveCanvasViewport(id, trashPath);
     const current = libraryStore.get().notes[id] ?? note;
     setState((prev) => {
       const notes = { ...prev.notes };
@@ -2273,6 +2381,7 @@ export async function trashNote(id: Id): Promise<void> {
             ...current,
             content: assets.content ?? current.content,
             id: trashPath,
+            title: titleOf(trashPath),
             trashed: true,
             trashedAt: Date.now(),
           },
@@ -2297,6 +2406,11 @@ export async function restoreNote(id: Id): Promise<void> {
     const nextPath = await resolveAvailablePath(target, original, taken, id);
     await target.move(id, nextPath);
     await moveHistory(target, id, nextPath);
+    // 引用跟随（恢复）：进回收站时引用没改写过，所以既有引用仍是 original —— 把它
+    // 落到恢复后的最终路径（可能带序号）。防御性再改写一次回收站路径，真写了它的卡片
+    // 也不该留着指空。
+    rewriteCanvasRefs(original, nextPath);
+    rewriteCanvasRefs(id, nextPath);
     const sourceAssets = joinPath(parentPath(id), ASSETS_DIR);
     const restoredAssets = joinPath(parentPath(nextPath), ASSETS_DIR);
     if (await target.exists(sourceAssets) && !(await target.exists(restoredAssets))) {
@@ -2304,18 +2418,8 @@ export async function restoreNote(id: Id): Promise<void> {
     }
     // 共享 `.assets/` 的引用按恢复后的路径重算前缀（回收站深两层，回来就要去掉）。
     const assets = await rebaseNoteAssets(target, id, nextPath);
-    // 恢复后的路径可能带序号（`第一章 2.md`）：显示名的键跟着落到最终路径上。
-    moveTitleOverride(id, nextPath);
-    // 「占位名出身」从回收站路径（或它来时的路径）搬到最终路径上。两条判据都要：
-    //   ① `placeholderOrigin` 里有回收站路径或它原来的路径 —— 覆盖「已经被自动改名过、
-    //      名字不再是占位名」的笔记（这类笔记的名字必须继续跟随正文标题）；
-    //   ② 还原后的 stem 本身就是占位名 —— 覆盖「丢过一次标记」的现场。
-    // 不补这一步的话，用户把一篇占位名笔记丢进回收站再还原，它之后**再也不会**自动改名。
-    const carriedOrigin = placeholderOrigin.has(id) || placeholderOrigin.has(original);
-    if (carriedOrigin || isPlaceholderName(stripExtension(baseName(nextPath)))) {
-      placeholderOrigin.delete(id);
-      placeholderOrigin.add(nextPath);
-    }
+    // 恢复后的路径可能带序号（`第一章 2.md`）：视口的键跟着落到最终路径上。
+    moveCanvasViewport(id, nextPath);
     setState((prev) => {
       const trash = { ...prev.trash };
       delete trash[id];
@@ -2328,6 +2432,7 @@ export async function restoreNote(id: Id): Promise<void> {
             ...note,
             content: assets.content ?? note.content,
             id: nextPath,
+            title: titleOf(nextPath),
             folderId: parentPath(nextPath) || null,
             trashed: false,
             trashedAt: null,
@@ -2458,8 +2563,8 @@ export async function purgeNote(id: Id): Promise<void> {
   try {
     await target.remove(id, { recursive: true });
     await removeNoteArtifacts(target, id);
-    dropTitleOverrides((path) => path === id);
     dropAutoRenameState((path) => path === id);
+    dropCanvasViewport((path) => path === id);
     setState((prev) => {
       const trash = { ...prev.trash };
       delete trash[id];
@@ -2478,8 +2583,8 @@ export async function emptyTrash(): Promise<number> {
   try {
     for (const id of ids) await removeNoteArtifacts(target, id);
     if (await target.exists(TRASH_DIR)) await target.remove(TRASH_DIR, { recursive: true });
-    dropTitleOverrides((path) => path === TRASH_DIR || path.startsWith(`${TRASH_DIR}/`));
     dropAutoRenameState((path) => path === TRASH_DIR || path.startsWith(`${TRASH_DIR}/`));
+    dropCanvasViewport((path) => path === TRASH_DIR || path.startsWith(`${TRASH_DIR}/`));
     setState((prev) => ({ ...prev, trash: {} }));
     return count;
   } catch (error) {
@@ -2580,6 +2685,9 @@ export async function renameFolder(id: Id, name: string): Promise<void> {
     remapIds(id, nextPath, { prefix: true });
     // One directory move carries the history of every note below it (D15).
     await moveHistory(target, id, nextPath);
+    // 引用跟随（与 moveFolder 同款）：改名目录 = 目录下所有笔记路径整体换前缀，
+    // 画布里的文件卡片按前缀改写到新前缀（后缀保留）。
+    rewriteCanvasRefs(id, nextPath, { prefix: true });
   } catch (error) {
     reportError(error, "重命名文件夹失败");
   }
@@ -2647,6 +2755,8 @@ export async function deleteFolder(id: Id, mode: "trash" | "promote"): Promise<v
         await target.move(source, destination);
         remapIds(source, destination, { prefix: entry.kind === "directory" });
         await moveHistory(target, source, destination);
+        // 提升到上级目录：卡片引用跟着每一条实际移动（目录条目开前缀匹配）。
+        rewriteCanvasRefs(source, destination, { prefix: entry.kind === "directory" });
       }
       // Everything moved out, so the now-empty directory must go recursively:
       // `recursive: false` throws ERR_FS_EISDIR on the desktop backend (D06).
@@ -2680,6 +2790,8 @@ export async function moveFolder(id: Id, parentId: Id | null): Promise<void> {
     await target.move(id, nextPath);
     remapIds(id, nextPath, { prefix: true });
     await moveHistory(target, id, nextPath);
+    // 目录整体搬家 ⇒ 目录下所有笔记的路径都换了前缀，画布引用按前缀跟随。
+    rewriteCanvasRefs(id, nextPath, { prefix: true });
     if (parentId) expandFolder(parentId);
   } catch (error) {
     reportError(error, "移动文件夹失败");
@@ -2795,16 +2907,30 @@ function remapKeyed<V>(map: Map<Id, V>, replace: (id: Id) => Id): void {
   }
 }
 
+const remapListeners = new Set<(replace: (id: Id) => Id) => void>();
+
+/**
+ * 订阅「路径改了」（重命名 / 移动 / 自动改名 / 新建让位）。回调在任何 store 更新**之前**
+ * 同步触发：编辑器靠它把「标签 → 常驻实例」的 key 搬到新路径，改名不再卸载重建
+ * （否则光标、滚动、undo 全丢，自动改名后继续打字会落到文档开头）。
+ */
+export function onIdsRemapped(listener: (replace: (id: Id) => Id) => void): () => void {
+  remapListeners.add(listener);
+  return () => remapListeners.delete(listener);
+}
+
 /** Rewrite every id that starts with (or equals) `oldId` after a rename/move. */
 function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): void {
   const replace = (value: Id): Id =>
     value === oldId ? newId : options.prefix && value.startsWith(`${oldId}/`) ? `${newId}${value.slice(oldId.length)}` : value;
+  for (const listener of remapListeners) listener(replace);
 
   patchNotes((notes) => {
     const next: Record<Id, Note> = {};
     for (const [key, note] of Object.entries(notes)) {
       const id = replace(key);
-      next[id] = { ...note, id, folderId: parentPath(id) || null };
+      // 撞名让位（`系统设计 2.md`）会改 stem：显示名跟着新文件名走。
+      next[id] = { ...note, id, title: titleOf(id), folderId: parentPath(id) || null };
     }
     return next;
   });
@@ -2822,7 +2948,10 @@ function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): voi
   const movedDirty: [Id, Id][] = [];
   setState((prev) => {
     const trash: Record<Id, Note> = {};
-    for (const [key, note] of Object.entries(prev.trash)) trash[replace(key)] = note;
+    for (const [key, note] of Object.entries(prev.trash)) {
+      const id = replace(key);
+      trash[id] = id === key ? note : { ...note, id, title: titleOf(id) };
+    }
     const dirty: Record<Id, true> = {};
     for (const [key, value] of Object.entries(prev.dirty)) {
       const id = replace(key);
@@ -2858,13 +2987,9 @@ function remapIds(oldId: Id, newId: Id, options: { prefix?: boolean } = {}): voi
     starred: meta.starred.map(replace),
     expanded: meta.expanded.map(replace),
     lastOpened: meta.lastOpened ? replace(meta.lastOpened) : null,
-    // 显示名的键也要跟着走，否则移动/重命名之后那条改名记录就指空、重扫时名字又变回正文 H1。
-    titleOverrides: meta.titleOverrides
-      ? Object.fromEntries(Object.entries(meta.titleOverrides).map(([path, title]) => [replace(path), title]))
-      : undefined,
-    // pin 与 `titleOverrides` 一一对应，必须在同一处做键替换，否则两张表会指不同的路径。
-    titlePinnedAt: meta.titlePinnedAt
-      ? Object.fromEntries(Object.entries(meta.titlePinnedAt).map(([path, at]) => [replace(path), at]))
+    // 画布视口也是路径键：画布改名/移动后，它的「上次看到的位置」要跟过去。
+    canvasViewport: meta.canvasViewport
+      ? Object.fromEntries(Object.entries(meta.canvasViewport).map(([path, viewport]) => [replace(path), viewport]))
       : undefined,
   };
   scheduleMeta(400);
@@ -3196,10 +3321,21 @@ const plainCache = new Map<Id, string>();
 /** Bound the body cache so a huge notebook cannot grow it without limit (D05). */
 const PLAIN_CACHE_LIMIT = 400;
 
+/**
+ * 一条笔记参与搜索的正文（未转小写）：HTML 页面认文字不认标记，画布取卡片里的
+ * 文字（JSON 语法本身不进索引），其余按 Markdown 去标记。片段也从这里截。
+ */
+function searchableText(note: Note): string {
+  const kind = noteKind(note);
+  if (kind === "html") return htmlPlainText(note.content);
+  if (kind === "canvas") return canvasPlainText(note.content);
+  return stripMarkdown(note.content);
+}
+
 function plainOf(note: Note): string {
   const cached = plainCache.get(note.id);
   if (cached !== undefined) return cached;
-  const text = stripMarkdown(note.content).toLowerCase();
+  const text = searchableText(note).toLowerCase();
   plainCache.set(note.id, text);
   while (plainCache.size > PLAIN_CACHE_LIMIT) {
     const oldest = plainCache.keys().next();
@@ -3257,7 +3393,11 @@ export function searchNotes(query: string, options: { limit?: number; sort?: Sor
   }
 
   const buildSnippet = (note: Note, position: number): string => {
-    const text = stripMarkdown(splitFrontMatter(note.content).body).replace(/\s+/g, " ").trim();
+    const text = (
+      noteKind(note) === "note" ? stripMarkdown(splitFrontMatter(note.content).body) : searchableText(note)
+    )
+      .replace(/\s+/g, " ")
+      .trim();
     if (!text) return "";
     if (position < 0) return text.slice(0, 96);
     const start = Math.max(0, position - 34);
@@ -3390,7 +3530,10 @@ function snapshotStamp(at: number): string {
 function reserveSnapshotName(noteId: Id, reason: SnapshotReason): string {
   const used = snapshotNames.get(noteId) ?? new Set<string>();
   snapshotNames.set(noteId, used);
-  const name = uniquePath(`${snapshotStamp(Date.now()).replace(/[: ]/g, "-")}-${reason}.md`, used, { foldCase: true });
+  // 扩展名跟随源文件：画布的历史是 .canvas（别的历史工具能按扩展名认出它），
+  // 笔记的历史保持 .md。extName 对无扩展名路径回退 ".md"（与 isMarkdownPath 家族一致）。
+  const ext = extName(noteId) || ".md";
+  const name = uniquePath(`${snapshotStamp(Date.now()).replace(/[: ]/g, "-")}-${reason}${ext}`, used, { foldCase: true });
   used.add(name);
   if (used.size > SNAPSHOT_NAME_MEMORY) {
     used.clear();
@@ -3557,6 +3700,20 @@ export async function saveImage(
   if (!isMarkdownPath(notePath)) {
     throw new Error(`saveImage 的第三参必须是笔记路径（如 归档/foo.md），收到的是「${notePath || "(空)"}」`);
   }
+  const path = await saveImageAsset(blob, suggestedName);
+  // 引用从**笔记所在目录**算到附件路径（`relativeAssetRef`，唯一产地），不在这里手拼一层前缀：
+  // 笔记嵌在 `操作系统/产品/` 里就该是 `../../.assets/x.png`，少一层就是裂图。
+  // 目标串再过一次 `markdownRef`：路径带空格时写成 `<…>`，否则会被**空格截断**、图片不渲染。
+  return { path, markdown: markdownRef(relativeAssetRef(notePath, path)) };
+}
+
+/**
+ * 把一张图写进共享附件目录，返回**工作区根相对路径**（`.assets/<uuid>.png`）。
+ * `saveImage` 的落盘那一半；画布拖入图片也走这里 —— 画布的 file 卡存的正是这种
+ * 根相对路径，不需要按笔记目录换算引用。永久删除时 `sharedAssetFilesIn` 认得
+ * 画布 JSON 里的 `".assets/…"`，所以画布引用的图不会被别的笔记的清算误删。
+ */
+export async function saveImageAsset(blob: Blob, suggestedName: string): Promise<string> {
   const target = requireBackend();
   const dir = assetsDirFor();
   /*
@@ -3568,10 +3725,7 @@ export async function saveImage(
   const candidate = joinPath(dir, await assetFinalName(bytes, suggestedName));
   const path = await reuseOrDedupe(target, candidate, bytes);
   if (!(await target.exists(path))) await target.writeBytes(path, bytes);
-  // 引用从**笔记所在目录**算到附件路径（`relativeAssetRef`，唯一产地），不在这里手拼一层前缀：
-  // 笔记嵌在 `操作系统/产品/` 里就该是 `../../.assets/x.png`，少一层就是裂图。
-  // 目标串再过一次 `markdownRef`：路径带空格时写成 `<…>`，否则会被**空格截断**、图片不渲染。
-  return { path, markdown: markdownRef(relativeAssetRef(notePath, path)) };
+  return path;
 }
 
 /**

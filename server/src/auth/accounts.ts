@@ -1,113 +1,128 @@
 /**
- * **密钥即身份**：账号的建立、认证、轮换（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §1.5、§4.3、§4.4）。
+ * 账号、会话、邀请与重置密码（`docs/执行-同步重写-2026-11-02.md`「身份模型」）。
  *
- * ## 这个文件里最要紧的一件事
+ * ## 账号 ≠ 凭据
  *
- * > **服务端从不生成、也从不持有任何密钥材料。**
- * >
- * > 客户端生成 `accountKey` / `encRoot`，派生出 `authToken`（发给我们）与 `wrapKey`（永不外发），
- * > 并把 `encRoot` 用 `wrapKey` 包成 `wrappedEncRoot` 一起送上来。我们只存：
- * >   - `auth_hash = sha256(authToken)`
- * >   - `wrapped_enc_root`（**服务端解不开**，因为没有 `wrapKey`）
- * >
- * > 这条一破，E2EE 就是假的（红线 3）。所以本文件**没有**任何 `encrypt` / `decrypt` /
- * > `deriveKey`，`server/` 里也不允许出现 `@noble/*`（`scripts/check-boundaries.mjs` 的 B3/B4 会拦）。
- *
- * ## 为什么不需要 Argon2id / 慢 KDF
- *
- * 慢 KDF 的唯一目的是对抗**低熵输入**（人类口令）。`authToken` 是 256 位 CSPRNG 的派生值，
- * `sha256(authToken)` **无法离线爆破** ⇒ `wrappedEncRoot` 安全 ⇒ HKDF 就够了。
- * 这直接砍掉一个依赖（§1.5「为什么不需要 Argon2id」）。
- *
- * ## 认证链路只有一条（§4.4）
+ * 「密钥即身份」时代令牌本身就是账号；现在账号是「邮箱 + 密码」（或 GitHub，下一阶段），
+ * 登录后每台设备 / 每次控制台登录各拿一个**会话令牌**：
  *
  * ```
- * Authorization: Bearer <authToken>
- *   → h = sha256(authToken)
- *   → SELECT ... FROM accounts WHERE auth_hash = h     （走唯一索引）
- *   → 无行 → 401；status != 'active' → 403
+ * Authorization: Bearer ons_<43 字符>
+ *   → h = sha256(令牌)
+ *   → SELECT … FROM sessions JOIN accounts WHERE token_hash = h
+ *   → 无行 / 已吊销 / 已过期 → 401；账号停用 → 403
  * ```
  *
- * 因为 `authToken` 有 2²⁵⁶ 空间，索引查找**不泄露任何部分信息**，所以不需要再做常量时间比较。
- * **也没有会话表**：令牌本身就是身份，控制台也用它（塞进 HttpOnly cookie）。
+ * 令牌是 256 位随机数，库里只存它的 sha256 —— 拖库拿不到可用令牌，索引查找也不泄露信息。
+ * 移除设备 = 吊销该设备的会话；改密码 / 重置密码 = 吊销这个账号的全部会话。
+ *
+ * ## 一次性码
+ *
+ * 邀请（`join_…`）、重置密码（`reset_…`）、笔记本共享（`nb_…`）都是 192 位随机码，
+ * 明文只在生成时返回一次，库里存 sha256。
+ *
+ * ## 服务端仍然没有加解密能力
+ *
+ * `wrapped_enc_root` 是客户端用「加密口令」包好的密文，这里只存不解（红线 3）。
  */
 
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { AccountInfo, Quota } from "../../../shared/contract";
+import { hashPassword, passwordProblem, verifyPassword } from "./passwords";
 
-/** `authToken` 的哈希。**唯一产地** —— 别处不许再写一遍。 */
-export function hashAuthToken(authToken: string): string {
-  return createHash("sha256").update(authToken, "utf8").digest("hex");
+/** 会话令牌 / 一次性码的哈希。**唯一产地** —— 别处不许再写一遍。 */
+export function hashToken(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-/** 一次性码（引导码/邀请码）的哈希。用 `randomBytes` 的十六进制，**明文只在生成时出现一次**。 */
-export function hashCode(code: string): string {
-  return createHash("sha256").update(code, "utf8").digest("hex");
-}
+/** 一次性码与令牌用的是同一个哈希；分开命名只为读代码时知道手里是什么。 */
+export const hashCode = hashToken;
 
 /**
  * 生成一次性码：`<prefix>_<48 位十六进制>`。
  *
- * 24 字节 = 192 位熵 ⇒ 无法爆破。`prefix` 让运维**一眼能分清**它是什么码
- * （`boot_` / `inv_` / `nb_`），减少「把笔记本邀请码当注册码发出去」这类事故。
+ * 前缀让运维一眼分清是什么码（`join_` 邀请 / `reset_` 重置密码 / `nb_` 笔记本共享）。
  */
-export function generateCode(prefix: "boot" | "inv" | "nb", bytes = 24): string {
+export function generateCode(prefix: "join" | "reset" | "nb", bytes = 24): string {
   return `${prefix}_${randomBytes(bytes).toString("hex")}`;
 }
 
-/** 恒定时间比较两个哈希（防时序侧信道）。长度不同直接返回假。 */
-export function hashesEqual(left: string, right: string): boolean {
-  const a = Buffer.from(left, "utf8");
-  const b = Buffer.from(right, "utf8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+/** 会话令牌：`ons_` + 32 字节 base64url。 */
+export function newSessionToken(): string {
+  return `ons_${randomBytes(32).toString("base64url")}`;
 }
 
-/** 账号状态。 */
+export function newAccountId(): string {
+  return randomBytes(16).toString("hex");
+}
+
+export function newNotebookId(): string {
+  return randomUUID();
+}
+
+/** 邮箱规范化：去空白、转小写。唯一约束本身也是 NOCASE，这里只是让存进去的样子一致。 */
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+/** 够用就好的形状检查（真正的校验是「邀请链接发到了这个人手里」）。 */
+export function isPlausibleEmail(email: string): boolean {
+  return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
 export type AccountStatus = "active" | "disabled";
+export type SessionKind = "device" | "panel";
 
 export interface AccountRow {
   id: string;
-  auth_hash: string;
-  wrapped_enc_root: string;
+  email: string | null;
+  display_name: string | null;
+  password_hash: string | null;
   is_admin: number;
   status: string;
-  label: string | null;
+  quota_bytes: number | null;
+  wrapped_enc_root: string | null;
+  enc_params: string | null;
   created_at: number;
   last_seen_at: number | null;
 }
 
-export interface CreateAccountInput {
-  /** 客户端生成的公开 `accountId`（16B 随机，十六进制）。 */
-  accountId: string;
-  /** 客户端派生出的 `authToken`（明文只在这一刻出现，我们只存哈希）。 */
-  authToken: string;
-  /** `AEAD(wrapKey, encRoot, aad=accountId)` —— 我们存下来但**解不开**。 */
-  wrappedEncRoot: string;
-  isAdmin?: boolean;
-  label?: string | null;
-  /** 注册门槛：引导码与邀请码**二选一，必须有其一**（§1.5「注册始终只能靠邀请码」）。 */
-  bootstrapCode?: string;
-  inviteCode?: string;
-  now?: number;
+export interface SessionRow {
+  id: string;
+  account_id: string;
+  token_hash: string;
+  kind: string;
+  device_id: string | null;
+  created_at: number;
+  last_used_at: number | null;
+  expires_at: number | null;
+  revoked_at: number | null;
+  ip: string | null;
 }
 
-/** 注册被拒的原因（机器可读，便于映射状态码）。 */
-export type CreateAccountRejection =
-  | "account-exists"
-  | "missing-code"
-  | "bad-bootstrap-code"
-  | "bootstrap-code-used"
-  | "bootstrap-code-expired"
-  | "bad-invite-code"
+export type AccountRejection =
+  | "bad-email"
+  | "email-taken"
+  | "weak-password"
+  | "bad-credentials"
+  | "setup-done"
+  | "bad-invite"
   | "invite-revoked"
   | "invite-expired"
-  | "invite-exhausted";
+  | "invite-exhausted"
+  | "invite-email-mismatch"
+  | "bad-reset"
+  | "reset-used"
+  | "reset-expired"
+  | "unauthorized"
+  | "disabled"
+  | "identity-taken"
+  | "only-login-method"
+  | "not-found";
 
 export class AccountError extends Error {
   constructor(
-    readonly rejection: CreateAccountRejection | "unauthorized" | "disabled" | "not-found",
+    readonly rejection: AccountRejection,
     message: string,
   ) {
     super(message);
@@ -115,257 +130,60 @@ export class AccountError extends Error {
   }
 }
 
-/** 引导码有效期：默认 30 分钟（CLI 打完码去客户端粘贴，够用且不久留）。 */
-export const BOOTSTRAP_CODE_TTL_MS = 30 * 60_000;
+/** 控制台会话的寿命。设备会话不过期（靠吊销）。 */
+export const PANEL_SESSION_TTL_MS = 8 * 3600_000;
+/** 重置密码链接的寿命。 */
+export const PASSWORD_RESET_TTL_MS = 24 * 3600_000;
+
+export interface InviteRow {
+  code_hash: string;
+  created_by: string | null;
+  created_at: number;
+  expires_at: number | null;
+  max_uses: number;
+  uses: number;
+  revoked_at: number | null;
+  email: string | null;
+  grant_admin: number;
+  quota_bytes: number | null;
+  accepted_by: string | null;
+}
+
+export interface IdentityRow {
+  provider: string;
+  subject: string;
+  account_id: string;
+  login: string | null;
+  created_at: number;
+  last_used_at: number | null;
+}
+
+export interface AccountStoreOptions {
+  /** 测试注入低成本 scrypt 参数（见 `FAST_PARAMS_FOR_TESTS`）。 */
+  passwordParams?: { N: number; r: number; p: number };
+}
 
 /**
- * 账号仓库。所有方法都是**同步**的（`node:sqlite` 是同步 API），
- * 由 HTTP 层包成 async。这样避免「假异步」把事务边界搞乱。
+ * 没有这个邮箱时也要跑一次 scrypt，让「邮箱不存在」与「密码错」耗时一致，
+ * 不让人用响应时间探测哪些邮箱注册过。
  */
+let dummyHash: Promise<string> | null = null;
+
 export class AccountStore {
-  constructor(private readonly db: DatabaseSync) {}
+  constructor(
+    /** 公开只为测试夹具能直接种行（`testAccounts.test-helper.ts`）；生产代码只走方法。 */
+    readonly db: DatabaseSync,
+    private readonly options: AccountStoreOptions = {},
+  ) {}
 
-  /** 按 `authToken` 找账号 —— 认证的唯一链路（§4.4）。 */
-  findById(authToken: string): AccountRow | null {
-    const row = this.db.prepare("SELECT * FROM accounts WHERE auth_hash = ?").get(hashAuthToken(authToken)) as AccountRow | undefined;
-    return row ?? null;
+  /* ---------------------------------------------------------------- 查询 */
+
+  findById(accountId: string): AccountRow | null {
+    return (this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId) as AccountRow | undefined) ?? null;
   }
 
-  /** 按 `accountId` 找（控制台与管理接口用）。 */
-  findById2(accountId: string): AccountRow | null {
-    const row = this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId) as AccountRow | undefined;
-    return row ?? null;
-  }
-
-  /**
-   * 认证 + 状态检查。返回账号行，或抛 `AccountError`。
-   *
-   * 区分 `unauthorized`（401）与 `disabled`（403）：前者不该泄露「这个账号存在」，
-   * 后者是管理员主动的动作，用户需要知道为什么进不去（§4.4 纪律 5）。
-   */
-  authenticate(authToken: string): AccountRow {
-    const row = this.findById(authToken);
-    if (!row) throw new AccountError("unauthorized", "令牌无效");
-    if (row.status !== "active") throw new AccountError("disabled", "账号已被禁用");
-    return row;
-  }
-
-  /** 更新 `last_seen_at`（每次成功认证都会调；失败不影响请求）。 */
-  touch(accountId: string, now = Date.now()): void {
-    this.db.prepare("UPDATE accounts SET last_seen_at = ? WHERE id = ?").run(now, accountId);
-  }
-
-  /** 这个 `accountId` 是否已被占用（客户端生成 id，理论上可能撞上已有的）。 */
-  exists(accountId: string): boolean {
-    return this.db.prepare("SELECT 1 FROM accounts WHERE id = ?").get(accountId) !== undefined;
-  }
-
-  /**
-   * 注册。**必须有码**（引导码或邀请码），且**不存在「首次注册自动成管理员」这条路径**
-   * —— 那会被抢注（§1.5）。
-   *
-   * 整个流程在一个事务里：消耗码与建账号**要么都成、要么都不成**。
-   */
-  create(input: CreateAccountInput): AccountRow {
-    const now = input.now ?? Date.now();
-    if (this.exists(input.accountId)) throw new AccountError("account-exists", "这个账号标识已被占用");
-
-    if (!input.bootstrapCode && !input.inviteCode) {
-      throw new AccountError("missing-code", "注册必须凭一次性引导码或邀请码");
-    }
-
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      if (input.bootstrapCode) {
-        this.consumeBootstrapCode(input.bootstrapCode, now);
-      } else if (input.inviteCode) {
-        this.consumeInvite(input.inviteCode, now);
-      }
-      this.db
-        .prepare(
-          `INSERT INTO accounts (id, auth_hash, wrapped_enc_root, is_admin, status, label, created_at, last_seen_at)
-           VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`,
-        )
-        .run(
-          input.accountId,
-          hashAuthToken(input.authToken),
-          input.wrappedEncRoot,
-          input.isAdmin ? 1 : 0,
-          input.label ?? null,
-          now,
-          now,
-        );
-      this.db.prepare("INSERT INTO quota_usage (account_id, bytes_used, notebooks, updated_at) VALUES (?, 0, 0, ?)").run(input.accountId, now);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-
-    const created = this.findById2(input.accountId);
-    if (!created) throw new Error("注册后读不到刚建的账号（不应该发生）");
-    return created;
-  }
-
-  /* ------------------------------------------------------------ 引导码 */
-
-  /**
-   * 发一个**一次性管理员引导码**（只由 CLI 调）。
-   *
-   * 返回明文 —— 调用方（CLI）负责**只打印一次、不写日志、不落盘**（§4.12）。
-   * 库里只存哈希，所以事后**连我们也拿不回明文**，这正是想要的。
-   */
-  createBootstrapCode(options: { now?: number; ttlMs?: number } = {}): { code: string; expiresAt: number } {
-    const now = options.now ?? Date.now();
-    const expiresAt = now + (options.ttlMs ?? BOOTSTRAP_CODE_TTL_MS);
-    const code = generateCode("boot");
-    this.db.prepare("INSERT INTO bootstrap_codes (code_hash, created_at, expires_at, used_at) VALUES (?, ?, ?, NULL)").run(hashCode(code), now, expiresAt);
-    return { code, expiresAt };
-  }
-
-  private consumeBootstrapCode(code: string, now: number): void {
-    const hash = hashCode(code);
-    const row = this.db.prepare("SELECT * FROM bootstrap_codes WHERE code_hash = ?").get(hash) as
-      | { code_hash: string; expires_at: number; used_at: number | null }
-      | undefined;
-    // 不区分「没有这个码」与「码错了」—— 两者对外都是「引导码无效」。
-    if (!row) throw new AccountError("bad-bootstrap-code", "引导码无效");
-    if (row.used_at !== null) throw new AccountError("bootstrap-code-used", "引导码已经被用过了");
-    if (now > row.expires_at) throw new AccountError("bootstrap-code-expired", "引导码已过期");
-    // 一次性：立刻标用掉（同一事务内，所以并发重复提交只会有一个成功）。
-    this.db.prepare("UPDATE bootstrap_codes SET used_at = ? WHERE code_hash = ?").run(now, hash);
-  }
-
-  /* ------------------------------------------------------------ 邀请码 */
-
-  /**
-   * 生成注册邀请码（明文只返回这一次；库里只存哈希）。
-   *
-   * `createdBy` **可以是 `null`** —— 那是 CLI 发码的情况：CLI 是「根信任」的运维通道，
-   * 它的典型场景恰恰是**还没有任何可用账号**的时候（§4.12 `bootstrap-admin` 存在的理由
-   * 就是「管理员密钥丢了、控制台进不去」）。见 `db.ts` 迁移 2 的说明。
-   */
-  createInvite(options: { createdBy: string | null; expiresInSeconds?: number; maxUses?: number; now?: number }): {
-    code: string;
-    expiresAt: number | null;
-    maxUses: number;
-  } {
-    const now = options.now ?? Date.now();
-    const maxUses = options.maxUses ?? 1;
-    const expiresAt = options.expiresInSeconds ? now + options.expiresInSeconds * 1000 : null;
-    const code = generateCode("inv");
-    this.db
-      .prepare("INSERT INTO invites (code_hash, created_by, created_at, expires_at, max_uses, uses, revoked_at) VALUES (?, ?, ?, ?, ?, 0, NULL)")
-      .run(hashCode(code), options.createdBy, now, expiresAt, maxUses);
-    return { code, expiresAt, maxUses };
-  }
-
-  private consumeInvite(code: string, now: number): void {
-    const hash = hashCode(code);
-    const row = this.db.prepare("SELECT * FROM invites WHERE code_hash = ?").get(hash) as
-      | { code_hash: string; expires_at: number | null; max_uses: number; uses: number; revoked_at: number | null }
-      | undefined;
-    if (!row) throw new AccountError("bad-invite-code", "邀请码无效");
-    if (row.revoked_at !== null) throw new AccountError("invite-revoked", "邀请码已被作废");
-    if (row.expires_at !== null && now > row.expires_at) throw new AccountError("invite-expired", "邀请码已过期");
-    if (row.uses >= row.max_uses) throw new AccountError("invite-exhausted", "邀请码已用尽");
-    this.db.prepare("UPDATE invites SET uses = uses + 1 WHERE code_hash = ?").run(hash);
-  }
-
-  revokeInvite(code: string, now = Date.now()): boolean {
-    const result = this.db.prepare("UPDATE invites SET revoked_at = ? WHERE code_hash = ? AND revoked_at IS NULL").run(now, hashCode(code));
-    return Number(result.changes ?? 0) > 0;
-  }
-
-  /* ---------------------------------------------------------------- 轮换 */
-
-  /**
-   * **轮换（零重加密）**：换 `accountKey` → 换 `authToken` / `wrapKey` → **重包** `wrappedEncRoot`。
-   *
-   * `encRoot` **不变**，所以一个字节的笔记都不用重新加密 —— 这是本设计最漂亮的一点（§1.5③）。
-   * 库操作只有一条 UPDATE，且**旧令牌立即失效**（因为 `auth_hash` 被换掉了）。
-   *
-   * 用**旧令牌**认证（调用方保证），所以这里只需要新值。
-   */
-  rotate(accountId: string, newAuthToken: string, newWrappedEncRoot: string): void {
-    const result = this.db
-      .prepare("UPDATE accounts SET auth_hash = ?, wrapped_enc_root = ? WHERE id = ?")
-      .run(hashAuthToken(newAuthToken), newWrappedEncRoot, accountId);
-    if (Number(result.changes ?? 0) === 0) throw new AccountError("not-found", "账号不存在");
-  }
-
-  /** 解锁（新设备）：用 `accountKey` 派生的令牌换回 `wrappedEncRoot`，客户端自己解。 */
-  unlock(authToken: string): { accountId: string; wrappedEncRoot: string } {
-    const row = this.authenticate(authToken);
-    return { accountId: row.id, wrappedEncRoot: row.wrapped_enc_root };
-  }
-
-  /* -------------------------------------------------------- 状态与删除 */
-
-  setStatus(accountId: string, status: AccountStatus): boolean {
-    const result = this.db.prepare("UPDATE accounts SET status = ? WHERE id = ?").run(status, accountId);
-    return Number(result.changes ?? 0) > 0;
-  }
-
-  /* ------------------------------------------------------------ 管理员位 */
-
-  /** 当前管理员数量（「最后一个管理员不能降权」要用）。 */
-  countAdmins(): number {
-    const row = this.db.prepare("SELECT COUNT(*) AS n FROM accounts WHERE is_admin = 1 AND status = 'active'").get() as { n: number } | undefined;
-    return row?.n ?? 0;
-  }
-
-  /**
-   * 改 `is_admin`。
-   *
-   * ## 为什么这条路径只给 CLI 用
-   *
-   * 引导码只能由 CLI 生成（§4.12），目的是「根信任通道不通过 HTTP 暴露」。
-   * 提权/降权是同一类动作 —— 它能把一个普通账号**变成**能用引导码的那个人。
-   * 一旦做成 HTTP 端点，任何一个被盗的管理员账号就能无限造管理员，
-   * 而那正是「引导码只在 CLI」想避免的事。
-   *
-   * ## 两条硬约束（都在这里守，不指望调用方记得）
-   *
-   * 1. **不能降掉最后一个管理员** —— 否则控制台永久进不去，只能再跑一次
-   *    `bootstrap-admin` 注册新账号，旧账号的数据要靠手工移交。
-   * 2. **降权时连禁用账号一起算**：`countAdmins` 只数 active 的，
-   *    所以「唯一的 active 管理员」被降权一定被拦住。
-   *
-   * @returns `{ ok: true, changed } | { ok: false, reason }`
-   */
-  setAdmin(accountId: string, isAdmin: boolean): { ok: true; changed: boolean } | { ok: false; reason: "not-found" | "last-admin" } {
-    const row = this.findById2(accountId);
-    if (!row) return { ok: false, reason: "not-found" };
-    const currently = row.is_admin === 1;
-    if (currently === isAdmin) return { ok: true, changed: false };
-    if (!isAdmin && row.status === "active" && this.countAdmins() <= 1) {
-      return { ok: false, reason: "last-admin" };
-    }
-    this.db.prepare("UPDATE accounts SET is_admin = ? WHERE id = ?").run(isAdmin ? 1 : 0, accountId);
-    return { ok: true, changed: true };
-  }
-
-  /**
-   * 删账号行。
-   *
-   * ⚠️ **先清 `quota_usage`**：它有 `REFERENCES accounts(id)`，而账号删除时
-   * 它是唯一一张由**本模块**拥有的引用表（其它几处 —— `notebooks` / `memberships` /
-   * `notebook_invites` / `invites` / `devices` —— 由 `NotebookStore` 负责清理）。
-   * 漏掉它的现象是 `FOREIGN KEY constraint failed`，而且**报错位置离根因很远**
-   * （在管理员删账号的 HTTP 处理器里），查起来很费时间。
-   */
-  delete(accountId: string): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db.prepare("DELETE FROM quota_usage WHERE account_id = ?").run(accountId);
-      const result = this.db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
-      this.db.exec("COMMIT");
-      return Number(result.changes ?? 0) > 0;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+  findByEmail(email: string): AccountRow | null {
+    return (this.db.prepare("SELECT * FROM accounts WHERE email = ?").get(normalizeEmail(email)) as AccountRow | undefined) ?? null;
   }
 
   list(): AccountRow[] {
@@ -373,27 +191,467 @@ export class AccountStore {
   }
 
   count(): number {
-    const row = this.db.prepare("SELECT COUNT(*) AS n FROM accounts").get() as { n: number } | undefined;
-    return row?.n ?? 0;
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM accounts").get() as { n: number }).n;
   }
 
-  /** 供控制台/接口用的公开形状（**绝不含 `auth_hash` 或 `wrapped_enc_root`**）。 */
-  info(row: AccountRow, quota: Quota): AccountInfo {
-    return { accountId: row.id, isAdmin: row.is_admin === 1, label: row.label, quota };
+  /** 零账号 = 还没初始化：`/admin` 显示初始化表单，`POST /v1/auth/setup` 可用。 */
+  needsSetup(): boolean {
+    return this.count() === 0;
+  }
+
+  touch(accountId: string, now = Date.now()): void {
+    this.db.prepare("UPDATE accounts SET last_seen_at = ? WHERE id = ?").run(now, accountId);
+  }
+
+  /* ---------------------------------------------------------------- 建号 */
+
+  private async hash(password: string): Promise<string> {
+    const problem = passwordProblem(password);
+    if (problem) throw new AccountError("weak-password", problem);
+    return hashPassword(password, this.options.passwordParams);
+  }
+
+  private checkEmail(email: string): string {
+    const normalized = normalizeEmail(email);
+    if (!isPlausibleEmail(normalized)) throw new AccountError("bad-email", "邮箱格式不对");
+    if (this.findByEmail(normalized)) throw new AccountError("email-taken", "这个邮箱已经注册过了");
+    return normalized;
+  }
+
+  /** 在调用方的事务里插一行账号（不开事务、不哈希，只写）。 */
+  private insertAccount(input: { email: string; passwordHash: string | null; displayName: string | null; isAdmin: boolean; quotaBytes: number | null; now: number }): string {
+    const id = newAccountId();
+    this.db
+      .prepare(
+        `INSERT INTO accounts (id, email, display_name, password_hash, is_admin, status, quota_bytes, created_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL)`,
+      )
+      .run(id, input.email, input.displayName, input.passwordHash, input.isAdmin ? 1 : 0, input.quotaBytes, input.now);
+    this.db.prepare("INSERT INTO quota_usage (account_id, bytes_used, notebooks, updated_at) VALUES (?, 0, 0, ?)").run(id, input.now);
+    return id;
+  }
+
+  /** 直接建号（CLI `create-admin` 与测试用；正常用户走邀请）。 */
+  async create(input: {
+    email: string;
+    password?: string | null;
+    displayName?: string | null;
+    isAdmin?: boolean;
+    quotaBytes?: number | null;
+    now?: number;
+  }): Promise<AccountRow> {
+    const email = this.checkEmail(input.email);
+    const passwordHash = input.password ? await this.hash(input.password) : null;
+    const id = this.transaction(() =>
+      this.insertAccount({
+        email: this.checkEmail(email),
+        passwordHash,
+        displayName: input.displayName?.trim() || null,
+        isAdmin: input.isAdmin ?? false,
+        quotaBytes: input.quotaBytes ?? null,
+        now: input.now ?? Date.now(),
+      }),
+    );
+    return this.findById(id)!;
+  }
+
+  /** 初始化：只在零账号时可用，建出来的是管理员。并发两次只会成功一次（事务内复查）。 */
+  async setup(input: { email: string; password: string; displayName?: string | null; now?: number }): Promise<AccountRow> {
+    if (!this.needsSetup()) throw new AccountError("setup-done", "这台服务器已经初始化过了");
+    const email = this.checkEmail(input.email);
+    const passwordHash = await this.hash(input.password);
+    const id = this.transaction(() => {
+      if (!this.needsSetup()) throw new AccountError("setup-done", "这台服务器已经初始化过了");
+      return this.insertAccount({ email, passwordHash, displayName: input.displayName?.trim() || null, isAdmin: true, quotaBytes: null, now: input.now ?? Date.now() });
+    });
+    return this.findById(id)!;
+  }
+
+  /* ---------------------------------------------------------------- 登录 */
+
+  /** 邮箱 + 密码。错误一律是「邮箱或密码不对」，不区分哪一个错。 */
+  async login(email: string, password: string): Promise<AccountRow> {
+    const row = this.findByEmail(email);
+    if (!row || !row.password_hash) {
+      dummyHash ??= hashPassword("opennote-dummy-password", this.options.passwordParams);
+      await verifyPassword(password, await dummyHash);
+      throw new AccountError("bad-credentials", "邮箱或密码不对");
+    }
+    if (!(await verifyPassword(password, row.password_hash))) throw new AccountError("bad-credentials", "邮箱或密码不对");
+    if (row.status !== "active") throw new AccountError("disabled", "账号已被停用");
+    return row;
+  }
+
+  createSession(input: { accountId: string; kind: SessionKind; deviceId?: string | null; ttlMs?: number | null; ip?: string | null; now?: number }): {
+    token: string;
+    session: SessionRow;
+  } {
+    const now = input.now ?? Date.now();
+    const token = newSessionToken();
+    const id = randomUUID();
+    const ttl = input.ttlMs === undefined ? (input.kind === "panel" ? PANEL_SESSION_TTL_MS : null) : input.ttlMs;
+    this.db
+      .prepare(
+        `INSERT INTO sessions (id, account_id, token_hash, kind, device_id, created_at, last_used_at, expires_at, revoked_at, ip)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+      )
+      .run(id, input.accountId, hashToken(token), input.kind, input.deviceId ?? null, now, now, ttl === null ? null : now + ttl, input.ip ?? null);
+    return { token, session: this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as unknown as SessionRow };
+  }
+
+  /** 令牌 → 会话 + 账号。路由层的唯一鉴权入口。 */
+  authenticateSession(token: string, now = Date.now()): { account: AccountRow; session: SessionRow } {
+    const session = this.db.prepare("SELECT * FROM sessions WHERE token_hash = ?").get(hashToken(token)) as SessionRow | undefined;
+    if (!session || session.revoked_at !== null || (session.expires_at !== null && now > session.expires_at)) {
+      throw new AccountError("unauthorized", "登录已失效，请重新登录");
+    }
+    const account = this.findById(session.account_id);
+    if (!account) throw new AccountError("unauthorized", "登录已失效，请重新登录");
+    if (account.status !== "active") throw new AccountError("disabled", "账号已被停用");
+    // 每分钟最多写一次，免得每个同步请求都写库。
+    if (session.last_used_at === null || now - session.last_used_at > 60_000) {
+      this.db.prepare("UPDATE sessions SET last_used_at = ? WHERE id = ?").run(now, session.id);
+    }
+    return { account, session };
+  }
+
+  /** 只要账号的调用点（绝大多数路由）用这个。 */
+  authenticate(token: string): AccountRow {
+    return this.authenticateSession(token).account;
+  }
+
+  revokeSession(sessionId: string, now = Date.now()): boolean {
+    const result = this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(now, sessionId);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  /** 移除设备：吊销它的所有会话。返回吊销了几条。 */
+  revokeDeviceSessions(accountId: string, deviceId: string, now = Date.now()): number {
+    const result = this.db
+      .prepare("UPDATE sessions SET revoked_at = ? WHERE account_id = ? AND device_id = ? AND revoked_at IS NULL")
+      .run(now, accountId, deviceId);
+    return Number(result.changes ?? 0);
+  }
+
+  /** 改密码 / 重置密码 / 停用账号时用：除了 `exceptSessionId`（当前这台）以外全部吊销。 */
+  revokeAllSessions(accountId: string, options: { exceptSessionId?: string; now?: number } = {}): number {
+    const now = options.now ?? Date.now();
+    const result = options.exceptSessionId
+      ? this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE account_id = ? AND id != ? AND revoked_at IS NULL").run(now, accountId, options.exceptSessionId)
+      : this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL").run(now, accountId);
+    return Number(result.changes ?? 0);
+  }
+
+  /** 某台设备是否还有有效会话（设备列表据此显示「已移除」）。 */
+  activeDeviceIds(accountId: string, now = Date.now()): Set<string> {
+    const rows = this.db
+      .prepare(
+        "SELECT DISTINCT device_id FROM sessions WHERE account_id = ? AND device_id IS NOT NULL AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+      )
+      .all(accountId, now) as unknown as { device_id: string }[];
+    return new Set(rows.map((row) => row.device_id));
+  }
+
+  /* ---------------------------------------------------------------- 密码 */
+
+  async changePassword(accountId: string, current: string, next: string, options: { keepSessionId?: string } = {}): Promise<void> {
+    const row = this.findById(accountId);
+    if (!row) throw new AccountError("not-found", "账号不存在");
+    if (row.password_hash && !(await verifyPassword(current, row.password_hash))) {
+      throw new AccountError("bad-credentials", "当前密码不对");
+    }
+    await this.setPassword(accountId, next, options.keepSessionId === undefined ? {} : { keepSessionId: options.keepSessionId });
+  }
+
+  async setPassword(accountId: string, next: string, options: { keepSessionId?: string } = {}): Promise<void> {
+    const passwordHash = await this.hash(next);
+    this.transaction(() => {
+      const result = this.db.prepare("UPDATE accounts SET password_hash = ? WHERE id = ?").run(passwordHash, accountId);
+      if (Number(result.changes ?? 0) === 0) throw new AccountError("not-found", "账号不存在");
+      this.revokeAllSessions(accountId, options.keepSessionId === undefined ? {} : { exceptSessionId: options.keepSessionId });
+    });
+  }
+
+  createPasswordReset(input: { accountId: string; createdBy: string | null; ttlMs?: number; now?: number }): { code: string; expiresAt: number } {
+    if (!this.findById(input.accountId)) throw new AccountError("not-found", "账号不存在");
+    const now = input.now ?? Date.now();
+    const expiresAt = now + (input.ttlMs ?? PASSWORD_RESET_TTL_MS);
+    const code = generateCode("reset");
+    this.db
+      .prepare("INSERT INTO password_resets (code_hash, account_id, created_by, created_at, expires_at, used_at) VALUES (?, ?, ?, ?, ?, NULL)")
+      .run(hashCode(code), input.accountId, input.createdBy, now, expiresAt);
+    return { code, expiresAt };
+  }
+
+  /** 重置链接对应谁（页面上显示「为 xx 设置新密码」）。 */
+  passwordResetInfo(code: string, now = Date.now()): { accountId: string; email: string | null } {
+    const row = this.db.prepare("SELECT * FROM password_resets WHERE code_hash = ?").get(hashCode(code)) as
+      | { account_id: string; expires_at: number; used_at: number | null }
+      | undefined;
+    if (!row) throw new AccountError("bad-reset", "链接无效");
+    if (row.used_at !== null) throw new AccountError("reset-used", "这个链接已经用过了");
+    if (now > row.expires_at) throw new AccountError("reset-expired", "链接已过期，请找管理员重新发一个");
+    return { accountId: row.account_id, email: this.findById(row.account_id)?.email ?? null };
+  }
+
+  async resetPassword(code: string, next: string, now = Date.now()): Promise<AccountRow> {
+    const { accountId } = this.passwordResetInfo(code, now);
+    const passwordHash = await this.hash(next);
+    this.transaction(() => {
+      // 事务内复查一次：两个标签页同时提交，只有一个成功。
+      this.passwordResetInfo(code, now);
+      this.db.prepare("UPDATE password_resets SET used_at = ? WHERE code_hash = ?").run(now, hashCode(code));
+      this.db.prepare("UPDATE accounts SET password_hash = ? WHERE id = ?").run(passwordHash, accountId);
+      this.revokeAllSessions(accountId, { now });
+    });
+    return this.findById(accountId)!;
+  }
+
+  /* ---------------------------------------------------------------- 邀请 */
+
+  createInvite(input: {
+    createdBy: string | null;
+    email?: string | null;
+    grantAdmin?: boolean;
+    quotaBytes?: number | null;
+    expiresInSeconds?: number | null;
+    maxUses?: number;
+    now?: number;
+  }): { code: string; expiresAt: number | null; maxUses: number } {
+    const now = input.now ?? Date.now();
+    const email = input.email ? normalizeEmail(input.email) : null;
+    if (email !== null && !isPlausibleEmail(email)) throw new AccountError("bad-email", "邮箱格式不对");
+    // 绑定了邮箱的邀请天然只能用一次。
+    const maxUses = email !== null ? 1 : (input.maxUses ?? 1);
+    const expiresAt = input.expiresInSeconds ? now + input.expiresInSeconds * 1000 : null;
+    const code = generateCode("join");
+    this.db
+      .prepare(
+        `INSERT INTO invites (code_hash, created_by, created_at, expires_at, max_uses, uses, revoked_at, email, grant_admin, quota_bytes, accepted_by)
+         VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, NULL)`,
+      )
+      .run(hashCode(code), input.createdBy, now, expiresAt, maxUses, email, input.grantAdmin ? 1 : 0, input.quotaBytes ?? null);
+    return { code, expiresAt, maxUses };
+  }
+
+  private usableInvite(code: string, now: number): InviteRow {
+    const row = this.db.prepare("SELECT * FROM invites WHERE code_hash = ?").get(hashCode(code)) as InviteRow | undefined;
+    if (!row) throw new AccountError("bad-invite", "邀请链接无效");
+    if (row.revoked_at !== null) throw new AccountError("invite-revoked", "邀请已被作废");
+    if (row.expires_at !== null && now > row.expires_at) throw new AccountError("invite-expired", "邀请已过期，请找管理员重新发一个");
+    if (row.uses >= row.max_uses) throw new AccountError("invite-exhausted", "邀请已经被用掉了");
+    return row;
+  }
+
+  /** `/join` 页面要显示的内容：发给谁、是什么角色、谁发的。 */
+  inviteInfo(code: string, now = Date.now()): { email: string | null; grantAdmin: boolean; quotaBytes: number | null; expiresAt: number | null; invitedBy: string | null } {
+    const row = this.usableInvite(code, now);
+    const creator = row.created_by ? this.findById(row.created_by) : null;
+    return {
+      email: row.email,
+      grantAdmin: row.grant_admin === 1,
+      quotaBytes: row.quota_bytes,
+      expiresAt: row.expires_at,
+      invitedBy: creator ? accountLabel(creator) : null,
+    };
+  }
+
+  /** 接受邀请：建号 + 记一次使用，同一事务。 */
+  async acceptInvite(code: string, input: { email: string; password: string; displayName?: string | null }, now = Date.now()): Promise<AccountRow> {
+    const invite = this.usableInvite(code, now);
+    const email = normalizeEmail(input.email);
+    if (invite.email !== null && invite.email !== email) {
+      throw new AccountError("invite-email-mismatch", "这个邀请是发给另一个邮箱的");
+    }
+    this.checkEmail(email);
+    const passwordHash = await this.hash(input.password);
+    const id = this.transaction(() => {
+      const fresh = this.usableInvite(code, now);
+      const accountId = this.insertAccount({
+        email: this.checkEmail(email),
+        passwordHash,
+        displayName: input.displayName?.trim() || null,
+        isAdmin: fresh.grant_admin === 1,
+        quotaBytes: fresh.quota_bytes,
+        now,
+      });
+      this.db.prepare("UPDATE invites SET uses = uses + 1, accepted_by = ? WHERE code_hash = ?").run(accountId, fresh.code_hash);
+      return accountId;
+    });
+    return this.findById(id)!;
+  }
+
+  /**
+   * 延长邀请（控制台只有哈希：明文码生成后就没了）。已作废、已用完的不延长。
+   * 新的到期时间从「现在」和「原到期时间」里较晚的那个往后算，所以没过期的邀请不会被缩短。
+   */
+  extendInviteByHash(codeHash: string, extraSeconds: number, now = Date.now()): number | null {
+    const row = this.db.prepare("SELECT * FROM invites WHERE code_hash = ?").get(codeHash) as InviteRow | undefined;
+    if (!row || row.revoked_at !== null || row.uses >= row.max_uses) return null;
+    const expiresAt = Math.max(now, row.expires_at ?? now) + extraSeconds * 1000;
+    this.db.prepare("UPDATE invites SET expires_at = ? WHERE code_hash = ?").run(expiresAt, codeHash);
+    return expiresAt;
+  }
+
+  revokeInvite(code: string, now = Date.now()): boolean {
+    const result = this.db.prepare("UPDATE invites SET revoked_at = ? WHERE code_hash = ? AND revoked_at IS NULL").run(now, hashCode(code));
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  /* ---------------------------------------------------------- 加密口令 */
+
+  /** 写入客户端包好的 encRoot 与 KDF 参数（服务端解不开，见模块头）。 */
+  setEncryption(accountId: string, wrappedEncRoot: string, encParams: string): void {
+    this.db.prepare("UPDATE accounts SET wrapped_enc_root = ?, enc_params = ? WHERE id = ?").run(wrappedEncRoot, encParams, accountId);
+  }
+
+  /* ---------------------------------------------------------- 第三方身份 */
+
+  identityOf(accountId: string, provider: "github"): IdentityRow | null {
+    return (this.db.prepare("SELECT * FROM identities WHERE account_id = ? AND provider = ?").get(accountId, provider) as IdentityRow | undefined) ?? null;
+  }
+
+  findByIdentity(provider: "github", subject: string): AccountRow | null {
+    const row = this.db.prepare("SELECT account_id FROM identities WHERE provider = ? AND subject = ?").get(provider, subject) as { account_id: string } | undefined;
+    return row ? this.findById(row.account_id) : null;
+  }
+
+  /** 绑定（已经绑在别的账号上 → `identity-taken`；这个账号已绑了另一个 → 换成新的）。 */
+  linkIdentity(input: { accountId: string; provider: "github"; subject: string; login: string | null; now?: number }): void {
+    const now = input.now ?? Date.now();
+    this.transaction(() => {
+      const owner = this.db.prepare("SELECT account_id FROM identities WHERE provider = ? AND subject = ?").get(input.provider, input.subject) as { account_id: string } | undefined;
+      if (owner && owner.account_id !== input.accountId) throw new AccountError("identity-taken", "这个 GitHub 账号已经绑定了另一个账号");
+      this.db.prepare("DELETE FROM identities WHERE account_id = ? AND provider = ?").run(input.accountId, input.provider);
+      this.db
+        .prepare("INSERT INTO identities (provider, subject, account_id, login, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(input.provider, input.subject, input.accountId, input.login, now, now);
+    });
+  }
+
+  /** 用这个身份登录了一次：刷新 login（GitHub 上改名了也跟上）与最近使用时间。 */
+  touchIdentity(provider: "github", subject: string, login: string | null, now = Date.now()): void {
+    this.db.prepare("UPDATE identities SET login = ?, last_used_at = ? WHERE provider = ? AND subject = ?").run(login, now, provider, subject);
+  }
+
+  /**
+   * 解绑。`requireOtherMethod`：账号没有密码时不许解（那是它唯一的登录方式）。
+   * 返回 false = 本来就没绑。
+   */
+  unlinkIdentity(accountId: string, provider: "github", options: { requireOtherMethod: boolean }): boolean {
+    const account = this.findById(accountId);
+    if (!account) throw new AccountError("not-found", "账号不存在");
+    if (options.requireOtherMethod && account.password_hash === null && this.identityOf(accountId, provider)) {
+      throw new AccountError("only-login-method", "这是这个账号唯一的登录方式，先设一个密码再解绑");
+    }
+    const result = this.db.prepare("DELETE FROM identities WHERE account_id = ? AND provider = ?").run(accountId, provider);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  /** 用第三方身份新建账号（GitHub 组织成员自动加入时用）：没有密码。 */
+  createWithIdentity(input: { email: string; displayName: string | null; provider: "github"; subject: string; login: string | null; quotaBytes?: number | null; now?: number }): AccountRow {
+    const now = input.now ?? Date.now();
+    const id = this.transaction(() => {
+      const accountId = this.insertAccount({ email: this.checkEmail(input.email), passwordHash: null, displayName: input.displayName?.trim() || null, isAdmin: false, quotaBytes: input.quotaBytes ?? null, now });
+      this.db
+        .prepare("INSERT INTO identities (provider, subject, account_id, login, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(input.provider, input.subject, accountId, input.login, now, now);
+      return accountId;
+    });
+    return this.findById(id)!;
+  }
+
+  /**
+   * 用 GitHub 接受邀请：建号（没有密码）+ 绑身份 + 记一次使用，同一事务。
+   * 邮箱：邀请绑了邮箱就用邀请的，否则用 GitHub 上已验证的那个。
+   */
+  acceptInviteWithIdentity(
+    code: string,
+    input: { githubEmail: string | null; displayName: string | null; provider: "github"; subject: string; login: string | null },
+    now = Date.now(),
+  ): AccountRow {
+    const id = this.transaction(() => {
+      const invite = this.usableInvite(code, now);
+      const email = invite.email ?? input.githubEmail;
+      if (!email) throw new AccountError("bad-email", "GitHub 上没有已验证的邮箱，请改用「设置一个密码」接受邀请");
+      const taken = this.db.prepare("SELECT account_id FROM identities WHERE provider = ? AND subject = ?").get(input.provider, input.subject) as { account_id: string } | undefined;
+      if (taken) throw new AccountError("identity-taken", "这个 GitHub 账号已经绑定了另一个账号，直接用它登录即可");
+      const accountId = this.insertAccount({
+        email: this.checkEmail(email),
+        passwordHash: null,
+        displayName: input.displayName?.trim() || null,
+        isAdmin: invite.grant_admin === 1,
+        quotaBytes: invite.quota_bytes,
+        now,
+      });
+      this.db
+        .prepare("INSERT INTO identities (provider, subject, account_id, login, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(input.provider, input.subject, accountId, input.login, now, now);
+      this.db.prepare("UPDATE invites SET uses = uses + 1, accepted_by = ? WHERE code_hash = ?").run(accountId, invite.code_hash);
+      return accountId;
+    });
+    return this.findById(id)!;
+  }
+
+  /* ------------------------------------------------------ 管理员能改的字段 */
+
+  setStatus(accountId: string, status: AccountStatus): boolean {
+    // 不吊销会话：停用后每个请求都回 403 `disabled`（客户端据此说「账号已被停用」而不是「请重新登录」），
+    // 重新启用就立刻恢复，不用每台设备再登录一遍。
+    const result = this.db.prepare("UPDATE accounts SET status = ? WHERE id = ?").run(status, accountId);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  setDisplayName(accountId: string, displayName: string | null): boolean {
+    const result = this.db.prepare("UPDATE accounts SET display_name = ? WHERE id = ?").run(displayName?.trim() || null, accountId);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  /** `null` = 跟随服务默认配额。 */
+  setQuota(accountId: string, quotaBytes: number | null): boolean {
+    const result = this.db.prepare("UPDATE accounts SET quota_bytes = ? WHERE id = ?").run(quotaBytes, accountId);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  countAdmins(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM accounts WHERE is_admin = 1 AND status = 'active'").get() as { n: number }).n;
+  }
+
+  setAdmin(accountId: string, isAdmin: boolean): { ok: true; changed: boolean } | { ok: false; reason: "not-found" | "last-admin" } {
+    const row = this.findById(accountId);
+    if (!row) return { ok: false, reason: "not-found" };
+    const currently = row.is_admin === 1;
+    if (currently === isAdmin) return { ok: true, changed: false };
+    // 不允许取消最后一个活跃管理员 —— 那会让控制台永久进不去。
+    if (!isAdmin && row.status === "active" && this.countAdmins() <= 1) return { ok: false, reason: "last-admin" };
+    this.db.prepare("UPDATE accounts SET is_admin = ? WHERE id = ?").run(isAdmin ? 1 : 0, accountId);
+    return { ok: true, changed: true };
+  }
+
+  delete(accountId: string): boolean {
+    return this.transaction(() => {
+      this.db.prepare("DELETE FROM quota_usage WHERE account_id = ?").run(accountId);
+      const result = this.db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
+      return Number(result.changes ?? 0) > 0;
+    });
+  }
+
+  /* ---------------------------------------------------------------- 工具 */
+
+  private transaction<T>(body: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = body();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 }
 
-/** 造一个 `accountId`（控制台/测试用；真实客户端自己生成并送上来）。 */
-export function newAccountId(): string {
-  return randomBytes(16).toString("hex");
-}
-
-/** 造一个 `notebookId`（uuid v4；库名由它派生，见 `notebooks.ts`）。 */
-export function newNotebookId(): string {
-  return randomUUID();
-}
-
-/** 造一个 `authToken`（仅测试/CLI 夹具用 —— 真实客户端自己派生，我们**不该**有生成它的能力）。 */
-export function newAuthTokenForTests(): string {
-  return randomBytes(32).toString("hex");
+/** 给人看的名字：显示名 → 邮箱 → 截断的 id。 */
+export function accountLabel(row: Pick<AccountRow, "id" | "display_name" | "email">): string {
+  return row.display_name || row.email || `账号 ${row.id.slice(0, 8)}`;
 }

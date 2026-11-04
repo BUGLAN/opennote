@@ -10,6 +10,7 @@
  * 4. **桶会定期清理**（否则就是一条内存泄漏路径）。
  */
 import { describe, expect, it, vi } from "vitest";
+import { PROTOCOL_VERSION } from "../../shared/contract";
 import { Hono } from "hono";
 import { globalRateLimitKey, rateLimit, rateLimitKeyFromHeader } from "./ratelimit";
 
@@ -174,10 +175,10 @@ describe("应用装配（§2.4）", () => {
     // ① 公开健康检查：**不需要令牌**就要能打（隧道/监控靠它）。
     const health = await app.request("http://localhost/v1/health");
     expect(health.status).toBe(200);
-    expect(((await health.json()) as { protocolVersion: number }).protocolVersion).toBe(1);
+    expect(((await health.json()) as { protocolVersion: number }).protocolVersion).toBe(PROTOCOL_VERSION);
 
     // ② 受保护路由：没有令牌 → 401（说明它确实挂上了，而不是落到 404）。
-    expect((await app.request("http://localhost/v1/account")).status).toBe(401);
+    expect((await app.request("http://localhost/v1/me")).status).toBe(401);
     expect((await app.request("http://localhost/v1/notebooks")).status).toBe(401);
     expect((await app.request("http://localhost/v1/admin/accounts")).status).toBe(401);
 

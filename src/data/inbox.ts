@@ -11,6 +11,9 @@
  *   state.json   { "status", "attempts", "lastError", "committedPath", "updatedAt" }
  * ```
  *
+ * HTML 页面条目（信封扩展 `format: "html"`）：正文外置为 `body.html`，静态资源按原相对路径
+ * 外置到 `resources/`（`resources[].file`），入库时由接收端内联成**单个** `.html` 文件。
+ *
  * 五态逐字：`pending` / `committing` / `committed` / `failed` / `discarded`。
  * 保留期逐字：`pending`·`committing` **不设期限**、`committed` **24 小时**、
  * `failed` **7 天**；`discarded` 不是保留期而是**销毁动作**——立即 `rm -r` 条目目录，
@@ -39,7 +42,9 @@ import {
 import { assertSafeRelative, baseName, joinPath, sanitizeName } from "../fs/paths";
 import type { FileSystemBackend } from "../fs/types";
 import { normalizeFolder } from "../lib/clip/envelope";
+import { inlineHtmlResources, normalizeResourcePath } from "../html/bundle";
 import { createStore, useStore } from "../lib/store";
+import { readImportIndex } from "./importLog";
 import { currentBackend, currentWorkspace, rescanWorkspace } from "./library";
 
 export type { InboxEntry, InboxStatus } from "../desktop/bridge";
@@ -58,7 +63,11 @@ export const INBOX_ROOT_LABEL = "笔记本根目录";
 const ENTRY_FILE = "entry.json";
 const STATE_FILE = "state.json";
 const BODY_FILE = "body.md";
+/** HTML 页面条目的外置正文（`format: "html"`）。 */
+const HTML_BODY_FILE = "body.html";
 const ASSETS_DIR = "assets";
+/** HTML 页面条目的资源目录（保留原相对路径，内联器按路径找）。 */
+const RESOURCES_DIR = "resources";
 
 /** 条目总量上限；达到上限时拒绝新投递（`IMP-4013`）。 */
 export const INBOX_LIMIT = 500;
@@ -71,6 +80,18 @@ export const INBOX_COMMITTED_TTL_MS = 24 * 60 * 60 * 1000;
 /** `failed` 条目保留 7 天。 */
 export const INBOX_FAILED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * 一条 `committing` 多久没有动静就算**孤儿**（见 `recoverStaleCommit()`）。
+ *
+ * 三十秒的依据：`runCommit()` 在进入真正的写盘阶段那一刻把 `updatedAt` 刷成当前时刻，
+ * 之后最长的一段是「接收端落盘 + 重扫一次工作区」（本机 2000 篇笔记的库实测 1–2 秒，
+ * 正文另有 8 MiB 上限）。留一个数量级的余量，才能既不自愈到真正在跑的那一次，
+ * 又不让用户对着「正在写入…」等太久。
+ *
+ * 它也**不是唯一判据**：同进程里真正在跑的提交记在 `inFlight` 里，一律不算孤儿。
+ */
+export const INBOX_COMMIT_STALE_MS = 30_000;
+
 /** 清除时机 = 工作区打开时扫一遍 + 每 6 小时一次（`02` §5.8.5）。 */
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 /** 兜底轮询间隔：窗口可见时每 30 秒一次（`02` §5.8.4 方案 C）。 */
@@ -81,6 +102,10 @@ const REFRESH_DEBOUNCE_MS = 450;
 /** 单个附件解码后 ≤ 8 MiB；数量 ≤ 32（`02` §2.7）。 */
 const MAX_ASSET_BYTES = 8 * 1024 * 1024;
 const MAX_ASSETS = 32;
+/** HTML 页面资源：条数、单件与合计上限（与 `lib/clip/envelope.ts` 的 `MAX_HTML_RESOURCE*` 同值）。 */
+const MAX_RESOURCES = 256;
+const MAX_RESOURCE_BYTES = 8 * 1024 * 1024;
+const MAX_RESOURCES_TOTAL_BYTES = 8 * 1024 * 1024;
 
 /* ============================== 错误模型 =============================== */
 
@@ -191,6 +216,10 @@ export interface InboxDetail {
   bodyText: string;
   /** `entry.json` 的 `bodyFile`（外置正文的条目相对路径），没有则为 null。 */
   bodyFile: string | null;
+  /** 正文格式：`html` = HTML 页面条目（预览走沙箱渲染，入库成 `.html`）。 */
+  format: "markdown" | "html";
+  /** HTML 页面的资源（`path` 相对页面，`file` 相对条目目录）；Markdown 条目恒为空。 */
+  resources: Array<{ path: string; file: string; size: number }>;
 }
 
 const CLIENT_LABELS: Record<ImportClient["name"], string> = {
@@ -409,7 +438,9 @@ function hostOf(url: string): string {
  * 长度不在这里设限：正文本身已被契约的 8 MiB 上限（`IMP-4004`）与通道上限约束，
  * 而同一个渲染管线（`src/lib/markdown.ts`）本来就要渲染整篇笔记（`ReadingView`）。
  */
-function bodyOf(text: string): string {
+function bodyOf(text: string, format: InboxDetail["format"] = "markdown"): string {
+  // HTML 页面：原文就是要渲染的文档（`---` 开头不是 front-matter），只统一换行。
+  if (format === "html") return String(text || "").replace(/\r\n?/g, "\n");
   const flat = String(text || "").replace(/\r\n?/g, "\n").trim();
   if (!flat) return "";
   return flat.startsWith("---") ? flat.replace(/^---\n[\s\S]*?\n---\n?/, "").trim() : flat;
@@ -484,6 +515,20 @@ async function readDir(target: FileSystemBackend, dirName: string): Promise<Inbo
     assets.push({ name, file: resolved ? file : "", size: info?.size ?? 0 });
   }
 
+  const format: InboxDetail["format"] = envelope?.format === "html" ? "html" : "markdown";
+  const resources: InboxDetail["resources"] = [];
+  if (format === "html") {
+    for (const resource of envelope?.resources ?? []) {
+      if (!resource || typeof resource !== "object") continue;
+      const path = typeof resource.path === "string" ? normalizeResourcePath(resource.path) : null;
+      const file = typeof resource.file === "string" ? resource.file : "";
+      const resolved = file ? safeJoinWithin(dirName, file) : null;
+      if (!path) continue;
+      const info = resolved ? await target.stat(resolved).catch(() => null) : null;
+      resources.push({ path, file: resolved ? file : "", size: info?.size ?? 0 });
+    }
+  }
+
   const envelopeBroken = envelope === null;
   const status: InboxStatus = envelopeBroken ? "failed" : state.status;
   const lastError = envelopeBroken ? "IMP-4001" : state.lastError;
@@ -523,29 +568,65 @@ async function readDir(target: FileSystemBackend, dirName: string): Promise<Inbo
     clientVersion: typeof envelope?.client?.version === "string" && envelope.client.version ? envelope.client.version : null,
     external: clientName === "other",
     assets,
-    bodyText: bodyOf(inlineBody),
+    bodyText: bodyOf(inlineBody, format),
     bodyFile,
+    format,
+    resources,
   };
 }
 
 /** 幂等：同 id 的第二个条目标 `failed` 并记 `IMP-4017`（`02` §5.8.2）。 */
 const DUPLICATE_CODE = "IMP-4017";
 
-/** 并发护栏：只让最后一次 `refreshInbox` 的结果落地（外部投递可能连发多次）。 */
-let refreshSeq = 0;
+/**
+ * 并发护栏：`refreshInbox()` **串行化**（同一时刻只有一次读盘在跑），期间新来的请求
+ * 合并成**一次尾随重读**。
+ *
+ * ⚠️ 这里原来写的是「只让最后一次开始的结果落地」（`seq === refreshSeq`），它有两个
+ * 真机可复现的后果：
+ *
+ * 1. **读得早、发布得晚的那一次会把新状态盖回去**。`runCommit()` 的收尾
+ *    `refreshInbox()` 之前，文件监听已经排了一次去抖刷新；两次交替完成时，
+ *    后者（读到的是写 `committed` **之前**的盘面）反而活了下来 —— store 里永远停在
+ *    `committing`，而磁盘上已经是 `committed`。
+ * 2. 卡住的条目**没有任何出路**：`committing` 状态在 UI 上同时禁用「入库」与「跳过这次」，
+ *    而 store 自己不会再刷新（磁盘不再变化，没有新事件），于是「一直正在入库」。
+ *
+ * 串行 + 尾随重读保证：**最后一次读盘一定发生在此前所有写入之后**，谁调用 `await
+ * refreshInbox()` 谁就能看到自己刚写下的状态。
+ */
+let refreshRunning: Promise<void> | null = null;
+let refreshAgain = false;
 
 /**
  * 从磁盘重读收件箱。写盘之后、`onInboxChanged` 到达之后、以及面板打开时都会调用。
  * 同时执行契约规定的幂等收尾：同 `importId` 的第二个条目只处理第一个。
  */
 export async function refreshInbox(): Promise<void> {
-  const seq = ++refreshSeq;
+  // 串行化：正在读盘的那一次跑完后，若期间有新请求就再读一遍（谁都不会被丢掉）。
+  if (refreshRunning) {
+    refreshAgain = true;
+    return refreshRunning;
+  }
+  refreshRunning = (async () => {
+    try {
+      do {
+        refreshAgain = false;
+        await refreshInboxOnce();
+      } while (refreshAgain);
+    } finally {
+      refreshRunning = null;
+    }
+  })();
+  return refreshRunning;
+}
+
+/** `refreshInbox()` 的单次读盘体（只由串行循环调用，不自己处理并发）。 */
+async function refreshInboxOnce(): Promise<void> {
   const target = currentBackend();
   if (!target) {
-    if (seq === refreshSeq) {
-      publish([]);
-      loadedStore.set(true);
-    }
+    publish([]);
+    loadedStore.set(true);
     return;
   }
   const names = await listDirNames(target);
@@ -573,13 +654,74 @@ export async function refreshInbox(): Promise<void> {
       }
     }
     seen.add(detail.entry.id);
-    next.push(detail);
+    // 卡在 `committing` 的孤儿条目就地自愈（见 `recoverStaleCommit`）。
+    next.push((await recoverStaleCommit(target, detail)) ?? detail);
   }
-  if (seq === refreshSeq) {
-    // 列表按目录名倒序 = 最新投递的排在最前（目录名以 UTC 时间戳开头，可直接比较）。
-    publish(next.sort((a, b) => (a.dirName < b.dirName ? 1 : a.dirName > b.dirName ? -1 : 0)));
-    loadedStore.set(true);
+  // 列表按目录名倒序 = 最新投递的排在最前（目录名以 UTC 时间戳开头，可直接比较）。
+  publish(next.sort((a, b) => (a.dirName < b.dirName ? 1 : a.dirName > b.dirName ? -1 : 0)));
+  loadedStore.set(true);
+}
+
+/**
+ * `committing` 是**锁**，不是终态：写它的人如果没走到收尾（进程被杀、接收端抛错后
+ * 进程没来得及落 `failed`、窗口在提交途中最中被关掉…），磁盘上就永远留着一条
+ * 「正在写入」。而 UI 在 `committing` 上同时禁用「入库」与「跳过这次」——
+ * 于是这条条目**没有任何出路**，用户看到的就是「一直正在入库、什么按钮都点不动」。
+ *
+ * 契约里的 `committing` 恰恰是「**保留、不设期限**」（`02` §5.8.3），没有任何自动清理
+ * 会来救它，所以出路必须由这里给：
+ *
+ * - **本进程正在提交**（`inFlight`）→ 不动，那是真的在写。
+ * - 刚写下去不到 {@link INBOX_COMMIT_STALE_MS} → 不动，给正在跑的那次留足时间。
+ * - 否则按**磁盘事实**判定终态：
+ *   - 幂等索引里有这个 `importId` 且文件确实在 → `committed`（`committedPath` = 索引里的
+ *     落点）。这正是真机上最常见的形态：笔记已经写好，只是收尾没跑完；
+ *   - 其余 → 退回 `pending`，把「入库 / 跳过这次」两个按钮还给用户。**不猜 `committed`**：
+ *     索引里没有就是「不知道有没有写成」，谎报入库会让用户以为笔记在、其实不在。
+ *
+ * 退回 `pending` 的代价是可能多出一篇「同名另存」的笔记（重试时同名文件还在），
+ * 而卡死的代价是这条条目**彻底无法处理**——两害相权前者可接受，且重试前界面会如实
+ * 提示「同名文件已存在，入库时会另存为《… 2》」。
+ *
+ * 只在**整盘刷新**里跑（`refreshInboxOnce`），单条读取（`findDir`）不碰磁盘状态：
+ * 否则用户点一下条目就会触发一次写盘 + watcher 自激。
+ */
+async function recoverStaleCommit(
+  target: FileSystemBackend,
+  detail: InboxDetail,
+): Promise<InboxDetail | null> {
+  const { entry } = detail;
+  if (entry.status !== "committing") return null;
+  if (inFlight.has(entry.id)) return null;
+  const updatedAt = Date.parse(entry.updatedAt);
+  if (Number.isFinite(updatedAt) && Date.now() - updatedAt < INBOX_COMMIT_STALE_MS) return null;
+
+  let next: InboxDiskState = {
+    status: "pending",
+    attempts: entry.attempts,
+    lastError: null,
+    committedPath: entry.committedPath,
+    updatedAt: Date.now(),
+  };
+  try {
+    const indexed = (await readImportIndex(target)).find((item) => item.importId === entry.id);
+    if (indexed?.path && (await target.exists(indexed.path))) {
+      next = { ...next, status: "committed", committedPath: indexed.path };
+    }
+  } catch {
+    // 索引读不出来（备份文件坏 / 后端拒绝）→ 按「不知道」处理，退回 pending。
   }
+  const kept = await writeStateIfPresent(target, detail.dirName, next).catch(() => false);
+  if (!kept) return null;
+  console.warn(
+    "[opennote] 收件箱条目卡在 committing，已按磁盘事实自愈：",
+    detail.dirName,
+    next.status,
+  );
+  return {
+    ...detail,
+    entry: { ...entry, status: next.status, committedPath: next.committedPath, notePath: next.committedPath, updatedAt: toIso(next.updatedAt) },
+  };
 }
 
 export async function listInboxDetails(): Promise<InboxDetail[]> {
@@ -643,7 +785,30 @@ async function withBody(target: FileSystemBackend, detail: InboxDetail): Promise
   const path = safeJoinWithin(detail.dirName, detail.bodyFile);
   if (!path) return detail;
   const text = await target.readText(path).catch(() => "");
-  return { ...detail, bodyText: bodyOf(text) };
+  return { ...detail, bodyText: bodyOf(text, detail.format) };
+}
+
+/**
+ * 收件箱里一条 HTML 页面的**预览文档**：正文 + 条目里暂存的资源，按入库时同一份规则
+ * （`html/bundle.ts`）内联成单文件 —— 用户在「预览」里看到的就是入库后会得到的那一页。
+ * 不是 HTML 条目、或读不到时返回 `null`。
+ */
+export async function readInboxHtmlPreview(id: string): Promise<string | null> {
+  const target = currentBackend();
+  if (!target) return null;
+  const found = await findDir(target, id);
+  if (!found || found.detail.format !== "html") return null;
+  const detail = await withBody(target, found.detail);
+  const byPath = new Map(detail.resources.filter((resource) => resource.file).map((resource) => [resource.path, resource.file]));
+  const result = await inlineHtmlResources(detail.bodyText, {
+    resolve: async (path) => {
+      const file = byPath.get(path);
+      const resolved = file ? safeJoinWithin(detail.dirName, file) : null;
+      const bytes = resolved ? await target.readBytes(resolved).catch(() => null) : null;
+      return bytes ? { bytes, mime: "" } : null;
+    },
+  });
+  return result.html;
 }
 
 export async function readInboxDetail(id: string): Promise<InboxDetail | null> {
@@ -750,6 +915,53 @@ async function stageAssets(
   return out;
 }
 
+/** HTML 页面的资源落到条目自己的 `resources/<原相对路径>`，返回归一后的 `resources[]`。 */
+async function stageResources(
+  target: FileSystemBackend,
+  dirName: string,
+  resources: ImportEnvelope["resources"],
+): Promise<NonNullable<ImportEnvelope["resources"]>> {
+  const list = resources ?? [];
+  if (list.length > MAX_RESOURCES) throw new InboxError("IMP-4013", inboxFailureMessage("IMP-4013"));
+  // 先把字节全部解析并过完校验（单件 + 合计），再统一写盘：中途失败不留半个 resources/ 目录。
+  const staged: Array<{ path: string; mime?: string; file: string; bytes: Uint8Array }> = [];
+  let total = 0;
+  for (const resource of list) {
+    if (!resource || typeof resource !== "object") continue;
+    const path = typeof resource.path === "string" ? normalizeResourcePath(resource.path) : null;
+    if (!path) throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+    let bytes: Uint8Array | null = null;
+    if (typeof resource.dataBase64 === "string" && resource.dataBase64) {
+      try {
+        bytes = decodeBase64(resource.dataBase64);
+      } catch {
+        throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+      }
+    } else if (typeof resource.file === "string" && resource.file) {
+      let relative: string;
+      try {
+        relative = assertSafeRelative(resource.file);
+      } catch {
+        throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+      }
+      bytes = await target.readBytes(relative).catch(() => null);
+    }
+    if (!bytes || bytes.byteLength > MAX_RESOURCE_BYTES) throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+    // 合计上限在这里把住：信封校验只对 dataBase64 形态计数，file 形态要等读盘后才知道大小。
+    total += bytes.byteLength;
+    if (total > MAX_RESOURCES_TOTAL_BYTES) throw new InboxError("IMP-4013", inboxFailureMessage("IMP-4013"));
+    staged.push({ path, ...(resource.mime ? { mime: resource.mime } : {}), file: joinPath(RESOURCES_DIR, path), bytes });
+  }
+  for (const item of staged) {
+    const absolute = joinPath(entryDirPath(dirName), item.file);
+    const parent = absolute.slice(0, absolute.lastIndexOf("/"));
+    await target.mkdir(parent).catch(() => undefined);
+    await target.writeBytes(absolute, item.bytes);
+  }
+  // `entry.json` 里的形态不带字节（`file` 相对条目目录）。
+  return staged.map((item) => ({ path: item.path, ...(item.mime ? { mime: item.mime } : {}), file: item.file }));
+}
+
 /**
  * 投递一个信封到收件箱（`enqueueInbox`）。
  *
@@ -811,21 +1023,24 @@ export async function enqueueInbox(
   const source = { ...(envelope.source ?? {}) } as Record<string, unknown>;
   if (typeof source.url !== "string" && source.url !== null) source.url = meta.sourceUrl || null;
   if (typeof source.capturedAt !== "string" || !source.capturedAt) source.capturedAt = toIso(at);
+  const html = envelope.format === "html";
+  const bodyFile = html ? HTML_BODY_FILE : BODY_FILE;
   const envelopeOut: ImportEnvelope = {
     spec: "opennote.import/v1",
     importId,
     title: typeof envelope.title === "string" && envelope.title ? envelope.title : meta.title,
     body: null,
-    bodyFile: BODY_FILE,
+    bodyFile,
     source: source as unknown as ImportEnvelope["source"],
     target: { folder, notePath: envelope.target?.notePath ?? null },
     conflict: envelope.conflict,
     tags: Array.isArray(envelope.tags) ? envelope.tags.filter((tag): tag is string => typeof tag === "string") : meta.tags,
-    assets: await stageAssets(target, dirName, envelope.assets, folder),
+    assets: html ? [] : await stageAssets(target, dirName, envelope.assets, folder),
+    ...(html ? { format: "html" as const, resources: await stageResources(target, dirName, envelope.resources) } : {}),
     client: envelope.client,
     enqueuedAt: toIso(at),
   };
-  await target.writeText(joinPath(entryDirPath(dirName), BODY_FILE), body);
+  await target.writeText(joinPath(entryDirPath(dirName), bodyFile), body);
   await target.writeText(joinPath(entryDirPath(dirName), ENTRY_FILE), `${JSON.stringify(envelopeOut, null, 2)}\n`);
   await writeStateFile(target, dirName, emptyState(at));
 
@@ -1039,6 +1254,24 @@ async function envelopeForReceiver(
     throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
   }
   envelope.assets = assets;
+  if (envelope.format === "html") {
+    // 资源同理：`file` 相对条目目录，接收端会按工作区根解释它 —— 一律在这里转成 `dataBase64`。
+    const resources: NonNullable<ImportEnvelope["resources"]> = [];
+    for (const resource of envelope.resources ?? []) {
+      if (!resource || typeof resource !== "object" || typeof resource.path !== "string") {
+        throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+      }
+      if (typeof resource.dataBase64 === "string" && resource.dataBase64) {
+        resources.push(resource);
+        continue;
+      }
+      const path = typeof resource.file === "string" && resource.file ? safeJoinWithin(dirName, resource.file) : null;
+      const bytes = path ? await target.readBytes(path).catch(() => null) : null;
+      if (!bytes) throw new InboxError("IMP-4012", inboxFailureMessage("IMP-4012"));
+      resources.push({ path: resource.path, ...(resource.mime ? { mime: resource.mime } : {}), dataBase64: encodeBase64(bytes) });
+    }
+    envelope.resources = resources;
+  }
   return JSON.stringify(envelope);
 }
 
@@ -1188,6 +1421,8 @@ async function runCommit(
   // 条目里的**暂存副本**立刻删掉，别留孤儿/双份字节；重试或重复提交也就不会二次搬迁。
   if (settled === "committed") {
     await target.remove(joinPath(entryDirPath(found.dirName), ASSETS_DIR), { recursive: true }).catch(() => undefined);
+    // HTML 页面的资源已经内联进 `.html`：暂存的 `resources/` 同理立刻删掉。
+    await target.remove(joinPath(entryDirPath(found.dirName), RESOURCES_DIR), { recursive: true }).catch(() => undefined);
   }
   // 入库后界面必须 3 秒内可见：重扫工作区 + 重读收件箱。
   await rescanWorkspace();

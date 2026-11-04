@@ -1,6 +1,6 @@
 ---
 name: opennote-ingest
-description: 把 Agent 生成的 Markdown 文档入库到本机 Opennote 笔记本。当用户说「入库」「存进我的笔记」「存进 Opennote」「把这些文档归档到笔记」「剪藏到 Opennote」时使用。默认投递到 Opennote 收件箱等用户确认，绝不改写或覆盖既有笔记。
+description: 把 Agent 生成的 Markdown 文档或 HTML 页面（连同它的 CSS / JS / 图片等静态资源）入库到本机 Opennote 笔记本。当用户说「入库」「存进我的笔记」「存进 Opennote」「把这些文档归档到笔记」「剪藏到 Opennote」时使用。默认投递到 Opennote 收件箱等用户确认，绝不改写或覆盖既有笔记。
 whenToUse: 用户要求把本次会话产出的文档、报告、分析、笔记片段存进 Opennote 时；也包括「刚才那几份文档都入库」这类批量请求。
 ---
 
@@ -72,6 +72,32 @@ node $script "docs\我的报告.md" --channel bridge --folder "Agent 产出" --j
 **为什么会出现 `pending`**：应用侧默认设置是「先进入收件箱」，且它只作用于
 **没有指明落点**的外部投递。所以桥通道**要么带 `--folder`，要么预期拿 `pending`**。
 拿不到 `created` 就别说「已经存进笔记了」——说「已进入收件箱，等你在 Opennote 里确认」。
+
+## HTML 页面（`.html` / `.htm`）
+
+源文件是 HTML 时自动走 HTML 页面通道（信封扩展 `format: "html"`），**仍然默认进收件箱**，
+用户在收件箱「预览」里看到的就是入库后的那一页（沙箱渲染，脚本照常运行）：
+
+```powershell
+# 页面与它的 css/ js/ img/ 放在同一个目录里；页面里直接引用的本地资源会被自动收集
+node $script "out\report\index.html" --folder "Agent 产出" --json
+
+# 脚本运行时才 fetch 的文件（扫不出来）用 --include 显式带上
+node $script "out\report\index.html" --include "out\report\data\series.json" --json
+```
+
+- **资源根 = 页面所在目录**：页面里 `css/a.css`、`./img/b.png`、CSS 里的 `url(...)` / `@import`
+  都会被收集；`../` 越出页面目录、点开头的目录（`.git/` 之类）、`https://` 远端资源**不收**。
+- 支持的资源格式：CSS、JS（含 `.mjs`）、JSON、常见图片（含 SVG / ICO）、字体（woff/woff2/ttf/otf）、
+  音视频（mp3/ogg/wav/m4a/mp4/webm）、`.vtt` / `.txt` / `.csv`。单件 ≤ 8 MiB、合计 ≤ 8 MiB、≤ 256 个。
+- 应用在入库时把资源**内联成单个 `.html` 文件**（不会在笔记本里散落 css/js）；
+  入库后是**只读页面**：可以看、可以全屏、不能在应用里编辑。
+- 标题：`--title` > `<title>` > 首个 `<h1>` > 文件名。HTML 页面不读 front-matter、不支持 `--attach`。
+- JSON 结果里多出 `format: "html"`、`resources`（随附了哪些）、`missingResources`
+  （页面引用了但找不到的，**入库后会缺失**——如实告诉用户）。
+- 已知边界：ES 模块之间的相对 `import`、脚本里 `fetch` 相对路径，入库成单文件后都**不可用**
+  （`--include` 能把文件带上，但页面运行时取不到它）；页面里的远端 `fetch` / XHR 会被沙箱拦下。
+- 批量里混着 HTML：`--dir <目录> --match "*.md,*.html"`。
 
 ## 标题、front-matter、标签怎么处理（确定性规则）
 

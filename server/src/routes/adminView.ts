@@ -1,411 +1,280 @@
 /**
- * 管理端聚合读端点（`docs/执行-三端同步…` §4.6、§10.1 M8）。
+ * `/v1/admin/*` 的聚合读：控制台各页一次取齐要显示的东西（`docs/执行-同步重写-2026-11-02.md` 阶段 ②）。
  *
- * ## 为什么单独一个文件，而不是继续往 `panel.ts` 里堆
+ * | 接口 | 页面 |
+ * | --- | --- |
+ * | `GET /overview` | 概览：计数、「需要你处理」、「值得留意」、运行状态、最近活动 |
+ * | `GET /activity` | 活动日志（审计 + 同步计数合成一条时间线，见 `activity.ts`） |
+ * | `GET /accounts/:id` | 用户详情抽屉：账号、笔记本、设备、最近活动 |
+ * | `GET /notebooks` | 全站笔记本 |
+ * | `GET /devices` | 全站设备 |
  *
- * `panel.ts` 已经同时管着「我的账号 / 我的设备 / 我的笔记本」这些**普通账号也用**的
- * 端点，和少数管理员端点。再加台账、全站设备、邀请码、巡检、配置、诊断，
- * 会让那个文件里「哪一段需要 requireAdmin」变得只能靠记忆 —— 而纪律类的东西
- * **不该靠记忆**。这里每个处理器第一句都是 `requireAdmin()`，全文件同一个形状。
+ * 写操作（改配额、移除设备、邀请……）在 `admin.ts`。这里只读，纪律相同：
+ * 每个处理器的第一句是管理员闸门，响应里没有任何哈希、密文或笔记内容。
  *
- * ## 这个文件不返回什么（和 `/v1/admin/*` 同一条纪律）
- *
- * - `auth_hash` / `wrapped_enc_root`（密钥材料，一旦出去就收不回来）
- * - 明文路径 / 笔记内容（E2EE 下服务端根本没有；`user-key` 库连 `epath` 都是密文）
- * - 邀请码明文（明文只在生成那一刻出现，事后连我们也拿不回）
- *
- * ## 一个刻意的「不做」
- *
- * **没有**「一键重建 _design」「一键解决冲突」。前者会掩盖「谁删了它」这个更重要的
- * 问题；后者违反红线 2（裁决属于 CouchDB，不是我们）。
+ * 响应都带 `now`（服务端时钟）：「在线」「N 天前」由页面按它算，不受浏览器时钟偏差影响。
  */
 
+import { statfsSync } from "node:fs";
+import { dirname } from "node:path";
 import { Hono } from "hono";
-import { AccountError, AccountStore, type AccountRow } from "../auth/accounts";
+import { adminAccountSummarySchema, parseContract, type AdminAccountSummary } from "../../../shared/contract";
+import { accountLabel, type AccountRow, type AccountStore } from "../auth/accounts";
+import { buildTimeline, type ActivityCategory, type ActivityLabels } from "../activity";
 import type { CouchClient } from "../couch/client";
-import type { NotebookStore } from "../notebooks";
 import type { ServerConfig } from "../config";
-import { inspectNotebook } from "../provisioning";
-import { PANEL_COOKIE, readCookie } from "../panelSecurity";
-
-/**
- * 合并两种按天计数（客户端上报 / 服务端实测），返回**带 `accountId` 的逐行视图**。
- *
- * 与 `panel.ts` 的 `mergeDailyStats()` 是同一套规则（取较大值，不相加），
- * 差别只在返回形状：那边按「我一个人」聚合、去掉 `accountId`；
- * 这里给管理页，必须保留「哪个账号」才能做热点排序。
- *
- * 为什么两份都要有（而不是抽成共享模块）：它们一个在 `/panel/api`、一个在
- * `/panel/api/admin`，共享一个工具模块会多出一层「谁都能 import」的公共面，
- * 而这段逻辑只有 20 行、且两边都会各自演化（一个要 `accountId`、一个不要）。
- * 合并规则的**唯一判据**写在两处的模块头里，改一处必须看另一处。
- */
-function mergeActivity(
-  reported: { accountId: string; notebookId: string; day: string; pulls: number; pushes: number; deletes: number; conflicts: number; errors: number }[],
-  observed: { accountId: string; notebookId: string; day: string; pulls: number; pushes: number; deletes: number; conflicts: number; errors: number }[],
-): { accountId: string; notebookId: string; day: string; pulls: number; pushes: number; deletes: number; conflicts: number; errors: number }[] {
-  const merged = new Map<string, { accountId: string; notebookId: string; day: string; pulls: number; pushes: number; deletes: number; conflicts: number; errors: number }>();
-  for (const row of [...reported, ...observed]) {
-    const key = `${row.accountId}|${row.notebookId}|${row.day}`;
-    const current = merged.get(key);
-    if (!current) {
-      merged.set(key, { ...row });
-      continue;
-    }
-    current.pulls = Math.max(current.pulls, row.pulls);
-    current.pushes = Math.max(current.pushes, row.pushes);
-    current.deletes = Math.max(current.deletes, row.deletes);
-    current.conflicts = Math.max(current.conflicts, row.conflicts);
-    current.errors = Math.max(current.errors, row.errors);
-  }
-  return [...merged.values()];
-}
+import type { AdminDeviceRow, NotebookStore } from "../notebooks";
+import type { SettingsStore } from "../settings";
+import { createAdminGate } from "./adminGate";
+import { loginMethodsOf, quotaOf } from "./auth";
 
 export interface AdminViewDeps {
   accounts: AccountStore;
   notebooks: NotebookStore;
   config: ServerConfig;
   couch: CouchClient;
-  /** 进程启动时间（uptime；测试注入）。 */
+  settings: SettingsStore;
   startedAt?: number;
   now?: () => number;
-  audit?: (event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null }) => void;
 }
 
-/** 近 N 天的按天聚合（管理页「运行状态」的流量图）。 */
-const TRAFFIC_WINDOW_DAYS = 30;
+/** 多久之内同步过算「在线」。检查点每次同步都刷，客户端空闲时 SSE 心跳也会刷会话。 */
+export const ONLINE_WINDOW_MS = 5 * 60_000;
+/** 「值得留意」里「很久没同步」的门槛。 */
+export const STALE_DEVICE_DAYS = 90;
+/** 配额用到多少算「快满了」。 */
+export const QUOTA_WARN_RATIO = 0.9;
+/** 活动日志往回看多少天的同步计数。 */
+const ACTIVITY_DAYS = 90;
+/** 活动日志一次最多翻到多深（审计是一次读出来再合并的）。 */
+const ACTIVITY_MAX_DEPTH = 5000;
 
-/** 「30 天没露面」算不算陈旧。 */
-const STALE_DEVICE_MS = 30 * 86_400_000;
+const CATEGORIES: readonly ActivityCategory[] = ["sync", "conflict", "account", "admin", "error"];
+
+function utcDay(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/** 用户列表 / 详情共用的账号摘要（一次取齐笔记本数与设备，不逐行查）。 */
+export function accountSummaries(
+  deps: Pick<AdminViewDeps, "accounts" | "notebooks" | "config" | "settings">,
+  rows: AccountRow[],
+  now: number,
+): AdminAccountSummary[] {
+  const notebookCounts = deps.notebooks.notebookCountsByAccount();
+  const devices = deps.notebooks.listAllDevices({ now });
+  return rows.map((row) => {
+    const own = devices.filter((device) => device.accountId === row.id);
+    const seen = own.map((device) => device.lastSeenAt).filter((value): value is number => value !== null);
+    return parseContract(
+      adminAccountSummarySchema,
+      {
+        accountId: row.id,
+        email: row.email,
+        displayName: row.display_name,
+        loginMethods: loginMethodsOf(deps.accounts, row),
+        status: row.status === "disabled" ? "disabled" : "active",
+        isAdmin: row.is_admin === 1,
+        quota: quotaOf(deps, row),
+        createdAt: row.created_at,
+        lastSeenAt: row.last_seen_at,
+        notebookCount: notebookCounts.get(row.id) ?? 0,
+        deviceCount: own.filter((device) => device.signedIn).length,
+        lastSyncAt: seen.length > 0 ? Math.max(...seen) : null,
+      },
+      "管理端账号摘要",
+    );
+  });
+}
+
+/** 时间线要的名字查找（一次读齐，避免每条事件查一次库）。 */
+function activityLabels(deps: Pick<AdminViewDeps, "accounts" | "notebooks">): ActivityLabels {
+  const accounts = new Map(deps.accounts.list().map((row) => [row.id, accountLabel(row)]));
+  const notebooks = deps.notebooks.notebookLabels();
+  return {
+    account: (id) => accounts.get(id) ?? `已删除的账号 ${id.slice(0, 6)}`,
+    notebook: (id) => {
+      const row = notebooks.get(id);
+      if (!row) return `笔记本 ${id.slice(0, 8)}`;
+      return row.deleted ? `${row.name}（已删除）` : row.name;
+    },
+  };
+}
+
+/** 数据目录所在磁盘还剩多少（内存库 / 平台不支持时为 null）。 */
+function diskFreeBytes(config: ServerConfig): number | null {
+  if (config.sqlitePath === ":memory:") return null;
+  try {
+    const stats = statfsSync(dirname(config.sqlitePath));
+    return Number(stats.bavail) * Number(stats.bsize);
+  } catch {
+    return null;
+  }
+}
+
+function deviceView(device: AdminDeviceRow, now: number): AdminDeviceRow & { online: boolean } {
+  return { ...device, online: device.signedIn && device.lastSeenAt !== null && now - device.lastSeenAt < ONLINE_WINDOW_MS };
+}
 
 export function createAdminViewRoutes(deps: AdminViewDeps): Hono {
-  const api = new Hono();
-  const now = deps.now ?? (() => Date.now());
+  const routes = new Hono();
+  const requireAdmin = createAdminGate(deps);
+  const now = (): number => deps.now?.() ?? Date.now();
   const json = (body: unknown, status = 200): Response =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 
-  /** 与 `panel.ts` 完全同一条闸门：401 与 403 分开，且拒绝发生在任何读取之前。 */
-  const requireAdmin = (c: { req: { header: (name: string) => string | undefined } }): AccountRow | Response => {
-    const fromCookie = readCookie(c.req.header("cookie"), PANEL_COOKIE);
-    const header = c.req.header("authorization");
-    const match = header ? /^Bearer\s+(.+)$/i.exec(header.trim()) : null;
-    const token = fromCookie ?? (match ? match[1]!.trim() : null);
-    if (!token) return json({ error: "未登录", code: "unauthorized" }, 401);
-    let row: AccountRow;
-    try {
-      row = deps.accounts.authenticate(token);
-    } catch (error) {
-      if (error instanceof AccountError) {
-        const disabled = error.rejection === "disabled";
-        return json({ error: error.message, code: disabled ? "disabled" : "unauthorized" }, disabled ? 403 : 401);
-      }
-      throw error;
-    }
-    if (row.is_admin !== 1) return json({ error: "需要管理员权限", code: "forbidden" }, 403);
-    return row;
-  };
+  /* ---------------------------------------------------------------- 概览 */
 
-  /* ------------------------------------------------------------ 概览 */
-
-  /**
-   * 运行状态页需要的一屏数字。
-   *
-   * ★ **一次请求给齐**，而不是让页面打 6 个端点：运维页最怕「一半成功一半失败」，
-   *   那种状态下每个数字的可信度都要单独判断。
-   */
-  api.get("/overview", async (c) => {
-    const admin = requireAdmin(c as never);
+  routes.get("/overview", async (c) => {
+    const admin = requireAdmin(c);
     if (admin instanceof Response) return admin;
-
+    const at = now();
     const accounts = deps.accounts.list();
-    const notebooks = deps.notebooks.listAllNotebooks();
-    const devices = deps.notebooks.listAllDevices();
-    const staleDevices = devices.filter((d) => (d.lastSeenAt ?? d.createdAt) < now() - STALE_DEVICE_MS);
-
-    /*
-     * 近 30 天按天汇总。**两个来源**：
-     *
-     * ① `client_stats` —— 客户端上报的（`POST /v1/stats`）。当前产品客户端**没有**调用它，
-     *    所以这一路通常是空的；
-     * ② `sync_activity` —— 服务端在 `/v1` 数据面上自己数的（见迁移 3）。**这一路一直有数**。
-     *
-     * 两者按 `(账号, 库, 天)` 取**较大值**合并（不是相加：那会把同一批请求数两遍，
-     * 因为客户端数它发出的、服务端数它收到的）。合并后的结果才是「这一天至少发生了什么」。
-     */
-    const byDay = new Map<string, { pulls: number; pushes: number; conflicts: number; errors: number; deletes: number }>();
-    const tally = (key: string, row: { pulls: number; pushes: number; conflicts: number; errors: number; deletes: number }): void => {
-      const bucket = byDay.get(key) ?? { pulls: 0, pushes: 0, conflicts: 0, errors: 0, deletes: 0 };
-      bucket.pulls += row.pulls;
-      bucket.pushes += row.pushes;
-      bucket.conflicts += row.conflicts;
-      bucket.errors += row.errors;
-      bucket.deletes += row.deletes;
-      byDay.set(key, bucket);
-    };
-    const mergedDays = mergeActivity(
-      // `statsFor()` 是按账号查的，行里没有 `accountId` —— 合并前补上（热点排序需要它）。
-      accounts.flatMap((account) =>
-        deps.notebooks.statsFor(account.id, { limitDays: TRAFFIC_WINDOW_DAYS * 12 }).map((row) => ({ accountId: account.id, ...row })),
-      ),
-      deps.notebooks.activityForAll(),
+    const summaries = accountSummaries(deps, accounts, at);
+    const devices = deps.notebooks.listAllDevices({ now: at }).map((device) => deviceView(device, at));
+    const signedIn = devices.filter((device) => device.signedIn);
+    const invites = deps.notebooks.listInvites().filter(
+      (invite) => invite.revokedAt === null && invite.uses < invite.maxUses && (invite.expiresAt === null || invite.expiresAt > at),
     );
-    for (const row of mergedDays) tally(row.day, row);
-    const daily = [...byDay.entries()]
-      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
-      .slice(-TRAFFIC_WINDOW_DAYS)
-      .map(([day, value]) => ({ day, ...value }));
+    const today = utcDay(at);
+    const weekAgo = utcDay(at - 6 * 86_400_000);
+    const activity = deps.notebooks.activitySince(weekAgo);
+    const todayRows = activity.filter((row) => row.day === today);
+    const staleCutoff = at - STALE_DEVICE_DAYS * 86_400_000;
 
-    const sum = (key: "pulls" | "pushes" | "conflicts" | "errors"): number => daily.reduce((acc, row) => acc + row[key], 0);
+    const attention = [
+      ...summaries
+        .filter((account) => account.status === "active" && account.quota.bytesLimit > 0 && account.quota.bytesUsed / account.quota.bytesLimit >= QUOTA_WARN_RATIO)
+        .map((account) => ({
+          kind: "quota" as const,
+          accountId: account.accountId,
+          label: account.displayName || account.email || account.accountId.slice(0, 8),
+          email: account.email,
+          bytesUsed: account.quota.bytesUsed,
+          bytesLimit: account.quota.bytesLimit,
+        })),
+      ...invites
+        .filter((invite) => invite.expiresAt !== null && invite.expiresAt - at < 86_400_000)
+        .map((invite) => ({ kind: "invite-expiring" as const, id: invite.codeHash, email: invite.email, expiresAt: invite.expiresAt })),
+    ];
 
-    /*
-     * 按账号聚合的冲突热点（「哪一端坏了」比总数更有用）。
-     *
-     * ★ 这段必须在这里算：`client_stats` 是按 (account, notebook, day) 存的，
-     *   前端只看得到自己那一份 —— 让前端去拼全站热点只能拼出当前登录的人，
-     *   而那一页叫「冲突与异常」，问的是**全站**哪一端坏了。
-     */
-    const accountLabel = new Map(accounts.map((row) => [row.id, row.label]));
-    const hotspots = new Map<string, { accountId: string; label: string | null; conflicts: number; errors: number; notebooks: Set<string> }>();
-    /*
-     * 与上面的流量图**同一套合并规则**（两个来源取较大值），否则会出现
-     * 「图上 0 次冲突、热点里 7 次」这种自相矛盾的一屏。
-     */
-    for (const row of mergedDays) {
-      if (row.conflicts === 0 && row.errors === 0) continue;
-      const bucket = hotspots.get(row.accountId) ?? {
-        accountId: row.accountId,
-        label: accountLabel.get(row.accountId) ?? null,
-        conflicts: 0,
-        errors: 0,
-        notebooks: new Set<string>(),
-      };
-      bucket.conflicts += row.conflicts;
-      bucket.errors += row.errors;
-      bucket.notebooks.add(row.notebookId);
-      hotspots.set(row.accountId, bucket);
-    }
-    const conflictHotspots = [...hotspots.values()]
-      .map((row) => ({
-        accountId: row.accountId,
-        label: row.label,
-        conflicts: row.conflicts,
-        errors: row.errors,
-        notebooks: row.notebooks.size,
-      }))
-      .sort((a, b) => b.conflicts + b.errors - (a.conflicts + a.errors));
-
-    /* 健康：CouchDB 可达 + 协议版本 + 没有「置备不一致」的库。 */
     let couchVersion: string | null = null;
-    let couchOk = true;
     try {
       couchVersion = (await deps.couch.version()).version;
     } catch {
-      couchOk = false;
+      couchVersion = null;
     }
-    const mismatched = notebooks.filter((nb) => nb.provisioning !== null && (!nb.provisioning.designOk || !nb.provisioning.syncInfoOk));
-    const startedAt = deps.startedAt ?? now();
-
-    /*
-     * 「需要处理」的几条：**判读随数据一起下发**，不在前端重算阈值。
-     * 阈值属于结论，放在前端等于让结论和事实分开演化。
-     */
-    const attention: { id: string; tone: string; title: string; detail: string; action: string }[] = [];
-    if (mismatched.length > 0) {
-      attention.push({
-        id: "provisioning",
-        tone: "danger",
-        title: mismatched.length + " 个库的置备状态不一致",
-        detail: mismatched.map((nb) => nb.name).slice(0, 3).join("、"),
-        action: "data",
-      });
-    }
-    if (sum("conflicts") > 0) {
-      attention.push({
-        id: "conflicts",
-        tone: "attention",
-        title: "近 30 天累计 " + sum("conflicts") + " 次冲突",
-        detail: "持续增长通常意味着一端基线坏了",
-        action: "issues",
-      });
-    }
-    if (staleDevices.length > 0) {
-      attention.push({
-        id: "stale-devices",
-        tone: "quiet",
-        title: staleDevices.length + " 台设备 30 天未同步",
-        detail: "可能是已经弃用的设备",
-        action: "devices",
-      });
-    }
+    const page = deps.accounts.db.prepare("PRAGMA page_count").get() as { page_count: number };
+    const pageSize = deps.accounts.db.prepare("PRAGMA page_size").get() as { page_size: number };
+    const labels = activityLabels(deps);
 
     return json({
-      generatedAt: now(),
-      accounts: {
+      now: at,
+      users: {
         total: accounts.length,
-        admins: accounts.filter((row) => row.is_admin === 1).length,
-        disabled: accounts.filter((row) => row.status !== "active").length,
+        admins: summaries.filter((account) => account.isAdmin).length,
+        disabled: summaries.filter((account) => account.status === "disabled").length,
+        pendingInvites: invites.length,
       },
-      notebooks: {
-        total: notebooks.length,
-        bytesUsed: notebooks.reduce((acc, nb) => acc + nb.bytesUsed, 0),
-      },
-      devices: { total: devices.length, stale: staleDevices.length },
-      traffic: {
-        days: daily,
-        total: { pulls: sum("pulls"), pushes: sum("pushes"), conflicts: sum("conflicts"), errors: sum("errors") },
-      },
-      health: {
-        couchOk,
-        couchVersion,
-        protocolVersion: deps.config.protocolVersionExpected,
-        provisioningMismatch: mismatched.length,
-        uptimeSeconds: Math.max(0, (now() - startedAt) / 1000),
+      devices: { total: signedIn.length, online: signedIn.filter((device) => device.online).length },
+      storage: { usedBytes: deps.notebooks.totalBytes(), diskFreeBytes: diskFreeBytes(deps.config), notebooks: deps.notebooks.totalNotebooks() },
+      today: {
+        changes: todayRows.reduce((sum, row) => sum + row.pushes + row.deletes, 0),
+        conflicts: todayRows.reduce((sum, row) => sum + row.conflicts, 0),
       },
       attention,
-      conflictHotspots,
-      /*
-       * 最近的控制面动作（概览页「最近控制面动作」卡）。
-       * 只取 6 条：概览是「扫一眼」的地方，完整列表在 /panel#/logs。
-       */
-      recentEvents: deps.notebooks.recentAudit(6),
-    });
-  });
-
-  /* ------------------------------------------------------------ 台账 */
-
-  /** 全站笔记本台账。**库级视图，不提供笔记内容浏览**（E2EE 下也没有）。 */
-  api.get("/notebooks", (c) => {
-    const admin = requireAdmin(c as never);
-    if (admin instanceof Response) return admin;
-    return json({
-      notebooks: deps.notebooks.listAllNotebooks(),
-      note: "这是库级账本。服务端看不到笔记正文；user-key 库连路径都是密文（epath）。",
-    });
-  });
-
-  /* ------------------------------------------------------------ 设备 */
-
-  /** 全站设备账本。**只读** —— 没有每设备凭据，所以没有「踢掉这一台」。 */
-  api.get("/devices", (c) => {
-    const admin = requireAdmin(c as never);
-    if (admin instanceof Response) return admin;
-    return json({
-      devices: deps.notebooks.listAllDevices(),
-      canRevoke: false,
-      note: "一个账号密钥所有设备共用，所以踢不掉单台设备。唯一的吊销手段是让那个账号轮换密钥（会波及它的所有设备）。",
-    });
-  });
-
-  /* ---------------------------------------------------------- 邀请码 */
-
-  api.get("/invites", (c) => {
-    const admin = requireAdmin(c as never);
-    if (admin instanceof Response) return admin;
-    return json({
-      invites: deps.notebooks.listInvites(),
-      note: "库里只有 sha256(邀请码)，明文在生成那一刻就没了 —— 这里显示的是哈希前缀，只能用来对账。",
-    });
-  });
-
-  /**
-   * 作废邀请码（**按哈希**）。
-   *
-   * `/v1/admin/invites/:code` 收的是**明文码**，而管理页只拿得到哈希
-   * （明文在生成那一刻就没了）—— 所以那条端点在这里用不了。
-   * 这不是重复实现：收凭据的形状不同，能做的事也不同。
-   *
-   * 幂等：已经作废过仍返回 204（目标状态已达成，不是错误）。
-   */
-  api.delete("/invites/:codeHash", (c) => {
-    const admin = requireAdmin(c as never);
-    if (admin instanceof Response) return admin;
-    const codeHash = c.req.param("codeHash");
-    /*
-     * 只接受 SHA-256 十六进制（64 位）。这个形状校验不是洁癖：
-     * 它挡住「把明文码当哈希传进来」——那会静默地作废失败（哈希不匹配），
-     * 而运维会以为已经作废了。
-     */
-    if (!/^[0-9a-f]{64}$/i.test(codeHash)) {
-      return json({ error: "邀请码哈希应当是 64 位十六进制", code: "bad-request" }, 400);
-    }
-    const changed = deps.notebooks.revokeInviteByHash(codeHash);
-    deps.audit?.({
-      actorId: admin.id,
-      action: "panel_revoke_invite",
-      target: codeHash.slice(0, 12),
-      ip: null,
-      detail: changed ? "revoked" : "already-revoked-or-unknown",
-    });
-    return new Response(null, { status: 204 });
-  });
-
-  /* ------------------------------------------------------------ 配置 */
-
-  /**
-   * 服务端配置（**只读**）。
-   *
-   * ★ 刻意不提供写入口：改配置要走环境变量 + 重启。做成热更新会让
-   *   「当前生效的到底是什么」变得不可回答 —— 而那正是运维页面存在的意义。
-   */
-  api.get("/config", (c) => {
-    const admin = requireAdmin(c as never);
-    if (admin instanceof Response) return admin;
-    return json({
-      readOnly: true,
-      // 密钥类配置**一律不下发**；只给「是不是配了」这种布尔事实。
-      config: {
-        externalBaseUrl: deps.config.externalBaseUrl,
-        protocolVersionExpected: deps.config.protocolVersionExpected,
-        couchUrl: deps.config.couchUrl,
-        couchUser: deps.config.couchUser,
-        couchAdminUserConfigured: Boolean(deps.config.couchAdminUser),
-        sqlitePath: deps.config.sqlitePath,
-        maxFileBytes: deps.config.maxFileBytes,
-        defaultAccountQuotaBytes: deps.config.defaultAccountQuotaBytes,
-        defaultAccountQuotaNotebooks: deps.config.defaultAccountQuotaNotebooks,
-        sseHeartbeatMs: deps.config.sseHeartbeatMs,
-        trustedProxyHeaders: deps.config.trustedProxyHeaders,
-        accountRequestsPerMinute: deps.config.accountRequestsPerMinute,
-        globalRequestsPerMinute: deps.config.globalRequestsPerMinute,
-        logLevel: deps.config.logLevel,
+      noteworthy: {
+        staleDevices: signedIn.filter((device) => (device.lastSeenAt ?? device.createdAt) < staleCutoff).length,
+        staleDays: STALE_DEVICE_DAYS,
+        conflictsThisWeek: activity.reduce((sum, row) => sum + row.conflicts, 0),
+        errorsThisWeek: activity.reduce((sum, row) => sum + row.errors, 0),
       },
-      note: "配置只读。改动请改环境变量后重启服务 —— 热更新会让「当前生效值」变得不可回答。",
+      server: {
+        externalBaseUrl: deps.config.externalBaseUrl,
+        protocolVersion: deps.config.protocolVersionExpected,
+        couchVersion,
+        uptimeSeconds: Math.max(0, Math.floor((at - (deps.startedAt ?? at)) / 1000)),
+        databaseBytes: page.page_count * pageSize.page_size,
+        maxFileBytes: deps.config.maxFileBytes,
+      },
+      recent: buildTimeline({ audit: deps.notebooks.auditBefore(null, 40), activity, labels, now: at, limit: 8 }).entries,
     });
   });
 
-  /* ------------------------------------------------------------ 巡检 */
+  /* ------------------------------------------------------------ 活动日志 */
 
-  /**
-   * 单个库的置备核对（只读）。
-   *
-   * 页面按需触发而不是「进来就查全库」：500 个库一次性核对会把 CouchDB 打满。
-   * 结果写进 notebook_provisioning，所以下次看台账不用再查一遍。
-   */
-  api.get("/notebooks/:id/inspection", async (c) => {
-    const admin = requireAdmin(c as never);
+  /** `?category=sync|conflict|account|admin|error&q=关键词&offset=0&limit=100` */
+  routes.get("/activity", (c) => {
+    const admin = requireAdmin(c);
     if (admin instanceof Response) return admin;
-    const notebookId = c.req.param("id");
-    const notebook = deps.notebooks.findById(notebookId);
-    if (!notebook) return json({ error: "笔记本不存在", code: "not-found" }, 404);
-
-    const report = await inspectNotebook(deps.couch, notebook.db_name, {
-      protocolVersion: deps.config.protocolVersionExpected,
-      cryptoMode: notebook.crypto_mode === "user-key" ? "user-key" : "none",
+    const at = now();
+    const rawCategory = c.req.query("category");
+    const category = CATEGORIES.find((value) => value === rawCategory) ?? null;
+    const limit = Math.min(500, Math.max(1, Number.parseInt(c.req.query("limit") ?? "", 10) || 100));
+    const offset = Math.min(ACTIVITY_MAX_DEPTH, Math.max(0, Number.parseInt(c.req.query("offset") ?? "", 10) || 0));
+    const timeline = buildTimeline({
+      audit: deps.notebooks.auditBefore(null, ACTIVITY_MAX_DEPTH + limit),
+      activity: deps.notebooks.activitySince(utcDay(at - (ACTIVITY_DAYS - 1) * 86_400_000)),
+      labels: activityLabels(deps),
+      now: at,
+      category,
+      query: c.req.query("q") ?? null,
+      offset,
+      limit,
     });
-    deps.notebooks.recordProvisioning(notebookId, {
-      designOk: report.designComplete,
-      revsLimit: report.revsLimit === null ? null : String(report.revsLimit),
-      syncInfoOk: report.syncInfoExists,
-    });
-    deps.audit?.({
-      actorId: admin.id,
-      action: "panel_inspect_notebook",
-      target: notebookId,
-      ip: null,
-      detail: report.healthy ? "healthy" : "problems",
-    });
-    return json({ inspection: report }, 200);
+    return json({ now: at, ...timeline });
   });
 
-  return api;
+  /* ------------------------------------------------------------ 用户详情 */
+
+  routes.get("/accounts/:id", (c) => {
+    const admin = requireAdmin(c);
+    if (admin instanceof Response) return admin;
+    const at = now();
+    const row = deps.accounts.findById(c.req.param("id"));
+    if (!row) return json({ error: "账号不存在", code: "not-found" }, 404);
+    const [summary] = accountSummaries(deps, [row], at);
+    const notebooks = deps.notebooks.listForAccount(row.id).map(({ notebook, role }) => ({
+      id: notebook.id,
+      name: notebook.name,
+      role,
+      cryptoMode: notebook.crypto_mode === "user-key" ? "user-key" : "none",
+      bytesUsed: deps.notebooks.notebookBytesOf(notebook.id),
+      createdAt: notebook.created_at,
+    }));
+    const devices = deps.notebooks.listAllDevices({ accountId: row.id, now: at }).map((device) => deviceView(device, at));
+    const labels = activityLabels(deps);
+    const recent = buildTimeline({
+      audit: deps.notebooks.auditBefore(null, 500).filter((event) => event.actorId === row.id || event.target === row.id),
+      activity: deps.notebooks.activitySince(utcDay(at - 29 * 86_400_000)).filter((item) => item.accountId === row.id),
+      labels,
+      now: at,
+      limit: 10,
+    }).entries;
+    return json({ now: at, account: summary, notebooks, devices, recent, isSelf: row.id === admin.id });
+  });
+
+  /* ---------------------------------------------------------------- 笔记本 */
+
+  routes.get("/notebooks", (c) => {
+    const admin = requireAdmin(c);
+    if (admin instanceof Response) return admin;
+    return json({ now: now(), notebooks: deps.notebooks.listAllNotebooks() });
+  });
+
+  /* ---------------------------------------------------------------- 设备 */
+
+  routes.get("/devices", (c) => {
+    const admin = requireAdmin(c);
+    if (admin instanceof Response) return admin;
+    const at = now();
+    return json({
+      now: at,
+      onlineWindowMs: ONLINE_WINDOW_MS,
+      staleDays: STALE_DEVICE_DAYS,
+      devices: deps.notebooks.listAllDevices({ now: at }).map((device) => deviceView(device, at)),
+    });
+  });
+
+  return routes;
 }

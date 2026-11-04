@@ -26,6 +26,7 @@ const { existsSync, watch, readdirSync, readFileSync } = require('node:fs')
 const { spawn } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const path = require('node:path')
+const { fileURLToPath } = require('node:url')
 
 // `opennote://` 深链解析（00 号 §6.14㉛）。零 Electron 依赖的纯函数，可被单测直接
 // require —— 「路由与拒绝规则」不靠真机手点，见 electron/deeplink.cjs 的注释。
@@ -36,7 +37,7 @@ const { DEEPLINK_CHANNEL, PROTOCOL, deeplinkMessage, findDeeplinkInArgv, parseOp
 // 远程配图在界面里加载不了；扩展侧 host_permissions 又只有 127.0.0.1 的十条。
 // 主进程没有这两道限制 —— 「图片一起保存」真正落地就靠这一层。纯函数，可单测。
 const { downloadImages: downloadImagesInMain } = require('./fetch-images.cjs')
-const { createSyncProxy, composeUrl, normalizeBaseUrl, assertSafeRelPath } = require('./sync.cjs')
+const { createSyncProxy, composeUrl, normalizeBaseUrl, assertSafeRelPath, fetchWithIdleTimeout } = require('./sync.cjs')
 
 /** 图片下载通道（preload 用同一个常量；verify-contract 的 C-12a 靠常量名配对两侧）。 */
 const NET_DOWNLOAD_IMAGES_CHANNEL = 'opennote:net:downloadImages'
@@ -149,25 +150,51 @@ function cspPolicy() {
     "form-action 'none'",
     "frame-ancestors 'none'",
     "worker-src 'self' blob:",
+    // HTML 页面的沙箱宿主页（`dist/html-sandbox.html`，见 src/html/sandbox.ts）是唯一的子框架。
+    // file: 是 scheme 源：CSP 写不出「只许这一个文件」，所以另有 will-frame-navigate 守着子框架导航。
+    'frame-src file:',
   ].join('; ')
+}
+
+/**
+ * HTML 页面沙箱宿主页自己的 CSP —— `src/html/sandbox.ts` 的 `HTML_SANDBOX_CSP` 的**逐字副本**
+ * （`src/html/sandbox.test.ts` 钉住两边一致）。它只发给 `dist/html-sandbox.html` 这一个文件：
+ * 页面内容需要内联脚本，而应用本体的策略绝不放行内联脚本（见 cspPolicy）。
+ * 页面跑在 `<iframe sandbox="allow-scripts">` 里（不透明源），这份宽松策略碰不到应用数据。
+ */
+const HTML_SANDBOX_CSP =
+  "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob: https:; style-src 'unsafe-inline' data: blob: https:; img-src data: blob: https:; font-src data: blob: https:; media-src data: blob: https:; connect-src data: blob:; worker-src data: blob:; frame-src 'none'; object-src 'none'; form-action 'none'"
+
+/** 打包产物里的沙箱宿主页（只有它拿 HTML_SANDBOX_CSP）。 */
+const HTML_SANDBOX_PATH = path.join(app.getAppPath(), 'dist', 'html-sandbox.html')
+
+function isHtmlSandboxUrl(url) {
+  if (!isFileUrl(url)) return false
+  try {
+    return pathIdentity(path.resolve(fileURLToPath(url.split(/[?#]/)[0]))) === pathIdentity(HTML_SANDBOX_PATH)
+  } catch {
+    return false
+  }
 }
 /**
  * 与界面左上角印章同源的图标（`pnpm icons` 生成，见 scripts/make_icons.py）：
  *   · Windows/Linux：`build/icon.ico` —— 窗口 + 任务栏 + Alt-Tab，打包后 exe 内嵌同一份；
- *   · macOS：**直接复用已经生成好的那张 512 位图**（`public/icon-512.png`，与 .ico 是
- *     同一份 art），打包后 Vite 会把它拷进 `dist/`，所以两个位置都找一遍。
+ *   · macOS：`build/icon-mac.png` —— 按 Apple 图标网格出的那一份（1024 画布、身体
+ *     824、带投影，见 make_icons.py 的 MAC_* 常量）。
  *
- * 为什么不给 macOS 现画一张：绘制依赖系统 CJK 字体，而 macOS 的 Songti 路径随版本搬过家
+ * 为什么 macOS 不直接用 PWA 的 `public/icon-512.png`：那张是**满幅**美术（印章铺满
+ * 整张画布），而 macOS 原生 App 的图标身体恒为 824/1024、四周留白。用满幅图，Dock /
+ * Finder / ⌘Tab 里就会比邻居大一圈 —— 「macOS 图标看起来不对」的根因就是这个。
+ *
+ * 也不能在这里现画：绘制依赖系统 CJK 字体，而 macOS 的 Songti 路径随版本搬过家
  * （`/System/Library/Fonts/` → `Supplemental/`），取不到时会静默落到 Pillow 自带、
  * 不含中日韩字形的兜底字体，画出一个「缺字方框」—— 真踩过：Dock 图标成了白框叉。
- * 生成物本来就是同一颗印章，直接拿来用最稳。
+ * 所以图标全部在 `pnpm icons` 里生成并提交，运行时只负责读文件。
  */
 const WINDOW_ICON = path.join(app.getAppPath(), 'build', 'icon.ico')
-const DOCK_ICON_CANDIDATES = [
-  path.join(app.getAppPath(), 'dist', 'icon-512.png'), // 打包后：Vite 把 public/ 拷进 dist/
-  path.join(app.getAppPath(), 'public', 'icon-512.png'), // 开发：源目录
-]
-/** 实际存在的那张 Dock 图标；都没有则返回 null（保持系统默认，绝不设成空白）。 */
+/** 打包后 `build/icon-mac.png` 由 electron-builder 的 files 收进 asar（见 electron-builder.yml）。 */
+const DOCK_ICON_CANDIDATES = [path.join(app.getAppPath(), 'build', 'icon-mac.png')]
+/** 实际存在的那张 Dock 图标；没有则返回 null（保持系统默认，绝不设成空白）。 */
 function dockIconPath() {
   return DOCK_ICON_CANDIDATES.find((candidate) => existsSync(candidate)) || null
 }
@@ -1309,7 +1336,8 @@ async function configureSyncProxy(baseUrl, confirmImpl) {
     //    渲染层仍然见过 `authToken` 一次。如实记在这里，不假装已经做到。
     authToken: () => syncAuthToken,
     transport: async ({ method, url, headers, body, timeoutMs }) => {
-      const response = await fetch(url, {
+      // 「无进展才超时」：慢线路上的大文件只要还在传就不掐断（见 sync.cjs 的 fetchWithIdleTimeout）。
+      const { response, bytes } = await fetchWithIdleTimeout(fetch, url, {
         method,
         headers,
         // ★ 渲染层过 IPC 的 body 是 **number[]**（字节值的普通数组）。undici 的 fetch
@@ -1317,9 +1345,7 @@ async function configureSyncProxy(baseUrl, confirmImpl) {
         //   于是服务端 JSON.parse 失败，报「形状不符合契约：expected object,
         //   received null」。真机（桌面注册）实测，先转回字节再发。
         body: Array.isArray(body) ? Uint8Array.from(body) : body,
-        signal: AbortSignal.timeout(timeoutMs),
-      })
-      const bytes = new Uint8Array(await response.arrayBuffer())
+      }, { idleMs: timeoutMs })
       return { status: response.status, headers: Object.fromEntries(response.headers.entries()), body: bytes }
     },
   })
@@ -2688,7 +2714,7 @@ function installContentSecurityPolicy() {
       for (const key of Object.keys(responseHeaders)) {
         if (key.toLowerCase() === 'content-security-policy') delete responseHeaders[key]
       }
-      responseHeaders['Content-Security-Policy'] = [cspPolicy()]
+      responseHeaders['Content-Security-Policy'] = [isHtmlSandboxUrl(details.url) ? HTML_SANDBOX_CSP : cspPolicy()]
       callback({ responseHeaders })
     })
   } catch (error) {
@@ -2802,6 +2828,18 @@ function hardenWebContents(window) {
     if (isAppUrl(url)) return
     event.preventDefault()
     openExternalSafely(url)
+  })
+
+  // 子框架只许是 HTML 页面的沙箱宿主页（及其内部的锚点 / about:blank）。页面脚本自己
+  // `location.href = …` 想把框架带去别处（远端站点、本机任意 file://）一律拦下 —— 不替它打开
+  // 外部浏览器：那是脚本发起的，不是用户的点击（用户点链接走 postMessage + userActivation）。
+  window.webContents.on('will-frame-navigate', (details) => {
+    if (details.isMainFrame) return
+    const url = details.url || ''
+    if (url === 'about:blank' || url === 'about:srcdoc') return
+    if (isHtmlSandboxUrl(url)) return
+    if (DEV_URL && isAppUrl(url) && /\/html-sandbox\.html(?:[?#]|$)/.test(url)) return
+    details.preventDefault()
   })
 }
 
@@ -3061,7 +3099,7 @@ app.whenReady().then(async () => {
     if (!readyLogged) {
       readyLogged = true
       const iconNote = IS_MAC
-        ? (dockIconPath() ?? '未找到 icon-512.png（保持系统默认图标）')
+        ? (dockIconPath() ?? '未找到 build/icon-mac.png（保持系统默认图标）')
         : (existsSync(WINDOW_ICON) ? WINDOW_ICON : 'exe 内嵌图标')
       const frameNote = mainWindow && !mainWindow.isDestroyed()
         ? `窗口=${mainWindow.getBounds().height}px 内容=${mainWindow.getContentBounds().height}px`

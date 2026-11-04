@@ -15,11 +15,10 @@
  * §5.1 把同步定成**旁路**。一个「配置说关、实际在跑」的实现会往用户没同意的
  * 地址发数据，所以这里连 provider 都**不建**（建了就有可能被别处顺手用上）。
  *
- * ### ② 缺账号密钥 ⇒ 返回 `null`（并说明原因），**不静默降级**
+ * ### ② 没登录 ⇒ 返回 `signed-out`（并说明原因），**不静默降级**
  *
- * 没有密钥就派生不出 `authToken`。这时**不能**「先连上试试」——
- * 那会发一个没有凭证的请求，而服务端只能回 401，用户看到的是「同步失败」，
- * 一个指向错误方向的报错（真因是「这台设备还没导入密钥」）。
+ * 没有会话令牌时**不能**「先连上试试」—— 那会发一个没有凭证的请求，服务端只能回 401，
+ * 用户看到的是「同步失败」，一个指向错误方向的报错（真因是「这台设备还没登录」）。
  *
  * ### ③ E2EE 但拿不到 `notebookKey` ⇒ 抛，**不退回明文**
  *
@@ -29,7 +28,6 @@
 
 import type { FileSystemBackend } from "../fs/types";
 import type { WorkspaceRecord } from "../data/workspaces";
-import { decodeAccountKey, deriveFromAccountKey } from "./accountKey";
 import { createSyncController, type SyncController } from "./controller";
 import { createOpenNoteProvider } from "./providers/opennote";
 import { resolveSend } from "./http";
@@ -37,6 +35,7 @@ import { createSyncSession, type SyncSession } from "./session";
 import type { SyncOnceResult } from "./engine";
 import { createSyncStream, type EventStreamLike } from "./stream";
 import { createBackendSyncFiles } from "./backendFiles";
+import { createIgnoreRules, shouldSkipEntry } from "./ignore";
 import { getDeviceId } from "./device";
 import type { SyncLedger } from "./state";
 import type { HashCache } from "./hashCache";
@@ -69,8 +68,12 @@ export type AttachSkipReason =
   | "disabled"
   /** 配置半配好（缺 baseUrl / notebookId）—— 与 `normalizeSyncConfig` 的判定一致。 */
   | "incomplete"
-  /** 这台设备还没有账号密钥。 */
-  | "no-account-key";
+  /** 这台设备还没有登录同步账号。 */
+  | "signed-out"
+  /** 加密笔记本，但这台设备还没解锁加密口令。 */
+  | "locked"
+  /** 这个笔记本绑的是另一台服务器（不是这台设备登录的那台）。 */
+  | "other-server";
 
 export type AttachResult =
   | { ok: true; controller: SyncController; /** 建好的会话（provider/ledger 供冲突裁决用）。 */
@@ -81,8 +84,8 @@ export interface AttachWorkspaceSyncOptions {
   record: WorkspaceRecord;
   backend: FileSystemBackend;
   ledger: SyncLedger;
-  /** 本机保存的账号密钥文本（`keys.ts` 读出来的那一份）；没有就传 `null`。 */
-  accountKeyText: string | null;
+  /** 设备会话令牌（`ons_…`，`account.ts` 登录换来的）；没登录就传 `null`。 */
+  authToken: string | null;
   /** 工作区根目录的 `.gitignore` 文本。 */
   gitignoreText?: string;
   /**
@@ -120,6 +123,11 @@ export interface AttachWorkspaceSyncOptions {
    * 否则每次接一个工作区都要重新解一遍包裹。
    */
   notebookKeyForNotebook?: (notebookId: string) => Uint8Array | undefined;
+  /**
+   * 加密笔记本的文件名对照表密钥（`derivePathMapKey(encRoot)`）。给了，全新设备才认得出
+   * 别的设备建的加密文件（见 `pathMap.ts`）。明文笔记本忽略它。
+   */
+  pathMapKey?: Uint8Array;
   /** 测试注入 provider（跳过真实网络）。 */
   provider?: ReturnType<typeof createOpenNoteProvider>;
   /**
@@ -147,25 +155,11 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
   if (config.baseUrl === "" || config.notebookId === "") {
     return { ok: false, reason: "incomplete", message: "同步配置不完整（缺服务地址或笔记本 id）" };
   }
-  if (options.accountKeyText === null || options.accountKeyText === "") {
-    return { ok: false, reason: "no-account-key", message: "这台设备还没有导入账号密钥" };
+  if (options.authToken === null || options.authToken === "") {
+    return { ok: false, reason: "signed-out", message: "这台设备还没有登录同步账号" };
   }
+  const authToken = options.authToken;
 
-  // 解不开的密钥在这里就当「没有」—— 与 `keys.ts` 的 `load()` 同一套判断。
-  let material;
-  try {
-    material = decodeAccountKey(options.accountKeyText);
-  } catch {
-    return { ok: false, reason: "no-account-key", message: "本机保存的账号密钥已损坏，请重新导入" };
-  }
-  const { authToken } = deriveFromAccountKey(material);
-
-  /*
-   * ★ E2EE 但拿不到 notebookKey ⇒ **抛**，不退回明文（见模块头 ③）。
-   *
-   * 这是整个文件里唯一「宁可炸也不降级」的地方：退回明文意味着把本该加密的内容
-   * 以明文发出去，而用户以为自己开着 E2EE。
-   */
   let notebookKey: Uint8Array | undefined;
   if (config.cryptoMode === "user-key") {
     // 需要 `encRoot`：它只存在于「解开 wrappedEncRoot」之后。
@@ -174,7 +168,7 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
     notebookKey = options.notebookKeyForNotebook?.(config.notebookId);
     if (!notebookKey) {
       throw new Error(
-        "这个笔记本是加密的，但这台设备还没有它的密钥 —— 请先导入账号密钥并解锁；" +
+        "这个笔记本是加密的，但这台设备还没有解锁加密口令 —— 请先在「设置 → 同步」里解锁；" +
           "（**不会**退回明文同步）",
       );
     }
@@ -206,17 +200,23 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
   const cursorStore = options.cursorStore;
   const cursorKey = `${config.notebookId}|${options.record.location}`;
   const knownCursor = knownCursorFor(options.ledger, cursorStore, cursorKey);
+  const scanRules = createIgnoreRules(options.gitignoreText ?? "");
   const session = createSyncSession({
     config,
     ledger: options.ledger,
     provider,
-    backend: createBackendSyncFiles({ backend: options.backend }),
+    backend: createBackendSyncFiles({
+      backend: options.backend,
+      // 与会话里引擎用的是同一份 `.gitignore` + 内置集：被忽略的目录整棵不扫。
+      skipDir: (path) => shouldSkipEntry(scanRules, path, true),
+    }),
     notebookId: config.notebookId,
     ...(options.gitignoreText === undefined ? {} : { gitignoreText: options.gitignoreText }),
     ...(options.hashCache === undefined ? {} : { hashCache: options.hashCache }),
     ...(options.cursorStore === undefined ? {} : { cursorStore: options.cursorStore }),
     cursorKey,
     ...(notebookKey === undefined ? {} : { notebookKey }),
+    ...(config.cryptoMode === "user-key" && options.pathMapKey !== undefined ? { pathMapKey: options.pathMapKey } : {}),
     ...(options.onSynced === undefined ? {} : { onSynced: options.onSynced }),
     ...(options.onStatus === undefined ? {} : { onStatus: options.onStatus }),
     ...(options.onApplied === undefined ? {} : { onApplied: options.onApplied }),
@@ -245,6 +245,7 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
       stream.start();
       return stream;
     },
+    hasLocalChanges: () => session.hasLocalChanges(),
     ...(options.log === undefined ? {} : { log: options.log }),
   });
 

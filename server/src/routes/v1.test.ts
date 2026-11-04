@@ -12,11 +12,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
-import { PROTOCOL_VERSION } from "../../../shared/contract";
+import { MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION } from "../../../shared/contract";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
-import { AccountStore, newAccountId, newAuthTokenForTests } from "../auth/accounts";
+import type { AccountStore } from "../auth/accounts";
+import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
 import { NotebookStore } from "../notebooks";
-import { createAccountRoutes } from "./account";
 import { createV1Routes } from "./v1";
 import { loadConfig, type ServerConfig } from "../config";
 
@@ -55,14 +55,13 @@ interface World {
 function makeWorld(): World {
   const db = openDatabase({ path: ":memory:" });
   const fake = new FakeCouch();
-  const accounts = new AccountStore(db);
+  const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
   const config = loadConfig(ENV);
   const couch = couchClient(fake);
   // 测试里 admin 与运行时用同一个假客户端（真实部署里是两套凭据）。
   const deps = { accounts, notebooks, config, couch, couchAdmin: couch, audit: (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event) };
   const app = new Hono();
-  app.route("/v1", createAccountRoutes(deps));
   app.route("/v1", createV1Routes(deps));
   return {
     fake,
@@ -72,14 +71,8 @@ function makeWorld(): World {
     app,
     couch,
     account() {
-      const token = newAuthTokenForTests();
-      const row = accounts.create({
-        accountId: newAccountId(),
-        authToken: token,
-        wrappedEncRoot: "wrapped-fake",
-        bootstrapCode: accounts.createBootstrapCode().code,
-      });
-      return { id: row.id, token };
+      const { id, token } = seedAccount(accounts);
+      return { id, token };
     },
     notebook(ownerId, name = "笔记本", cryptoMode = "none") {
       const row = notebooks.create({ ownerId, name, cryptoMode });
@@ -111,8 +104,12 @@ describe("§4.7 · `/v1/health`：公开、且是协议闸门", () => {
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.ok).toBe(true);
     expect(body.protocolVersion).toBe(PROTOCOL_VERSION);
-    expect(body.minSupportedProtocolVersion).toBe(1);
+    expect(body.minSupportedProtocolVersion).toBe(MIN_SUPPORTED_PROTOCOL_VERSION);
     expect(body.couchVersion).toBe("3.3.3-fake");
+    // 客户端在「服务器地址」失焦时据此决定显示哪些登录方式（没给 settings 时按默认值报）。
+    expect(body.auth).toEqual({ password: true, github: false });
+    expect(body.registration).toBe("invite");
+    expect(body.setupRequired).toBe(true);
   });
 
   it("CouchDB 不通时**也要能报健康**（否则控制台连「哪里坏了」都看不到）", async () => {
@@ -689,76 +686,6 @@ describe("§4.3 · 客户端统计：只记计数", () => {
   });
 });
 
-describe("§1.5 · 注册与轮换的端到端（K2 / K5）", () => {
-  it("K2 · 没有码的注册请求 → 400（服务端不接受无码注册）", async () => {
-    const world = makeWorld();
-    const response = await call(world, "/v1/account", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ accountId: newAccountId(), authToken: newAuthTokenForTests(), wrappedEncRoot: "wrapped-too-short-0001" }),
-    });
-    expect(response.status).toBe(400);
-    expect(world.accounts.count()).toBe(0);
-  });
-
-  it("K2 · `isAdmin` 只由引导码决定，**请求体说了不算**", async () => {
-    const world = makeWorld();
-    // 用邀请码注册，同时在请求体里塞 isAdmin: true（schema 里没有这个字段，应被剥掉）。
-    const admin = world.account();
-    const invite = world.accounts.createInvite({ createdBy: admin.id });
-    const response = await call(world, "/v1/account", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        accountId: newAccountId(),
-        authToken: newAuthTokenForTests(),
-        wrappedEncRoot: "wrapped-by-invite-0001",
-        inviteCode: invite.code,
-        isAdmin: true,
-      }),
-    });
-        expect(response.status).toBe(201);
-    expect(((await response.json()) as { isAdmin: boolean }).isAdmin).toBe(false);
-  });
-
-  it("K5 · 轮换之后旧令牌立即 401、新令牌可用（204）", async () => {
-    const world = makeWorld();
-    const alice = world.account();
-    const newToken = newAuthTokenForTests();
-
-    const rotate = await call(world, "/v1/account/rotate", {
-      method: "POST",
-      headers: { ...auth(alice.token), "content-type": "application/json" },
-      body: JSON.stringify({ newAuthToken: newToken, newWrappedEncRoot: "wrapped-after-rotation-0001" }),
-    });
-    expect(rotate.status).toBe(204);
-
-    expect((await call(world, "/v1/account", { headers: auth(alice.token) })).status).toBe(401);
-    const after = await call(world, "/v1/account", { headers: auth(newToken) });
-    expect(after.status).toBe(200);
-    // K7 · 解锁拿回**新的** wrappedEncRoot。
-    const unlock = await call(world, "/v1/account/unlock", { method: "POST", headers: auth(newToken) });
-    expect(((await unlock.json()) as { wrappedEncRoot: string }).wrappedEncRoot).toBe("wrapped-after-rotation-0001");
-  });
-
-  it("注册响应里**不含**任何密钥材料（红线 3）", async () => {
-    const world = makeWorld();
-    const response = await call(world, "/v1/account", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ accountId: newAccountId(), authToken: newAuthTokenForTests(), wrappedEncRoot: "wrapped-x", bootstrapCode: world.accounts.createBootstrapCode().code }),
-    });
-    const text = await response.text();
-    expect(text).not.toContain("wrapped-x");
-    expect(text).not.toContain("accountKey");
-    expect(text).not.toContain("encRoot");
-  });
-});
-
-/* ============================================================================
-   §4.7 / §4.8 · `/v1/events` SSE 中继
-   ============================================================================ */
-
 describe("§4.7 · `/v1/events`（SSE 中继）", () => {
   /** 读出流的第一块（够了 —— 首帧就是 `ready`）。 */
   async function firstChunk(response: Response): Promise<string> {
@@ -1235,3 +1162,54 @@ describe("控制台取数 · 服务端在数据面上**自己数**（不依赖�
   });
 });
 
+
+describe("空间配额：超出就拒收让用量变多的写", () => {
+  it("超配额 → 413 + code quota；改小、删除照常放行；读不受影响", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.accounts.setQuota(alice.id, 10);
+    const put = (did: string, path: string, body: string, ifMatch?: string) =>
+      call(world, `/v1/file?nb=${notebook.id}&did=${did}&path=${path}`, {
+        method: "PUT",
+        headers: { ...auth(alice.token), ...(ifMatch === undefined ? {} : { "if-match": ifMatch }) },
+        body,
+      });
+
+    const first = await put("f:a", "a.md", "12345678");
+    expect(first.status).toBe(201);
+    const firstHash = ((await first.json()) as { hash: string }).hash;
+
+    const over = await put("f:b", "b.md", "12345678");
+    expect(over.status).toBe(413);
+    const body = (await over.json()) as { code: string; error: string; bytesUsed: number; bytesLimit: number };
+    expect(body.code).toBe("quota");
+    expect(body.error).toContain("空间已满");
+    expect(body).toMatchObject({ bytesUsed: 8, bytesLimit: 10 });
+
+    // 改小：用量变少，放行。
+    const smaller = await put("f:a", "a.md", "1234", firstHash);
+    expect(smaller.status).toBe(200);
+    expect(world.notebooks.bytesOwnedBy(alice.id)).toBe(4);
+
+    // 腾出空间之后，原来被拒的那条能写进去了。
+    expect((await put("f:b", "b.md", "123456")).status).toBe(201);
+
+    // 读不受配额影响。
+    const read = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { headers: auth(alice.token) });
+    expect(read.status).toBe(200);
+  });
+
+  it("配额 ≤ 0 视为不限", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.accounts.setQuota(alice.id, 0);
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, {
+      method: "PUT",
+      headers: auth(alice.token),
+      body: "x".repeat(100),
+    });
+    expect(response.status).toBe(201);
+  });
+});

@@ -3,10 +3,12 @@
  * Opennote 一键开发启动器（纯 Node ESM，无额外依赖）。
  *
  * 流程：
- *   1. 用当前 Node 可执行文件直接跑 vite/bin/vite.js（不依赖 .cmd shim，Windows 下更可靠）
- *   2. 轮询 http://127.0.0.1:5173，最多 40 次 × 500ms
- *   3. 就绪后拉起 Electron，注入 OPENNOTE_DEV_URL，stdio 继承到当前终端
- *   4. Electron 退出 → 结束 Vite 子进程 → 以相同退出码退出
+ *   1. 挑端口：默认从 5173 起，被占用就 +1 往后找（最多试 20 个）；显式设了
+ *      OPENNOTE_DEV_URL 则按它的端口来，不改
+ *   2. 用当前 Node 可执行文件直接跑 vite/bin/vite.js（不依赖 .cmd shim，Windows 下更可靠）
+ *   3. 轮询选定的地址，最多 40 次 × 500ms
+ *   4. 就绪后拉起 Electron，注入 OPENNOTE_DEV_URL（实际端口），stdio 继承到当前终端
+ *   5. Electron 退出 → 结束 Vite 子进程 → 以相同退出码退出
  *
  * Ctrl+C：Windows 下 SIGINT 会同时送达同控制台的子进程，这里再做一次兜底清理。
  */
@@ -14,6 +16,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import net from 'node:net'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +24,10 @@ import { fileURLToPath } from 'node:url'
 const require = createRequire(import.meta.url)
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-const DEV_URL = process.env.OPENNOTE_DEV_URL || 'http://127.0.0.1:5173'
+const EXPLICIT_DEV_URL = process.env.OPENNOTE_DEV_URL || ''
+const DEFAULT_DEV_URL = 'http://127.0.0.1:5173'
+/** 默认端口被占用时往后试几个（5173 → 5192）。 */
+const PORT_ATTEMPTS = 20
 const POLL_ATTEMPTS = 40
 const POLL_INTERVAL_MS = 500
 const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }
@@ -74,6 +80,28 @@ for (const signal of Object.keys(SIGNAL_EXIT_CODES)) {
   })
 }
 
+/** 在 host 上试着监听 port：能监听 = 空闲（随即关掉，交给 Vite）。 */
+function isPortFree(host, port) {
+  return new Promise((resolve) => {
+    const server = net.createServer()
+    server.once('error', () => resolve(false))
+    server.once('listening', () => server.close(() => resolve(true)))
+    server.listen(port, host)
+  })
+}
+
+/**
+ * 从 start 起找第一个空闲端口。先探测再交给 Vite（仍带 --strictPort）：
+ * Electron 要拿到确切的地址，不能让 Vite 自己悄悄换端口；也避免轮询时
+ * 连到别的进程占着的 5173、把 Electron 指向一个不相干的服务。
+ */
+async function findFreePort(host, start) {
+  for (let port = start; port < start + PORT_ATTEMPTS; port += 1) {
+    if (await isPortFree(host, port)) return port
+  }
+  throw new Error(`端口 ${start}–${start + PORT_ATTEMPTS - 1} 都被占用了`)
+}
+
 async function waitForDevServer(url) {
   for (let attempt = 1; attempt <= POLL_ATTEMPTS; attempt += 1) {
     if (viteChild && viteChild.exitCode !== null) {
@@ -94,13 +122,19 @@ async function main() {
   const viteBin = resolveViteBin()
   if (!viteBin) throw new Error('未找到 vite，请先在项目根目录执行 pnpm install')
 
-  const target = new URL(DEV_URL)
-  const port = target.port || '5173'
+  const target = new URL(EXPLICIT_DEV_URL || DEFAULT_DEV_URL)
+  const preferred = Number(target.port || '5173')
+  if (!EXPLICIT_DEV_URL) {
+    const port = await findFreePort(target.hostname, preferred)
+    if (port !== preferred) log(`端口 ${preferred} 已被占用，改用 ${port}`)
+    target.port = String(port)
+  }
+  const DEV_URL = target.origin
 
   log(`启动 Vite 开发服务器（${DEV_URL}）…`)
   viteChild = spawn(
     process.execPath,
-    [viteBin, '--host', target.hostname, '--port', port, '--strictPort'],
+    [viteBin, '--host', target.hostname, '--port', target.port, '--strictPort'],
     { cwd: projectRoot, stdio: 'inherit', env: { ...process.env, BROWSER: 'none' } },
   )
   viteChild.on('error', (error) => {

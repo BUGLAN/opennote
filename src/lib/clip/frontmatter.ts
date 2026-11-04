@@ -21,8 +21,8 @@
  * ```
  *
  * 三条最容易踩的坑，全部来自既有代码的事实：
- * 1. `deriveTitle()`（`src/lib/utils.ts:61`）**不读 front-matter**，只认正文第一个标题行 ——
- *    所以正文首行必须是 `# {title}`，写 `title:` 键完全无效；
+ * 1. 应用**不读 front-matter 的 `title:`**：侧栏显示名是文件名（落点按 title 命名），
+ *    正文里的标题靠首行 `# {title}`，写 `title:` 键完全无效；
  * 2. `deriveTags()`（`:132`）只认 `tags: [a, b]` 行内数组或 `- ` 块序列，且**只有 `tags`
  *    会被应用解析**，其余 7 个键都是惰性元数据（仍要写，供换机器/换编辑器不丢来源）；
  * 3. `---` 必须在**文件最开头**（`splitFrontMatter()` 的正则是 `^\uFEFF?---\r?\n…`），
@@ -92,7 +92,7 @@ export function renderFrontMatter(envelope: ImportEnvelope): string {
 
 /**
  * 正文里第一个非空行若本身已是 H1，降级为 H2（只降级一次，不做全局改写）。
- * 理由：避免同一文件出现两个 H1（`deriveTitle()` 只取第一个标题行）。
+ * 理由：避免同一文件出现两个 H1（首行已经是 `# {title}`）。
  */
 export function downgradeLeadingH1(body: string): string {
   const lines = body.split("\n");

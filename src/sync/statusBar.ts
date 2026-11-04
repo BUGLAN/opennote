@@ -55,15 +55,32 @@ export interface SyncBarInfo {
  * 「没开同步」也返回 `null`：同步是逐笔记本的开关，关着就是一个普通笔记本，
  * 不该常驻一句「同步 · 关」提醒他去开。
  */
-export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean): SyncBarInfo | null {
+/** 账号层面状态栏要知道的三件事（`account.ts` 的 `syncAccountStore` 里取）。 */
+export interface SyncBarAccount {
+  needsSignIn: boolean;
+  disabled: boolean;
+}
+
+const SIGNED_IN: SyncBarAccount = { needsSignIn: false, disabled: false };
+
+export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean, account: SyncBarAccount = SIGNED_IN): SyncBarInfo | null {
   if (!hasWorkspace) return null;
 
-  // ① 前置：没有密钥就谈不上同步，而这条**只有用户能解决**。
-  if (!state.hasKey) {
-    return { tone: "warn", label: "未导入密钥", title: "这台设备还没有账号密钥；导入之后才能同步" };
+  // ① 账号层面的问题：只有用户自己能解决（重新登录 / 找管理员），而且会让所有同步都停下。
+  if (account.disabled || state.status?.phase === "disabled") {
+    return { tone: "error", label: "账号已被停用", title: "同步账号被管理员停用了；请联系同步服务器的管理员" };
   }
-  if (state.reason === "incomplete") {
-    return { tone: "warn", label: "同步未配置完", title: "还差服务地址或远端笔记本；点击补全" };
+  if (account.needsSignIn || state.status?.phase === "signed-out") {
+    return { tone: "error", label: "需要重新登录", title: "这台设备的同步登录已失效（密码改过，或在别处被移除了）；点击重新登录" };
+  }
+  if (state.reason === "signed-out") {
+    return { tone: "warn", label: "未登录同步", title: "这个笔记本开着同步，但这台设备还没有登录同步账号；点击登录" };
+  }
+  if (state.reason === "locked") {
+    return { tone: "warn", label: "待解锁", title: "这个笔记本是端到端加密的；输入加密口令解锁后才能同步" };
+  }
+  if (state.reason === "other-server") {
+    return { tone: "warn", label: "服务器不一致", title: "这个笔记本绑的同步服务器与这台设备登录的不是同一台；点击查看" };
   }
   // ② 没开同步：不是异常，别常驻。
   if (state.reason === "disabled") return null;
@@ -91,7 +108,7 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean): Sy
       if (state.status.conflicts > 0) {
         return {
           tone: "warn",
-          label: `${state.status.conflicts} 处冲突待处理`,
+          label: `${state.status.conflicts} 篇待处理`,
           title: text.detail ?? "两边都改过同一篇，需要你决定保留哪一份",
         };
       }
@@ -123,7 +140,7 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean): Sy
       }
       return null;
     }
-    // offline / error / key-rotated：都要让人看见。
+    // offline / error：都要让人看见。
     return {
       tone: text.tone === "error" ? "error" : "warn",
       label: text.label,

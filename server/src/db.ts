@@ -15,9 +15,9 @@
  *
  * ## 三条与安全直接相关的写法
  *
- * 1. **`accounts` 里没有口令字段**（没有口令体系，§1.5）。存的是 `auth_hash = sha256(authToken)`
- *    —— 256 位随机令牌的哈希，**无法离线爆破**（这也正是「不需要 Argon2id」的依据）。
- * 2. **`wrapped_enc_root` 是密文**：`AEAD(wrapKey, encRoot, aad=accountId)`。
+ * 1. **密码只存 scrypt 哈希**（`auth/passwords.ts`），会话令牌只存 sha256（v4 起，
+ *    `docs/执行-同步重写-2026-11-02.md`）。明文令牌只在登录响应里出现一次。
+ * 2. **`wrapped_enc_root` 是密文**：由客户端用「加密口令」派生的 `wrapKey` 包好再上传。
  *    服务端**解不开**，因为它没有 `wrapKey`（红线 3）。
  * 3. **审计表永不包含正文或密钥材料**（§4.3 注释里写死了这一条）。
  */
@@ -27,13 +27,19 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 6;
 
 interface Migration {
   version: number;
   /** 人类可读的一句话（迁移日志与控制台都会显示，便于审计）。 */
   description: string;
   up: (db: DatabaseSync) => void;
+  /**
+   * 要重建被外键引用的表时置 true：`migrate()` 在事务**外**关掉外键、事务内跑完后用
+   * `PRAGMA foreign_key_check` 兜底，再打开（SQLite 官方的「12 步改表」流程）。
+   * 外键开关在事务里改不了，所以只能由 `migrate()` 来做。
+   */
+  foreignKeysOff?: boolean;
 }
 
 /**
@@ -276,6 +282,132 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    description: "账号改为邮箱 + 密码：重建 accounts，新增 sessions / password_resets / server_settings，邀请带邮箱与角色",
+    foreignKeysOff: true,
+    up: (db) => {
+      /*
+       * ## 为什么重建 accounts（而不是加列）
+       *
+       * v1–v3 的 accounts 是「密钥即身份」：`auth_hash` / `wrapped_enc_root` 都是 NOT NULL，
+       * 新账号根本没有这两样东西。同步重写（`docs/执行-同步重写-2026-11-02.md`）决定**不兼容**
+       * 旧账号，所以旧行原样搬过来但没有邮箱和密码 —— 它们再也登录不了，只留着让外键与审计不断。
+       *
+       * - `email` 用 `COLLATE NOCASE` 的唯一约束：`Lan@x.com` 与 `lan@x.com` 是同一个人。
+       * - `password_hash` 可空：只用 GitHub 登录的账号没有密码。
+       * - `quota_bytes` 可空：空 = 跟随服务默认值（改默认值时不用逐个改账号）。
+       * - `wrapped_enc_root` / `enc_params` 留给「加密口令」阶段，现在恒为空。
+       *
+       * ## 凭据不再是账号本身
+       *
+       * 以前令牌就是身份，所以没有会话表。现在登录换来不透明令牌，`sessions` 只存它的 sha256；
+       * 移除设备 = 吊销它的会话，改密码 = 吊销全部会话。
+       *
+       * `bootstrap_codes` 删掉：第一个管理员改由「零账号时的初始化接口」与 CLI `create-admin` 产生。
+       */
+      db.exec(`
+        CREATE TABLE accounts_v4 (
+          id               TEXT PRIMARY KEY,
+          email            TEXT UNIQUE COLLATE NOCASE,
+          display_name     TEXT,
+          password_hash    TEXT,
+          is_admin         INTEGER NOT NULL DEFAULT 0,
+          status           TEXT NOT NULL DEFAULT 'active',   -- active | disabled
+          quota_bytes      INTEGER,
+          wrapped_enc_root TEXT,
+          enc_params       TEXT,
+          created_at       INTEGER NOT NULL,
+          last_seen_at     INTEGER
+        );
+      `);
+      // 旧表的列在不同版本里不完全一样（早期是 `disabled_at` 而不是 `status`），按实际存在的列搬。
+      const legacy = new Set((db.prepare("PRAGMA table_info(accounts)").all() as unknown as { name: string }[]).map((row) => row.name));
+      const statusExpr = legacy.has("status") ? "status" : legacy.has("disabled_at") ? "CASE WHEN disabled_at IS NULL THEN 'active' ELSE 'disabled' END" : "'active'";
+      db.exec(`
+        INSERT INTO accounts_v4 (id, email, display_name, password_hash, is_admin, status, quota_bytes, wrapped_enc_root, enc_params, created_at, last_seen_at)
+          SELECT id, NULL, ${legacy.has("label") ? "label" : "NULL"}, NULL, ${legacy.has("is_admin") ? "is_admin" : "0"}, ${statusExpr}, NULL, NULL, NULL, created_at, ${legacy.has("last_seen_at") ? "last_seen_at" : "NULL"}
+            FROM accounts;
+        DROP TABLE accounts;
+        ALTER TABLE accounts_v4 RENAME TO accounts;
+
+        CREATE TABLE sessions (
+          id           TEXT PRIMARY KEY,
+          account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          token_hash   TEXT NOT NULL UNIQUE,          -- sha256(令牌)  ★ 明文只在登录响应里出现一次
+          kind         TEXT NOT NULL,                 -- device | panel
+          device_id    TEXT,
+          created_at   INTEGER NOT NULL,
+          last_used_at INTEGER,
+          expires_at   INTEGER,                       -- 空 = 不过期（设备会话）
+          revoked_at   INTEGER,
+          ip           TEXT
+        );
+        CREATE INDEX idx_sessions_account ON sessions(account_id);
+
+        CREATE TABLE password_resets (
+          code_hash  TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          created_by TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          used_at    INTEGER
+        );
+
+        -- 可在控制台改、即时生效的服务设置（键值对；值是 JSON 文本）
+        CREATE TABLE server_settings (
+          key        TEXT PRIMARY KEY,
+          value      TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        ALTER TABLE invites ADD COLUMN email TEXT;
+        ALTER TABLE invites ADD COLUMN grant_admin INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE invites ADD COLUMN quota_bytes INTEGER;
+        ALTER TABLE invites ADD COLUMN accepted_by TEXT;
+
+        ALTER TABLE devices ADD COLUMN os TEXT;
+        ALTER TABLE devices ADD COLUMN client_version TEXT;
+        ALTER TABLE devices ADD COLUMN revoked_at INTEGER;
+
+        DROP TABLE IF EXISTS bootstrap_codes;
+      `);
+    },
+  },
+  {
+    version: 5,
+    description: "sync_activity 记下当天最后一次活动的时间（控制台活动日志按时间排）",
+    up: (db) => {
+      /*
+       * `sync_activity` 按天聚合，只有 `day` 没有时刻 —— 活动日志要把它和审计（精确到毫秒）
+       * 排进同一条时间线，只靠 `day` 只能把一整天的同步堆在当天末尾。
+       * 加一列「这一行最后一次被记账的时间」，旧行留空（按当天末尾排）。
+       */
+      db.exec("ALTER TABLE sync_activity ADD COLUMN last_at INTEGER");
+    },
+  },
+  {
+    version: 6,
+    description: "第三方登录身份（GitHub）：identities",
+    up: (db) => {
+      /*
+       * 一个账号可以绑一个 GitHub 身份；`subject` 是 GitHub 的数字 id（login 会改名，id 不会）。
+       * 删账号时级联删掉它的身份，身份不会挂在不存在的账号上。
+       */
+      db.exec(`
+        CREATE TABLE identities (
+          provider     TEXT NOT NULL,              -- github
+          subject      TEXT NOT NULL,              -- GitHub 用户的数字 id
+          account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          login        TEXT,                       -- 显示用（@buglan），每次登录刷新
+          created_at   INTEGER NOT NULL,
+          last_used_at INTEGER,
+          PRIMARY KEY (provider, subject)
+        );
+        CREATE UNIQUE INDEX idx_identities_account ON identities(account_id, provider);
+      `);
+    },
+  },
 ];
 
 export interface OpenDatabaseOptions {
@@ -340,13 +472,20 @@ function migrate(db: DatabaseSync, options: OpenDatabaseOptions): void {
       options.onMigration?.(migration, false);
       continue;
     }
+    if (migration.foreignKeysOff) db.exec("PRAGMA foreign_keys = OFF");
     db.exec("BEGIN");
     try {
       migration.up(db);
+      if (migration.foreignKeysOff) {
+        const broken = db.prepare("PRAGMA foreign_key_check").all();
+        if (broken.length > 0) throw new Error(`外键检查失败：${JSON.stringify(broken.slice(0, 3))}`);
+      }
       db.exec("COMMIT");
     } catch (error) {
       db.exec("ROLLBACK");
       throw new Error(`迁移 ${migration.version}（${migration.description}）失败，已回滚：${String(error)}`);
+    } finally {
+      if (migration.foreignKeysOff) db.exec("PRAGMA foreign_keys = ON");
     }
     writeSchemaVersion(db, migration.version);
     current = migration.version;

@@ -13,7 +13,10 @@ import {
   findCaseFoldCollisions,
   foldCaseKey,
   idForPath,
+  isCanvasPath,
   isHiddenPath,
+  isHtmlPath,
+  isMaterializable,
   isValidPathDocId,
   normalizeNfc,
   normalizePath,
@@ -145,6 +148,43 @@ describe("大小写折叠（只检测，不改名）", () => {
 
   it("foldCaseKey 只做小写与归一，不做别的", () => {
     expect(foldCaseKey("Notes\\A.MD")).toBe("notes/a.md");
+  });
+});
+
+describe("isCanvasPath / isMaterializable（画布进物化判据，同步与导入共用）", () => {
+  it("`.canvas` 是画布：大小写不敏感，别的扩展名不是", () => {
+    expect(isCanvasPath("看板.canvas")).toBe(true);
+    expect(isCanvasPath("读书/看板.canvas")).toBe(true);
+    expect(isCanvasPath("看板.CANVAS")).toBe(true); // 与 md/图片判据同款大小写不敏感
+    expect(isCanvasPath("看板.canvasx")).toBe(false);
+    expect(isCanvasPath("看板.md")).toBe(false);
+    expect(isCanvasPath(".canvas")).toBe(true); // 扩展名判据只看结尾，与 isMarkdownPath(".md") 同款
+  });
+
+  it("isMaterializable 认笔记、图片与画布；源码/配置仍不落地", () => {
+    expect(isMaterializable("notes/a.md")).toBe(true);
+    expect(isMaterializable("assets/pic.png")).toBe(true);
+    expect(isMaterializable("notes/看板.canvas")).toBe(true);
+    // 曾经的缺口：画布推得上去、拉不下来，就是因为这里不认它
+    expect(isMaterializable("src/main.ts")).toBe(false);
+    expect(isMaterializable("package.json")).toBe(false);
+    expect(isMaterializable("看布.canvasbak")).toBe(false);
+  });
+});
+
+describe("isHtmlPath / isMaterializable（HTML 页面进物化判据，散落的 css/js 不进）", () => {
+  it("`.html` / `.htm` 是 HTML 页面：大小写不敏感", () => {
+    expect(isHtmlPath("报告.html")).toBe(true);
+    expect(isHtmlPath("产出/报告.HTM")).toBe(true);
+    expect(isHtmlPath("报告.xhtml")).toBe(false); // XHTML 不在范围内（解析规则不同）
+    expect(isHtmlPath("报告.html.bak")).toBe(false);
+    expect(isHtmlPath("报告.md")).toBe(false);
+  });
+
+  it("isMaterializable 认 HTML 页面，但不认它可能引用的 css / js", () => {
+    expect(isMaterializable("产出/报告.html")).toBe(true);
+    expect(isMaterializable("产出/style.css")).toBe(false);
+    expect(isMaterializable("产出/app.js")).toBe(false);
   });
 });
 

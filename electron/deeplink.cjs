@@ -21,7 +21,7 @@ const PROTOCOL = 'opennote'
 /** 主进程 → 渲染层的深链频道（preload 用 `onDeepLink(cb)` 订阅，arity 1）。 */
 const DEEPLINK_CHANNEL = 'opennote:app:deeplink'
 
-/** 与 02 号 §5.6 一致：只认这两条路由，其余一律显式拒绝。 */
+/** 与 02 号 §5.6 一致：设置只认这两条路由（同步另有 `sync/callback`、`sync/sign-in`），其余一律显式拒绝。 */
 const SETTINGS_ROUTES = new Set(['settings', 'settings/import'])
 
 /**
@@ -104,6 +104,41 @@ function parseOpennoteUrl(raw) {
     // 归一成 POSIX 相对路径再交给上层。**不 trim** —— 上面的校验已经拒绝了两端
     // 带空白的值，这里再 trim 就等于把校验悄悄取消掉。
     return { ok: true, kind: 'open', path: path.replace(/\\/g, '/') }
+  }
+
+  // 同步：GitHub 登录回来（`opennote://sync/callback?code=…&state=…` 或 `?error=…&message=…`）。
+  // 只转交这几个字符串参数，长度设上限；真伪由渲染层核对 state、由服务端核对 PKCE verifier。
+  if (route === 'sync/callback') {
+    const pick = (name, max) => {
+      const value = url.searchParams.get(name)
+      return value === null || value.length > max ? null : value
+    }
+    const state = pick('state', 128)
+    if (!state) return { ok: false, reason: 'invalid', detail: '缺少 state 参数', route }
+    return {
+      ok: true,
+      kind: 'sync-callback',
+      code: pick('code', 256),
+      state,
+      error: pick('error', 64),
+      message: pick('message', 500),
+      github: pick('github', 64),
+    }
+  }
+
+  // 同步：`/join` 页的「在 Opennote 中打开」→ 打开设置的同步一栏，预填服务器与邮箱（不自动登录）。
+  if (route === 'sync/sign-in') {
+    const server = url.searchParams.get('server')
+    const email = url.searchParams.get('email')
+    if (server !== null && (server.length > 300 || !/^https?:\/\/[^\s]+$/i.test(server))) {
+      return { ok: false, reason: 'invalid', detail: 'server 参数不是 http(s) 地址', route }
+    }
+    return {
+      ok: true,
+      kind: 'sync-sign-in',
+      server,
+      email: email !== null && email.length <= 254 ? email : null,
+    }
   }
 
   return { ok: false, reason: 'unsupported', route }

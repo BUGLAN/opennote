@@ -8,6 +8,47 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **HTML 页面**：`.html` / `.htm` 成为与 Markdown、画布并列的第三种页面。打开即渲染（不是源码、
+  不是编辑器），脚本照常运行；应用内只读——标签栏的锁固定为「锁定」且不可解锁；右上角悬浮全屏按钮，
+  退出全屏回到原页面（页面状态不丢）。页面跑在 `sandbox="allow-scripts"` 的不透明源 iframe 里，
+  宿主页 `html-sandbox.html` 自带独立 CSP，应用本体的 CSP 一字未放宽。详见 `docs/html/00-HTML页面.md`。
+- **Skill 入库 HTML 页面**：`opennote-ingest` 认 `.html`，自动收集页面引用的 CSS / JS / 图片 / 字体，
+  默认进收件箱，「预览」即入库后的那一页；入库时内联成单个 `.html` 文件（信封扩展
+  `format: "html"` + `resources[]`）。文件 / zip / 文件夹导入同样认 `.html` 并内联同批资源。
+
+### 修复
+
+- **macOS 的图标比所有 App 大一圈（Dock / Finder / ⌘Tab）**：`build/icon.icns` 与运行时
+  Dock 用的 `public/icon-512.png` 都是「印章铺满整张画布」的美术（alpha 实心 0..1024），
+  而 macOS 原生 App 的图标身体恒为 **824/1024**（四周 100px 留白）再加一圈投影 —— 实测
+  本机 Claude / PyCharm / VS Code 的 1024 档与 Apple 自家 Notes / Calendar / Safari 的
+  256 档：实心身体都折合 824/1024（1024 上是 `100..924`），投影则是「向下偏几像素、
+  `alpha>0` 外溢 20–48px」这个量级（Apple 自家更宽更淡，第三方普遍更硬更深）。
+  现在 `pnpm icons` 为 macOS 单独出一套画布：身体 824、
+  圆角 185.4（Apple 模板值）、高斯 σ15 + 向下偏移 10 + 18% 黑的投影（比第三方常见做法
+  更宽更淡，贴 Apple 模板的观感）；先按 4 倍超采样再 LANCZOS 降到每一档（旧图是原生
+  尺寸直画，16/32 档圆角有锯齿）。`build/icon.icns` 换成这套，新增
+  `build/icon-mac.png` 给 Electron 运行时 `app.dock.setIcon`（打包时由
+  `electron-builder.yml` 的 `files` 收进 asar），并加 `verify_mac_icon()` 自检：
+  四角必须透明、身体占比必须 ≈0.8047，否则直接报错退出。Windows `.ico`、
+  PWA / favicon 仍是满幅美术（没有这个网格要求），本次没有改动它们的绘制代码。
+- **导入收件箱卡在「正在入库…」，而且这条条目再也处理不掉**（用户真机截图：笔记其实已经
+  入库，界面一直转圈）。两处独立成因，都在数据层修掉：
+  - **并发刷新把新状态盖回旧的**。`refreshInbox()` 原来的并发护栏是「只让最后一次**开始**的
+    读盘落地」，于是「读得早、发布得晚」的那一次会把 `committed` 覆盖回 `committing`。
+    改成**串行 + 尾随重读**后，后一次读盘一定发生在此前所有写入之后，`await refreshInbox()`
+    的调用方看到的就是自己刚写下的状态。
+  - **`committing` 没有任何自愈路径**。它在界面上同时禁用「入库」与「跳过这次」，而契约规定
+    这个状态**不设期限**（`02` §5.8.3），进程被杀 / 收尾没跑完就会永久留一条死条目。新增
+    `recoverStaleCommit()`：整盘刷新时，超过 30 秒没动静、且不在本进程 `inFlight` 里的
+    `committing` 条目按**磁盘事实**落地 —— 幂等索引里有落点且文件在 → `committed`；否则退回
+    `pending`，把两个按钮还给用户（不猜 `committed`：谎报会让用户去找一篇并不存在的笔记）。
+  - 面板收尾无条件重读一次：主按钮那句话由磁盘状态决定，光放开本地的 `busy` 是不够的。
+  - 回归用例 6 条（`src/data/inbox.test.ts`）。其中「入库途中排进来的刷新」在修复前读到的
+    正是 `committing`。
+
 ## [0.15.0] - 2026-10-24
 
 > **多设备同步首次交付**：自带同步服务端（Node + CouchDB，密钥即身份、默认端到端加密）、

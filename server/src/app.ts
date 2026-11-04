@@ -7,7 +7,7 @@
  * | --- | --- | --- |
  * | `/` + 静态资源 | **PWA 客户端**（与其它两个同源，所以 CSP 不用放开任何 https） | 网页端 |
  * | `/v1/*` | 客户端 API | 桌面 / Android / 网页 |
- * | `/panel` | **控制台** | 浏览器（运维） |
+ * | `/admin`、`/join`、`/reset` | **控制台**与两张公开页（`routes/panel.ts`） | 浏览器（运维 / 被邀请的人） |
  * | `/v1/health` | 公开健康检查 | 隧道 / 监控 |
  *
  * 同源带来两件具体的好事：**CSP 里 `connect-src` 不用放开任何 https**；控制台不需要 CORS。
@@ -40,14 +40,18 @@ import { CouchClient } from "./couch/client";
 import { AccountStore } from "./auth/accounts";
 import { NotebookStore } from "./notebooks";
 import { rateLimit, globalRateLimitKey, rateLimitKeyFromHeader } from "./ratelimit";
-import { createAccountRoutes } from "./routes/account";
+import { createAuthRoutes, LoginThrottle } from "./routes/auth";
 import { createAdminRoutes } from "./routes/admin";
+import { createAdminViewRoutes } from "./routes/adminView";
+import { createPanelRoutes } from "./routes/panel";
+import { createGithubRoutes } from "./routes/github";
+import { createGithubApi, OAuthFlows, type GithubApi } from "./auth/github";
+import { PairingStore } from "./auth/pairing";
+import { createPairingRoutes } from "./routes/pairing";
 import { createNotebookRoutes } from "./routes/notebooks";
 import { createV1Routes } from "./routes/v1";
-import { createPanelApi } from "./routes/panel";
-import { createAdminViewRoutes } from "./routes/adminView";
-import { loadPanelAsset, panelAssetNames } from "./panelAssets";
-import { csrfGuard, isHttps, securityHeaders, PANEL_CSP } from "./panelSecurity";
+import { SettingsStore } from "./settings";
+import { csrfGuard, isHttps, securityHeaders } from "./panelSecurity";
 
 export interface AppOptions {
   config: ServerConfig;
@@ -57,6 +61,8 @@ export interface AppOptions {
   couchAdmin?: CouchClient;
   /** 进程启动时间（uptime）。 */
   startedAt?: number;
+  /** 覆盖 GitHub 接口（测试注入假实现）。 */
+  github?: GithubApi;
   now?: () => number;
 }
 
@@ -64,6 +70,7 @@ export interface BuiltApp {
   app: Hono;
   accounts: AccountStore;
   notebooks: NotebookStore;
+  settings: SettingsStore;
   couch: CouchClient;
   couchAdmin: CouchClient;
 }
@@ -105,6 +112,7 @@ export function createApp(options: AppOptions): BuiltApp {
   const { config, db } = options;
   const accounts = new AccountStore(db);
   const notebooks = new NotebookStore(db);
+  const settings = new SettingsStore(db, config);
   const couch = options.couch ?? CouchClient.fromConfig(config);
   const couchAdmin = options.couchAdmin ?? CouchClient.adminFromConfig(config);
 
@@ -150,17 +158,22 @@ export function createApp(options: AppOptions): BuiltApp {
   const https = isHttps(config);
   app.use("*", async (c, next) => {
     await next();
-    const headers = securityHeaders({ https, csp: c.req.path.startsWith("/panel") ? PANEL_CSP : null });
+    const headers = securityHeaders({ https, csp: null });
     for (const [key, value] of Object.entries(headers)) {
       // 不覆盖路由自己设的头（例如静态资源已经给了准确的 content-type）。
       if (!c.res.headers.has(key)) c.res.headers.set(key, value);
     }
   });
 
-  /* CSRF 闸门：只对**带 cookie 的变更类请求**生效（纯 Bearer 客户端不受影响）。 */
-  app.use("/panel/api/*", csrfGuard());
+  const nowOption = options.now === undefined ? {} : { now: options.now };
+  const audit = (event: Parameters<NotebookStore["audit"]>[0]): void => notebooks.audit(event);
+  // 客户端登录与控制台登录共用一份失败计数：换个入口不该换来五次新机会。
+  const throttle = new LoginThrottle();
+  // 进行中的 GitHub 授权与一次性登录码（只在内存）：回调路由发码，`/v1/auth/github/exchange` 收码。
+  const oauth = new OAuthFlows();
 
-  app.route("/v1", createAccountRoutes({ accounts, notebooks, config, audit: (event) => notebooks.audit(event) }));
+  app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, throttle, oauth, ...nowOption }));
+  app.route("/v1", createPairingRoutes({ accounts, notebooks, config, settings, pairings: new PairingStore(), audit, ...nowOption }));
   app.route(
     "/v1",
     createNotebookRoutes({
@@ -174,7 +187,24 @@ export function createApp(options: AppOptions): BuiltApp {
   );
   app.route(
     "/v1",
-    createV1Routes({ accounts, notebooks, config, couch, couchAdmin, audit: (event) => notebooks.audit(event) }),
+    createV1Routes({ accounts, notebooks, config, couch, couchAdmin, settings, audit: (event) => notebooks.audit(event) }),
+  );
+  /*
+   * 控制台用 cookie 调管理接口：cookie 会被浏览器自动带上，所以变更请求必须带自定义头
+   * （跨源页面发不出来）。纯 Bearer 的请求没有 cookie，不受影响（见 `csrfGuard`）。
+   */
+  app.use("/v1/admin/*", csrfGuard());
+  app.route(
+    "/v1/admin",
+    createAdminViewRoutes({
+      accounts,
+      notebooks,
+      config,
+      couch,
+      settings,
+      ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
+      ...nowOption,
+    }),
   );
   app.route(
     "/v1/admin",
@@ -183,76 +213,16 @@ export function createApp(options: AppOptions): BuiltApp {
       notebooks,
       config,
       couch,
+      settings,
       audit: (event) => notebooks.audit(event),
       ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
       ...(options.now === undefined ? {} : { now: options.now }),
     }),
   );
 
-  /* ------------------------------------------------------------ 控制台 */
-  /*
-   * §4.6：无构建步骤的静态页。只有三个资源（白名单在 `panelAssets.ts`），
-   * 所以这里**不是**一个通用静态服务器 —— 没有目录列表、没有路径拼接、没有缓存头。
-   */
-  for (const name of panelAssetNames()) {
-    const route = name === "index.html" ? "/panel" : `/panel/${name}`;
-    app.get(route, () => {
-      const asset = loadPanelAsset(name);
-      if (!asset) return new Response("not found", { status: 404 });
-      /*
-       * 字体/印章是二进制，文本资源是字符串：两种都要能发。
-       * `cache-control: no-store` 对**所有**控制台资源都成立 —— 「改了没生效」
-       * 在这台页面上浪费过太多次时间，宁可每次重读。
-       */
-      return new Response(asset.body as string | Uint8Array, {
-        status: 200,
-        headers: {
-          "content-type": asset.contentType,
-          "cache-control": "no-store",
-        },
-      });
-    });
-  }
-  // `/panel/` 与 `index.html` 也指向同一份（用户会手打这两种）。
-  app.get("/panel/", () => {
-    const asset = loadPanelAsset("index.html")!;
-    return new Response(asset.body as string | Uint8Array, {
-      status: 200,
-      headers: { "content-type": asset.contentType, "cache-control": "no-store" },
-    });
-  });
-
-  /*
-   * 管理端聚合读端点（台账 / 全站设备 / 邀请码 / 配置 / 巡检 / 概览）。
-   * 与 `createPanelApi` 挂在**同一个前缀**下：它们的鉴权形状完全一样，
-   * 分成两个文件只是为了「每个文件的每个处理器都要 requireAdmin」这条纪律
-   * 能被一眼看出来。
-   */
-  app.route(
-    "/panel/api/admin",
-    createAdminViewRoutes({
-      accounts,
-      notebooks,
-      config,
-      couch,
-      audit: (event) => notebooks.audit(event),
-      ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
-      ...(options.now === undefined ? {} : { now: options.now }),
-    }),
-  );
-
-  app.route(
-    "/panel/api",
-    createPanelApi({
-      accounts,
-      notebooks,
-      config,
-      couch,
-      couchAdmin,
-      audit: (event) => notebooks.audit(event),
-      ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
-    }),
-  );
+  /* 网页控制台（`/admin`）、`/join`、`/reset` 与它们的静态资源、cookie 会话接口。 */
+  app.route("/", createPanelRoutes({ accounts, notebooks, config, settings, throttle, audit, ...nowOption }));
+  app.route("/", createGithubRoutes({ accounts, config, settings, oauth, github: options.github ?? createGithubApi(), audit, ...nowOption }));
 
   // 兜底 404：**形状与其它错误一致**（`{error, code}`），免得客户端要处理两种错误体。
   app.notFound((c) =>
@@ -275,5 +245,5 @@ export function createApp(options: AppOptions): BuiltApp {
     });
   });
 
-  return { app, accounts, notebooks, couch, couchAdmin };
+  return { app, accounts, notebooks, settings, couch, couchAdmin };
 }

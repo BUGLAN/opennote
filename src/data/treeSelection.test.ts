@@ -68,9 +68,10 @@ function rule(css: string, selector: string): string {
 }
 
 describe("侧栏文件树：同一时刻只有一行是选中态", () => {
-  it("文件夹行 / 集合行 / 标签行不再是选中态（`is-active` → `is-current`）", () => {
+  it("文件夹行 / 标签行不再是选中态（`is-active` → `is-current`）", () => {
     // 标签行由 `TagBranch` 渲染（「标签」页树形化：TagsBody 只出树，行在 TagBranch）。
-    for (const name of ["FolderBranch", "ScopeRow", "TagBranch"]) {
+    // 星标 / 回收站以前是树末尾的集合行（`ScopeRow`），现在是侧栏底部的快捷入口，不在树里了。
+    for (const name of ["FolderBranch", "TagBranch"]) {
       const body = bodyOf(sidebar, name);
       expect(body, `${name} 应当挂 is-current`).toContain("is-current");
       expect(body, `${name} 不许再挂 is-active（那是笔记行的选中态）`).not.toContain("is-active");
@@ -103,5 +104,40 @@ describe("侧栏文件树：同一时刻只有一行是选中态", () => {
 
   it("真·选中态仍是 S-C8：`--accent-soft` 底（这条不许被顺手改掉）", () => {
     expect(rule(app, ".tree__row.is-active")).toMatch(/background:\s*var\(--accent-soft\)/);
+  });
+});
+
+describe("侧栏布局（2026-11-04 改版）", () => {
+  it("树上不再有单独的展开箭头：文件夹 / 标签的图标自己就是开合记号", () => {
+    expect(sidebar).not.toContain("tree__caret");
+    expect(bodyOf(sidebar, "FolderBranch")).toContain('"tree__icon--toggle", open && "is-open"');
+    expect(bodyOf(sidebar, "TagBranch")).toContain('"tree__icon--hash"');
+  });
+
+  it("搜索框与回收站都在滚动区外面：树滑到多深都找得到", () => {
+    const search = sidebar.indexOf('className="sidebar__search"');
+    const body = sidebar.indexOf('className="sidebar__body"');
+    const pinned = sidebar.indexOf('className="sidebar__pinned"');
+    expect(search).toBeGreaterThan(0);
+    expect(search).toBeLessThan(body);
+    expect(pinned).toBeGreaterThan(body);
+    // 滚动的只有 `.sidebar__body`；搜索框与回收站那一行不许被压缩
+    expect(rule(app, ".sidebar__search")).toMatch(/flex:\s*none/);
+    expect(rule(app, ".sidebar__pinned")).toMatch(/flex:\s*none/);
+  });
+
+  it("分区列表：没有页签；星标 / 收件箱 / 回收站与文件树是同一种行，文件夹与标签是可折叠分区", () => {
+    expect(sidebar).not.toContain("sidebar__tabs");
+    expect(bodyOf(sidebar, "NavRow")).toContain('"tree__row"');
+    for (const label of ['label="星标"', 'label="收件箱"', 'label="回收站"', 'label="文件夹"', 'label="标签"']) {
+      expect(sidebar).toContain(label);
+    }
+    expect(bodyOf(sidebar, "SectionHeader")).toContain("aria-expanded={open}");
+  });
+
+  it("文件行按种类给图标：HTML 与画布不再和 Markdown 共用一张", () => {
+    const body = bodyOf(sidebar, "noteIcon");
+    expect(body).toContain('kind === "html") return "code"');
+    expect(body).toContain('kind === "canvas") return "canvas"');
   });
 });

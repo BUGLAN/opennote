@@ -30,13 +30,17 @@ export interface FolderChoice {
   disabled?: boolean;
 }
 
+/**
+ * 笔记的种类：普通 Markdown 笔记、JSON Canvas 画布（`.canvas`），或 HTML 页面（`.html` / `.htm`，
+ * 应用内只读渲染，见 `src/html/`）。
+ */
+export type NoteKind = "note" | "canvas" | "html";
+
 export interface Note {
   id: Id;
   folderId: Id | null;
-  /** Denormalised title, kept in sync with the content (or with `titleOverride`). */
+  /** Display name: always the file name without its extension (never derived from the content). */
   title: string;
-  /** Set when the user renames a note from the tree; wins over the derived title. */
-  titleOverride: string | null;
   content: string;
   createdAt: number;
   updatedAt: number;
@@ -48,6 +52,29 @@ export interface Note {
   words: number;
   trashed: boolean;
   trashedAt: number | null;
+  /**
+   * 笔记种类。**可选 + 缺省视为 "note"**：既有测试（如 `tagTree.test.ts`）直接
+   * 构造完整的 `Note` 字面量，必填字段会让全仓 typecheck 失败；而「缺省即笔记」
+   * 也正是磁盘事实 —— `.canvas` 出现之前所有文件都是笔记。
+   * 读取侧一律经 `noteKind()` 归一化，不要直接读 `note.kind`（会是 `undefined`）。
+   */
+  kind?: NoteKind;
+}
+
+/**
+ * `Note.kind` 的归一化读取：缺省与坏值一律落回 "note"。
+ * 「这篇是不是画布」的唯一判据，视图层与数据层共用。
+ */
+export function noteKind(note: Pick<Note, "kind">): NoteKind {
+  return note.kind === "canvas" || note.kind === "html" ? note.kind : "note";
+}
+
+/**
+ * 应用内不可修改的种类（目前只有 HTML 页面）：标签栏的锁固定为「锁定」且不可解锁，
+ * 数据层拒收对它的正文写入。磁盘上的外部改动照常被读进来（那不是「应用内修改」）。
+ */
+export function isReadOnlyKind(note: Pick<Note, "kind">): boolean {
+  return noteKind(note) === "html";
 }
 
 export type SnapshotReason = "auto" | "manual" | "restore" | "before-disk";
@@ -79,7 +106,21 @@ export type AccentId = "seal" | "indigo" | "pine" | "gamboge";
 export type FontId = "serif" | "sans" | "wenkai" | "mono";
 export type WidthId = "narrow" | "normal" | "wide" | "full";
 export type SortKey = "updated" | "created" | "title";
-export type SidebarTab = "files" | "search" | "tags" | "starred";
+/**
+ * 侧栏当前看的那一页。现在只有两页：文件树（`"files"`）与回收站（`"trash"`）。
+ * `"search"` / `"tags"` / `"starred"` 只为兼容旧的 state.json 与命令面板保留：
+ * 读到它们按「文件」画，`"tags"` / `"starred"` 顺手展开对应分区（`Sidebar.tsx`）。
+ */
+export type SidebarTab = "files" | "search" | "tags" | "starred" | "trash";
+
+/** 侧栏可折叠分区的展开状态（见 `UiSettings.sidebarSections`）。 */
+export interface SidebarSections {
+  starred: boolean;
+  folders: boolean;
+  tags: boolean;
+}
+
+export const DEFAULT_SIDEBAR_SECTIONS: SidebarSections = { starred: false, folders: true, tags: false };
 
 export interface ThemeMeta {
   id: ThemeId;
@@ -193,6 +234,11 @@ export interface UiSettings {
   expandedTags: string[];
   /** 过滤时被用户手动收起的标签分支 —— 命中路径默认全展开，这列表是例外。 */
   collapsedTags: string[];
+  /**
+   * 侧栏三个可折叠分区的展开状态（2026-11-04 侧栏改成「分区列表」之后才有）：
+   * 星标（在搜索框下面展开星标笔记）、文件夹、标签。纯界面状态，只落 localStorage。
+   */
+  sidebarSections: SidebarSections;
   lastNoteId: Id | null;
   /**
    * 「设置 · 文件 · 导入与接口」里的三项（设计稿 R1/R2/R8）。
@@ -295,6 +341,7 @@ export const DEFAULT_UI: UiSettings = {
   // 标签树的展开 / 收起（见 UiSettings.expandedTags）：空 = 全部收起。
   expandedTags: [],
   collapsedTags: [],
+  sidebarSections: DEFAULT_SIDEBAR_SECTIONS,
   lastNoteId: null,
   // 0.3.0（00 号 §6.14㉕）默认「先进入收件箱」：外部导入先落 `.opennote/inbox/`，
   // 由用户在收件箱里确认落点后再入库。这样任何外部客户端都不可能静默写进笔记库。

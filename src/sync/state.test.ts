@@ -137,6 +137,49 @@ describe("往返与形状", () => {
     expect(backend.text(SYNC_META_FILE)).toContain(`"version": ${SYNC_LEDGER_VERSION}`);
   });
 
+  it("旧账本（条目里没有 `pendingConflict`）照常读出，不炸、也不凭空补出这个字段", async () => {
+    const backend = new MiniBackend();
+    // 加 pendingConflict 之前写下的账本原样（没有升 SYNC_LEDGER_VERSION，旧文件必须能直接读）。
+    backend.seed(
+      SYNC_META_FILE,
+      JSON.stringify({
+        version: SYNC_LEDGER_VERSION,
+        remote: { baseUrl: "https://notes.example.com", notebookId: "nb", cryptoMode: "none", protocolVersion: 1 },
+        nextBid: 2,
+        bids: { "notes/a.md": 1 },
+        files: {
+          "notes/a.md": { bid: 1, localHash: "a".repeat(64), remoteHash: "b".repeat(64), rev: "1-x", imported: true, syncedAt: 1 },
+        },
+      }),
+    );
+    const read = await readSyncLedger(backend);
+    expect(read).not.toBeNull();
+    expect(read!.files["notes/a.md"]?.localHash).toBe("a".repeat(64));
+    expect(read!.files["notes/a.md"]?.pendingConflict).toBeUndefined();
+  });
+
+  it("`pendingConflict` 跟着账本落盘、读回来原样还在（冲突要活过重启）", async () => {
+    const backend = new MiniBackend();
+    const ledger = newLedger();
+    ledger.files["notes/a.md"] = {
+      bid: bidForPath(ledger, "notes/a.md"),
+      localHash: "a".repeat(64),
+      remoteHash: "b".repeat(64),
+      rev: "2-abc",
+      imported: true,
+      syncedAt: 1,
+      pendingConflict: { kind: "both-modified", localId: "c".repeat(64), remoteId: "d".repeat(64), at: 5 },
+    };
+    await writeSyncLedger(backend, ledger);
+    const read = await readSyncLedger(backend);
+    expect(read!.files["notes/a.md"]?.pendingConflict).toEqual({
+      kind: "both-modified",
+      localId: "c".repeat(64),
+      remoteId: "d".repeat(64),
+      at: 5,
+    });
+  });
+
   it("没有账本 → null（「还没开始同步」是正常状态，不是错误）", async () => {
     const backend = new MiniBackend();
     expect(await readSyncLedger(backend)).toBeNull();

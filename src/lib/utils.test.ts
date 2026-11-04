@@ -4,7 +4,6 @@ import {
   countText,
   derivePlaceholderTitle,
   deriveTags,
-  deriveTitle,
   excerpt,
   firstHeadingLine,
   formatRelativeTime,
@@ -14,31 +13,6 @@ import {
   stripMarkdown,
   uniqueName,
 } from "./utils";
-
-describe("deriveTitle", () => {
-  it("uses the first heading when the note opens with one", () => {
-    expect(deriveTitle("# 标题\n\n正文")).toBe("标题");
-  });
-
-  it("falls back to the first plain line", () => {
-    expect(deriveTitle("intro\n\n# 标题\n\n正文")).toBe("intro");
-    expect(deriveTitle("只是第一行\n第二行")).toBe("只是第一行");
-  });
-
-  it("skips front matter, fences and rules", () => {
-    const md = "---\ntags: [a]\n---\n\n```ts\nconst x = 1\n```\n\n真正的标题\n";
-    expect(deriveTitle(md)).toBe("真正的标题");
-  });
-
-  it("uses the fallback for an empty document", () => {
-    expect(deriveTitle("   \n\n")).toBe("无标题");
-    expect(deriveTitle("", "九月")).toBe("九月");
-  });
-
-  it("cleans inline syntax", () => {
-    expect(deriveTitle("# **重点** 与 [链接](x) 和 `code`")).toBe("重点 与 链接 和 code");
-  });
-});
 
 describe("isPlaceholderName（自动改名的唯一入口条件）", () => {
   it("三个 fallback 产地与它们的序号变体都算占位名", () => {
@@ -100,13 +74,12 @@ describe("derivePlaceholderTitle（认 H1–H6，绝不把正文首行当标题�
     expect(derivePlaceholderTitle("# ")).toBeNull();
   });
 
-  it("标题超长按 TITLE_LIMIT 截断（与 deriveTitle 同一口径）", () => {
+  it("标题超长按 TITLE_LIMIT 截断", () => {
     expect(derivePlaceholderTitle(`# ${"字".repeat(200)}`)).toHaveLength(90);
   });
 
-  it("不改 deriveTitle 的默认语义：同一个文档两个函数可以给出不同答案", () => {
+  it("不拿正文首行兜底：首行是普通正文时取后面的标题行", () => {
     const md = "只是第一行\n\n# 后面才有标题\n";
-    expect(deriveTitle(md)).toBe("只是第一行");
     expect(derivePlaceholderTitle(md)).toBe("后面才有标题");
   });
 });

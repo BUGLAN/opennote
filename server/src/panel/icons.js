@@ -57,7 +57,12 @@
       '<path d="M4.5 7h15M9.5 7V5.4a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="m6.5 7 .8 11.6a2 2 0 0 0 2 1.9h5.4a2 2 0 0 0 2-1.9L17.5 7"/>',
     rotate:
       '<path d="M4 12a8 8 0 0 1 13.7-5.6"/><path d="M20 12a8 8 0 0 1-13.7 5.6"/><path d="M17.7 2.9v3.5h-3.5"/><path d="M6.3 21.1v-3.5h3.5"/>',
-    dot: '<circle cx="12" cy="12" r="4.2"/>'
+    dot: '<circle cx="12" cy="12" r="4.2"/>',
+    laptop: '<rect x="4.6" y="5" width="14.8" height="10" rx="1.4"/><path d="M2.8 18.6h18.4"/>',
+    phone: '<rect x="7" y="2.8" width="10" height="18.4" rx="2"/><path d="M11 17.6h2"/>',
+    lock: '<rect x="5" y="10.6" width="14" height="9.6" rx="1.8"/><path d="M8.2 10.6V7.8a3.8 3.8 0 0 1 7.6 0v2.8"/>',
+    mail: '<rect x="3.4" y="5.4" width="17.2" height="13.2" rx="1.8"/><path d="m4 6.4 8 6.2 8-6.2"/>',
+    logout: '<path d="M14.6 4.4H18a1.6 1.6 0 0 1 1.6 1.6v12a1.6 1.6 0 0 1-1.6 1.6h-3.4"/><path d="M10.4 16.4 6 12l4.4-4.4"/><path d="M6 12h9.6"/>'
   };
 
   function icon(name, size, extraClass) {

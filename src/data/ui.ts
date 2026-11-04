@@ -1,5 +1,5 @@
 import { createStore, useStore } from "../lib/store";
-import { DEFAULT_UI, THEMES, clampSidebarWidth, type ThemeId, type UiSettings } from "./types";
+import { DEFAULT_SIDEBAR_SECTIONS, DEFAULT_UI, THEMES, clampSidebarWidth, type SidebarSections, type ThemeId, type UiSettings } from "./types";
 import { applyContentWidthOverride, readContentWidthPreference } from "./contentWidth";
 
 export const STORAGE_KEY = "opennote.ui.v1";
@@ -65,6 +65,13 @@ function load(): UiSettings {
     if (!Array.isArray(ui.collapsedTags) || !ui.collapsedTags.every((tag) => typeof tag === "string")) {
       ui.collapsedTags = [];
     }
+    // 侧栏分区的展开状态：旧版本没有这个键，坏值逐项回默认。
+    const sections = ui.sidebarSections as Partial<SidebarSections> | undefined;
+    ui.sidebarSections = {
+      starred: typeof sections?.starred === "boolean" ? sections.starred : DEFAULT_SIDEBAR_SECTIONS.starred,
+      folders: typeof sections?.folders === "boolean" ? sections.folders : DEFAULT_SIDEBAR_SECTIONS.folders,
+      tags: typeof sections?.tags === "boolean" ? sections.tags : DEFAULT_SIDEBAR_SECTIONS.tags,
+    };
     // 宽度是**用户拖出来的**：旧版本没有这个键、手改过 localStorage、拖到窗口外
     // 都会留下越界值，所以读取时统一夹一次，别让坏值把布局撑坏。
     ui.sidebarWidth = clampSidebarWidth(ui.sidebarWidth);

@@ -1,4 +1,7 @@
 node_modules
+# `pnpm icons` 是 Python 脚本，import 一次就会留下字节码缓存
+__pycache__/
+*.pyc
 dist
 dist-clip
 dist-ssr
@@ -16,6 +19,8 @@ coverage
 # DSH 工具在本地跑诊断时留下的报告目录，不属于本项目产物
 .dsh-acl-report/
 .tmp-shots
+# 任何 `.tmp-*` 目录都是本地临时产物（调研 / 验证 / 截图），统一不进库
+.tmp-*/
 # `pnpm build:ignore` 的中间产物目录（产物本体是 electron/ignore-rules.cjs，它要提交）
 .ignore-rules-build
 
@@ -60,3 +65,14 @@ prototype/
 # CLI 生成的引导码明文（`bootstrap-admin`）。**绝不能入库** —— 拿到它就能注册出管理员。
 # 它曾长期以未跟踪文件躺在服务器工作区（`/root/opennote/boot-code.txt`）。
 boot-code.txt
+
+# 同步重写的界面原型（`docs/sync/mockups/`）：设计过程产物，只在本地看，不进库。
+docs/sync/mockups/
+
+# claude
+.claude/
+
+# 本地验证 / 探针的输出目录（如 `scripts/statusbar-fit-probe.mjs` 默认写到 `docs/verify/`）：过程证据，不进库
+docs/verify/
+# TypeScript 增量构建缓存
+*.tsbuildinfo

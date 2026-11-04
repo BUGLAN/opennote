@@ -135,6 +135,66 @@ function sanitizeHeaders(raw) {
 }
 
 /**
+ * 发一个请求并读完正文：**无进展**超过 `idleMs`、或总时长超过 `maxMs` 才中止。
+ *
+ * 以前用的是 `AbortSignal.timeout(30000)` —— 那是**整个请求**的总时限：慢线路上一篇 1.4 MB 的
+ * 笔记还在稳定地传，30 秒一到照样被掐断，整轮同步失败重来（真机：2~3 分钟停在「正在同步」）。
+ * 现在只要数据还在来就继续；挂死的连接（一个字节都不来）仍然 `idleMs` 后失败。
+ * 与渲染层 `src/sync/http.ts` 的 `fetchWithIdleTimeout` 是同一个规则（两个运行时各写一份）。
+ */
+function spanText(ms) {
+  return ms >= 1000 ? `${Math.round(ms / 1000)} 秒` : `${ms} 毫秒`;
+}
+
+async function fetchWithIdleTimeout(fetchFn, url, init, limits) {
+  const idleMs = limits && typeof limits.idleMs === "number" ? limits.idleMs : 30000;
+  const maxMs = limits && typeof limits.maxMs === "number" ? limits.maxMs : 10 * 60 * 1000;
+  const controller = new AbortController();
+  const timeoutError = (message) => Object.assign(new Error(message), { name: "TimeoutError" });
+  let idleTimer;
+  const armIdle = () => {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => controller.abort(timeoutError(`${spanText(idleMs)}没有收到任何数据`)), idleMs);
+  };
+  const maxTimer = setTimeout(() => controller.abort(timeoutError(`请求超过 ${spanText(maxMs)}`)), maxMs);
+  // 中止时直接让正在等的那一步失败（理由见 src/sync/http.ts 的同名函数）。
+  const aborted = new Promise((_resolve, reject) => {
+    controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+  });
+  aborted.catch(() => undefined);
+  armIdle();
+  try {
+    const response = await Promise.race([fetchFn(url, { ...init, signal: controller.signal }), aborted]);
+    armIdle();
+    const body = response.body;
+    if (!body || typeof body.getReader !== "function") {
+      return { response, bytes: new Uint8Array(await Promise.race([response.arrayBuffer(), aborted])) };
+    }
+    const reader = body.getReader();
+    controller.signal.addEventListener("abort", () => void reader.cancel(controller.signal.reason).catch(() => undefined), { once: true });
+    const parts = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await Promise.race([reader.read(), aborted]);
+      if (done) break;
+      parts.push(value);
+      total += value.byteLength;
+      armIdle();
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      bytes.set(part, offset);
+      offset += part.byteLength;
+    }
+    return { response, bytes };
+  } finally {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    clearTimeout(maxTimer);
+  }
+}
+
+/**
  * 建一个**绑定到某个 base URL** 的代理。
  *
  * 注意签名：`createSyncProxy({ baseUrl })` 而不是 `createSyncProxy()` 后再传 url ——
@@ -165,8 +225,7 @@ function createSyncProxy(options) {
     const body = input && input.body !== undefined && input.body !== null ? input.body : undefined;
 
     if (typeof fetchImpl === "function") {
-      const response = await fetchImpl(url.toString(), { method, headers, body, signal: AbortSignal.timeout(timeoutMs) });
-      const bytes = new Uint8Array(await response.arrayBuffer());
+      const { response, bytes } = await fetchWithIdleTimeout(fetchImpl, url.toString(), { method, headers, body }, { idleMs: timeoutMs });
       return { status: response.status, headers: Object.fromEntries(response.headers.entries()), body: bytes };
     }
     if (typeof transport === "function") return transport({ method, url: url.toString(), headers, body, timeoutMs });
@@ -183,6 +242,7 @@ module.exports = {
   assertSafeRelPath,
   composeUrl,
   createSyncProxy,
+  fetchWithIdleTimeout,
   normalizeBaseUrl,
   sanitizeHeaders,
 };

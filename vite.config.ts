@@ -36,6 +36,13 @@ interface PreRenderedChunkInfo {
   moduleIds?: string[];
 }
 
+/** The slice of rolldown's `PreRenderedAsset` the lazy-CSS routing needs. */
+interface PreRenderedAssetInfo {
+  names?: string[];
+  originalFileNames?: string[];
+  type: "asset" | "chunk";
+}
+
 /* --------------------------------------------------------- bundle layout */
 
 /** `node_modules/@scope/name/…` → `@scope/name` (pnpm's `.pnpm/…` store included). */
@@ -56,13 +63,33 @@ function packageNameOf(id: string): string | null {
  * precache and fills from the network on first use (`workbox.runtimeCaching`).
  *
  * A chunk is moved there only when *every* module inside it belongs to a package
- * that `src/**` never imports statically. A chunk that also carries shell code
+ * that `src/**` never imports statically, or lives in the canvas view modules
+ * (`src/canvas/**` minus `controller.ts`, plus `src/styles/canvas.css`) which
+ * are only reachable through `React.lazy`. A chunk that also carries shell code
  * (shared editor internals, `dompurify`, …) is loaded during startup, so it has
  * to stay in the precache — otherwise the offline app would fail to boot.
  * The invariant to check on `dist/` after a build: every file in the static
  * import closure of `index.html` must appear in `sw.js`'s precache manifest.
  */
 const eagerlyImportedPackages = new Set<string>();
+
+/**
+ * D28（画布扩展）：`src/canvas/**` 的视图模块只经 React.lazy 动态 import 进入
+ * 应用，它们静态 import 的三方包（@xyflow/react 及其内部依赖）因此不属于启动包。
+ * 两处消费：
+ *   ① 下面的 eager 扫描跳过这些文件 —— 否则 @xyflow/react 会被记成「启动包」，
+ *      画布 chunk 永远回不到 lazy；
+ *   ② `isLazyChunk` 把它们（连带 `src/styles/canvas.css`，它只被画布模块 import）
+ *      视同「只在动态图里的三方包」。
+ *
+ * `controller.ts` 不需要豁免：模块归属由引用图决定 —— 应用外壳静态 import 它时，
+ * 它会随静态闭包并进 eager chunk（chunk 里有应用源码，isLazyChunk 自然判 false）；
+ * 只有画布模块引用它时，它随画布 chunk 一起进 lazy。两种落位都正确。
+ */
+function isCanvasViewModule(id: string): boolean {
+  if (/\/src\/canvas\//.test(id)) return true;
+  return /\/src\/styles\/canvas\.css(?:\?|$)/.test(id);
+}
 
 const SOURCE_FILE = /\.(?:ts|tsx|js|jsx)$/;
 const STATIC_IMPORT_FROM = /(?:^|[\s;}])(?:import|export)\s[^;'"]*?\bfrom\s*["']([^"']+)["']/g;
@@ -89,6 +116,8 @@ function scanEagerAppPackages(root: string): void {
         continue;
       }
       if (!SOURCE_FILE.test(entry.name)) continue;
+      // 画布视图模块的三方 import 不算启动包（见 isCanvasViewModule 的说明）
+      if (isCanvasViewModule(join(dir, entry.name).replace(/\\/g, "/"))) continue;
       const code = readFileSync(join(dir, entry.name), "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
@@ -105,16 +134,21 @@ function scanEagerAppPackages(root: string): void {
 }
 
 function isLazyChunk(moduleIds: string[]): boolean {
-  let sawThirdPartyModule = false;
+  let sawLazyModule = false;
   for (const rawId of moduleIds) {
     const id = rawId.replace(/\\/g, "/");
     if (id.includes("\0")) continue; // vite/rolldown runtime helpers ship with the shell
+    if (isCanvasViewModule(id)) {
+      // 画布视图源码（含 canvas.css）只在动态 import 图里，与懒加载三方包同等对待
+      sawLazyModule = true;
+      continue;
+    }
     const pkg = packageNameOf(id);
     if (!pkg) return false; // app source, assets, project css
     if (eagerlyImportedPackages.has(pkg)) return false;
-    sawThirdPartyModule = true;
+    sawLazyModule = true;
   }
-  return sawThirdPartyModule;
+  return sawLazyModule;
 }
 
 /**
@@ -124,6 +158,8 @@ function isLazyChunk(moduleIds: string[]): boolean {
  */
 function lazyChunkLabel(moduleIds: string[], fallback: string): string {
   const ids = moduleIds.map((id) => id.replace(/\\/g, "/"));
+  // 画布视图 chunk 统一叫 canvas-view（@xyflow 的手动分包另有名字），构建日志可辨
+  if (ids.some((id) => isCanvasViewModule(id))) return "canvas-view";
   const legacyMode = ids.map((id) => id.match(/node_modules\/@codemirror\/legacy-modes\/(.+)\.js$/)).find(Boolean);
   if (legacyMode?.[1]) return legacyMode[1].replace(/\//g, "-");
   const packages = ids.map((id) => packageNameOf(id));
@@ -188,6 +224,9 @@ function contentSecurityPolicyPlugin(): Plugin {
          */
         "connect-src 'self' https://api.github.com https://raw.githubusercontent.com",
         "media-src 'self' blob: data:",
+        // HTML 页面的沙箱宿主页（`public/html-sandbox.html`，同源静态文件）是唯一的子框架；
+        // 页面内容自己的策略在那份文件里，不继承这一条（见 src/html/sandbox.ts）。
+        "frame-src 'self'",
         "object-src 'none'",
         "base-uri 'none'",
         "form-action 'none'",
@@ -303,10 +342,50 @@ export default defineConfig({
           // `main.tsx`); only the engine itself is loaded on demand.
           if (id.includes("node_modules/katex") && !id.endsWith(".css")) return "katex";
           if (id.includes("node_modules/react")) return "react";
+          // @xyflow/react 单独成 chunk：只被画布视图动态引用（D28），isLazyChunk 会
+          // 把它送进 assets/lazy/（zustand / @xyflow/system 等内部依赖跟随引用方）。
+          if (id.includes("node_modules/@xyflow/")) return "xyflow";
           return undefined;
+        },
+        assetFileNames(assetInfo: PreRenderedAssetInfo) {
+          // 懒加载 chunk 的 CSS 也进 assets/lazy/，由此被 workbox 既有的 globIgnores
+          // "**/assets/lazy/**" 整体排除出安装期预缓存。匹配依据（都不依赖 chunk
+          // 命名的调用时序）：
+          //   · "CanvasView.css" —— 懒加载画布 chunk 的 CSS 资产名（chunk 门面模块
+          //     = src/canvas/CanvasView.tsx，rolldown 以其 basename 命名；这也是
+          //     集成工位 React.lazy 的唯一入口文件名，重命名它需同步改这里）；
+          //   · "xyflow.css" —— 上面 manualChunks 钉死的 xyflow chunk 的样式；
+          //   · 来源路径信号作为补充（覆盖构建器命名差异的兜底）。
+          const candidates = [...(assetInfo.names ?? []), ...(assetInfo.originalFileNames ?? [])];
+          const isLazyCss =
+            assetInfo.type === "asset" &&
+            candidates.some(
+              (name) =>
+                name.endsWith(".css") &&
+                (name === "CanvasView.css" ||
+                  name === "xyflow.css" ||
+                  name.includes("src/styles/canvas.css") ||
+                  name.includes("node_modules/@xyflow/")),
+            );
+          return isLazyCss ? "assets/lazy/[name]-[hash][extname]" : "assets/[name]-[hash][extname]";
         },
       },
     },
   },
-  server: { port: 5173, host: "127.0.0.1" },
+  server: {
+    port: 5173,
+    host: "127.0.0.1",
+    /*
+     * 开发时让网页端与本地同步服务同源：`OPENNOTE_SYNC_DEV_TARGET=http://127.0.0.1:8797 pnpm dev`，
+     * 然后在「设置 → 同步」里把服务器地址填成 `http://127.0.0.1:5173`。
+     * 生产里网页端就是同步服务自己发的（同源），服务端刻意不发 CORS 头，所以开发时只能这样接。
+     */
+    ...(process.env.OPENNOTE_SYNC_DEV_TARGET
+      ? {
+          proxy: Object.fromEntries(
+            ["/v1", "/auth", "/admin", "/panel", "/join", "/reset"].map((prefix) => [prefix, { target: process.env.OPENNOTE_SYNC_DEV_TARGET, changeOrigin: false }]),
+          ),
+        }
+      : {}),
+  },
 });

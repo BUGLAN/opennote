@@ -56,6 +56,11 @@ files:
   # 独立于 `dist/`（主应用构建会 `emptyOutDir`），所以必须是单独一行。
   - dist-clip/**/*
   - electron/**/*
+  # macOS 运行时 Dock 图标（`pnpm icons` 的产物，Apple 图标网格）。主进程用
+  # `app.getAppPath()/build/icon-mac.png` 读它；打包后这个路径就是 asar 根，所以必须
+  # 显式收进包里 —— build/ 是 buildResources，默认**不会**被收进 app。
+  # 不带 icon.icns / icon.ico：那两个是 electron-builder 的打包输入，不是运行时资源。
+  - build/icon-mac.png
   - package.json
   # ⚠️ 这条 negate 不能删 —— 上面那句「打包只需要带上 dist/、主进程代码和 package.json」
   # 只靠**正列**是不成立的：electron-builder 会把 package.json 里的**生产依赖整包**收进
@@ -95,6 +100,9 @@ win:
 # 自带的 hdiutil/ditto 包成 DMG + ZIP（`pnpm package:mac`）。见下面 mac 段的注释。
 mac:
   # 直接指向预生成的 .icns（`pnpm icons` 用系统 iconutil 出的，16→1024 共 10 档）。
+  # 注意这份 .icns 是 **Apple 图标网格**美术（身体 824/1024 + 投影），与 Windows 的
+  # build/icon.ico、PWA 的 public/icon-512.png（都是满幅）不是同一张图；见
+  # scripts/make_icons.py 的 MAC_* 常量与 verify_mac_icon()。
   #
   # ⚠️ 不要改回 .png：electron-builder 的图标转换器要**联网下载** icons 工具链
   # （icons@1.1.0），离线机器上 `pnpm package:mac` 会以 `fetch failed` 失败。

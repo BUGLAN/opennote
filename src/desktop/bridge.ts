@@ -61,6 +61,15 @@ export interface ImportAsset {
   file?: string;
 }
 
+/** HTML 页面的一份静态资源（`format: "html"`；`path` 相对 HTML 所在目录）。 */
+export interface ImportHtmlResource {
+  path: string;
+  mime?: string;
+  dataBase64?: string;
+  /** 通道级扩展：资源外置时的相对路径（收件箱条目里相对条目目录）。 */
+  file?: string;
+}
+
 export interface ImportClient {
   name: "chrome-extension" | "cli" | "mcp" | "share-target" | "manual" | "other";
   version: string;
@@ -79,6 +88,10 @@ export interface ImportEnvelope {
   conflict?: "new" | "append" | "skip" | "overwrite";
   tags?: string[];
   assets?: ImportAsset[];
+  /** 正文格式（扩展字段，缺省 `markdown`）；`html` = 入库成只读 HTML 页面。 */
+  format?: "markdown" | "html";
+  /** `format: "html"` 的静态资源（CSS / JS / 图片 / 字体…），入库时内联成单文件。 */
+  resources?: ImportHtmlResource[];
   client?: ImportClient;
   /** 收件箱条目附加字段。 */
   enqueuedAt?: string;
@@ -445,7 +458,11 @@ export interface OpennoteBridge {
    * 「打开 Opennote 设置」死按钮就是协议从未注册导致的）。
    */
   onDeepLink(callback: (
-    link: { ok: true; kind: "settings"; section: "import" } | { ok: true; kind: "open"; path: string },
+    link:
+      | { ok: true; kind: "settings"; section: "import" }
+      | { ok: true; kind: "open"; path: string }
+      | { ok: true; kind: "sync-callback"; code: string | null; state: string; error: string | null; message: string | null; github: string | null }
+      | { ok: true; kind: "sync-sign-in"; server: string | null; email: string | null },
   ) => void): () => void;
   /**
    * 桌面端自更新（`opennote:update:*`）。只有打包版 Windows x64 上

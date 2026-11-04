@@ -124,10 +124,10 @@ describe("接不上时要说清「为什么」", () => {
     const deferred = deferredAttach();
     const binding = createWorkspaceSyncBinding({ attach: deferred.attach });
     const starting = binding.start();
-    deferred.release(0, { ok: false, reason: "no-account-key", message: "还没导入密钥" });
+    deferred.release(0, { ok: false, reason: "signed-out", message: "还没导入密钥" });
     await starting;
     expect(binding.phase()).toBe("skipped");
-    expect(binding.reason()).toBe("no-account-key");
+    expect(binding.reason()).toBe("signed-out");
     expect(binding.controller()).toBeNull();
   });
 
@@ -139,6 +139,7 @@ describe("接不上时要说清「为什么」", () => {
     });
     await expect(binding.start()).resolves.toBeUndefined();
     expect(binding.phase()).toBe("idle");
+    binding.stop();
   });
 
   it("`skipped` 之后再 `start()` 能重试（用户导入密钥之后）", async () => {
@@ -146,7 +147,7 @@ describe("接不上时要说清「为什么」", () => {
     const made = fakeController();
     const binding = createWorkspaceSyncBinding({ attach: deferred.attach });
     const first = binding.start();
-    deferred.release(0, { ok: false, reason: "no-account-key", message: "x" });
+    deferred.release(0, { ok: false, reason: "signed-out", message: "x" });
     await first;
     expect(binding.phase()).toBe("skipped");
 
@@ -154,5 +155,67 @@ describe("接不上时要说清「为什么」", () => {
     deferred.release(1, ok(made.controller));
     await second;
     expect(binding.phase()).toBe("attached");
+  });
+});
+
+describe("★ attach 抛错之后自动重新接上", () => {
+  function manualTimers() {
+    const queued: { fn: () => void; ms: number }[] = [];
+    return {
+      queued,
+      setTimeoutFn: (fn: () => void, ms: number) => {
+        const entry = { fn, ms };
+        queued.push(entry);
+        return entry;
+      },
+      clearTimeoutFn: (handle: unknown) => {
+        const index = queued.indexOf(handle as { fn: () => void; ms: number });
+        if (index >= 0) queued.splice(index, 1);
+      },
+    };
+  }
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("★ 开机时离线（解锁请求失败）⇒ 退避后再试，网络回来就接上", async () => {
+    const timers = manualTimers();
+    const made = fakeController();
+    let calls = 0;
+    const binding = createWorkspaceSyncBinding({
+      attach: async () => {
+        calls += 1;
+        if (calls < 3) throw new Error("fetch failed");
+        return ok(made.controller);
+      },
+      ...timers,
+      retryBaseDelayMs: 1000,
+    });
+    await binding.start();
+    expect(binding.phase()).toBe("idle");
+    expect(timers.queued.map((t) => t.ms)).toEqual([1000]);
+    timers.queued.shift()!.fn();
+    await settle();
+    expect(timers.queued.map((t) => t.ms)).toEqual([2000]);
+    timers.queued.shift()!.fn();
+    await settle();
+    expect(binding.phase()).toBe("attached");
+    expect(made.calls).toEqual(["start"]);
+    expect(timers.queued).toHaveLength(0);
+  });
+
+  it("`stop()` 取消挂着的重试（关掉工作区之后不该再偷偷接上）", async () => {
+    const timers = manualTimers();
+    let calls = 0;
+    const binding = createWorkspaceSyncBinding({
+      attach: async () => {
+        calls += 1;
+        throw new Error("fetch failed");
+      },
+      ...timers,
+    });
+    await binding.start();
+    expect(timers.queued).toHaveLength(1);
+    binding.stop();
+    expect(timers.queued).toHaveLength(0);
+    expect(calls).toBe(1);
   });
 });

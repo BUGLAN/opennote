@@ -1,5 +1,8 @@
 /**
- * 账号密钥的**本机保管**（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §3.9「密钥在本地的存放」、§5.2）。
+ * 同步**登录凭据**的本机保管（`docs/执行-同步重写-2026-11-02.md` 阶段 ⑤）。
+ *
+ * 存的是一小段 JSON（`SyncCredentials`）：服务器地址、会话令牌 `ons_…`、账号 id 与邮箱、本机设备名，
+ * 以及**可选**的 encRoot（用户勾了「记在这台设备上」才有）。
  *
  * ## 三个宿主，三种存法 —— 而它们的**安全等级不同**，UI 必须如实说
  *
@@ -7,41 +10,37 @@
  * | --- | --- | --- |
  * | 桌面 Electron | **主进程**持有（可选 `safeStorage` 落盘） | **不能**（渲染层拿不到） |
  * | Android | Capacitor Preferences | 能（但 WebView 里没有第三方脚本） |
- * | 网页 | **`localStorage`**（文档已定） | **能** ← ⚠️ **这是网页端 E2EE 的固有弱点** |
+ * | 网页 | **`localStorage`** | **能** ← ⚠️ **这是网页端 E2EE 的固有弱点** |
  *
- * §3.9 对网页端写得很直白：「⚠️ **可被 XSS 读**——这是网页端 E2EE 的固有弱点，UI 必须写明；
- * 换来的是『刷新不用重新导入密钥』」。
- *
- * 所以这个模块把「密钥放在哪」变成**可查询的事实**（`host` / `readableByPageScript`），
+ * 所以这个模块把「凭据放在哪」变成**可查询的事实**（`host` / `readableByPageScript`），
  * 而不是让 UI 去猜。有一条用例断言：**网页端的 `readableByPageScript` 必须是 `true`** ——
- * 如果哪天有人把它改成 `false`（因为「看起来更安全」），那条用例会红，
- * 因为那等于**对用户撒谎**。
+ * 改成 `false` 等于对用户撒谎。
  *
- * ## 为什么存的是**导出文本**而不是拆开的字段
+ * ## 为什么存成一个不透明的字符串
  *
- * `accountKey.ts` 的导出格式（`opennote-key-v1.…`）已经包含 `accountId`，
- * 而 `accountId` 是 `authToken` 的派生 salt —— 少了它，读回来的密钥**派不出令牌**。
- * 存成一个不透明的字符串，就不存在「存的时候漏了一个字段」这种错。
+ * 桌面主进程只负责「加密落盘 / 读回」，不需要懂里面是什么（`electron/main.cjs` 的
+ * `sync-account-key.bin`）。形状校验在渲染层这一侧做：坏的值不写进去，读回坏值当「没有」。
+ * 旧的「账号密钥」文本读回来也当「没有」—— 新服务端不兼容旧账号，重新登录即可。
  */
 
-import { decodeAccountKey } from "./accountKey";
+import { parseCredentials } from "./credentials";
 
-/** 密钥存在哪里（UI 要据此给出准确的说明，不能含糊）。 */
+/** 凭据存在哪里（UI 要据此给出准确的说明，不能含糊）。 */
 export type KeyStoreHost = "desktop-main" | "browser-local-storage" | "capacitor-preferences" | "memory";
 
-export interface AccountKeyStore {
+export interface CredentialStore {
   readonly host: KeyStoreHost;
   /**
-   * **页面脚本能不能读到这把密钥**。
+   * **页面脚本能不能读到这把凭据**。
    *
-   * 桌面端 `false`（密钥在主进程，渲染层只能请求它做事）；
+   * 桌面端 `false`（凭据在主进程，渲染层只能请求它做事）；
    * 网页端与移动端 `true`（`localStorage` / Preferences 都在 JS 可及范围内）。
    *
    * ⚠️ 这个值**必须如实**：它不是「我们打算怎么用它」，而是「攻击者拿到一次 XSS 之后
    * 能不能把它读走」。把它报成 `false` 只是让 UI 少说一句警告，不改变事实。
    */
   readonly readableByPageScript: boolean;
-  /** 读回保存的密钥文本；没有（或已损坏）返回 `null`。 */
+  /** 读回保存的凭据文本；没有（或已损坏）返回 `null`。 */
   load(): Promise<string | null>;
   /** 保存（会**校验形状**：坏的值不该进存储，否则失败会推迟到下一次派生）。 */
   save(text: string): Promise<void>;
@@ -50,17 +49,17 @@ export interface AccountKeyStore {
 }
 
 /** 存储键名。带版本号：将来换格式时不会把旧值当成新格式读。 */
-export const ACCOUNT_KEY_STORAGE_KEY = "opennote.sync.accountKey.v1";
+export const CREDENTIALS_STORAGE_KEY = "opennote.sync.credentials.v2";
 
 /**
- * 校验一段文本是不是**可用的**账号密钥。
+ * 校验一段文本是不是**可用的**登录凭据。
  *
  * 在 `save` 时校验的理由：一个坏值进了存储，失败会推迟到「用户下次打开应用」，
  * 而那时的报错离「保存的时候就已经错了」很远。**在边界上挡住。**
  */
 function assertUsable(text: string): void {
   // `decodeAccountKey` 会在版本/长度/base64 不对时抛出**可读**的错误。
-  decodeAccountKey(text);
+  parseCredentials(text);
 }
 
 /* ============================================================================
@@ -68,12 +67,12 @@ function assertUsable(text: string): void {
    ============================================================================ */
 
 /**
- * 内存里的密钥保管。
+ * 内存里的凭据保管。
  *
- * 两个用途：① 用例；② **「不记住密钥」模式** —— 用户明确不要持久化时用它，
+ * 两个用途：① 用例；② **「不记住凭据」模式** —— 用户明确不要持久化时用它，
  * 于是「刷新就要重新导入」是一个**被实现出来的**行为，而不是靠某处不写存储。
  */
-export function createMemoryKeyStore(initial: string | null = null): AccountKeyStore {
+export function createMemoryCredentialStore(initial: string | null = null): CredentialStore {
   let value: string | null = initial;
   return {
     host: "memory",
@@ -105,16 +104,16 @@ export interface WebStorageLike {
 }
 
 /**
- * 网页端的密钥保管（`localStorage`）。
+ * 网页端的凭据保管（`localStorage`）。
  *
  * ⚠️ **`readableByPageScript: true`** —— 这是 §3.9 明确承认的弱点，不是 bug。
- * UI 必须写明「网页端保存的密钥可被恶意脚本读取」，让用户自己决定要不要在这台设备上保存。
+ * UI 必须写明「网页端保存的凭据可被恶意脚本读取」，让用户自己决定要不要在这台设备上保存。
  *
  * 存储不可用（隐私模式 / 配额满 / 被策略禁用）时**不抛**：退回「只在本页有效」的行为，
  * 并把 `persisted` 报成 false。抛出去会让整个引导流程卡在第一步，而那是不必要的 ——
  * 用户仍然可以当场用，只是刷新后要重新导入。
  */
-export function createWebKeyStore(storage?: WebStorageLike): AccountKeyStore & { persisted(): boolean } {
+export function createWebCredentialStore(storage?: WebStorageLike): CredentialStore & { persisted(): boolean } {
   const backing = storage ?? (typeof localStorage === "undefined" ? null : localStorage);
   let memoryOnly: string | null = null;
   let lastWriteFailed = false;
@@ -135,7 +134,7 @@ export function createWebKeyStore(storage?: WebStorageLike): AccountKeyStore & {
          * 而第一版只在 `save()` 那一刻看起来成立（`persisted()` 报了 false），
          * 一旦真去读就露馅。用例咬住了它。
          */
-        return backing.getItem(ACCOUNT_KEY_STORAGE_KEY) ?? memoryOnly;
+        return backing.getItem(CREDENTIALS_STORAGE_KEY) ?? memoryOnly;
       } catch {
         // 读被拒（某些浏览器的隐私模式）：退回内存。
         return memoryOnly;
@@ -149,7 +148,7 @@ export function createWebKeyStore(storage?: WebStorageLike): AccountKeyStore & {
         return;
       }
       try {
-        backing.setItem(ACCOUNT_KEY_STORAGE_KEY, text);
+        backing.setItem(CREDENTIALS_STORAGE_KEY, text);
         lastWriteFailed = false;
       } catch {
         // 配额满 / 被禁用：**不抛**，退回「只在本页有效」。
@@ -160,7 +159,7 @@ export function createWebKeyStore(storage?: WebStorageLike): AccountKeyStore & {
       memoryOnly = null;
       if (!backing) return;
       try {
-        backing.removeItem(ACCOUNT_KEY_STORAGE_KEY);
+        backing.removeItem(CREDENTIALS_STORAGE_KEY);
       } catch {
         // 删不掉也没什么可做的（值已经不在了或存储不可用）。
       }
@@ -181,23 +180,23 @@ export interface DesktopKeyBridge {
   persisted(): Promise<boolean>;
 }
 
-export interface DesktopKeyStoreOptions {
+export interface DesktopCredentialStoreOptions {
   bridge: DesktopKeyBridge;
   /** 主进程报告是否持久化（用来在 UI 上如实说明「退出后还在不在」）。 */
   onPersistence?: (persisted: boolean) => void;
 }
 
 /**
- * 桌面端的密钥保管：**渲染层不持有密钥**，只把「读/写/清」转发给主进程。
+ * 桌面端的凭据保管：**渲染层不持有凭据**，只把「读/写/清」转发给主进程。
  *
  * 这是 §3.9 对桌面端的要求（「主进程持有（可选 `safeStorage` 落盘）」），
- * 也是 §5.5「渲染层拿不到令牌/密钥」那条纪律的落点：
- * 即使渲染层被 XSS，攻击者也只能**请求**主进程做事，拿不到密钥原文去别的设备上用。
+ * 也是 §5.5「渲染层拿不到令牌/凭据」那条纪律的落点：
+ * 即使渲染层被 XSS，攻击者也只能**请求**主进程做事，拿不到凭据原文去别的设备上用。
  */
-export function createDesktopKeyStore(options: DesktopKeyStoreOptions): AccountKeyStore {
+export function createDesktopCredentialStore(options: DesktopCredentialStoreOptions): CredentialStore {
   return {
     host: "desktop-main",
-    // 密钥在主进程，页面脚本读不到原文（只能请求它代签/代理）。
+    // 凭据在主进程，页面脚本读不到原文（只能请求它代签/代理）。
     readableByPageScript: false,
     async load() {
       const text = await options.bridge.load();
@@ -246,12 +245,12 @@ function globalBridge(): OpenNoteGlobal | null {
  * Capacitor 的 WebView 里 `localStorage` 是持久的，而接 Preferences 需要原生插件，
  * 那属于 P2 之后的收尾（**这里如实说明，不假装已经接了**）。
  */
-export function resolveAccountKeyStore(options: { storage?: WebStorageLike } = {}): AccountKeyStore {
+export function resolveCredentialStore(options: { storage?: WebStorageLike } = {}): CredentialStore {
   const bridge = globalBridge();
   if (bridge?.isElectron && bridge.syncKeys) {
-    return createDesktopKeyStore({ bridge: bridge.syncKeys });
+    return createDesktopCredentialStore({ bridge: bridge.syncKeys });
   }
-  return createWebKeyStore(options.storage);
+  return createWebCredentialStore(options.storage);
 }
 
 /* ============================================================================
@@ -259,31 +258,31 @@ export function resolveAccountKeyStore(options: { storage?: WebStorageLike } = {
    ============================================================================ */
 
 /**
- * 告诉用户「这把密钥存在哪、有什么风险」。
+ * 告诉用户「这把凭据存在哪、有什么风险」。
  *
  * 放在这里（而不是各组件里）是因为这三句话是**对同一个事实**的三种表述，
  * 分散写迟早会出现「一个界面说了风险、另一个没说」。
  */
-export function describeKeyStorage(store: AccountKeyStore): { where: string; risk: string | null } {
+export function describeCredentialStorage(store: CredentialStore): { where: string; risk: string | null } {
   switch (store.host) {
     case "desktop-main":
       return {
-        where: "密钥保存在应用主进程里，网页代码读不到它。",
+        where: "登录信息保存在应用主进程里，网页代码读不到它。",
         risk: null,
       };
     case "browser-local-storage":
       return {
-        where: "密钥保存在这个浏览器的 localStorage 里，刷新不用重新导入。",
-        risk: "注意：网页端保存的密钥可以被页面上的恶意脚本读走。如果你不放心，就选「不记住」，每次打开时重新粘贴密钥。",
+        where: "登录信息保存在这个浏览器的 localStorage 里，刷新不用重新登录。",
+        risk: "注意：网页端保存的登录信息与加密口令可以被页面上的恶意脚本读走。不放心的话，别勾「记在这台设备上」，每次打开时重新输入加密口令。",
       };
     case "capacitor-preferences":
       return {
-        where: "密钥保存在这台设备的应用存储里。",
+        where: "登录信息保存在这台设备的应用存储里。",
         risk: "注意：应用内的脚本可以读到它。",
       };
     case "memory":
       return {
-        where: "密钥只保留在本次会话里，刷新或退出后需要重新导入。",
+        where: "登录信息只保留在本次会话里，刷新或退出后需要重新登录。",
         risk: null,
       };
   }

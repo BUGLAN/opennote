@@ -12,26 +12,34 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import {
-  ACCOUNT_KEY_STORAGE_KEY,
-  createDesktopKeyStore,
-  createMemoryKeyStore,
-  createWebKeyStore,
-  describeKeyStorage,
-  resolveAccountKeyStore,
+  CREDENTIALS_STORAGE_KEY,
+  createDesktopCredentialStore,
+  createMemoryCredentialStore,
+  createWebCredentialStore,
+  describeCredentialStorage,
+  resolveCredentialStore,
   type DesktopKeyBridge,
   type WebStorageLike,
 } from "./keys";
-import { encodeAccountKey } from "./accountKey";
+import { encodeCredentials } from "./credentials";
 
-/** 一份合法的密钥文本（固定值，断言才稳定）。 */
-const VALID_KEY = encodeAccountKey({
+/** 一份合法的凭据文本（固定值，断言才稳定）。 */
+const VALID_KEY = encodeCredentials({
+  v: 2,
+  server: "https://notes.example.com",
+  token: "ons_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   accountId: "00112233445566778899aabbccddeeff",
-  accountKey: Uint8Array.from({ length: 32 }, (_, index) => index),
+  email: "lan@example.com",
+  deviceName: "Lan 的 Mac",
 });
 /** 另一份合法但不同的。 */
-const OTHER_KEY = encodeAccountKey({
+const OTHER_KEY = encodeCredentials({
+  v: 2,
+  server: "https://notes.example.com",
+  token: "ons_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   accountId: "ffffffffffffffffffffffffffffffff",
-  accountKey: Uint8Array.from({ length: 32 }, (_, index) => 255 - index),
+  email: null,
+  deviceName: "Pixel",
 });
 
 /** 一个内存版 `localStorage`（也用来模拟「配额满」）。 */
@@ -54,7 +62,7 @@ function fakeStorage(options: { failWrites?: boolean } = {}): WebStorageLike & {
 
 describe("内存保管（也是「不记住」模式）", () => {
   it("往返一致；`clear()` 之后就没有了", async () => {
-    const store = createMemoryKeyStore();
+    const store = createMemoryCredentialStore();
     expect(await store.load()).toBeNull();
     await store.save(VALID_KEY);
     expect(await store.load()).toBe(VALID_KEY);
@@ -63,7 +71,7 @@ describe("内存保管（也是「不记住」模式）", () => {
   });
 
   it("构造时可以给初值（用于测试与「本次会话已经有密钥」的场景）", async () => {
-    expect(await createMemoryKeyStore(OTHER_KEY).load()).toBe(OTHER_KEY);
+    expect(await createMemoryCredentialStore(OTHER_KEY).load()).toBe(OTHER_KEY);
   });
 
   it("`save` **校验形状**：坏的值不进存储（失败要发生在边界上）", async () => {
@@ -71,7 +79,7 @@ describe("内存保管（也是「不记住」模式）", () => {
      * 一个坏值进了存储，失败会推迟到「用户下次打开应用」——
      * 而那时的报错离「保存的时候就已经错了」很远。所以必须在边界上挡住。
      */
-    const store = createMemoryKeyStore();
+    const store = createMemoryCredentialStore();
     await expect(store.save("不是密钥")).rejects.toThrow();
     await expect(store.save("")).rejects.toThrow();
     // 坏值没有留下任何痕迹。
@@ -86,9 +94,9 @@ describe("内存保管（也是「不记住」模式）", () => {
 describe("网页保管（`localStorage`）", () => {
   it("往返一致，且写进的是**约定好的键名**（带版本号）", async () => {
     const storage = fakeStorage();
-    const store = createWebKeyStore(storage);
+    const store = createWebCredentialStore(storage);
     await store.save(VALID_KEY);
-    expect(storage.map.get(ACCOUNT_KEY_STORAGE_KEY)).toBe(VALID_KEY);
+    expect(storage.map.get(CREDENTIALS_STORAGE_KEY)).toBe(VALID_KEY);
     expect(await store.load()).toBe(VALID_KEY);
     expect(store.persisted()).toBe(true);
   });
@@ -98,16 +106,16 @@ describe("网页保管（`localStorage`）", () => {
      * 这条断言的方向是刻意的：它锁住「我们如实告诉用户风险」这件事。
      * 把它改成 false 不会让密钥变安全，只会让 UI 少说一句警告。
      */
-    expect(createWebKeyStore(fakeStorage()).readableByPageScript).toBe(true);
-    expect(createWebKeyStore(fakeStorage()).host).toBe("browser-local-storage");
+    expect(createWebCredentialStore(fakeStorage()).readableByPageScript).toBe(true);
+    expect(createWebCredentialStore(fakeStorage()).host).toBe("browser-local-storage");
   });
 
   it("`clear()` 真的把存储里的那条删掉（不是只清内存）", async () => {
     const storage = fakeStorage();
-    const store = createWebKeyStore(storage);
+    const store = createWebCredentialStore(storage);
     await store.save(VALID_KEY);
     await store.clear();
-    expect(storage.map.has(ACCOUNT_KEY_STORAGE_KEY)).toBe(false);
+    expect(storage.map.has(CREDENTIALS_STORAGE_KEY)).toBe(false);
     expect(await store.load()).toBeNull();
   });
 
@@ -116,7 +124,7 @@ describe("网页保管（`localStorage`）", () => {
      * 抛出去会让整个引导流程卡在第一步 —— 而那是不必要的：用户仍然可以当场用，
      * 只是刷新后要重新导入。所以这里降级，并把事实报给 UI。
      */
-    const store = createWebKeyStore(fakeStorage({ failWrites: true }));
+    const store = createWebCredentialStore(fakeStorage({ failWrites: true }));
     await expect(store.save(VALID_KEY)).resolves.toBeUndefined();
     expect(store.persisted()).toBe(false);
     // 本页仍然能用（内存里那份在）。
@@ -124,7 +132,7 @@ describe("网页保管（`localStorage`）", () => {
   });
 
   it("完全没有 `localStorage` 时也能用（只是不持久）", async () => {
-    const store = createWebKeyStore(undefined);
+    const store = createWebCredentialStore(undefined);
     // 在 node 环境里 `localStorage` 不存在 ⇒ backing 为 null。
     await store.save(VALID_KEY);
     expect(store.persisted()).toBe(false);
@@ -133,7 +141,7 @@ describe("网页保管（`localStorage`）", () => {
 
   it("`save` 同样校验形状（坏值不写进存储）", async () => {
     const storage = fakeStorage();
-    const store = createWebKeyStore(storage);
+    const store = createWebCredentialStore(storage);
     await expect(store.save("opennote-key-v1.垃圾")).rejects.toThrow();
     expect(storage.map.size).toBe(0);
   });
@@ -146,7 +154,7 @@ describe("网页保管（`localStorage`）", () => {
       setItem: () => undefined,
       removeItem: () => undefined,
     };
-    const store = createWebKeyStore(storage);
+    const store = createWebCredentialStore(storage);
     await store.save(VALID_KEY);
     expect(await store.load()).toBe(VALID_KEY);
   });
@@ -180,7 +188,7 @@ describe("桌面保管（转发到主进程）", () => {
 
   it("往返一致，并且**转发**给了主进程（渲染层不自己存）", async () => {
     const bridge = fakeBridge();
-    const store = createDesktopKeyStore({ bridge });
+    const store = createDesktopCredentialStore({ bridge });
     await store.save(VALID_KEY);
     // 值真的到了「主进程」那一侧。
     expect(bridge.value).toBe(VALID_KEY);
@@ -191,25 +199,25 @@ describe("桌面保管（转发到主进程）", () => {
   });
 
   it("★ **`readableByPageScript` 必须是 `false`**（密钥在主进程，渲染层拿不到原文）", () => {
-    expect(createDesktopKeyStore({ bridge: fakeBridge() }).readableByPageScript).toBe(false);
-    expect(createDesktopKeyStore({ bridge: fakeBridge() }).host).toBe("desktop-main");
+    expect(createDesktopCredentialStore({ bridge: fakeBridge() }).readableByPageScript).toBe(false);
+    expect(createDesktopCredentialStore({ bridge: fakeBridge() }).host).toBe("desktop-main");
   });
 
   it("主进程报告「没有 safeStorage」时，`onPersistence` 收到 false（UI 要据此如实说明）", async () => {
     const seen: boolean[] = [];
-    const store = createDesktopKeyStore({ bridge: fakeBridge(null, false), onPersistence: (value) => void seen.push(value) });
+    const store = createDesktopCredentialStore({ bridge: fakeBridge(null, false), onPersistence: (value) => void seen.push(value) });
     await store.save(VALID_KEY);
     expect(seen).toEqual([false]);
   });
 
   it("磁盘上的值被手工改坏 ⇒ 当「没有」处理（让用户重新导入，而不是在派生时炸）", async () => {
-    const store = createDesktopKeyStore({ bridge: fakeBridge("被手工改坏的内容") });
+    const store = createDesktopCredentialStore({ bridge: fakeBridge("被手工改坏的内容") });
     expect(await store.load()).toBeNull();
   });
 
   it("`save` 校验形状（坏值不落到主进程）", async () => {
     const bridge = fakeBridge();
-    await expect(createDesktopKeyStore({ bridge }).save("坏值")).rejects.toThrow();
+    await expect(createDesktopCredentialStore({ bridge }).save("坏值")).rejects.toThrow();
     expect(bridge.value).toBeNull();
   });
 });
@@ -224,14 +232,14 @@ describe("按宿主挑实现", () => {
     const saved = scope.window;
     scope.window = { opennote: { isElectron: true, syncKeys: { load: async () => null, save: async () => undefined, clear: async () => undefined, persisted: async () => true } } };
     try {
-      expect(resolveAccountKeyStore().host).toBe("desktop-main");
+      expect(resolveCredentialStore().host).toBe("desktop-main");
     } finally {
       scope.window = saved;
     }
   });
 
   it("没有桌面桥 ⇒ 走 `localStorage`", () => {
-    expect(resolveAccountKeyStore({ storage: fakeStorage() }).host).toBe("browser-local-storage");
+    expect(resolveCredentialStore({ storage: fakeStorage() }).host).toBe("browser-local-storage");
   });
 
   it("有 `isElectron` 但**没有** `syncKeys`（旧版 preload）⇒ 退回 `localStorage`，不崩", () => {
@@ -239,7 +247,7 @@ describe("按宿主挑实现", () => {
     const saved = scope.window;
     scope.window = { opennote: { isElectron: true } };
     try {
-      expect(resolveAccountKeyStore({ storage: fakeStorage() }).host).toBe("browser-local-storage");
+      expect(resolveCredentialStore({ storage: fakeStorage() }).host).toBe("browser-local-storage");
     } finally {
       scope.window = saved;
     }
@@ -252,16 +260,16 @@ describe("按宿主挑实现", () => {
 
 describe("§3.9 · 「密钥存在哪、有什么风险」必须说得准", () => {
   it("网页端**必须**给出 XSS 警告（这是文档明确要求的）", () => {
-    const described = describeKeyStorage(createWebKeyStore(fakeStorage()));
+    const described = describeCredentialStorage(createWebCredentialStore(fakeStorage()));
     expect(described.risk).toBeTruthy();
     expect(described.risk).toContain("恶意脚本");
     // 而且要给用户一条出路（「不记住」），不能只是吓唬。
-    expect(described.risk).toContain("不记住");
+    expect(described.risk).toContain("记在这台设备上");
   });
 
   it("桌面端**不该**报一个它没有的风险（错报风险与瞒报一样有害）", () => {
-    const described = describeKeyStorage(
-      createDesktopKeyStore({
+    const described = describeCredentialStorage(
+      createDesktopCredentialStore({
         bridge: { load: async () => null, save: async () => undefined, clear: async () => undefined, persisted: async () => true },
       }),
     );
@@ -269,20 +277,20 @@ describe("§3.9 · 「密钥存在哪、有什么风险」必须说得准", () =
     expect(described.where).toContain("主进程");
   });
 
-  it("内存（不记住）模式说清「刷新后要重新导入」", () => {
-    const described = describeKeyStorage(createMemoryKeyStore());
-    expect(described.where).toContain("重新导入");
+  it("内存（不记住）模式说清「刷新后要重新登录」", () => {
+    const described = describeCredentialStorage(createMemoryCredentialStore());
+    expect(described.where).toContain("重新登录");
     expect(described.risk).toBeNull();
   });
 
   it("四个宿主都有说明（`switch` 没有漏分支）", () => {
     const hosts = [
-      createMemoryKeyStore(),
-      createWebKeyStore(fakeStorage()),
-      createDesktopKeyStore({ bridge: { load: async () => null, save: async () => undefined, clear: async () => undefined, persisted: async () => true } }),
+      createMemoryCredentialStore(),
+      createWebCredentialStore(fakeStorage()),
+      createDesktopCredentialStore({ bridge: { load: async () => null, save: async () => undefined, clear: async () => undefined, persisted: async () => true } }),
     ];
     for (const store of hosts) {
-      const described = describeKeyStorage(store);
+      const described = describeCredentialStorage(store);
       expect(described.where.length).toBeGreaterThan(4);
     }
   });
@@ -293,7 +301,7 @@ describe("§3.9 · 「密钥存在哪、有什么风险」必须说得准", () =
    ============================================================================ */
 
 describe("界面文案纪律", () => {
-  it("`describeKeyStorage` 的文案里没有 emoji（产品规则：界面文案无 emoji）", async () => {
+  it("`describeCredentialStorage` 的文案里没有 emoji（产品规则：界面文案无 emoji）", async () => {
     /*
      * 这条是**产品级规则**（`verify-contract.cjs` 的 U-8）在单元层面的前哨：
      * 我第一版在风险文案里放了 ⚠️，被 U-8 咬住了。与其等那个大检查器报，

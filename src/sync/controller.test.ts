@@ -254,3 +254,54 @@ describe("兜底：流连不上时不能干等着", () => {
     expect(world.triggers).toEqual([]);
   });
 });
+
+/* ============================================================================
+   ★ 游标一致 ≠ 本地也干净
+   ============================================================================ */
+
+describe("★ 连上后游标一致时，先看本地有没有没推的改动", () => {
+  function world(hasLocalChanges: () => Promise<boolean>) {
+    const runner = fakeRunner();
+    const noteUpToDate = vi.fn();
+    (runner.runner as unknown as { noteUpToDate: () => void }).noteUpToDate = noteUpToDate;
+    let onUpToDate: (() => void) | null = null;
+    const controller = createSyncController({
+      runner: runner.runner,
+      openStream: (_signal, upToDate) => {
+        onUpToDate = upToDate;
+        return fakeStream({ reconciles: true }).stream;
+      },
+      hasLocalChanges,
+      setTimeoutFn: () => 0,
+      clearTimeoutFn: () => undefined,
+    });
+    controller.start();
+    return { ...runner, noteUpToDate, upToDate: () => onUpToDate?.() };
+  }
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("★ 本地有改动（应用关着时改过 / 上次没来得及推）⇒ 同步一轮，不报「已是最新」", async () => {
+    const w = world(async () => true);
+    w.upToDate();
+    await settle();
+    expect(w.triggers).toEqual(["startup"]);
+    expect(w.noteUpToDate).not.toHaveBeenCalled();
+  });
+
+  it("本地也干净 ⇒ 一个请求都不发，只更新「上次同步时间」", async () => {
+    const w = world(async () => false);
+    w.upToDate();
+    await settle();
+    expect(w.triggers).toEqual([]);
+    expect(w.noteUpToDate).toHaveBeenCalledTimes(1);
+  });
+
+  it("核对本地失败 ⇒ 按「有改动」处理（宁可白跑一轮，不可漏推）", async () => {
+    const w = world(async () => {
+      throw new Error("读不了");
+    });
+    w.upToDate();
+    await settle();
+    expect(w.triggers).toEqual(["startup"]);
+  });
+});

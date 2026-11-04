@@ -43,6 +43,7 @@ export interface WorkspaceSyncConfig {
   enabled: boolean;
   /** 同步服务的公开地址（`https://notes.example.com`）。 */
   baseUrl: string;
+  /** 对应云端哪个笔记本。空 = 开了同步、等下次打开时按名字配对（见 `normalizeSyncConfig`）。 */
   notebookId: string;
   cryptoMode: CryptoMode;
   /** 账号的**引用**（不是密钥本身）。 */
@@ -103,11 +104,13 @@ export function normalizeSyncConfig(raw: unknown): WorkspaceSyncConfig {
   })();
 
   /*
-   * ★ 半配好的同步视为**关**。
-   * 缺 notebookId 就没法知道同步哪个笔记本；地址不可用就没法知道发给谁 ——
-   * 这两种情况下「跑起来」都意味着往一个没验证过的目的地发数据。
+   * ★ 地址不可用的同步视为**关**：没法知道发给谁，「跑起来」就意味着往一个没验证过的目的地发数据。
+   *
+   * `notebookId` 可以是空的：那是「开了同步、还没对上云端哪个笔记本」（设置页里打开了一个
+   * 当前没打开的笔记本）。它被打开时 `appSync.resolveRemoteNotebook` 按名字配对或新建，
+   * 再把 id 写回来；对上之前 `attach` 不会发任何文件请求。
    */
-  const enabled = wantsEnabled && usableUrl && notebookId !== "";
+  const enabled = wantsEnabled && usableUrl;
   return { enabled, baseUrl, notebookId, cryptoMode, accountRef };
 }
 

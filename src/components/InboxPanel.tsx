@@ -46,6 +46,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "./Icons";
+import { HtmlFrame } from "../html/HtmlFrame";
 import { desktopBridge } from "../desktop/bridge";
 import { folderPathLabel, useLibrary } from "../data/library";
 import type { Folder, Id } from "../data/types";
@@ -63,6 +64,7 @@ import {
   discardInbox,
   inboxFailureMessage,
   readInboxDetail,
+  readInboxHtmlPreview,
   refreshInbox,
   startInboxWatch,
   useInboxDetails,
@@ -209,11 +211,11 @@ export function planPreviewImage(src: string, staged: ReadonlyMap<string, string
  * `target.folder = "../逃逸"`）会让它抛错**——这里必须接住，否则整块面板会渲染崩掉。
  * 非法时按根目录算一个只用于显示的文件名，并如实标记 `illegal`。
  */
-function safeRequestedPath(folder: string | null, title: string): { path: string; illegal: boolean } {
+function safeRequestedPath(folder: string | null, title: string, ext = ".md"): { path: string; illegal: boolean } {
   try {
-    return { path: requestedNotePath(folder, title), illegal: false };
+    return { path: requestedNotePath(folder, title, ext), illegal: false };
   } catch {
-    return { path: requestedNotePath(null, title), illegal: true };
+    return { path: requestedNotePath(null, title, ext), illegal: true };
   }
 }
 
@@ -370,7 +372,18 @@ function SaveToPicker({
     const flip = below < 340 && box.top > below;
     // 右侧可用宽度：从触发器左边缘到窗口右边缘（留 12px 呼吸位）。
     const maxWidth = Math.max(240, window.innerWidth - box.left - 12);
-    setRect({ left: box.left, top: flip ? box.top - 4 : box.bottom + 4, width: box.width, maxWidth, flip });
+    const next = { left: box.left, top: flip ? box.top - 4 : box.bottom + 4, width: box.width, maxWidth, flip };
+    // 位置没变就沿用旧对象：React 据此跳过重渲染（滚动时绝大多数事件都是这种情况）。
+    setRect((prev) =>
+      prev &&
+      prev.left === next.left &&
+      prev.top === next.top &&
+      prev.width === next.width &&
+      prev.maxWidth === next.maxWidth &&
+      prev.flip === next.flip
+        ? prev
+        : next,
+    );
   }, []);
 
   // 展开时定位；展开期间跟着滚动/改尺寸重算（不然浮层会留在原地，和触发器脱开）。
@@ -380,11 +393,27 @@ function SaveToPicker({
       return;
     }
     place();
-    window.addEventListener("scroll", place, true);
-    window.addEventListener("resize", place);
+    /*
+     * 捕获阶段的 scroll 会收到页面上**每一个**滚动容器的事件，包括浮层自己的候选列表；
+     * 每个都同步量一次 getBoundingClientRect 再 setState，滚列表就是逐帧重渲染。
+     * 所以：浮层内部的滚动直接忽略（触发器没动），其余的一帧最多量一次。
+     */
+    let frame: number | null = null;
+    const schedule = (event: Event) => {
+      if (event.type === "scroll" && event.target instanceof Node && popupRef.current?.contains(event.target)) return;
+      if (frame === null) {
+        frame = requestAnimationFrame(() => {
+          frame = null;
+          place();
+        });
+      }
+    };
+    window.addEventListener("scroll", schedule, true);
+    window.addEventListener("resize", schedule);
     return () => {
-      window.removeEventListener("scroll", place, true);
-      window.removeEventListener("resize", place);
+      if (frame !== null) cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", schedule);
     };
   }, [open, place]);
 
@@ -625,6 +654,12 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
    * 详情栏内部（面板本身固定高度，见 `app.css` 的 `.dialog--tall`）。
    */
   const [bodies, setBodies] = useState<ReadonlyMap<string, string>>(() => new Map());
+  /**
+   * HTML 页面条目的预览文档（正文 + 暂存资源按入库规则内联后的那一页），只留当前一条：
+   * 内联后可能有十几 MB，不进 `bodies` 那个多条缓存。缓存键 = `id@updatedAt`
+   * （`updatedAt` 来自 state.json，重试 / 失败等状态迁移会更新）——条目内容变了预览自动重做。
+   */
+  const [htmlPreview, setHtmlPreview] = useState<{ key: string; html: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
   /** 「保存到」的选择（`00` §6.14㉜）：只对当前条目生效，`folder: null` = 工作区根。 */
   const [folderPick, setFolderPick] = useState<{ id: string; folder: string | null } | null>(null);
@@ -679,7 +714,9 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
    * 它必须**排在 effects 之前**：预览页的图片解析 effect 依赖渲染结果（`previewHtml`），
    * 而 hooks 不许出现在 `if (!open) return null` 之后。
    */
-  const previewHtml = useMemo(() => renderMarkdown(bodyText), [bodyText]);
+  const isHtmlEntry = selected?.format === "html";
+  // HTML 页面条目不走 markdown 管线：预览是沙箱里渲染的那一页（见下面的 `htmlPreview`）。
+  const previewHtml = useMemo(() => (isHtmlEntry ? "" : renderMarkdown(bodyText)), [isHtmlEntry, bodyText]);
 
   /* ---------------------------- 落点与说明句 ---------------------------- */
 
@@ -712,17 +749,18 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
     if (entry.status === "committed" && entry.notePath) {
       return { path: entry.notePath, illegal: false, folderMissing: false, sameName: false, editing: false };
     }
-    const requested = safeRequestedPath(effectiveFolder, entry.title || "无标题");
+    const requested = safeRequestedPath(effectiveFolder, entry.title || "无标题", selected?.format === "html" ? ".html" : ".md");
     const folderMissing = !requested.illegal && effectiveFolder !== null && !(effectiveFolder in library.folders);
     const sameName = requested.path in library.notes;
     const editing = Object.values(library.notes).some((note) => note.id === requested.path && library.dirty[note.id]);
     return { path: requested.path, illegal: requested.illegal, folderMissing, sameName, editing };
-  }, [entry?.id, entry?.status, entry?.notePath, effectiveFolder, entry?.title, library.folders, library.notes, library.dirty]);
+  }, [entry?.id, entry?.status, entry?.notePath, effectiveFolder, entry?.title, selected?.format, library.folders, library.notes, library.dirty]);
 
   const previous = useMemo(() => {
-    if (!entry || !entry.sourceUrl) return null;
+    // HTML 页面没有「追加到上一次剪藏」这回事（接收端一律新建），不给这条将来时提示。
+    if (!entry || !entry.sourceUrl || isHtmlEntry) return null;
     return findPreviousCapture(library.notes, entry.sourceUrl);
-  }, [entry?.id, entry?.sourceUrl, library.notes]);
+  }, [entry?.id, entry?.sourceUrl, isHtmlEntry, library.notes]);
 
   /** 落点说明句（优先级：非法 → 目录不存在 → 正在编辑 → 同网址剪藏过 → 同名另存 → 最终落点）。 */
   const hint = useMemo(() => {
@@ -739,9 +777,10 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
       return `这个网址之前剪藏过（${when}），入库时会追加到《${previous.title}》。`;
     }
     if (landing.sameName) return `同名文件已存在，入库时会另存为《${entry.title} 2》。`;
-    // 最终落点说明句：入库前明确「会存到哪」。
-    return effectiveFolder ? `入库到「${effectiveFolder}」。` : `入库到${INBOX_ROOT_LABEL}。`;
-  }, [entry?.id, entry?.status, entry?.title, effectiveFolder, landing, previous, now]);
+    // 最终落点说明句：入库前明确「会存到哪」。HTML 页面多说一句它入库后是什么（只读页面）。
+    const where = effectiveFolder ? `入库到「${effectiveFolder}」` : `入库到${INBOX_ROOT_LABEL}`;
+    return isHtmlEntry ? `${where}，成为一个只读的 HTML 页面。` : `${where}。`;
+  }, [entry?.id, entry?.status, entry?.title, effectiveFolder, landing, previous, isHtmlEntry, now]);
 
   /* -------------------------------- 副作用 ------------------------------- */
 
@@ -787,6 +826,22 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
       alive = false;
     };
   }, [open, selected?.entry.id, selected?.bodyText, bodies]);
+
+  // HTML 页面条目：预览页需要内联后的整页文档（资源在条目的 `resources/` 里）。
+  useEffect(() => {
+    if (!open || !selected || selected.format !== "html" || tab !== "preview") return;
+    const key = `${selected.entry.id}@${selected.entry.updatedAt}`;
+    if (htmlPreview?.key === key) return;
+    let alive = true;
+    void readInboxHtmlPreview(selected.entry.id)
+      .catch(() => null)
+      .then((html) => {
+        if (alive) setHtmlPreview({ key, html });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, selected?.entry.id, selected?.entry.updatedAt, selected?.format, tab, htmlPreview?.key]);
 
   // 打开时焦点落在左列表第一个条目上（mockup 520 行）。
   useEffect(() => {
@@ -855,6 +910,21 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
         notify(errorMessage(error) || "入库失败，请重试。", { kind: "danger" });
       } finally {
         setBusy(false);
+        /*
+         * 收尾无条件重读一次收件箱。
+         *
+         * 主按钮的文字是 `committing ? "正在入库…" : …`，而 `committing = busy || status ===
+         * "committing"`：只把 `busy` 放开是不够的，**界面上那句话由磁盘状态说了算**。
+         * 真机上正是这里出的错——笔记已经落盘、`state.json` 已经是 `committed`，但那次
+         * 刷新被并发读覆盖成了入库途中的 `committing`，于是按钮永远停在「正在入库…」，
+         * 而它同时承担着「禁用入库 / 禁用跳过这次」两条锁（见 `primaryDisabled`）——
+         * 条目就此成了死结。
+         *
+         * 数据层已经改成串行刷新（`refreshInbox`）+ 孤儿自愈（`recoverStaleCommit`），
+         * 这里再显式收尾一次：无论底层是成功、抛错还是被别处提前发布过，面板都会在
+         * 入库动作结束后与磁盘对齐。
+         */
+        void refreshInbox().catch(() => undefined);
       }
     },
     [folderPick],
@@ -1192,7 +1262,17 @@ export function InboxPanel({ open, onClose, onOpenNote, initialFilter }: InboxPa
                   tabIndex={0}
                   hidden={tab !== "preview"}
                 >
-                  {bodyText ? (
+                  {isHtmlEntry ? (
+                    htmlPreview?.key === `${entry?.id}@${entry?.updatedAt}` && htmlPreview?.html ? (
+                      <div className="inbox__html">
+                        <HtmlFrame html={htmlPreview.html} title={entry?.title || "HTML 页面预览"} />
+                      </div>
+                    ) : htmlPreview?.key === `${entry?.id}@${entry?.updatedAt}` ? (
+                      <p className="inbox__preview-empty">这一条没有可预览的页面。</p>
+                    ) : (
+                      <p className="inbox__preview-empty">正在准备页面预览…</p>
+                    )
+                  ) : bodyText ? (
                     <article
                       ref={previewRef}
                       className="prose inbox__prose"
