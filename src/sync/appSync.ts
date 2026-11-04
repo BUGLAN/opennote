@@ -637,3 +637,17 @@ export function bindWorkspaceToRemote(record: WorkspaceRecord, notebook: Noteboo
 export function currentWorkspaceRecord(): WorkspaceRecord | null {
   return currentRecord;
 }
+
+/*
+ * ★ 开发时这个模块**不许热替换**，改了就整页刷新。
+ *
+ * 它是有状态的：绑定、调度器、定时器、和服务器之间那条长连接都挂在模块级变量上。Vite 热替换会
+ * 执行一份**新的**模块，而旧的那份（正在跑的同步循环）原样留着 —— App / 设置页改用新那份的
+ * store，同步却还在旧那份里跑旧代码。真机踩过：加了「最近同步」之后同步照常，记录却一条都没有。
+ * 自己接住更新（这样同步层的改动不会冒泡成 App 的热替换），然后整页刷新。生产构建里没有 `import.meta.hot`。
+ */
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    window.location.reload();
+  });
+}
