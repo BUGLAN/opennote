@@ -85,6 +85,46 @@ describe("登录", () => {
     ]);
   });
 
+  it("★ 同一台电脑换账号登录 ⇒ 设备跟到新账号（真机：Windows 换账号后设置页只列出 Mac）", async () => {
+    const world = makeWorld();
+    await world.accounts.create({ email: "old@example.com", password: PASSWORD });
+    await world.accounts.create({ email: "new@example.com", password: PASSWORD });
+    const old = (await world.login("old@example.com", PASSWORD, DEVICE_B)).body!.token as string;
+    const fresh = (await world.login("new@example.com", PASSWORD, DEVICE_B)).body!.token as string;
+
+    const mine = (await world.call("/v1/me/devices", { token: fresh })).body!.devices as { deviceId: string; current: boolean }[];
+    expect(mine).toEqual([expect.objectContaining({ deviceId: DEVICE_B.deviceId, current: true })]);
+    // 旧账号那边不再列它（它已经不是那个账号的设备了）。
+    const theirs = (await world.call("/v1/me/devices", { token: old })).body!.devices as unknown[];
+    expect(theirs).toEqual([]);
+  });
+
+  it("没有这台设备会话的账号**不能**靠填 deviceId 把别人的设备改挂过来", async () => {
+    const world = makeWorld();
+    const alice = await world.accounts.create({ email: "alice@example.com", password: PASSWORD });
+    const bob = await world.accounts.create({ email: "bob@example.com", password: PASSWORD });
+    await world.login("alice@example.com", PASSWORD, DEVICE_A);
+    // bob 从别的设备登录，然后在检查点 / POST /v1/devices 里填 alice 的 deviceId。
+    world.notebooks.upsertDevice({ deviceId: DEVICE_A.deviceId, accountId: bob.id, name: "抢来的", platform: "web" });
+
+    expect(world.notebooks.listDevices(bob.id)).toEqual([]);
+    expect(world.notebooks.listDevices(alice.id)).toEqual([expect.objectContaining({ deviceId: DEVICE_A.deviceId, name: DEVICE_A.name })]);
+  });
+
+  it("已经换过账号的设备：下一次带着新账号会话登记（检查点）时自己改挂过来", async () => {
+    const world = makeWorld();
+    const oldAccount = await world.accounts.create({ email: "old@example.com", password: PASSWORD });
+    const newAccount = await world.accounts.create({ email: "new@example.com", password: PASSWORD });
+    // 修复之前的现场：设备行挂在旧账号名下，而新账号已经有这台设备的有效会话。
+    world.notebooks.upsertDevice({ deviceId: DEVICE_B.deviceId, accountId: oldAccount.id, name: "win 一号机", platform: "desktop" });
+    world.accounts.createSession({ accountId: newAccount.id, kind: "device", deviceId: DEVICE_B.deviceId });
+    expect(world.notebooks.listDevices(newAccount.id)).toEqual([]);
+
+    world.notebooks.upsertDevice({ deviceId: DEVICE_B.deviceId, accountId: newAccount.id, name: null, platform: null });
+    expect(world.notebooks.listDevices(newAccount.id)).toEqual([expect.objectContaining({ deviceId: DEVICE_B.deviceId, name: "win 一号机" })]);
+    expect(world.notebooks.listDevices(oldAccount.id)).toEqual([]);
+  });
+
   it("密码错 → 401 bad-credentials；同一邮箱连错 5 次 → 429，正确密码也要等", async () => {
     const world = makeWorld();
     await world.accounts.create({ email: "lan@example.com", password: PASSWORD });

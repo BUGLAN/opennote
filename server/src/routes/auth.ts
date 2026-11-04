@@ -102,6 +102,14 @@ export function issueDeviceSession(
   ip: string | null,
   now: number,
 ): { token: string; me: Me } {
+  // 同一台设备重新登录：旧会话作废，免得一台设备挂着好几条有效令牌。
+  deps.accounts.revokeDeviceSessions(account.id, device.deviceId, now);
+  const { token, session } = deps.accounts.createSession({ accountId: account.id, kind: "device", deviceId: device.deviceId, ip, now });
+  /*
+   * 先发会话、**再**登记设备：`upsertDevice` 只在「本账号有这台设备的有效会话」时才把一台
+   * 原本属于别的账号的设备改挂过来（防请求体里填别人的 deviceId）。顺序反了，换账号登录
+   * 的那台电脑就会继续挂在旧账号名下。
+   */
   deps.notebooks.upsertDevice({
     deviceId: device.deviceId,
     accountId: account.id,
@@ -112,9 +120,6 @@ export function issueDeviceSession(
     now,
     ip,
   });
-  // 同一台设备重新登录：旧会话作废，免得一台设备挂着好几条有效令牌。
-  deps.accounts.revokeDeviceSessions(account.id, device.deviceId, now);
-  const { token, session } = deps.accounts.createSession({ accountId: account.id, kind: "device", deviceId: device.deviceId, ip, now });
   deps.accounts.touch(account.id, now);
   return { token, me: meOf(deps, account, session) };
 }

@@ -761,6 +761,16 @@ export class NotebookStore {
    * 传进来为空的字段**不覆盖**已有值（`COALESCE`）：某次登记拿不到机器名时，
    * 不能把之前存好的名字冲成 NULL（`docs/待办-服务端同步能力清单-2026-10-23.md` 第 2 条）。
    * 设备的凭据是会话（`sessions.device_id`），这里只是账本；重新登录会清掉 `revoked_at`。
+   *
+   * ★ **归属跟着会话走**：`deviceId` 是客户端装好之后就固定的，同一台电脑换账号登录时还是它。
+   * 以前这里从不改归属，于是那台电脑一直挂在旧账号名下 —— 新账号的设备列表里看不到它，
+   * 移除它也匹配不上（真机 2026-11-04：Windows 换到新账号后，设置页只列出 Mac）。
+   *
+   * 但**不能**谁来登记就归谁：检查点与 `POST /v1/devices` 的 `deviceId` 来自请求体，
+   * 任何登录了的账号都能填别人的 id。所以规则是：这一行已属于本账号，**或者**本账号手里有
+   * 这台设备**还有效的会话**，才更新（含改归属）；否则一个字都不动。
+   * 登录时（`issueDeviceSession`）先发会话再登记，于是换账号登录的那一刻就改过来了；
+   * 已经换过账号的设备，下一次同步打检查点时也会自己改过来。
    */
   upsertDevice(input: {
     deviceId: string;
@@ -778,13 +788,21 @@ export class NotebookStore {
         `INSERT INTO devices (id, account_id, name, platform, os, client_version, created_at, last_seen_at, last_ip, revoked_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(id) DO UPDATE SET
+           account_id = excluded.account_id,
            name = COALESCE(excluded.name, devices.name),
            platform = COALESCE(excluded.platform, devices.platform),
            os = COALESCE(excluded.os, devices.os),
            client_version = COALESCE(excluded.client_version, devices.client_version),
            last_seen_at = excluded.last_seen_at,
            last_ip = COALESCE(excluded.last_ip, devices.last_ip),
-           revoked_at = NULL`,
+           revoked_at = NULL
+         WHERE devices.account_id = excluded.account_id
+            OR EXISTS (
+                 SELECT 1 FROM sessions s
+                  WHERE s.device_id = excluded.id AND s.account_id = excluded.account_id
+                    AND s.kind = 'device' AND s.revoked_at IS NULL
+                    AND (s.expires_at IS NULL OR s.expires_at > excluded.last_seen_at)
+               )`,
       )
       .run(input.deviceId, input.accountId, input.name, input.platform, input.os ?? null, input.clientVersion ?? null, now, now, input.ip ?? null);
   }
