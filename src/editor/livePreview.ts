@@ -25,7 +25,16 @@ import {
   TableWidget,
   WikiLinkWidget,
 } from "./widgets";
-import { lastTableWidths, parseTableAlignments, splitTableRow, tableMetricKey, tableWidthsFor } from "./tableMetrics";
+import {
+  cellTextWidth,
+  lastTableWidths,
+  parseTableAlignments,
+  splitTableRow,
+  tableAvailableWidth,
+  tableMetricKey,
+  tableWidthsFor,
+  type TableColumn,
+} from "./tableMetrics";
 
 /** Above this size we stop decorating and fall back to plain markdown highlighting. */
 const MAX_DECORATED_LENGTH = 800_000;
@@ -288,7 +297,34 @@ function decorate(
     const columns = aligns.length || headerCells || Math.max(0, ...splits.map((split) => split.cells.length));
     if (columns <= 0) return;
 
-    const measured = tableWidthsFor(tableMetricKey(key)) ?? lastTableWidths(columns);
+    const frozen = tableWidthsFor(tableMetricKey(key)) ?? lastTableWidths(columns);
+    /*
+     * 列宽冻结在渲染态的实测值上，但**内容放不下时只许变宽**（`cellTextWidth` 的注释）。
+     * 多出来的宽度全给内容盒，内边距不变；总宽不超过正文栏。
+     */
+    let measured: readonly TableColumn[] | null = frozen;
+    if (frozen && frozen.length === columns) {
+      const need = frozen.map((col) => col.content);
+      let measurable = true;
+      for (let r = 0; r < rows.length && measurable; r += 1) {
+        splits[r].cells.forEach((cell, i) => {
+          if (i >= columns || !measurable) return;
+          const width = cellTextWidth(lines[r].text.slice(cell.from, cell.to).trim(), rows[r].header);
+          if (width == null) measurable = false;
+          else need[i] = Math.max(need[i], Math.ceil(width) + 1);
+        });
+      }
+      if (measurable) {
+        const extra = need.map((n, i) => Math.max(0, n - frozen[i].content));
+        const base = frozen.reduce((sum, col) => sum + col.track, 0);
+        const grow = extra.reduce((sum, n) => sum + n, 0);
+        const room = Math.max(0, tableAvailableWidth() - base);
+        const scale = grow > room ? room / grow : 1;
+        if (grow > 0 && scale > 0) {
+          measured = frozen.map((col, i) => ({ track: col.track + extra[i] * scale, content: col.content + extra[i] * scale }));
+        }
+      }
+    }
     const weights = new Array<number>(columns).fill(4);
     for (let r = 0; r < rows.length; r += 1) {
       splits[r].cells.forEach((cell, i) => {
@@ -999,17 +1035,30 @@ export const livePreview = [livePreviewField];
  * 按装饰集做缓存：一次按键只会建一份，方向键连按不重复扫描。
  */
 const atomCache = new WeakMap<DecorationSet, RangeSet<RangeValue>>();
+const ATOM = Decoration.replace({});
 
 export function atomsOf(state: EditorState): RangeSet<RangeValue> {
   const value = state.field(livePreviewField, false);
   if (!value) return RangeSet.empty;
   const cached = atomCache.get(value.set);
   if (cached) return cached;
-  const ranges: Range<Decoration>[] = [];
+  const spans: Span[] = [];
   value.set.between(0, state.doc.length, (from, to, deco) => {
-    if (to > from && (deco.spec as { atom?: boolean }).atom) ranges.push(deco.range(from, to));
+    if (to > from && (deco.spec as { atom?: boolean }).atom) spans.push({ from, to });
   });
-  const atoms = RangeSet.of<RangeValue>(ranges, true);
+  /*
+   * 相邻的原子**必须合并**：链接的 `]`、`(`、URL、`)` 是四段挨着的隐藏范围，CodeMirror 只会
+   * 把光标推出「严格落在某一段内部」的位置 —— 两段的交界处不算内部，光标就停在那儿，
+   * 方向键照样要按好几次（真实浏览器实测：从 `文字` 末尾按 → 停在 `](` 中间）。
+   */
+  spans.sort((a, b) => a.from - b.from || a.to - b.to);
+  const merged: Span[] = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    if (last && span.from <= last.to) last.to = Math.max(last.to, span.to);
+    else merged.push({ ...span });
+  }
+  const atoms = RangeSet.of<RangeValue>(merged.map((span) => ATOM.range(span.from, span.to)));
   atomCache.set(value.set, atoms);
   return atoms;
 }

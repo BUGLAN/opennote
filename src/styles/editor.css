@@ -259,8 +259,8 @@
 
 /* ---- link tooltip ------------------------------------------------------ */
 /* 光标停在链接里时的地址浮层（`editor/linkTip.ts`）：地址 + 打开 / 编辑。
-   外框（底色、边、圆角、阴影）由 `theme.ts` 的 `.cm-tooltip` 统一给。 */
-.cm-tooltip .md-link-tip {
+   外框（底色、边、圆角、阴影）由 `theme.ts` 的 `.cm-tooltip` 统一给；元素本身就是 `.cm-tooltip`。 */
+.cm-tooltip.md-link-tip {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -271,7 +271,7 @@
   color: var(--ink-2);
 }
 
-.cm-tooltip .md-link-tip__url {
+.cm-tooltip.md-link-tip .md-link-tip__url {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -280,7 +280,7 @@
   font-size: 12px;
 }
 
-.cm-tooltip .md-link-tip__btn {
+.cm-tooltip.md-link-tip .md-link-tip__btn {
   flex: none;
   border: 0;
   border-radius: var(--radius-sm);
@@ -291,13 +291,17 @@
   cursor: pointer;
 }
 
-.cm-tooltip .md-link-tip__btn:hover {
+.cm-tooltip.md-link-tip .md-link-tip__btn:hover {
   background: var(--accent-soft);
 }
 
 /* ---- table toolbar ----------------------------------------------------- */
 /* 光标在表格里（就地编辑态）时贴在表格上方的工具条（`editor/tableEdit.ts`）。 */
-.cm-tooltip .md-table-tools {
+/* 注意选择器是**复合**的：`create()` 交出去的元素本身就被 CodeMirror 加上 `.cm-tooltip`，
+   不是套在一个 `.cm-tooltip` 里面。
+   工具条挂在表头第一个字的上方；表头行有 1.05em 的上内边距，整体再往上抬一截才不压住表头。 */
+.cm-tooltip.md-table-tools {
+  translate: 0 -1.35em;
   display: flex;
   gap: 2px;
   padding: 3px;
@@ -305,7 +309,7 @@
   font-size: 12px;
 }
 
-.cm-tooltip .md-table-tools__btn {
+.cm-tooltip.md-table-tools .md-table-tools__btn {
   border: 0;
   border-radius: var(--radius-sm);
   padding: 3px 7px;
@@ -315,7 +319,7 @@
   cursor: pointer;
 }
 
-.cm-tooltip .md-table-tools__btn:hover {
+.cm-tooltip.md-table-tools .md-table-tools__btn:hover {
   background: var(--accent-soft);
   color: var(--accent);
 }

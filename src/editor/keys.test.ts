@@ -264,3 +264,15 @@ describe("表格：光标吸附与工具条", () => {
     expect(kit.state.doc.toString()).toBe("| a |  | b |\n| --- | :---: | --- |\n| 3 |  | 4 |");
   });
 });
+
+describe("原子范围", () => {
+  it("相邻的隐藏范围合并成一段（链接的 `](url)` 是一整块，中间没有可停的交界）", async () => {
+    const { atomsOf } = await import("./livePreview");
+    const kit = keyKit("前 [文字](https://a.com) 后‸");
+    const spans: string[] = [];
+    atomsOf(kit.state).between(0, kit.state.doc.length, (from, to) => {
+      spans.push(kit.state.sliceDoc(from, to));
+    });
+    expect(spans).toEqual(["[", "](https://a.com)"]);
+  });
+});

@@ -153,6 +153,53 @@ export function parseTableAlignments(delimiterRow: string): TableAlign[] {
   });
 }
 
+/* ------------------------------------------------------------ 编辑中的列宽增长 */
+
+let measureContext: CanvasRenderingContext2D | null | undefined;
+let fontCache: { family: string; size: number } | null = null;
+let fontCacheAt = 0;
+
+/** 单元格文字的字体：正文字体，字号是 `.md-tcell` 的 0.94 × 0.94em（见 `editor.css`）。 */
+function cellFont(): { family: string; size: number } | null {
+  if (typeof document === "undefined") return null;
+  const now = Date.now();
+  if (fontCache && now - fontCacheAt < 2000) return fontCache;
+  const content = document.querySelector(".cm-content");
+  if (!content) return null;
+  const style = getComputedStyle(content);
+  const size = Number.parseFloat(style.fontSize) * 0.94 * 0.94;
+  if (!Number.isFinite(size) || size <= 0) return null;
+  fontCache = { family: style.fontFamily, size };
+  fontCacheAt = now;
+  return fontCache;
+}
+
+/**
+ * 一段单元格文字排出来有多宽（px）。量不了（node 单测、没有 canvas）就是 `null`。
+ *
+ * 为什么要量：就地编辑态的列宽取自**渲染态实测**，然后在编辑期间冻结（见 `byColumns`）。
+ * 冻结本身是对的 —— 改字不该重排整张表 —— 但内容一旦超过量到的宽度，窄列里就成了
+ * 一个字一行（真实浏览器实测：在 1 个字宽的列里打「29」，变成竖排的「2 / 9」）。
+ * 所以只许列**变宽**到放得下内容为止，不许变窄。
+ */
+export function cellTextWidth(text: string, bold: boolean): number | null {
+  if (!text) return 0;
+  if (measureContext === undefined) {
+    measureContext = typeof document === "undefined" ? null : document.createElement("canvas").getContext("2d");
+  }
+  const font = cellFont();
+  if (!measureContext || !font) return null;
+  measureContext.font = `${bold ? 600 : 400} ${font.size}px ${font.family}`;
+  return measureContext.measureText(text).width;
+}
+
+/** 正文栏的可用宽度（列变宽的上限）。拿不到就不设上限。 */
+export function tableAvailableWidth(): number {
+  if (typeof document === "undefined") return Number.POSITIVE_INFINITY;
+  const content = document.querySelector(".cm-content") as HTMLElement | null;
+  return content?.clientWidth ? content.clientWidth - 4 : Number.POSITIVE_INFINITY;
+}
+
 /** @internal 单测用：清空记忆表（模块级单例，用例之间需要干净起点）。 */
 export function clearTableWidths(): void {
   widths.clear();
