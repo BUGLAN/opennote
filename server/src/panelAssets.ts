@@ -58,6 +58,10 @@ const ASSETS: Record<string, string> = {
   "app.js": "text/javascript; charset=utf-8",
   "console.css": "text/css; charset=utf-8",
   "tokens.css": "text/css; charset=utf-8",
+  // 公开分享页（`/s/<id>`，`sharePage.ts`）：prose.css 是客户端 `src/styles/prose.css` 的原样副本。
+  "prose.css": "text/css; charset=utf-8",
+  "share.css": "text/css; charset=utf-8",
+  "share.js": "text/javascript; charset=utf-8",
   "assets/fonts/figtree-latin-wght-normal.woff2": "font/woff2",
   "assets/fonts/newsreader-latin-opsz-normal.woff2": "font/woff2",
   "assets/fonts/fraunces-latin-full-normal.woff2": "font/woff2",

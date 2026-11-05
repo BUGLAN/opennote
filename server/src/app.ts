@@ -8,6 +8,7 @@
  * | `/` + 静态资源 | **PWA 客户端**（与其它两个同源，所以 CSP 不用放开任何 https；`webApp.ts`） | 网页端 |
  * | `/v1/*` | 客户端 API | 桌面 / Android / 网页 |
  * | `/admin`、`/join`、`/reset` | **控制台**与两张公开页（`routes/panel.ts`） | 浏览器（运维 / 被邀请的人） |
+ * | `/s/<id>` | 公开分享的只读快照（`routes/shares.ts`） | 拿到链接的任何人 |
  * | `/v1/health` | 公开健康检查 | 隧道 / 监控 |
  *
  * 同源带来两件具体的好事：**CSP 里 `connect-src` 不用放开任何 https**；控制台不需要 CORS。
@@ -50,6 +51,8 @@ import { PairingStore } from "./auth/pairing";
 import { createPairingRoutes } from "./routes/pairing";
 import { createNotebookRoutes } from "./routes/notebooks";
 import { createV1Routes } from "./routes/v1";
+import { createShareRoutes } from "./routes/shares";
+import { ShareStore } from "./shares";
 import { SettingsStore } from "./settings";
 import { csrfGuard, isHttps, securityHeaders } from "./panelSecurity";
 import { createWebAppRoutes, resolveWebRoot } from "./webApp";
@@ -76,6 +79,7 @@ export interface BuiltApp {
   app: Hono;
   accounts: AccountStore;
   notebooks: NotebookStore;
+  shares: ShareStore;
   settings: SettingsStore;
   couch: CouchClient;
   couchAdmin: CouchClient;
@@ -120,6 +124,7 @@ export function createApp(options: AppOptions): BuiltApp {
   const { config, db } = options;
   const accounts = new AccountStore(db);
   const notebooks = new NotebookStore(db);
+  const shares = new ShareStore(db);
   const settings = new SettingsStore(db, config);
   const couch = options.couch ?? CouchClient.fromConfig(config);
   const couchAdmin = options.couchAdmin ?? CouchClient.adminFromConfig(config);
@@ -228,13 +233,19 @@ export function createApp(options: AppOptions): BuiltApp {
     }),
   );
 
+  /* 公开分享：`/v1/shares`（创建 / 撤销）与 `/s/<id>`（公开快照页与原文件）。 */
+  app.route(
+    "/",
+    createShareRoutes({ accounts, notebooks, shares, config, couch, couchAdmin, settings, audit: (event) => notebooks.audit(event), ...nowOption }),
+  );
+
   /* 网页控制台（`/admin`）、`/join`、`/reset` 与它们的静态资源、cookie 会话接口。 */
   app.route("/", createPanelRoutes({ accounts, notebooks, config, settings, throttle, audit, ...nowOption }));
   app.route("/", createGithubRoutes({ accounts, config, settings, oauth, github: options.github ?? createGithubApi(), audit, ...nowOption }));
 
   /*
    * 网页版（`/` + 静态资源，SPA 回落）。**必须最后挂**：它是 `GET *`，只回答前面没人认领的路径，
-   * 而且自己会跳过 `/v1`、`/admin`、`/panel`、`/join`、`/reset`、`/auth`（见 `webApp.ts`）。
+   * 而且自己会跳过 `/v1`、`/admin`、`/panel`、`/join`、`/reset`、`/auth`、`/s`（见 `webApp.ts`）。
    */
   const webRoot = resolveWebRoot(options.webRoot);
   if (webRoot) app.route("/", createWebAppRoutes(webRoot));
@@ -260,5 +271,5 @@ export function createApp(options: AppOptions): BuiltApp {
     });
   });
 
-  return { app, accounts, notebooks, settings, couch, couchAdmin, webRoot };
+  return { app, accounts, notebooks, shares, settings, couch, couchAdmin, webRoot };
 }

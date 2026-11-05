@@ -3485,6 +3485,30 @@ mark.hit {
   color: var(--ink-2);
 }
 
+/* ------------------------------------------------------------------ 公开分享对话框
+ * 侧栏右键「分享此链接 / 分享此文件」（`ShareDialog.tsx`）。一行链接 + 复制按钮；
+ * 链接用等宽字（它是一段地址），其余沿用 dialog__rows / dialog__note。不新增设计令牌。 */
+.share-dialog__host {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+}
+.share-dialog__link {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.share-dialog__link .btn {
+  flex: none;
+  white-space: nowrap;
+}
+.share-dialog__url {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
 /* ------------------------------------------------------------------ 同步对话框
  * ⚠️ 这一整组类名以前**压根没有样式**（sync-dialog__* 在 CSS 里一次都没出现过）。
  * 于是「卡片 / 标题 / 行」全靠浏览器默认盒模型 —— 一段 base64 游标就能把整个

@@ -35,6 +35,7 @@ describe("首次打开", () => {
         "schema_version",
         "server_settings",
         "sessions",
+        "shares",
         "sync_activity",
       ].sort(),
     );

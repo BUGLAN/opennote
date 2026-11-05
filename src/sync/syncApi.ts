@@ -16,7 +16,9 @@ import type {
   KdfParams,
   Me,
   NotebookSummary,
+  ShareCreated,
 } from "../../shared/contract";
+import { parseContract, shareCreatedSchema } from "../../shared/contract";
 import { resolveSend, type HttpSend } from "./http";
 
 export class SyncApiError extends Error {
@@ -55,6 +57,13 @@ export interface SyncApi {
   pairingReject(id: string): Promise<void>;
   pairingClaim(input: { code: string; publicKey: string; device: DeviceDescriptor }): Promise<{ id: string; claimToken: string; publicKey: string; expiresAt: number; email: string | null }>;
   pairingResult(id: string, claimToken: string): Promise<{ status: "waiting" | "rejected" } | { status: "done"; token: string; me: Me; sealed: string | null }>;
+  /**
+   * 公开分享：把一个文件**此刻**的字节传上去，换一个公开链接。
+   * 是一次性快照 —— 之后本地的修改不会更新它，它也不参与同步。
+   */
+  createShare(input: { name: string; bytes: Uint8Array }): Promise<ShareCreated>;
+  /** 撤销一个分享（只有作者能撤；撤完链接立刻失效）。 */
+  revokeShare(shareId: string): Promise<void>;
 }
 
 /** 把一个错误说成人话（连不上 / 不是 Opennote / 服务端给的那句）。 */
@@ -82,7 +91,9 @@ export async function openSyncApi(options: { server: string; token?: string | nu
   }
   const decoder = new TextDecoder();
 
+  /** `body` 是 JSON 值；要传原始字节（分享的快照）时给 `Uint8Array`。 */
   async function request<T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<T> {
+    const raw = body instanceof Uint8Array;
     let response;
     try {
       response = await send({
@@ -91,9 +102,9 @@ export async function openSyncApi(options: { server: string; token?: string | nu
         headers: {
           accept: "application/json",
           ...(token ? { authorization: `Bearer ${token}` } : {}),
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
+          ...(body === undefined ? {} : { "content-type": raw ? "application/octet-stream" : "application/json" }),
         },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(body === undefined ? {} : { body: raw ? body : JSON.stringify(body) }),
       });
     } catch (error) {
       throw new SyncApiError(0, `连不上 ${base.replace(/^https?:\/\//, "")}：${error instanceof Error ? error.message : String(error)}`, "network");
@@ -134,5 +145,8 @@ export async function openSyncApi(options: { server: string; token?: string | nu
     pairingReject: (pairingId) => request("POST", `/v1/pairing/${id(pairingId)}/reject`, {}),
     pairingClaim: (input) => request("POST", "/v1/pairing/claim", input),
     pairingResult: (pairingId, claimToken) => request("POST", `/v1/pairing/${id(pairingId)}/result`, { claimToken }),
+    createShare: async (input) =>
+      parseContract(shareCreatedSchema, await request("POST", `/v1/shares?name=${id(input.name)}`, input.bytes), "POST /v1/shares"),
+    revokeShare: (shareId) => request("DELETE", `/v1/shares/${id(shareId)}`),
   };
 }

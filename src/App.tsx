@@ -97,6 +97,7 @@ import { describeGithubError, planImport, runImport } from "./lib/github/importR
 import { parseRepoInput, targetLabel } from "./lib/github/parse";
 import { collectLocalFiles, planPull, planPush, pullChanges, pushChanges, resolvePullConflicts } from "./lib/github/sync";
 import { GithubDialogHost } from "./components/GithubDialog";
+import { ShareDialogHost } from "./components/ShareDialog";
 import { StoragePersistenceNotice } from "./components/StoragePersistenceNotice";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { ContentWidthHandles } from "./components/ContentWidthHandles";
@@ -1880,6 +1881,7 @@ export default function App(): ReactNode {
       <MenuHost />
       <DialogHost />
       <GithubDialogHost />
+      <ShareDialogHost />
       <ConflictDialogHost />
       <Toasts />
 

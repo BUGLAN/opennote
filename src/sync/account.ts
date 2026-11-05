@@ -10,12 +10,13 @@
  * | 加密口令 | `setPassphrase` · `unlockWithPassphrase` · `changePassphrase` · `forgetRememberedKey` |
  * | 添加设备 | `startAddDevice`（A 端显示 6 位码、确认对方） |
  * | 账号页 | `listDevices` · `removeDevice` · `changePassword` · `linkGithub` · `unlinkGithub` |
+ * | 公开分享 | `createPublicShare` · `revokePublicShare`（一次性快照，不参与同步） |
  *
  * 会话令牌只在 `keys.ts` 的保管里与本模块的内存里；UI 只能看到 `syncAccountStore` 里的摘要。
  * 解开的 encRoot 默认只在内存（退出应用就要重新输口令），用户勾了「记在这台设备上」才进保管。
  */
 
-import type { DeviceDescriptor, DeviceInfo, EncryptionState, HealthResponse, Me, NotebookSummary } from "../../shared/contract";
+import type { DeviceDescriptor, DeviceInfo, EncryptionState, HealthResponse, Me, NotebookSummary, ShareCreated } from "../../shared/contract";
 import { createStore } from "../lib/store";
 import { appVersion } from "../lib/appVersion";
 import { desktopBridge } from "../desktop/bridge";
@@ -601,6 +602,10 @@ export const removeDevice = (deviceId: string): Promise<void> => withSession((cl
 export const remoteNotebooks = (): Promise<NotebookSummary[]> => withSession((client) => client.notebooks());
 export const createRemoteNotebook = (input: { name: string; cryptoMode: "none" | "user-key" }): Promise<NotebookSummary> =>
   withSession((client) => client.createNotebook(input));
+
+/** 公开分享（一次性快照，不参与同步）：见 `src/lib/share.ts`。 */
+export const createPublicShare = (input: { name: string; bytes: Uint8Array }): Promise<ShareCreated> => withSession((client) => client.createShare(input));
+export const revokePublicShare = (shareId: string): Promise<void> => withSession((client) => client.revokeShare(shareId));
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
   await withSession((client) => client.changePassword({ currentPassword, newPassword }));

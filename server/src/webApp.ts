@@ -9,7 +9,7 @@
  *
  * ## 不碰的路径
  *
- * `/v1`、`/admin`、`/panel`、`/join`、`/reset`、`/auth` 这几个前缀**永远不**由这里回答，
+ * `/v1`、`/admin`、`/panel`、`/join`、`/reset`、`/auth`、`/s`（公开分享）这几个前缀**永远不**由这里回答，
  * 哪怕它们 404 —— 那样 API 的 404 仍是 `{error, code}` JSON，而不是一份 `index.html`。
  *
  * ## 目录
@@ -35,7 +35,7 @@ import { fileURLToPath } from "node:url";
 import { Hono, type Context } from "hono";
 
 /** 这些前缀属于 API / 控制台 / 公开页，网页版的回落绝不能盖住它们。 */
-const RESERVED = /^\/(?:v1|admin|panel|join|reset|auth)(?:\/|$)/;
+const RESERVED = /^\/(?:v1|admin|panel|join|reset|auth|s)(?:\/|$)/;
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",

@@ -346,6 +346,33 @@ export const inviteCreatedResponseSchema = z.object({
 });
 export type InviteCreatedResponse = z.infer<typeof inviteCreatedResponseSchema>;
 
+/* ------------------------------------------------------------ 公开分享 */
+
+/**
+ * 公开分享的 id：128 位随机数的 base64url（22 个字符）。它就是公开链接里的那一段，
+ * 拿到它 = 能看这份快照，所以必须不可猜。
+ */
+export const shareIdSchema = z.string().regex(/^[A-Za-z0-9_-]{22}$/, "分享 id 形状不对");
+
+/**
+ * `POST /v1/shares?name=<文件名>`（请求体是文件的原始字节）的响应。
+ *
+ * ★ 分享是**一次性快照**：服务端存下的是这一次上传的字节，之后本地怎么改都不会更新它，
+ * 它也不参与同步。要新内容就再分享一次（得到一个新 id）。
+ *
+ * `url` 是只读网页（`/s/<id>`），`rawUrl` 是原文件本身（`/s/<id>/raw`）。两者都按服务端的
+ * 对外地址（`EXTERNAL_BASE_URL`）拼，客户端原样展示即可。
+ */
+export const shareCreatedSchema = z.object({
+  id: shareIdSchema,
+  url: z.string().url(),
+  rawUrl: z.string().url(),
+  name: z.string().min(1).max(255),
+  size: z.number().int().nonnegative(),
+  createdAt: z.number().int().nonnegative(),
+});
+export type ShareCreated = z.infer<typeof shareCreatedSchema>;
+
 /* ------------------------------------------------------------ 同步数据面 */
 
 /**

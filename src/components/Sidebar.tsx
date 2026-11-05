@@ -40,6 +40,8 @@ import type { UpdateAction, UpdateView } from "../lib/updateView";
 import { cn, excerpt, formatRelativeTime } from "../lib/utils";
 import { Icon, type IconName } from "./Icons";
 import { openMenu, type MenuItem } from "./Overlays";
+import { openShareDialog, type ShareMode } from "../lib/share";
+import { syncAccountStore } from "../sync/account";
 
 export type SidebarTab = "files" | "search" | "tags" | "starred" | "trash";
 
@@ -942,6 +944,22 @@ interface NoteRowProps {
 }
 
 /**
+ * 「分享此链接」/「分享此文件」两项（`src/lib/share.ts`）：只有登录了同步服务器才出现 ——
+ * 公开链接就是那台服务器上的地址，没有服务器就无处可放。不按文件类型区分，什么文件都能分享。
+ * 菜单是点击那一刻构建的，所以直接读账号状态，不需要从上面一层层传。
+ */
+function shareMenuItems(note: Note): MenuItem[] {
+  const { account, encryption } = syncAccountStore.get();
+  if (!account) return [];
+  const open = (mode: ShareMode) =>
+    openShareDialog({ mode, note, server: account.server, encrypted: encryption === "locked" || encryption === "unlocked" });
+  return [
+    { id: "share-page", label: "分享此链接", icon: "external", separatorBefore: true, run: () => open("page") },
+    { id: "share-file", label: "分享此文件", icon: "upload", run: () => open("file") },
+  ];
+}
+
+/**
  * memo：打字时只有正在编辑的那篇笔记对象会变（以及它第一次变脏时的 `dirty`），
  * 其余行的 props 全部原样 —— 回调都是稳定引用（见 `Sidebar` 顶部的 `openNote`）。
  */
@@ -994,6 +1012,7 @@ const NoteRow = memo(function NoteRow({
         disabled: noteAbsolutePath(getLibrary().workspace, note.id) === null,
         run: () => void copyPathToClipboard(getLibrary().workspace, note.id),
       },
+      ...shareMenuItems(note),
       {
         id: "trash",
         label: "移到回收站",

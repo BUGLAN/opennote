@@ -27,7 +27,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 interface Migration {
   version: number;
@@ -405,6 +405,33 @@ const MIGRATIONS: readonly Migration[] = [
           PRIMARY KEY (provider, subject)
         );
         CREATE UNIQUE INDEX idx_identities_account ON identities(account_id, provider);
+      `);
+    },
+  },
+  {
+    version: 7,
+    description: "公开分享（一次性快照）：shares",
+    up: (db) => {
+      /*
+       * 这里只记**谁在什么时候公开了哪个文件**（控制面）；快照的字节在 CouchDB 的
+       * `opennote-shares` 库里（本模块头：SQLite 永不放笔记字节）。
+       *
+       * `id` 就是公开链接里的那一段（128 位随机，base64url）—— 拿到链接 = 能看，
+       * 所以它必须不可猜。`name` 是作者主动公开的文件名，可以明文存。
+       * 删账号时级联删掉它的分享：公开页按这张表判断「还在不在」，行没了链接就失效。
+       */
+      db.exec(`
+        CREATE TABLE shares (
+          id           TEXT PRIMARY KEY,
+          account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          name         TEXT NOT NULL,              -- 文件名（含扩展名）
+          content_type TEXT NOT NULL,              -- 由服务端按扩展名定，不信客户端
+          size         INTEGER NOT NULL,
+          sha256       TEXT NOT NULL,
+          created_at   INTEGER NOT NULL,
+          revoked_at   INTEGER
+        );
+        CREATE INDEX idx_shares_account ON shares(account_id);
       `);
     },
   },
