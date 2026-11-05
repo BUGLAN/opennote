@@ -1,8 +1,8 @@
 import { syntaxTree } from "@codemirror/language";
 import type { SyntaxNode } from "@lezer/common";
 import type { EditorState } from "@codemirror/state";
-import { keymap, type Command, type EditorView } from "@codemirror/view";
-import { livePreviewField, unwrapSource } from "./livePreview";
+import { EditorView, keymap, type Command } from "@codemirror/view";
+import { atomAt, hasAtomIn, livePreviewField, unwrapSource } from "./livePreview";
 
 /**
  * 「光标停在边界按删除 ⇒ 先拆开这一段，而不是删内容」。
@@ -71,8 +71,10 @@ function unwrappableStartingAt(state: EditorState, pos: number): SyntaxNode | nu
 }
 
 /**
- * 光标与元素之间可能只隔空白（块级图片独占一行时行尾常有空格）。
- * 往回跳过空白再判定边界。
+ * 光标与图片之间可能只隔空白（块级图片独占一行时行尾常有空格）。往回跳过空白再判定边界。
+ *
+ * **只对图片这么做**：对粗体、链接也跳空白的话，`**粗** |` 按退格就成了「先拆粗体」，
+ * 那个空格反而删不掉（排查报告问题 12）。
  */
 function skipSpaceBackwards(state: EditorState, pos: number): number {
   const line = state.doc.lineAt(pos);
@@ -90,6 +92,9 @@ function skipSpaceBackwards(state: EditorState, pos: number): number {
 function unwrap(view: EditorView, node: SyntaxNode): boolean {
   const current = view.state.field(livePreviewField, false)?.unwrapped;
   if (current && current.from === node.from && current.to === node.to) return false;
+  // 里面没有藏着的东西（`[注]` 这种不是链接的方括号、打开了「显示标记」）⇒ 没什么可拆的，
+  // 这次按键照常删字 —— 否则用户要按两次退格才删得掉一个 `]`。表格是另一种形态，照拆。
+  if (node.name !== "Table" && !hasAtomIn(view.state, node.from, node.to)) return false;
   const head = view.state.selection.main.head;
   // 光标本来就在这个元素边界上（行内元素、表格自己的末尾）⇒ 位置不动。
   // 光标在**表格下面那一行的行首**时离得远，露出的源码会被「光标一离开就收起来」
@@ -144,12 +149,45 @@ function tableEndingAt(state: EditorState, pos: number): SyntaxNode | null {
 export const unwrapBackspace: Command = (view) => {
   const selection = view.state.selection.main;
   if (!selection.empty) return false;
-  const pos = skipSpaceBackwards(view.state, selection.head);
-  const node = unwrappableEndingAt(view.state, pos);
-  if (node) return unwrap(view, node);
+  const direct = unwrappableEndingAt(view.state, selection.head);
+  if (direct) return unwrap(view, direct);
+  const spaced = skipSpaceBackwards(view.state, selection.head);
+  if (spaced !== selection.head) {
+    const image = unwrappableEndingAt(view.state, spaced);
+    if (image?.name === "Image") return unwrap(view, image);
+  }
+  const hidden = guardHidden(view, selection.head - 1);
+  if (hidden !== null) return hidden;
   const table = tableEndingBeforeLineStart(view.state, selection.head);
   return table ? unwrap(view, table) : false;
 };
+
+/**
+ * 这一下删除要删的字符 `pos` 落在**看不见的源码**里（原子范围，见 `livePreview.atomsOf`）吗？
+ *
+ * 是的话绝不能直接删：CodeMirror 的删除命令会把整个原子范围一起删掉 —— 在链接文字末尾按
+ * Delete 就会一键删掉看不见的 `](https://…)`，链接当场坏掉、用户却什么都没看见。
+ * 能拆开就先拆开（露出源码，再按一次才删）；拆不开的（列表符号、引用标记这类块级前缀，
+ * 由 markdown 自带的键位处理）返回 `null`，交还给后面的键位。
+ */
+function guardHidden(view: EditorView, pos: number): boolean | null {
+  if (pos < 0 || pos >= view.state.doc.length) return null;
+  if (!atomAt(view.state, pos)) return null;
+  const node = unwrappableAround(view.state, pos);
+  return node ? unwrap(view, node) : null;
+}
+
+/**
+ * 包住 `pos` 这个字符的最内层可拆元素。按**这个字符本身**往上找，不按原子范围找 ——
+ * 两个元素的隐藏标记紧挨着时（`**a**[b](u)` 的 `**[`），没有哪个元素能包住两者，
+ * 按范围找就会落空，删除键随即把看不见的标记直接删掉（审查报告 A1）。
+ */
+function unwrappableAround(state: EditorState, pos: number): SyntaxNode | null {
+  for (let node: SyntaxNode | null = syntaxTree(state).resolveInner(pos, 1); node; node = node.parent) {
+    if (node.from <= pos && node.to > pos && UNWRAPPABLE.has(node.name)) return node;
+  }
+  return null;
+}
 
 /** Delete：光标贴在某个已渲染元素的**开头**时，先把它拆成源码。 */
 export const unwrapDelete: Command = (view) => {
@@ -157,6 +195,8 @@ export const unwrapDelete: Command = (view) => {
   if (!selection.empty) return false;
   const node = unwrappableStartingAt(view.state, selection.head);
   if (node) return unwrap(view, node);
+  const hidden = guardHidden(view, selection.head);
+  if (hidden !== null) return hidden;
   const table = tableEndingAt(view.state, selection.head);
   return table ? unwrap(view, table) : false;
 };
@@ -168,4 +208,35 @@ export const unwrapDelete: Command = (view) => {
 export const unwrapKeymap = keymap.of([
   { key: "Backspace", run: unwrapBackspace },
   { key: "Delete", run: unwrapDelete },
+  // 按词 / 按行删除同样会一口吞掉相邻的隐藏标记（`**粗体**` 后按 Ctrl-Backspace 会删掉 `**`）
+  { key: "Mod-Backspace", run: unwrapBackspace },
+  { key: "Alt-Backspace", run: unwrapBackspace },
+  { key: "Ctrl-Backspace", run: unwrapBackspace },
+  { key: "Mod-Delete", run: unwrapDelete },
+  { key: "Alt-Delete", run: unwrapDelete },
+  { key: "Ctrl-Delete", run: unwrapDelete },
 ]);
+
+/**
+ * 单击渲染出来的**行内公式** ⇒ 拆开它、光标落在公式末尾（收尾 `$` 前面）—— 和 Typora
+ * 点公式进入编辑一样。行内公式常驻渲染之后，这是除了边界按删除以外的第二个入口。
+ */
+export const revealOnClick = EditorView.domEventHandlers({
+  mousedown(event, view) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false;
+    const target = (event.target as HTMLElement | null)?.closest?.(".md-math:not(.math-block)");
+    if (!target || !view.contentDOM.contains(target)) return false;
+    let pos: number;
+    try {
+      pos = view.posAtDOM(target);
+    } catch {
+      return false;
+    }
+    const node = unwrappableStartingAt(view.state, pos);
+    if (!node || node.name !== "InlineMath") return false;
+    event.preventDefault();
+    view.dispatch({ effects: unwrapSource.of({ from: node.from, to: node.to }), selection: { anchor: node.to - 1 } });
+    view.focus();
+    return true;
+  },
+});

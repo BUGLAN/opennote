@@ -18,7 +18,7 @@ vi.mock("../data/workspaces", () => ({
 }));
 
 import { flushAll, openWorkspace, saveImage } from "../data/library";
-import { insertFileSnippets } from "./media";
+import { attachmentInsertion, insertFileSnippets, pendingInserts, trackRange } from "./media";
 
 function stateFor(doc: string): EditorState {
   return EditorState.create({ doc, extensions: [markdownSupport] });
@@ -263,5 +263,35 @@ describe("粘贴/拖拽的图片：落共享 .assets/，引用能解析回它", 
     expect(both).toContain("./备注 2.assets/b.png");
     // 远程图仍然不进本地预载队列（它不需要 blob URL）。
     expect(both.some((path) => path.startsWith("https:"))).toBe(false);
+  });
+});
+
+describe("附件插入位置（排查报告问题 19）", () => {
+  it("落盘期间前面被编辑过：登记的区间跟着文档移动", async () => {
+    const { EditorState } = await import("@codemirror/state");
+    let state = EditorState.create({ doc: "前面的字\n后面", extensions: [pendingInserts] });
+    state = state.update({ effects: trackRange.of({ id: 1, from: 5, to: 5 }) }).state;
+    state = state.update({ changes: { from: 0, insert: "新加的" } }).state;
+    expect(state.field(pendingInserts).get(1)).toEqual({ from: 8, to: 8 });
+    // 区间里面的字被删了：起点不越过终点
+    state = state.update({ effects: trackRange.of({ id: 2, from: 0, to: 3 }) }).state;
+    state = state.update({ changes: { from: 0, to: 3 } }).state;
+    expect(state.field(pendingInserts).get(2)).toEqual({ from: 0, to: 0 });
+  });
+
+  it("插入点在行中间 ⇒ 先换行，附件独占一行", async () => {
+    const { EditorState } = await import("@codemirror/state");
+    const state = EditorState.create({ doc: "前半后半" });
+    const spec = attachmentInsertion(state, 2, 2, ["![图](a.png)"]);
+    expect(state.update(spec).state.doc.toString()).toBe("前半\n![图](a.png)\n后半");
+  });
+
+  it("有选区 ⇒ 替换选区；在行首 ⇒ 不多插空行", async () => {
+    const { EditorState } = await import("@codemirror/state");
+    const state = EditorState.create({ doc: "替换我\n下一行" });
+    const spec = attachmentInsertion(state, 0, 3, ["![图](a.png)"]);
+    const next = state.update(spec).state;
+    expect(next.doc.toString()).toBe("![图](a.png)\n\n下一行");
+    expect(next.selection.main.head).toBe("![图](a.png)\n".length);
   });
 });

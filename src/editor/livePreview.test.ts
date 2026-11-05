@@ -271,10 +271,12 @@ describe("装饰器基线：未改动的形态保持原样", () => {
     expect(keysContaining(keys, "WikiLinkWidget")).toEqual(['3-9|WikiLinkWidget{"label":"笔记","exists":false}']);
   });
 
-  it("列表与任务：项目符号与复选框换成 widget", () => {
+  it("列表与任务：项目符号换成圆点；任务项只有复选框（`- ` 藏掉，不再多一个圆点）", () => {
+    expect(currentKeys(stateFor("- 项\n", { anchor: 4 }))).toContain('0-1|BulletWidget{"depth":1}');
     const doc = "- [ ] 任务\n";
     const keys = currentKeys(stateFor(doc, { anchor: doc.length }));
-    expect(keys).toContain('0-1|BulletWidget{"depth":1}');
+    expect(keysContaining(keys, "BulletWidget")).toHaveLength(0);
+    expect(keys).toContain("0-2");
     expect(keys).toContain('2-5|CheckboxWidget{"checked":false}');
   });
 
@@ -702,8 +704,20 @@ describe("块还没成立就显示源码", () => {
   });
 
   it("空引用露出 `>`，有文字就藏起来", () => {
-    expect(keysContaining(currentKeys(stateFor("> \n", { anchor: 2 })), "md-src")).toHaveLength(1);
-    expect(keysContaining(currentKeys(stateFor("> 引用\n", { anchor: 4 })), "md-src")).toHaveLength(0);
+    const empty = currentKeys(stateFor("> \n", { anchor: 2 }));
+    expect(keysContaining(empty, "md-src")).toHaveLength(1);
+    // 原来这里只数了 md-src：Blockquote 分支同时把 `> ` **藏掉**了（一条纯 replace，键就是
+    // `0-2`），用例照样是绿的 —— 假绿。现在必须同时断言它没有被藏。
+    expect(empty).not.toContain("0-2");
+    const filled = currentKeys(stateFor("> 引用\n", { anchor: 4 }));
+    expect(keysContaining(filled, "md-src")).toHaveLength(0);
+    expect(filled).toContain("0-2");
+  });
+
+  it("空引用在第二段（隔着空行的新引用）里同样露出 `>`", () => {
+    const keys = currentKeys(stateFor("> 引用\n\n> \n", { anchor: 0 }));
+    expect(keys).not.toContain("6-8");
+    expect(keys).toContain("6-8|md-src");
   });
 
   it("空列表项露出 `-`，有文字才换成圆点 widget", () => {
@@ -805,5 +819,120 @@ describe("findImageSource：按完整源码定位图片", () => {
       urlFrom: imageAt + 5,
       urlTo: imageAt + 5 + URL.length,
     });
+  });
+});
+
+
+/* ------------------------------------------------ 渲染态常驻：行内公式、wiki、引用式链接 */
+describe("行内公式与 wiki 链接常驻渲染", () => {
+  it("光标在同一行也保持渲染（整行不再因为光标进来而横跳）", () => {
+    const keys = currentKeys(stateFor("行内 $x^2$ 与 [[笔记]] 后\n", { anchor: 0 }));
+    expect(keysContaining(keys, "MathWidget")).toHaveLength(1);
+    expect(keysContaining(keys, "WikiLinkWidget")).toHaveLength(1);
+  });
+
+  it("拆开之后露出源码", () => {
+    let state = stateFor("行内 $x^2$ 后\n", { anchor: 8 });
+    state = state.update({ effects: unwrapSource.of({ from: 3, to: 8 }) }).state;
+    expect(keysContaining(currentKeys(state), "MathWidget")).toHaveLength(0);
+    expect(currentKeys(state)).toContain("3-8|md-src");
+  });
+});
+
+describe("引用式链接", () => {
+  it("没有定义的 `[注]` 只是普通文字：方括号不藏、不染链接色", () => {
+    const keys = currentKeys(stateFor("见 [注] 文字\n", { anchor: 0 }));
+    expect(keysContaining(keys, "md-link")).toHaveLength(0);
+    expect(keys).not.toContain("2-3");
+  });
+
+  it("有定义的 `[文字][ref]`：藏掉 `[ref]`，定义行弱化显示", () => {
+    const doc = "[文字][ref]\n\n[ref]: https://x.com\n";
+    const keys = currentKeys(stateFor(doc, { anchor: doc.length }));
+    expect(keys).toContain("1-3|md-link");
+    expect(keys).toContain("4-9");
+    expect(keysContaining(keys, "md-linkref")).toHaveLength(1);
+  });
+
+  it("定义一出现，别处的链接立刻生效（增量路径也一样）", () => {
+    let state = stateFor("[文字][ref]\n\n", { anchor: 0 });
+    expect(keysContaining(currentKeys(state), "md-link")).toHaveLength(0);
+    state = state.update({ changes: { from: state.doc.length, insert: "[ref]: https://x.com" } }).state;
+    expect(currentKeys(state)).toContain("1-3|md-link");
+  });
+});
+
+describe("ATX 标题的标记", () => {
+  it("普通标题只藏 `# `，文字一个都不藏（回归：收尾标记的判定曾把整行藏掉）", () => {
+    const keys = currentKeys(stateFor("# 标题\n", { anchor: 0 }));
+    expect(keys).toContain("0-2");
+    expect(keys.filter((key) => /^\d+-\d+$/.test(key))).toEqual(["0-2"]);
+  });
+
+  it("`##   标题` 的空白一起藏；`## 标题 ##` 收尾的 `##` 也藏", () => {
+    expect(currentKeys(stateFor("##   标题\n", { anchor: 0 }))).toContain("0-5");
+    const keys = currentKeys(stateFor("## 标题 ##\n", { anchor: 0 }));
+    expect(keys).toContain("0-3");
+    expect(keys).toContain("5-8");
+  });
+});
+
+describe("YAML front matter", () => {
+  it("文件头的 front matter 是一块元数据：不是分隔线、`title:` 也不是二级标题", () => {
+    const doc = "---\ntitle: x\ntags: [a]\n---\n\n正文\n";
+    const keys = currentKeys(stateFor(doc, { anchor: doc.length }));
+    expect(keysContaining(keys, "HrWidget")).toHaveLength(0);
+    expect(keysContaining(keys, "md-h2")).toHaveLength(0);
+    expect(keysContaining(keys, "md-frontmatter")).toHaveLength(4);
+  });
+
+  it("与 splitFrontMatter 同一条规则：没闭合就不是 front matter（开头的 `---` 仍是分隔线）", () => {
+    const keys = currentKeys(stateFor("---\n正文第一段\n\n第二段\n", { anchor: 0 }));
+    expect(keysContaining(keys, "md-frontmatter")).toHaveLength(0);
+  });
+
+  it("不在文件开头的 `---` 照旧", () => {
+    const keys = currentKeys(stateFor("正文\n\n---\na: 1\n---\n", { anchor: 0 }));
+    expect(keysContaining(keys, "md-frontmatter")).toHaveLength(0);
+  });
+});
+
+describe("审查报告：渲染细节", () => {
+  it("`## ##` 是空标题：露出源码，不整行藏掉", () => {
+    const keys = currentKeys(stateFor("## ##\n", { anchor: 0 }));
+    expect(keys.filter((key) => /^\d+-\d+$/.test(key))).toEqual([]);
+  });
+
+  it("写在引用块 / 列表里的引用定义也能找到", () => {
+    const keys = currentKeys(stateFor("[t][r] 与 [u]\n\n> [r]: http://x\n\n- [u]: http://y\n", { anchor: 0 }));
+    expect(keys.filter((key) => key.endsWith("|md-link"))).toHaveLength(2);
+    expect(keysContaining(keys, "md-plain")).toHaveLength(0);
+  });
+
+  it("引用定义只改了地址：增量路径也换成新地址（大文档）", () => {
+    const filler = "正文段落填充。".repeat(4000);
+    let state = settled(stateFor(`![logo][l]\n\n${filler}\n\n[l]: a.png\n`, { anchor: 0 }));
+    expect(currentKeys(state).some((key) => key.includes("ImageWidget") && key.includes("a.png"))).toBe(true);
+    const at = state.doc.toString().lastIndexOf("a.png");
+    state = settled(state.update({ changes: { from: at, to: at + 1, insert: "b" } }).state);
+    const keys = currentKeys(state);
+    expect(keys.some((key) => key.includes("ImageWidget") && key.includes("b.png"))).toBe(true);
+  });
+});
+
+describe("front matter 的增量解析", () => {
+  it("在远处补上收尾的 `---`：开头立刻重新认成 front matter（与全量解析一致）", async () => {
+    const { keyKit } = await import("./testing/keyKit");
+    const filler = "正文很长。\n".repeat(600);
+    const kit = keyKit(`---\nfoo: 1\n${filler}‸`);
+    const kinds = () => {
+      const names: string[] = [];
+      for (let node = syntaxTree(kit.state).topNode.firstChild; node && names.length < 1; node = node.nextSibling) names.push(node.name);
+      return names[0];
+    };
+    expect(kinds()).toBe("HorizontalRule");
+    kit.type("\n---");
+    ensureSyntaxTree(kit.state, kit.state.doc.length, 5000);
+    expect(kinds()).toBe("FrontMatter");
   });
 });

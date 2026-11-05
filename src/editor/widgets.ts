@@ -5,7 +5,9 @@ import { parentPath } from "../fs";
 import { blockHeightFor, rememberBlockHeight } from "./blockHeight";
 import { imageSizeFor, markImageLoaded, parkImageElement, pooledImageElement, rememberImageSize, rememberSourceSize, sourceSizeFor } from "./imagePool";
 import { bridge } from "./bridge";
-import { mathHtmlSync, renderMath } from "./math";
+import { unwrapSource } from "./unwrapEffect";
+import { decodeMarkdownHref } from "../lib/markdown";
+import { hydrateMath, mathHtmlSync, renderMath } from "./math";
 import { mermaidHtmlSync, renderMermaid } from "./mermaid";
 import { rememberTableWidths, splitTableRow, tableMetricKey, type TableColumn } from "./tableMetrics";
 
@@ -424,16 +426,37 @@ export class WikiLinkWidget extends WidgetType {
     return other.label === this.label && other.exists === this.exists;
   }
 
-  toDOM(): HTMLElement {
+  /**
+   * 单击 = 编辑（拆开、光标落在标题末尾）；⌘ / Ctrl + 单击 = 打开 —— 和普通链接同一套手势。
+   *
+   * 原来单击就跳走：wiki 链接常驻渲染之后，单击还跳走就**根本没法把光标放进去改它**
+   * （排查报告问题 16）。
+   */
+  toDOM(view: EditorView): HTMLElement {
     const host = document.createElement("span");
     host.className = `md-wikilink${this.exists ? "" : " is-missing"}`;
     host.contentEditable = "false";
     host.textContent = this.exists ? this.label : `${this.label} ＋`;
-    host.title = this.exists ? `打开《${this.label}》` : `创建笔记《${this.label}》`;
+    const verb = this.exists ? `打开《${this.label}》` : `创建笔记《${this.label}》`;
+    host.title = `${MOD_LABEL} + 点击${verb}；点击编辑`;
     host.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
       event.preventDefault();
       event.stopPropagation();
-      bridge.openWikiLink(this.label);
+      if (event.metaKey || event.ctrlKey) {
+        bridge.openWikiLink(this.label);
+        return;
+      }
+      let from: number;
+      try {
+        from = view.posAtDOM(host);
+      } catch {
+        return;
+      }
+      const to = from + this.label.length + 4;
+      if (view.state.sliceDoc(from, to) !== `[[${this.label}]]`) return;
+      view.dispatch({ effects: unwrapSource.of({ from, to }), selection: { anchor: to - 2 } });
+      view.focus();
     });
     return host;
   }
@@ -442,6 +465,9 @@ export class WikiLinkWidget extends WidgetType {
     return true;
   }
 }
+
+const MOD_LABEL =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "⌘" : "Ctrl";
 
 /**
  * 点到渲染态表格的哪一格 ⇒ 源码里的哪个位置。
@@ -524,12 +550,38 @@ export class TableWidget extends WidgetType {
     readonly rows: number,
     /** 表格原文 —— 源码态补白的钥匙，见 `blockHeight.ts`。 */
     readonly blockKey: string = "",
+    /** 所属笔记的路径：单元格里的相对图片按它所在目录解析（与 `ImageWidget` 同一规则）。 */
+    readonly notePath: string = "",
   ) {
     super();
   }
 
   eq(other: TableWidget): boolean {
-    return other.html === this.html && other.rows === this.rows;
+    return other.html === this.html && other.rows === this.rows && other.notePath === this.notePath;
+  }
+
+  /**
+   * 单元格里的公式与图片：渲染管线只输出占位（公式的 `data-tex`、原样的相对 `src`），
+   * 这里补上 KaTeX 排版、把相对路径换成能读的地址 —— 否则渲染态表格里公式是原文、本机图片是裂图
+   * （排查报告问题 15）。两者都是异步的，完成后重新量高度与列宽。
+   */
+  private hydrate(view: EditorView, host: HTMLElement): void {
+    const remeasure = () => {
+      reportBlockHeight(view, host, this.blockKey);
+      this.measureWidths(view, host);
+      view.requestMeasure();
+    };
+    hydrateMath(host, remeasure);
+    for (const img of Array.from(host.querySelectorAll("img"))) {
+      const src = decodeMarkdownHref(img.getAttribute("src") || "");
+      if (!src || /^(?:https?:|data:|blob:)/i.test(src)) continue;
+      img.removeAttribute("src");
+      void resolveImageSrc(src, parentPath(this.notePath)).then((url) => {
+        if (!url) return;
+        img.addEventListener("load", remeasure, { once: true });
+        img.src = url;
+      });
+    }
   }
 
   /**
@@ -595,16 +647,23 @@ export class TableWidget extends WidgetType {
      * 「就地编辑态」高出一行，点进表格时整块往下跳一下。
      */
     host.innerHTML = this.html.trim();
+    this.hydrate(view, host);
     reportBlockHeight(view, host, this.blockKey);
     this.measureWidths(view, host);
     this.watchWidths(host);
     host.addEventListener("mousedown", (event) => {
-      const anchor = (event.target as HTMLElement | null)?.closest("a");
-      if (anchor instanceof HTMLAnchorElement) {
-        event.preventDefault();
-        event.stopPropagation();
-        bridge.openExternal(anchor.href);
-        return;
+      // 链接与 wiki 链接：⌘ / Ctrl + 点击才打开（与正文同一套手势）；单击就是点进格子编辑
+      const target = event.target as HTMLElement | null;
+      if (event.metaKey || event.ctrlKey) {
+        const anchor = target?.closest("a");
+        const wiki = target?.closest<HTMLElement>(".wikilink");
+        if (anchor instanceof HTMLAnchorElement || wiki) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (wiki) bridge.openWikiLink(wiki.dataset.wiki ?? wiki.textContent ?? "");
+          else bridge.openExternal((anchor as HTMLAnchorElement).href);
+          return;
+        }
       }
       event.preventDefault();
       // 点进来的这一下同步量一遍：编辑态第一帧就要用**当前**列宽，

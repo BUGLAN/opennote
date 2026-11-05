@@ -1,11 +1,12 @@
 import { syntaxTree } from "@codemirror/language";
 import type { SyntaxNode, Tree } from "@lezer/common";
-import { type EditorState, type Range, StateEffect, StateField, type Transaction } from "@codemirror/state";
+import { type EditorState, type Range, RangeSet, type RangeValue, StateField, type Transaction } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, type WidgetType } from "@codemirror/view";
 import { renderMarkdown } from "../lib/markdown";
 import { setBlockPad } from "./blockHeight";
 import { bridge } from "./bridge";
 import { stripMathDollars, stripMathFence } from "./math";
+import { unwrapSource } from "./unwrapEffect";
 import {
   defaultEditorSettings,
   editorSettingsField,
@@ -24,7 +25,16 @@ import {
   TableWidget,
   WikiLinkWidget,
 } from "./widgets";
-import { lastTableWidths, parseTableAlignments, splitTableRow, tableMetricKey, tableWidthsFor } from "./tableMetrics";
+import {
+  cellTextWidth,
+  lastTableWidths,
+  parseTableAlignments,
+  splitTableRow,
+  tableAvailableWidth,
+  tableMetricKey,
+  tableWidthsFor,
+  type TableColumn,
+} from "./tableMetrics";
 
 /** Above this size we stop decorating and fall back to plain markdown highlighting. */
 const MAX_DECORATED_LENGTH = 800_000;
@@ -85,6 +95,11 @@ interface LivePreviewValue {
    * 只留**一段**：这是「我正在拆这一个」的临时状态，不是一份清单。
    */
   unwrapped: Span | null;
+  /**
+   * 文档里所有引用式链接定义（`[ref]: url`）的标签，拼成一个串。定义一变，别处的
+   * `[文字][ref]` 是不是链接也跟着变 —— 增量路径看不到那么远，所以这个串一变就整体重算。
+   */
+  refKey: string;
 }
 
 /**
@@ -94,7 +109,7 @@ interface LivePreviewValue {
  * `` `代码` ``、链接、图片…）的边界上按删除时，先露源码、吃掉这次按键 —— 这就是
  * 「删掉这个粗体这一块」的手感；再按一次才真的删内容。
  */
-export const unwrapSource = StateEffect.define<{ from: number; to: number }>();
+export { unwrapSource };
 
 function selectionSpans(state: EditorState): SelectionSpan[] {
   const doc = state.doc;
@@ -147,6 +162,76 @@ function mergeSpans(spans: Span[]): Span[] {
 }
 
 /**
+ * 单元格源码在渲染后**看得见的**那部分（量列宽用）：链接只剩文字、`**` `==` `` ` `` 这些标记去掉、
+ * `\|` 只算一个 `|`。不扣掉的话，隐藏的 `](https://…)` 也被算进宽度，编辑时列被撑得很宽。
+ */
+function visibleCellText(raw: string): string {
+  return raw
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[\[([^\]]*)\]\]/g, "$1")
+    .replace(/(\*\*|__|~~|==|`)/g, "")
+    .replace(/(^|[^\\])[*_](?=\S)|(?<=\S)[*_](?=\s|$)/g, "$1")
+    .replace(/\\\|/g, "|");
+}
+
+/** 引用式链接的标签按 CommonMark 规则归一：去掉方括号、折叠空白、不分大小写。 */
+export function normalizeLinkLabel(raw: string): string {
+  return raw.replace(/^\[|\]$/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * 文档里的引用式链接定义：标签 → 地址。定义只能出现在顶层（或容器里），这里只扫
+ * `Document` 的直接子节点 —— 一次按块数的循环，不遍历整棵树。
+ */
+export function linkReferences(state: EditorState): Map<string, string> {
+  const refs = new Map<string, string>();
+  const visit = (first: SyntaxNode | null) => {
+    for (let node = first; node; node = node.nextSibling) {
+      // 定义也可以写在引用块、列表项里（CommonMark 允许）—— 只往这几种容器里钻，不遍历段落内部
+      if (CONTAINER_RE.test(node.name)) {
+        visit(node.firstChild);
+        continue;
+      }
+      if (node.name !== "LinkReference") continue;
+      const label = node.getChild("LinkLabel");
+      const url = node.getChild("URL");
+      if (!label || !url) continue;
+      const key = normalizeLinkLabel(state.sliceDoc(label.from, label.to));
+      if (key && !refs.has(key)) refs.set(key, state.sliceDoc(url.from, url.to));
+    }
+  };
+  visit(syntaxTree(state).topNode.firstChild);
+  return refs;
+}
+
+const CONTAINER_RE = /^(?:Blockquote|BulletList|OrderedList|ListItem)$/;
+
+/** 定义的「指纹」：标签**和地址**都算 —— 只改地址时，别处的引用式图片也得跟着换。 */
+function refKeyOf(refs: ReadonlyMap<string, string>): string {
+  return [...refs].map(([label, url]) => `${label}\u0001${url}`).join("\u0000");
+}
+
+/**
+ * 一个 `Link` / `Image` 节点指向的地址。行内写法直接取 `URL`；引用式（`[文字][ref]`、
+ * `[文字][]`、`[文字]`）去定义里查 —— **查不到就不是链接**。
+ *
+ * 这一条很要紧：lezer 不解析引用，正文里随手写的 `[注]` 也会被它当成 `Link` 节点。
+ * 原来一律按链接渲染（方括号藏掉、文字染成链接色），普通的方括号文字就这样「消失」了。
+ */
+export function linkTarget(state: EditorState, node: SyntaxNode, refs?: ReadonlyMap<string, string>): string | null {
+  const url = node.getChild("URL");
+  if (url) return state.sliceDoc(url.from, url.to);
+  const marks: SyntaxNode[] = [];
+  for (let child = node.firstChild; child; child = child.nextSibling) if (LINK_MARK_RE.test(child.name)) marks.push(child);
+  const label = node.getChild("LinkLabel");
+  const labelText = label ? state.sliceDoc(label.from, label.to) : "";
+  const text = marks.length > 1 ? state.sliceDoc(marks[0].to, marks[1].from) : "";
+  const key = normalizeLinkLabel(labelText && labelText !== "[]" ? labelText : text);
+  if (!key) return null;
+  return (refs ?? linkReferences(state)).get(key) ?? null;
+}
+
+/**
  * Turn the markdown syntax tree into live-preview decorations for the given
  * document spans. Everything that needs a block widget (tables, formulas,
  * diagrams, rules) lives here, because CodeMirror only allows block decorations
@@ -160,6 +245,7 @@ function decorate(
   decorations: Range<Decoration>[],
   pads: ReadonlyMap<string, number> = new Map(),
   unwrapped: Span | null = null,
+  refs: ReadonlyMap<string, string> = new Map(),
 ): void {
   const doc = state.doc;
   const tree = syntaxTree(state);
@@ -173,11 +259,21 @@ function decorate(
       decorations.push(Decoration.mark(attributes ? { class: cls, attributes } : { class: cls }).range(from, to));
     }
   };
-  const hide = (from: number, to: number) => {
-    if (to > from) decorations.push(Decoration.replace({}).range(from, to));
+  /*
+   * `atom: true`：这一段对光标是**原子**的（见 `atomsOf()`）—— 看不见的字符不许光标走进去，
+   * 否则方向键会在隐藏的 `**`、链接 URL 里「空走」，打字会写进看不见的地方。
+   * 块级 widget 不算：方向键要能进到表格 / 公式块里，让它换成可编辑的形态。
+   */
+  /*
+   * `group`：这段原子属于哪个元素（元素的起点）。相邻的原子**只在同一个元素里**合并 ——
+   * 链接的 `[`、`](`、URL、`)` 要合成一块；但 `**a**[b](u)` 里粗体的收尾 `**` 和链接的 `[`
+   * 是两个元素，合并之后删除键就找不到「包住整块」的元素可拆，会把看不见的标记直接删掉。
+   */
+  const hide = (from: number, to: number, group = from) => {
+    if (to > from) decorations.push(Decoration.replace({ atom: true, group }).range(from, to));
   };
-  const replaceWith = (from: number, to: number, widget: WidgetType, block = false) => {
-    if (to > from) decorations.push(Decoration.replace({ widget, block }).range(from, to));
+  const replaceWith = (from: number, to: number, widget: WidgetType, block = false, group = from) => {
+    if (to > from) decorations.push(Decoration.replace({ widget, block, atom: !block, group }).range(from, to));
   };
   /**
    * 源码态**补白**：把这个块渲染成 widget 时的高度，与它现在（源码态）的高度的差额，
@@ -282,7 +378,34 @@ function decorate(
     const columns = aligns.length || headerCells || Math.max(0, ...splits.map((split) => split.cells.length));
     if (columns <= 0) return;
 
-    const measured = tableWidthsFor(tableMetricKey(key)) ?? lastTableWidths(columns);
+    const frozen = tableWidthsFor(tableMetricKey(key)) ?? lastTableWidths(columns);
+    /*
+     * 列宽冻结在渲染态的实测值上，但**内容放不下时只许变宽**（`cellTextWidth` 的注释）。
+     * 多出来的宽度全给内容盒，内边距不变；总宽不超过正文栏。
+     */
+    let measured: readonly TableColumn[] | null = frozen;
+    if (frozen && frozen.length === columns) {
+      const need = frozen.map((col) => col.content);
+      let measurable = true;
+      for (let r = 0; r < rows.length && measurable; r += 1) {
+        splits[r].cells.forEach((cell, i) => {
+          if (i >= columns || !measurable) return;
+          const width = cellTextWidth(visibleCellText(lines[r].text.slice(cell.from, cell.to).trim()), rows[r].header);
+          if (width == null) measurable = false;
+          else need[i] = Math.max(need[i], Math.ceil(width) + 1);
+        });
+      }
+      if (measurable) {
+        const extra = need.map((n, i) => Math.max(0, n - frozen[i].content));
+        const base = frozen.reduce((sum, col) => sum + col.track, 0);
+        const grow = extra.reduce((sum, n) => sum + n, 0);
+        const room = Math.max(0, tableAvailableWidth() - base);
+        const scale = grow > room ? room / grow : 1;
+        if (grow > 0 && scale > 0) {
+          measured = frozen.map((col, i) => ({ track: col.track + extra[i] * scale, content: col.content + extra[i] * scale }));
+        }
+      }
+    }
     const weights = new Array<number>(columns).fill(4);
     for (let r = 0; r < rows.length; r += 1) {
       splits[r].cells.forEach((cell, i) => {
@@ -393,14 +516,24 @@ function decorate(
       //
       // 连竖线**后面那串空格**一起藏：空格若留在单元格开头，会占掉 4px 宽，
       // 长内容就会「渲染态两行、编辑态三行」，整块高度对不上（实测差 26px）。
+      //
+      // **空格子例外**：整格都是空白时只藏竖线、空白留着 —— 光标要有一个看得见的落点
+      // （全藏掉的话那一格只剩 font-size:0 的字符，光标画出来是 0 高，等于看不见）。
+      const blankAfter = (pipe: number) => {
+        const next = line.text.indexOf("|", pipe + 1);
+        return line.text.slice(pipe + 1, next < 0 ? line.text.length : next).trim().length === 0;
+      };
       for (const pipe of pipes) {
         let end = pipe + 1;
-        while (end < line.text.length && (line.text[end] === " " || line.text[end] === "\t")) end += 1;
+        if (!blankAfter(pipe)) {
+          while (end < line.text.length && (line.text[end] === " " || line.text[end] === "\t")) end += 1;
+        }
         mark(line.from + pipe, line.from + end, "md-tskip");
       }
       // 单元格**末尾的空白**也要藏：它会参与断行计算 —— 51px 的窄列里，
       // 「列一」+ 一个空格刚好放不下，渲染态一行、编辑态两行（整行高 26px）。
       for (const segment of segments) {
+        if (line.text.slice(segment.from, segment.to).replace(/\|/g, "").trim().length === 0) continue;
         let end = segment.to;
         if (end > segment.from && line.text[end - 1] === "|") end -= 1;
         let start = end;
@@ -428,6 +561,20 @@ function decorate(
         const to = ref.to;
         const node = ref.node;
 
+        /* -------------------------------------------------------- front matter */
+        // 文件头的 YAML 元数据：保持源码可见（它就是给人改的），排成一块弱化的等宽区域。
+        if (name === "FrontMatter") {
+          const startLine = doc.lineAt(from);
+          const endLine = doc.lineAt(to);
+          for (let n = startLine.number; n <= endLine.number; n += 1) {
+            const cls = ["md-frontmatter"];
+            if (n === startLine.number) cls.push("md-frontmatter-first");
+            if (n === endLine.number) cls.push("md-frontmatter-last");
+            lineDeco(doc.line(n).from, cls.join(" "));
+          }
+          return false;
+        }
+
         /* ------------------------------------------------------------ headings */
         const atx = /^ATXHeading([1-6])$/.exec(name);
         if (atx) {
@@ -435,11 +582,26 @@ function decorate(
           const markNode = node.getChild("HeaderMark");
           // 空标题（`## ` 后面还没有文字）显示源码 —— 它此刻还不成立。
           // 「敲下 `##` 看得见 → 敲进文字就消失 → 把文字删空又回来」全由这一条给出。
-          const empty = markNode ? isEmptyBlock(markNode.to, to) : false;
           if (!markNode) return;
-          const markEnd = Math.min(markNode.to + 1, to);
-          if (!empty && !showsSource(from, to)) hide(markNode.from, markEnd);
-          else mark(markNode.from, markEnd, "md-src");
+          // 「空」要扣掉收尾的 `##`：`## ##` 也是一个还没成立的标题，得露出源码（否则整行全藏、光标落进去什么都看不见）
+          const tail = node.lastChild;
+          const textTo = tail && tail.from > markNode.from && tail.name === "HeaderMark" ? tail.from : to;
+          const empty = isEmptyBlock(markNode.to, textTo);
+          // 藏到第一个非空白字符为止（`##   标题` 的几个空格一起藏，不止一个）
+          let markEnd = markNode.to;
+          while (markEnd < to && /[ \t]/.test(doc.sliceString(markEnd, markEnd + 1))) markEnd += 1;
+          if (!empty && !showsSource(from, to)) {
+            hide(markNode.from, markEnd, from);
+            // 收尾的 `##`（`## 标题 ##`）连同前面的空白一起藏
+            // 按**位置**比，不能比对象：`lastChild` / `getChild` 每次都给一个新的 SyntaxNode 包装，
+            // `!==` 恒为真 —— 只有一个 `#` 的标题会被当成「有收尾标记」，整行文字被藏掉。
+            const closing = node.lastChild;
+            if (closing && closing.from > markNode.from && closing.name === "HeaderMark") {
+              let closeFrom = closing.from;
+              while (closeFrom > markEnd && /[ \t]/.test(doc.sliceString(closeFrom - 1, closeFrom))) closeFrom -= 1;
+              hide(closeFrom, to, from);
+            }
+          } else mark(markNode.from, Math.min(markNode.to + 1, to), "md-src");
           return;
         }
         const setext = /^SetextHeading([12])$/.exec(name);
@@ -477,7 +639,7 @@ function decorate(
           }
           if (!showsSource(from, to)) {
             for (let child = first; child; child = child.nextSibling) {
-              if (MARK_RE.test(child.name)) hide(child.from, child.to);
+              if (MARK_RE.test(child.name)) hide(child.from, child.to, from);
             }
           }
           return;
@@ -489,8 +651,8 @@ function decorate(
           if (first && last && first !== last && first.name === "CodeMark" && last.name === "CodeMark") {
             mark(first.to, last.from, "md-code");
             if (!showsSource(from, to)) {
-              hide(first.from, first.to);
-              hide(last.from, last.to);
+              hide(first.from, first.to, from);
+              hide(last.from, last.to, from);
             }
           }
           return false;
@@ -504,7 +666,7 @@ function decorate(
             if (LINK_MARK_RE.test(child.name)) marks.push(child);
           }
           const urlNode = node.getChild("URL");
-          const raw = urlNode ? state.sliceDoc(urlNode.from, urlNode.to) : "";
+          const raw = linkTarget(state, node, refs) ?? "";
           const labelFrom = marks.length ? marks[0].to : to;
           const labelTo = marks.length > 1 ? marks[1].from : to;
 
@@ -532,20 +694,40 @@ function decorate(
             return false;
           }
 
+          // 引用式写法查不到定义 ⇒ 不是链接，就是普通的方括号文字（见 `linkTarget`）。
+          // `md-plain` 压掉语法高亮给 Link 节点上的链接色。
+          if (!raw) {
+            mark(from, to, "md-plain");
+            return;
+          }
           if (labelTo > labelFrom) mark(labelFrom, labelTo, "md-link");
           if (!showsSource(from, to)) {
-            for (const markNode of marks) hide(markNode.from, markNode.to);
-            if (urlNode) hide(urlNode.from, urlNode.to);
+            for (const markNode of marks) hide(markNode.from, markNode.to, from);
+            if (urlNode) hide(urlNode.from, urlNode.to, from);
             const title = node.getChild("LinkTitle");
-            if (title) hide(title.from, title.to);
+            if (title) hide(title.from, title.to, from);
+            const label = node.getChild("LinkLabel");
+            if (label) hide(label.from, label.to, from);
           } else if (raw && urlNode) {
             mark(urlNode.from, urlNode.to, "md-src");
           }
           return;
         }
 
+        /*
+         * 行内公式与 wiki 链接也是**渲染态常驻**（与粗体同一条规则）：光标进这一行不再换成源码，
+         * 整行也就不再横向跳。要改它：边界按退格 / Delete 拆开，或者单击它（`unwrap.ts` 的
+         * `revealOnClick`、`WikiLinkWidget`）。
+         */
+        if (name === "LinkReference") {
+          const startLine = doc.lineAt(from);
+          const endLine = doc.lineAt(to);
+          for (let n = startLine.number; n <= endLine.number; n += 1) lineDeco(doc.line(n).from, "md-linkref");
+          return false;
+        }
+
         if (name === "InlineMath") {
-          if (!isActive(from, to)) {
+          if (!showsSource(from, to)) {
             replaceWith(from, to, new MathWidget(stripMathDollars(state.sliceDoc(from, to)), false));
             return false;
           }
@@ -571,7 +753,7 @@ function decorate(
 
         if (name === "WikiLink") {
           const label = state.sliceDoc(from + 2, Math.max(from + 2, to - 2));
-          if (!isActive(from, to)) {
+          if (!showsSource(from, to)) {
             replaceWith(from, to, new WikiLinkWidget(label, bridge.hasNote(label)));
             return false;
           }
@@ -664,13 +846,8 @@ function decorate(
           for (let n = startLine.number; n <= endLine.number; n += 1) {
             lineDeco(doc.line(n).from, `md-quote md-quote-${Math.min(depth, 3)}`);
           }
-          if (!showsSource(from, to)) {
-            for (let child = node.firstChild; child; child = child.nextSibling) {
-              if (child.name === "QuoteMark") {
-                hide(child.from, Math.min(child.to + 1, doc.lineAt(child.from).to));
-              }
-            }
-          }
+          // 标记的显隐全部交给下面的 QuoteMark 分支逐行判断（空引用要露出 `>`）。这里原来还会
+          // 无条件藏掉 Blockquote 的直接子标记，把空引用的 `>` 也藏了（排查报告问题 11）。
           return;
         }
 
@@ -721,6 +898,12 @@ function decorate(
               // 空列表项（`- ` 后面还没有文字）显示源码，和空标题/空引用同一条规则。
               const item = node.parent;
               const empty = item ? isEmptyBlock(to, item.to) : false;
+              // 任务项只显示复选框，不再在它前面多一个圆点（与 Typora 一致）
+              const task = item?.getChild("Task")?.getChild("TaskMarker");
+              if (task && !showsSource(from, to)) {
+                hide(from, task.from, item!.from);
+                return false;
+              }
               if (!empty && !showsSource(from, to)) {
                 let depth = 0;
                 for (let cur: SyntaxNode | null = node; cur; cur = cur.parent) if (cur.name === "BulletList") depth += 1;
@@ -738,7 +921,8 @@ function decorate(
 
         if (name === "TaskMarker") {
           const raw = state.sliceDoc(from, to);
-          replaceWith(from, to, new CheckboxWidget(/[xX]/.test(raw)));
+          // 与前面藏掉的 `- ` 同属这个列表项：两段合成一块原子
+          replaceWith(from, to, new CheckboxWidget(/[xX]/.test(raw)), false, node.parent?.parent?.from ?? from);
           return false;
         }
 
@@ -762,7 +946,12 @@ function decorate(
             replaceWith(
               startLine.from,
               Math.max(endLine.to, startLine.to),
-              new TableWidget(renderMarkdown(source), endLine.number - startLine.number + 1, state.sliceDoc(from, to)),
+              new TableWidget(
+                renderMarkdown(source),
+                endLine.number - startLine.number + 1,
+                state.sliceDoc(from, to),
+                settings.notePath,
+              ),
               true,
             );
             return false;
@@ -825,12 +1014,13 @@ function buildDecorations(
   const doc = state.doc;
   const active = selectionSpans(state);
   if (doc.length === 0 || doc.length > MAX_DECORATED_LENGTH) {
-    return { set: Decoration.none, active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped };
+    return { set: Decoration.none, active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped, refKey: "" };
   }
   const settings = state.field(editorSettingsField, false) ?? defaultEditorSettings;
   const decorations: Range<Decoration>[] = [];
-  decorate(state, settings, [{ from: 0, to: doc.length }], active, decorations, pads, unwrapped);
-  return { set: Decoration.set(decorations, true), active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped };
+  const refs = linkReferences(state);
+  decorate(state, settings, [{ from: 0, to: doc.length }], active, decorations, pads, unwrapped, refs);
+  return { set: Decoration.set(decorations, true), active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped, refKey: refKeyOf(refs) };
 }
 
 /** Reuse the previous decoration set and only redo the blocks that changed. */
@@ -846,10 +1036,12 @@ function updateDecorations(
   const active = selectionSpans(state);
   const epoch = value.epoch + 1;
   if (doc.length === 0 || doc.length > MAX_DECORATED_LENGTH) {
-    return { set: Decoration.none, active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped };
+    return { set: Decoration.none, active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped, refKey: "" };
   }
   // 补白变了就得整体重算：它落在具体某几行上，增量路径的 filter/update 不会把它带上。
   if (fullRebuild || doc.length < FULL_REBUILD_LENGTH) return buildDecorations(state, pads, epoch, unwrapped);
+  const refs = linkReferences(state);
+  if (refKeyOf(refs) !== value.refKey) return buildDecorations(state, pads, epoch, unwrapped);
   const settings = state.field(editorSettingsField, false) ?? defaultEditorSettings;
   const tree = syntaxTree(state);
 
@@ -879,10 +1071,10 @@ function updateDecorations(
       filter: (from, to) => !(from >= span.from && to <= span.to),
     });
     decorations.length = 0;
-    decorate(state, settings, [span], active, decorations, pads, unwrapped);
+    decorate(state, settings, [span], active, decorations, pads, unwrapped, refs);
     if (decorations.length) set = set.update({ add: decorations.slice(), sort: true });
   }
-  return { set, active, parsedTo: tree.length, epoch, pads, unwrapped };
+  return { set, active, parsedTo: tree.length, epoch, pads, unwrapped, refKey: value.refKey };
 }
 
 export const livePreviewField = StateField.define<LivePreviewValue>({
@@ -971,6 +1163,88 @@ export const livePreviewField = StateField.define<LivePreviewValue>({
 });
 
 export const livePreview = [livePreviewField];
+
+const ATOM = Decoration.replace({});
+
+interface AtomSpan extends Span {
+  group: number;
+}
+
+function atomSpans(state: EditorState, from: number, to: number): AtomSpan[] {
+  const value = state.field(livePreviewField, false);
+  if (!value) return [];
+  const spans: AtomSpan[] = [];
+  value.set.between(from, to, (a, b, deco) => {
+    const spec = deco.spec as { atom?: boolean; group?: number };
+    if (b > a && spec.atom) spans.push({ from: a, to: b, group: spec.group ?? a });
+  });
+  return spans;
+}
+
+/**
+ * 相邻的原子**在同一个元素里**才合并：链接的 `]`、`(`、URL、`)` 是四段挨着的隐藏范围，
+ * CodeMirror 只会把光标推出「严格落在某一段内部」的位置 —— 不合并的话交界处就成了
+ * 一个看不见的落点（真实浏览器实测：从 `文字` 末尾按 → 停在 `](` 中间）。
+ * 不同元素之间不合并（见 `hide()` 的 group）。
+ */
+function mergeAtoms(spans: AtomSpan[]): Span[] {
+  spans.sort((a, b) => a.from - b.from || a.to - b.to);
+  const merged: AtomSpan[] = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    if (last && span.from <= last.to && span.group === last.group) last.to = Math.max(last.to, span.to);
+    else merged.push({ ...span });
+  }
+  return merged;
+}
+
+/** 视口外各留这么多字符的余量：光标从视口边上往外走一两步也还在算过的范围里。 */
+const ATOM_MARGIN = 2000;
+const windowCache = new WeakMap<DecorationSet, { from: number; to: number; set: RangeSet<RangeValue> }>();
+
+/**
+ * 光标不可进入的范围：所有**看不见的源码**（隐藏的标记）与**行内 widget**（图片、公式、
+ * wiki 链接、圆点、复选框）。由 `cursorRules.ts` 交给 `EditorView.atomicRanges`，
+ * 方向键因此一步跨过 `](https://…)` 这种整段隐藏的字符，而不是按 N 次光标才动一下。
+ *
+ * 直接从装饰集里挑（`spec.atom`），所以和**显示状态天然一致**：拆开的那段（`unwrapSource`）、
+ * 打开「显示标记」、块还没成立时，标记是可见的，自然也就不再是原子的。
+ *
+ * **只算 `[from, to)` 这一段**（调用方给视口 + 余量）：大文档每次按键装饰集都会换一份，
+ * 整篇扫一遍要 5–10ms（30 万字实测 5.8ms，比整次 dispatch 还慢）。按装饰集缓存，同一份
+ * 装饰集、范围被覆盖时直接复用。
+ */
+export function atomsOf(state: EditorState, from = 0, to = state.doc.length): RangeSet<RangeValue> {
+  const value = state.field(livePreviewField, false);
+  if (!value) return RangeSet.empty;
+  const lo = Math.max(0, from);
+  const hi = Math.min(state.doc.length, to);
+  const cached = windowCache.get(value.set);
+  if (cached && cached.from <= lo && cached.to >= hi) return cached.set;
+  const merged = mergeAtoms(atomSpans(state, lo, hi));
+  const set = RangeSet.of<RangeValue>(merged.map((span) => ATOM.range(span.from, span.to)));
+  windowCache.set(value.set, { from: lo, to: hi, set });
+  return set;
+}
+
+/** 给 `EditorView.atomicRanges` 用：视口 + 选区附近。 */
+export function atomsNear(state: EditorState, viewport: { from: number; to: number }): RangeSet<RangeValue> {
+  const sel = state.selection;
+  const from = Math.min(viewport.from, sel.ranges[0].from) - ATOM_MARGIN;
+  const to = Math.max(viewport.to, sel.ranges[sel.ranges.length - 1].to) + ATOM_MARGIN;
+  return atomsOf(state, from, to);
+}
+
+/** `[from, to)` 里有没有原子（看不见的源码 / 行内 widget）。只扫这一小段。 */
+export function hasAtomIn(state: EditorState, from: number, to: number): boolean {
+  return atomSpans(state, from, to).some((span) => span.to > from && span.from < to);
+}
+
+/** 盖住 `pos` 这个字符（`[pos, pos+1)`）的原子（未合并的那一段），没有就是 `null`。 */
+export function atomAt(state: EditorState, pos: number): { from: number; to: number } | null {
+  const hit = atomSpans(state, pos, pos + 1).find((span) => span.from <= pos && span.to > pos);
+  return hit ? { from: hit.from, to: hit.to } : null;
+}
 
 /**
  * @internal exported for the regression tests — the full, non-incremental build.

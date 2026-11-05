@@ -182,6 +182,9 @@ class FindPanel implements Panel {
 
   /** 面板自己的按键 —— 不会冒泡到编辑器，所以这里必须自己兜住。 */
   private keydown(event: KeyboardEvent): void {
+    // 输入法合成中：回车是「选词上屏」、Esc 是「取消合成」，都不是给查找条的命令
+    // （排查报告问题 20：中文输入时按回车选词会被当成「下一个」，按 Esc 会直接关掉查找条）。
+    if (event.isComposing || event.keyCode === 229) return;
     const mod = event.metaKey || event.ctrlKey;
     if (event.key === "Escape") {
       event.preventDefault();
