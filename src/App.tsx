@@ -45,6 +45,7 @@ import {
   type WorkspaceRecord,
 } from "./data/workspaces";
 import { hasLegacyData } from "./data/legacy";
+import { ensureStoragePersistenceFor } from "./data/storagePersistence";
 import {
   commitInboxResult,
   discardInbox,
@@ -96,6 +97,7 @@ import { describeGithubError, planImport, runImport } from "./lib/github/importR
 import { parseRepoInput, targetLabel } from "./lib/github/parse";
 import { collectLocalFiles, planPull, planPush, pullChanges, pushChanges, resolvePullConflicts } from "./lib/github/sync";
 import { GithubDialogHost } from "./components/GithubDialog";
+import { StoragePersistenceNotice } from "./components/StoragePersistenceNotice";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { ContentWidthHandles } from "./components/ContentWidthHandles";
 import { EditorPane } from "./components/EditorPane";
@@ -239,6 +241,18 @@ export default function App(): ReactNode {
   useEffect(() => {
     void initLibrary();
   }, []);
+
+  /*
+   * 浏览器笔记本（OPFS）默认是「尽力而为」的存储：打开时补一次持久存储申请。
+   * 本会话里 `persist()` 只真正调用一次（见 `ensureStoragePersistence`），之后切换笔记本
+   * 只做 `persisted()` 只读查询，不会反复弹授权框。
+   * 只在 OPFS 后端 —— 桌面版与 FSA 是磁盘上的真实文件夹，不需要也不该出现这个提示。
+   */
+  const activeWorkspaceId = library.workspace?.id ?? null;
+  const activeWorkspaceKind = library.workspace?.kind ?? null;
+  useEffect(() => {
+    if (activeWorkspaceId) void ensureStoragePersistenceFor(activeWorkspaceKind);
+  }, [activeWorkspaceId, activeWorkspaceKind]);
 
   // D11: the desktop shell asks before it closes the window, so the last ≤450ms
   // of typing still reach the disk (flushAll, then the metadata). `flushForClose`
@@ -1460,6 +1474,7 @@ export default function App(): ReactNode {
         ui.sidebarOpen && "is-sidebar-open",
       )}
     >
+      <StoragePersistenceNotice workspace={library.workspace} />
       <Sidebar
         library={library}
         ui={ui}

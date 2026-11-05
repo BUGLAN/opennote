@@ -22,6 +22,7 @@ import {
 } from "../fs";
 import { uid } from "../lib/utils";
 import type { CryptoMode } from "../../shared/contract";
+import { ensureStoragePersistence } from "./storagePersistence";
 
 const STORAGE_KEY = "opennote.workspaces.v1";
 
@@ -367,7 +368,13 @@ export async function createBrowserWorkspace(name = "我的笔记"): Promise<Wor
   if (!supportsOpfs()) throw new Error("这个浏览器不支持本地文件系统（OPFS）");
   const directory = sanitizeName(name, "笔记");
   await opfsWorkspaceDir(directory);
-  return rememberWorkspace({ name: directory, kind: "opfs", location: directory });
+  const record = rememberWorkspace({ name: directory, kind: "opfs", location: directory });
+  /*
+   * 新建浏览器笔记本的第一时间申请持久存储；不 await —— `persist()` 在部分浏览器里会
+   * 弹授权框，不能让「创建」按钮等它。申请结果进 `storagePersistenceStore`，界面据此提示。
+   */
+  void ensureStoragePersistence();
+  return record;
 }
 
 /**
@@ -394,7 +401,10 @@ export async function createMirrorWorkspace(displayName: string, directoryName: 
   if (!supportsOpfs()) throw new Error("这个浏览器不支持本地文件系统（OPFS），GitHub 导入暂时用不了");
   const directory = sanitizeName(directoryName, "repo");
   await opfsWorkspaceDir(directory);
-  return rememberWorkspace({ name: displayName, kind: "opfs", location: directory });
+  const record = rememberWorkspace({ name: displayName, kind: "opfs", location: directory });
+  // GitHub 导入也落在 OPFS 里，与新建浏览器笔记本同一条持久化要求。
+  void ensureStoragePersistence();
+  return record;
 }
 
 export function workspaceDisplayName(record: WorkspaceRecord): string {
