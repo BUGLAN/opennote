@@ -191,12 +191,34 @@ function EditorHost(props: EditorHostProps): ReactNode {
      effect）。`display: none` 时 CM 量不到尺寸，`viewportIsAppropriate()` 一律放行：
      改动落在旧视口里面时，映射后的视口会把新插进来的整段都包进去 —— 实测一篇短笔记在
      后台被整篇改成 25 万字符，10503 行全部进了 DOM，之后它每变一次都要 ~140ms。 */
+  /** 输入法合成期间推迟的外部改动：合成结束时补落（只挂一个监听）。 */
+  const deferredRef = useRef(false);
   const applyExternalContent = useCallback(() => {
     const view = viewRef.current;
     if (!view) return;
     const next = propsRef.current.content;
     const current = view.state.doc.toString();
     if (next === expectedRef.current || next === current) return;
+    /*
+     * 合成中不改文档（排查报告问题 10）：同步 / 「磁盘为准」的改动恰好在中文输入合成期间到达时，
+     * 直接 dispatch 会打断输入法 —— 候选词丢失、已输入的拼音被吞或重复。等 `compositionend`、
+     * CodeMirror 把合成结果落进文档之后再替换（`minimalReplace` 只换差异段，光标照样夹进新文档）。
+     */
+    if (view.composing) {
+      if (deferredRef.current) return;
+      deferredRef.current = true;
+      view.contentDOM.addEventListener(
+        "compositionend",
+        () => {
+          setTimeout(() => {
+            deferredRef.current = false;
+            applyExternalContent();
+          }, 0);
+        },
+        { once: true },
+      );
+      return;
+    }
     expectedRef.current = next;
     const { changes, selection } = minimalReplace(current, next, view.state.selection.main);
     view.dispatch({
@@ -204,6 +226,7 @@ function EditorHost(props: EditorHostProps): ReactNode {
       selection,
       annotations: Transaction.addToHistory.of(false),
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 自引用：合成结束时重跑自己
   }, []);
 
   const hidden = !props.active || props.locked;
