@@ -106,11 +106,16 @@ function renderTip(view: EditorView, link: LinkAt): HTMLElement {
   if (OPENABLE.test(link.url)) {
     button("打开", () => bridge.openExternal(/^www\./i.test(link.url) ? `https://${link.url}` : link.url));
   }
+  if (view.state.readOnly) return dom;
   button("编辑", () => {
+    // 浮层会被复用（同一个链接、同一个位置就不重建），而这期间可能已经打过字 ——
+    // 位置必须**点的那一刻**重新取，用建浮层时的坐标会选错一位、把链接改坏（审查报告 A4）
+    const current = linkAt(view.state, view.state.selection.main.head);
+    if (!current) return;
     view.dispatch({
-      effects: link.reference ? [] : unwrapSource.of({ from: link.from, to: link.to }),
-      selection: { anchor: link.urlFrom, head: link.urlTo },
-      scrollIntoView: link.reference,
+      effects: current.reference ? [] : unwrapSource.of({ from: current.from, to: current.to }),
+      selection: { anchor: current.urlFrom, head: current.urlTo },
+      scrollIntoView: current.reference,
     });
     view.focus();
   });

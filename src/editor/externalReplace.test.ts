@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { minimalReplace } from "./externalReplace";
+import { mergeExternal, minimalReplace } from "./externalReplace";
 
 /**
  * 外部改动落进编辑器时的那一段最小改动。
@@ -100,5 +100,22 @@ describe("minimalReplace：只替换公共前后缀之外的那一段", () => {
         expect(apply(oldText, nextText), `${JSON.stringify(oldText)} → ${JSON.stringify(nextText)}`).toBe(nextText);
       }
     }
+  });
+});
+
+describe("mergeExternal：输入法合成期间到达的外部改动（审查报告 B1）", () => {
+  it("外部改了开头、本地在末尾打了字 ⇒ 两边都保住", () => {
+    expect(mergeExternal("甲乙丙\n丁", "甲乙丙\n丁你好", "外部甲乙丙\n丁")).toBe("外部甲乙丙\n丁你好");
+  });
+
+  it("本地没动 ⇒ 直接是外部内容；外部没动 ⇒ 保留本地", () => {
+    expect(mergeExternal("a", "a", "b")).toBe("b");
+    expect(mergeExternal("a", "ab", "a")).toBe("ab");
+  });
+
+  it("同一处都改了 ⇒ 外部的改动落下，本地插入的字也不丢", () => {
+    const merged = mergeExternal("一二三", "一二X三", "一Y三");
+    expect(merged).toContain("Y");
+    expect(merged).toContain("X");
   });
 });

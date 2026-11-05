@@ -172,16 +172,19 @@ export const unwrapBackspace: Command = (view) => {
  */
 function guardHidden(view: EditorView, pos: number): boolean | null {
   if (pos < 0 || pos >= view.state.doc.length) return null;
-  const atom = atomAt(view.state, pos);
-  if (!atom) return null;
-  const node = unwrappableAround(view.state, atom.from, atom.to);
+  if (!atomAt(view.state, pos)) return null;
+  const node = unwrappableAround(view.state, pos);
   return node ? unwrap(view, node) : null;
 }
 
-/** 包住 `[from, to)` 的最内层可拆元素。 */
-function unwrappableAround(state: EditorState, from: number, to: number): SyntaxNode | null {
-  for (let node: SyntaxNode | null = syntaxTree(state).resolveInner(from, 1); node; node = node.parent) {
-    if (node.from <= from && node.to >= to && UNWRAPPABLE.has(node.name)) return node;
+/**
+ * 包住 `pos` 这个字符的最内层可拆元素。按**这个字符本身**往上找，不按原子范围找 ——
+ * 两个元素的隐藏标记紧挨着时（`**a**[b](u)` 的 `**[`），没有哪个元素能包住两者，
+ * 按范围找就会落空，删除键随即把看不见的标记直接删掉（审查报告 A1）。
+ */
+function unwrappableAround(state: EditorState, pos: number): SyntaxNode | null {
+  for (let node: SyntaxNode | null = syntaxTree(state).resolveInner(pos, 1); node; node = node.parent) {
+    if (node.from <= pos && node.to > pos && UNWRAPPABLE.has(node.name)) return node;
   }
   return null;
 }

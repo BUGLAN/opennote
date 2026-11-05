@@ -80,3 +80,53 @@ describe("什么时候转", () => {
     expect(worthConverting("<h2>标题</h2><p>正文</p>")).toBe(true);
   });
 });
+
+describe("审查报告：粘贴的边缘情况", () => {
+  it("Google Docs：整篇包在 font-weight:normal 的 <b> 里 ⇒ 段落照常分开，不是一坨粗体", () => {
+    const md = htmlToMarkdown(body(h("b", { style: "font-weight:normal" }, h("p", null, "one"), h("p", null, "two"))));
+    expect(md).toBe("one\n\ntwo");
+  });
+
+  it("包着块的链接卡片（<a><div>…</div><p>…</p></a>）⇒ 按块展开，不粘成一行", () => {
+    const md = htmlToMarkdown(body(h("a", { href: "https://x.com" }, h("div", null, "标题"), h("p", null, "描述"))));
+    expect(md).toBe("标题\n\n描述");
+  });
+
+  it("中文加粗以标点结尾 ⇒ 标点挪到标记外，加粗照样生效", () => {
+    expect(htmlToMarkdown(body(h("p", null, h("strong", null, "注意："), "这里")))).toBe("**注意**：这里");
+    expect(htmlToMarkdown(body(h("p", null, h("strong", null, "“引用”"), "后面")))).toBe("“**引用**”后面");
+  });
+
+  it("不规范的嵌套列表（<ul> 直接套 <ul>）⇒ 挂到上一项下面，不丢", () => {
+    const md = htmlToMarkdown(body(h("ul", null, h("li", null, "a"), h("ul", null, h("li", null, "b")), h("li", null, "c"))));
+    expect(md).toBe("- a\n  - b\n- c");
+  });
+
+  it("<pre> 里的 <br> 是换行", () => {
+    expect(htmlToMarkdown(body(h("pre", null, "line1", h("br", null), "line2")))).toBe("```\nline1\nline2\n```");
+  });
+
+  it("表格格子里代码中的 `|` 转义；colspan 补空格子", () => {
+    const md = htmlToMarkdown(
+      body(h("table", null, h("tr", null, h("th", { colspan: "2" }, "合并"), h("th", null, "三")), h("tr", null, h("td", null, h("code", null, "x|y")), h("td", null, "2"), h("td", null, "3")))),
+    );
+    expect(md).toBe("| 合并 |  | 三 |\n| --- | --- | --- |\n| `x\\|y` | 2 | 3 |");
+  });
+
+  it("地址里的括号编码掉；大的 data: 图片不内联", () => {
+    expect(htmlToMarkdown(body(h("p", null, h("a", { href: "https://x.com/a)b" }, "t"))))).toBe("[t](https://x.com/a%29b)");
+    const big = `data:image/png;base64,${"A".repeat(5000)}`;
+    expect(htmlToMarkdown(body(h("p", null, h("img", { src: big, alt: "截图" }))))).toBe("截图");
+  });
+
+  it("行首像块级语法的文字被转义；标题结尾的 ` #` 保留", () => {
+    expect(htmlToMarkdown(body(h("p", null, "2024. 是个好年")))).toBe("2024\\. 是个好年");
+    expect(htmlToMarkdown(body(h("h2", null, "C #")))).toBe("## C \\#");
+  });
+
+  it("KaTeX / 本应用渲染的公式 ⇒ 取回 TeX 原文", () => {
+    const katex = h("span", { class: "katex" }, h("math", null, h("semantics", null, h("mi", null, "x"), h("annotation", { encoding: "application/x-tex" }, "x^2"))), h("span", { class: "katex-html" }, "x2"));
+    expect(htmlToMarkdown(body(h("p", null, "公式 ", katex, " 结束")))).toBe("公式 $x^2$ 结束");
+    expect(htmlToMarkdown(body(h("p", null, h("span", { class: "math", "data-tex": "a+b" }, "乱码"))))).toBe("$a+b$");
+  });
+});

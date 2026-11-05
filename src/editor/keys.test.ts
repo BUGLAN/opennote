@@ -29,13 +29,25 @@ describe("标题", () => {
     expect(kit.state.doc.toString()).toBe("## 新标题");
   });
 
-  it("从标题文字开头往左 ⇒ 去上一行末尾，不会被吸附卡住", () => {
-    const kit = keyKit("前一行\n## 标题");
-    kit.view.dispatch({ selection: { anchor: 5 } }); // 落在隐藏的 `## ` 中间
-    expect(kit.show()).toBe("前一行\n## ‸标题");
-    // ← 从文字开头出发：原子范围让它一步跨过 `## `，落在行首（4）
-    kit.view.dispatch({ selection: { anchor: 4 }, userEvent: "select" });
+  it("从标题文字开头按 ← ⇒ 去上一行末尾，不会被吸附卡住", () => {
+    const kit = keyKit("前一行\n## ‸标题");
+    kit.press("ArrowLeft");
     expect(kit.show()).toBe("前一行‸\n## 标题");
+  });
+
+  it("已在文字开头时点行首 / Home（落点 = 行首）⇒ 留在文字开头，不跳到上一行", () => {
+    const kit = keyKit("前一行\n## ‸标题");
+    kit.view.dispatch({ selection: { anchor: 4 }, userEvent: "select.pointer" });
+    expect(kit.show()).toBe("前一行\n## ‸标题");
+  });
+
+  it("引用 / 列表里的标题，文字开头回车 ⇒ 上方插一行同样的容器前缀，标题不动", () => {
+    let kit = keyKit("> ## ‸标题");
+    kit.press("Enter");
+    expect(kit.show()).toBe("> \n> ## ‸标题");
+    kit = keyKit("- ## ‸标题");
+    kit.press("Enter");
+    expect(kit.show()).toBe("- \n- ## ‸标题");
   });
 
   it("在上一段末尾按 Delete ⇒ 把标题文字并上来，不留下一个字面的 `## `", () => {
@@ -274,5 +286,100 @@ describe("原子范围", () => {
       spans.push(kit.state.sliceDoc(from, to));
     });
     expect(spans).toEqual(["[", "](https://a.com)"]);
+  });
+});
+
+describe("审查报告：删除与原子范围", () => {
+  it("两个元素的隐藏标记紧挨着：退格 / Delete 先拆开，不删看不见的标记", () => {
+    let kit = keyKit("前 **a**[‸b](u) 后");
+    kit.press("Backspace");
+    expect(kit.state.doc.toString()).toBe("前 **a**[b](u) 后");
+    kit = keyKit("前 **a‸**[b](u) 后");
+    kit.press("Delete");
+    expect(kit.state.doc.toString()).toBe("前 **a**[b](u) 后");
+    kit = keyKit("前 [a‸](u)**b** 后");
+    kit.press("Delete");
+    expect(kit.state.doc.toString()).toBe("前 [a](u)**b** 后");
+    kit = keyKit("前 *a*`‸c` 后");
+    kit.press("Backspace");
+    expect(kit.state.doc.toString()).toBe("前 *a*`c` 后");
+  });
+
+  it("不同元素的原子不合并（中间留着一个可停的位置）", async () => {
+    const { atomsOf } = await import("./livePreview");
+    const kit = keyKit("**a**[b](u)‸");
+    const spans: string[] = [];
+    atomsOf(kit.state).between(0, kit.state.doc.length, (from, to) => {
+      spans.push(kit.state.sliceDoc(from, to));
+    });
+    expect(spans).toEqual(["**", "**", "[", "](u)"]);
+  });
+});
+
+describe("审查报告：表格", () => {
+  it("引用里的表格：回车新行带 `> `、列数不变；空行回车跳出时留在引用里", () => {
+    const kit = keyKit("> | a | b |\n> | - | - |\n> | 1 | 2‸ |");
+    kit.press("Enter");
+    expect(kit.show()).toBe("> | a | b |\n> | - | - |\n> | 1 | 2 |\n> |  | ‸ |");
+    kit.press("Enter");
+    expect(kit.show()).toBe("> | a | b |\n> | - | - |\n> | 1 | 2 |\n>\n> ‸");
+  });
+
+  it("列表里缩进的表格：工具条保留缩进，不多出首列", async () => {
+    const { applyTableOp } = await import("./tableEdit");
+    const kit = keyKit("- 项\n\n  | a | b |\n  | - | - |\n  | 1‸ | 2 |");
+    applyTableOp(kit.view, "colRight");
+    expect(kit.state.doc.toString()).toBe("- 项\n\n  | a |  | b |\n  | --- | --- | --- |\n  | 1 |  | 2 |");
+  });
+
+  it("引用里的表格：工具条「↓行」不把表格拖出引用", async () => {
+    const { applyTableOp } = await import("./tableEdit");
+    const kit = keyKit("> | a | b |\n> | - | - |\n> | 1‸ | 2 |");
+    applyTableOp(kit.view, "rowBelow");
+    expect(kit.state.doc.toString()).toBe("> | a | b |\n> | --- | --- |\n> | 1 | 2 |\n> |  |  |");
+  });
+
+  it("工具条不丢掉超出列数的格子", async () => {
+    const { applyTableOp } = await import("./tableEdit");
+    const kit = keyKit("| a | b |\n| - | - |\n| 1‸ | 2 | 3 |");
+    applyTableOp(kit.view, "center");
+    expect(kit.state.doc.line(3).text).toBe("| 1 | 2 | 3 |");
+  });
+
+  it("只读时：工具条不出现、命令不改文档", async () => {
+    const { applyTableOp, tableEdit } = await import("./tableEdit");
+    void tableEdit;
+    const { readOnlyCompartment } = await import("./setup");
+    const { EditorState } = await import("@codemirror/state");
+    const kit = keyKit("| a | b |\n| - | - |\n| 1‸ | 2 |\n| 3 | 4 |");
+    kit.view.dispatch({ effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(true)) });
+    expect(applyTableOp(kit.view, "rowDelete")).toBe(false);
+    kit.press("Enter");
+    kit.press("Backspace");
+    expect(kit.state.doc.toString()).toBe("| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |");
+  });
+
+  it("按词 / 按行删除收在格子里，不删竖线", () => {
+    let kit = keyKit("| a | b |\n| - | - |\n| 1 | ‸2 |");
+    kit.press("Ctrl-Backspace");
+    expect(kit.state.doc.toString()).toBe("| a | b |\n| - | - |\n| 1 | 2 |");
+    kit = keyKit("| a | b |\n| - | - |\n| 1 | 二三‸ |");
+    kit.press("Ctrl-Backspace");
+    expect(kit.show()).toBe("| a | b |\n| - | - |\n| 1 | ‸ |");
+    kit = keyKit("| a | b |\n| - | - |\n| 1‸ | 2 |");
+    kit.press("Ctrl-Delete");
+    expect(kit.state.doc.toString()).toBe("| a | b |\n| - | - |\n| 1 | 2 |");
+  });
+
+  it("行尾竖线后面有空格：最后一格按 Tab 新起一行，不跑到竖线外", () => {
+    const kit = keyKit("| a | b |\n| - | - |\n| 1 | 2‸ | ");
+    kit.press("Tab");
+    expect(kit.show()).toBe("| a | b |\n| - | - |\n| 1 | 2 | \n| ‸ |  |");
+  });
+
+  it("光标前已经有 `\\` 时打 `|` ⇒ 只补 `|`（不会写成 `\\\\|`）", () => {
+    const kit = keyKit("| a | b |\n| - | - |\n| x\\‸ | 2 |");
+    kit.press("|");
+    expect(kit.state.doc.line(3).text).toBe("| x\\| | 2 |");
   });
 });

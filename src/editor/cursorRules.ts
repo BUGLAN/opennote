@@ -1,6 +1,9 @@
 import { EditorSelection, EditorState, Prec, type Extension, type SelectionRange, type Transaction } from "@codemirror/state";
+import { completionStatus } from "@codemirror/autocomplete";
+import { syntaxTree } from "@codemirror/language";
 import { EditorView, keymap, type Command } from "@codemirror/view";
-import { atomsOf, hasAtomIn } from "./livePreview";
+import type { SyntaxNode } from "@lezer/common";
+import { atomsNear, hasAtomIn } from "./livePreview";
 
 /**
  * 光标与「看不见的源码」之间的三条规则。
@@ -35,30 +38,33 @@ function prefixHidden(state: EditorState, lineFrom: number, prefixEnd: number): 
 
 /* ------------------------------------------------------------ 1. 原子范围 */
 
-const atomicMarks = EditorView.atomicRanges.of((view) => atomsOf(view.state));
+const atomicMarks = EditorView.atomicRanges.of((view) => atomsNear(view.state, view.viewport));
 
 /* ------------------------------------------------------------ 2. 行首吸附 */
 
 /**
  * 光标落在被隐藏的块级前缀里 ⇒ 吸到文字开头。
  *
- * 唯一的例外是**往左走**：光标本来就在文字开头、这一下要往前，吸回原地就卡死了 ——
- * 这时送去上一行末尾（第一行则留在原地）。
+ * 往左走（← 从文字开头出发）不靠这里判断，而是由 `leftOutOfPrefix` 这个键位直接送到上一行
+ * 末尾 —— 过滤器分不清 ← 与 Home / 点行首（落点都是行首），只看结果会把后两者也送走。
+ * 表格行不管：它有自己的吸附（`tableEdit.ts`），两个过滤器同时动会互相打架。
  */
-function snapRange(tr: Transaction, range: SelectionRange, index: number): SelectionRange {
+function snapRange(tr: Transaction, range: SelectionRange): SelectionRange {
   if (!range.empty) return range;
   const state = tr.state;
   const line = state.doc.lineAt(range.head);
   if (range.head >= line.to && line.length > 0) return range;
   const prefixEnd = blockPrefixEnd(state, line.from);
   if (range.head >= prefixEnd || !prefixHidden(state, line.from, prefixEnd)) return range;
-
-  const before = tr.startState.selection.ranges[index] ?? tr.startState.selection.main;
-  const previous = tr.docChanged ? tr.changes.mapPos(before.head, 1) : before.head;
-  if (!tr.docChanged && before.empty && previous === prefixEnd && range.head < prefixEnd) {
-    return line.number > 1 ? EditorSelection.cursor(line.from - 1) : EditorSelection.cursor(prefixEnd);
-  }
+  if (inTable(state, prefixEnd)) return range;
   return EditorSelection.cursor(prefixEnd);
+}
+
+function inTable(state: EditorState, pos: number): boolean {
+  for (let node: SyntaxNode | null = syntaxTree(state).resolveInner(pos, 1); node; node = node.parent) {
+    if (node.name === "Table") return true;
+  }
+  return false;
 }
 
 /** 便宜的预检：新选区里有没有哪个光标可能落在前缀里（只看文本，不算装饰）。 */
@@ -76,7 +82,7 @@ function mayNeedSnap(tr: Transaction): boolean {
 const prefixSnap = EditorState.transactionFilter.of((tr) => {
   if (!tr.selection && !tr.docChanged) return tr;
   if (!mayNeedSnap(tr)) return tr;
-  const ranges = tr.newSelection.ranges.map((range, index) => snapRange(tr, range, index));
+  const ranges = tr.newSelection.ranges.map((range) => snapRange(tr, range));
   if (ranges.every((range, index) => range.eq(tr.newSelection.ranges[index]))) return tr;
   return [tr, { selection: EditorSelection.create(ranges, tr.newSelection.mainIndex), sequential: true }];
 });
@@ -107,6 +113,7 @@ function headingAt(state: EditorState, pos: number): HeadingAt | null {
 /** 文字开头按退格：去掉 `## `，变回普通段落（标记可见时就是普通的删一个字符）。 */
 const headingBackspace: Command = (view) => {
   const { state } = view;
+  if (state.readOnly) return false;
   const range = state.selection.main;
   if (!range.empty || state.selection.ranges.length > 1) return false;
   const heading = headingAt(state, range.head);
@@ -121,21 +128,43 @@ const headingBackspace: Command = (view) => {
   return true;
 };
 
-/** 文字开头按回车：在标题**上方**插一个空行，标题与光标都不动。 */
+/**
+ * 文字开头按回车：在标题**上方**插一个空行，标题与光标都不动。
+ * 引用 / 列表里的标题同理：上方插一行同样的容器前缀（`> `、`- `），标题留在原地 ——
+ * 交给 markdown 自带的「续写容器」的话，`> ## 标题` 会被拆成空标题 + 正文（审查报告 A8）。
+ */
 const headingEnter: Command = (view) => {
   const { state } = view;
+  if (state.readOnly || completionStatus(state) === "active") return false;
   const range = state.selection.main;
   if (!range.empty || state.selection.ranges.length > 1) return false;
   const heading = headingAt(state, range.head);
-  // 引用 / 列表里的标题交给 markdown 自带的「续写容器」去处理
-  if (!heading || heading.contained || range.head !== heading.textFrom) return false;
+  if (!heading || range.head !== heading.textFrom) return false;
   const line = state.doc.lineAt(range.head);
+  const container = heading.contained ? state.sliceDoc(line.from, heading.markFrom) : "";
+  const insert = `${container}\n`;
   view.dispatch({
-    changes: { from: line.from, insert: "\n" },
-    selection: { anchor: range.head + 1 },
+    changes: { from: line.from, insert },
+    selection: { anchor: range.head + insert.length },
     userEvent: "input",
     scrollIntoView: true,
   });
+  return true;
+};
+
+/**
+ * ← 从被隐藏前缀的行的文字开头出发：直接去上一行末尾（第一行就原地不动）。
+ * 不这么做的话，原子范围把光标送到行首、吸附又把它送回文字开头 —— 卡死在原地。
+ */
+const leftOutOfPrefix: Command = (view) => {
+  const { state } = view;
+  const range = state.selection.main;
+  if (!range.empty || state.selection.ranges.length > 1) return false;
+  const line = state.doc.lineAt(range.head);
+  const prefixEnd = blockPrefixEnd(state, line.from);
+  if (range.head !== prefixEnd || prefixEnd === line.from || !prefixHidden(state, line.from, prefixEnd)) return false;
+  if (inTable(state, prefixEnd)) return false;
+  view.dispatch({ selection: { anchor: line.number > 1 ? line.from - 1 : prefixEnd }, scrollIntoView: true, userEvent: "select" });
   return true;
 };
 
@@ -146,6 +175,7 @@ const headingEnter: Command = (view) => {
  */
 const joinNextBlock: Command = (view) => {
   const { state } = view;
+  if (state.readOnly) return false;
   const range = state.selection.main;
   if (!range.empty || state.selection.ranges.length > 1) return false;
   const line = state.doc.lineAt(range.head);
@@ -171,6 +201,7 @@ const headingKeymap = Prec.highest(
     { key: "Backspace", run: headingBackspace },
     { key: "Enter", run: headingEnter },
     { key: "Delete", run: joinNextBlock },
+    { key: "ArrowLeft", run: leftOutOfPrefix },
   ]),
 );
 

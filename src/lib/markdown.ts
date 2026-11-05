@@ -39,14 +39,18 @@ const NEWLINE = 0x0a;
 const SPACE = 32;
 const TAB = 9;
 
+/**
+ * `==高亮==`：与编辑器（lezer 的分隔符解析）同一条边界 —— 标记必须贴着文字（`== x ==` 不是），
+ * 里面照常解析粗体、链接；可以跨软换行（同一段里）。
+ */
 function highlightRule(state: InlineState, silent: boolean): boolean {
   const start = state.pos;
   const src = state.src;
-  if (src.charCodeAt(start) !== EQUALS || src.charCodeAt(start + 1) !== EQUALS) return false;
+  if (src.charCodeAt(start) !== EQUALS || src.charCodeAt(start + 1) !== EQUALS || src.charCodeAt(start + 2) === EQUALS) return false;
   const close = src.indexOf("==", start + 2);
-  if (close < 0 || close > state.posMax) return false;
+  if (close < 0 || close + 2 > state.posMax) return false;
   const inner = src.slice(start + 2, close);
-  if (!inner.trim() || inner.includes("\n")) return false;
+  if (!inner.trim() || /^\s/.test(inner) || /\s$/.test(inner)) return false;
   if (!silent) {
     state.push("mark_open", "mark", 1);
     const max = state.posMax;
@@ -107,33 +111,36 @@ function mathInlineRule(state: InlineState, silent: boolean): boolean {
   return true;
 }
 
-/** 公式块：单行或多行；没闭合、遇到空行就不算（与 D13 一致：不吞后文）。 */
+/**
+ * 公式块，规则与编辑器（`mdExtensions.ts` 的 MathBlock）逐条一致：
+ * - 单行 `$$…$$`，且这一行以 `$$` 结尾（`$$a$$ 尾巴` 不是公式块）
+ * - 多行：收尾行以 `$$` 结尾
+ * - 没闭合：到空行或文末为止（D13：不吞后文）
+ */
 function mathBlockRule(state: BlockState, startLine: number, endLine: number, silent: boolean): boolean {
   const lineText = (line: number) => state.src.slice(state.bMarks[line] + state.tShift[line], state.eMarks[line]);
   if (state.sCount[startLine] - state.blkIndent >= 4) return false;
   const fence = "$".repeat(2);
   const first = lineText(startLine);
   if (!first.startsWith(fence)) return false;
-  const rest = first.slice(2);
+  const rest = first.slice(2).trimEnd();
   let content: string;
   let last = startLine;
-  if (rest.trimEnd().endsWith(fence) && rest.trim().length >= 2) {
-    content = rest.trimEnd().slice(0, -2);
+  if (rest.includes(fence)) {
+    if (!rest.endsWith(fence)) return false;
+    content = rest.slice(0, -2);
   } else {
     const body = [rest];
-    let closed = false;
     for (let line = startLine + 1; line < endLine; line += 1) {
       const text = lineText(line);
       if (!text.trim()) break;
+      last = line;
       if (text.trimEnd().endsWith(fence)) {
         body.push(text.trimEnd().slice(0, -2));
-        last = line;
-        closed = true;
         break;
       }
       body.push(text);
     }
-    if (!closed) return false;
     content = body.join("\n");
   }
   if (silent) return true;

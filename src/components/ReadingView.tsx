@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { resolveImageSrc } from "../data/assets";
-import { splitFrontMatter } from "../lib/utils";
 import { hydrateMath } from "../editor/math";
 import { decodeMarkdownHref, renderMarkdown } from "../lib/markdown";
 import type { Note } from "../data/types";
@@ -16,7 +15,8 @@ import type { Note } from "../data/types";
  */
 export function ReadingView({ note }: { note: Note }): ReactNode {
   const ref = useRef<HTMLElement | null>(null);
-  const html = useMemo(() => renderMarkdown(splitFrontMatter(note.content).body), [note.content]);
+  // renderMarkdown 自己会跳过 front matter；这里再切一次就把正文开头的分隔线段也当元数据剥掉了
+  const html = useMemo(() => renderMarkdown(note.content), [note.content]);
 
   useEffect(() => {
     const host = ref.current;

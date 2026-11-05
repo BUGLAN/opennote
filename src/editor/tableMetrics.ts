@@ -124,6 +124,9 @@ export function splitTableRow(text: string): TableRowSplit {
       // 行首 `|` 之前、行尾 `|` 之后都没有格子。
       if (left === -1 || right === text.length) continue;
     }
+    // 行首 `|` 之前只有缩进、行尾 `|` 之后只有空白：也不是格子（否则 `  | a |` 与 `| a | `
+    // 都会多出一个幽灵格，光标被 Tab 送到竖线外面，打的字落在表格外）
+    if (pipes.length > 0 && (left === -1 || right === text.length) && text.slice(from, to).trim() === "") continue;
     cells.push({ from, to });
   }
   // 行首那个竖线之前如果只有空白（表格行被缩进了），那点空白不是一格 ——

@@ -161,6 +161,19 @@ function mergeSpans(spans: Span[]): Span[] {
   return merged;
 }
 
+/**
+ * 单元格源码在渲染后**看得见的**那部分（量列宽用）：链接只剩文字、`**` `==` `` ` `` 这些标记去掉、
+ * `\|` 只算一个 `|`。不扣掉的话，隐藏的 `](https://…)` 也被算进宽度，编辑时列被撑得很宽。
+ */
+function visibleCellText(raw: string): string {
+  return raw
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[\[([^\]]*)\]\]/g, "$1")
+    .replace(/(\*\*|__|~~|==|`)/g, "")
+    .replace(/(^|[^\\])[*_](?=\S)|(?<=\S)[*_](?=\s|$)/g, "$1")
+    .replace(/\\\|/g, "|");
+}
+
 /** 引用式链接的标签按 CommonMark 规则归一：去掉方括号、折叠空白、不分大小写。 */
 export function normalizeLinkLabel(raw: string): string {
   return raw.replace(/^\[|\]$/g, "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -172,19 +185,30 @@ export function normalizeLinkLabel(raw: string): string {
  */
 export function linkReferences(state: EditorState): Map<string, string> {
   const refs = new Map<string, string>();
-  for (let node = syntaxTree(state).topNode.firstChild; node; node = node.nextSibling) {
-    if (node.name !== "LinkReference") continue;
-    const label = node.getChild("LinkLabel");
-    const url = node.getChild("URL");
-    if (!label || !url) continue;
-    const key = normalizeLinkLabel(state.sliceDoc(label.from, label.to));
-    if (key && !refs.has(key)) refs.set(key, state.sliceDoc(url.from, url.to));
-  }
+  const visit = (first: SyntaxNode | null) => {
+    for (let node = first; node; node = node.nextSibling) {
+      // 定义也可以写在引用块、列表项里（CommonMark 允许）—— 只往这几种容器里钻，不遍历段落内部
+      if (CONTAINER_RE.test(node.name)) {
+        visit(node.firstChild);
+        continue;
+      }
+      if (node.name !== "LinkReference") continue;
+      const label = node.getChild("LinkLabel");
+      const url = node.getChild("URL");
+      if (!label || !url) continue;
+      const key = normalizeLinkLabel(state.sliceDoc(label.from, label.to));
+      if (key && !refs.has(key)) refs.set(key, state.sliceDoc(url.from, url.to));
+    }
+  };
+  visit(syntaxTree(state).topNode.firstChild);
   return refs;
 }
 
+const CONTAINER_RE = /^(?:Blockquote|BulletList|OrderedList|ListItem)$/;
+
+/** 定义的「指纹」：标签**和地址**都算 —— 只改地址时，别处的引用式图片也得跟着换。 */
 function refKeyOf(refs: ReadonlyMap<string, string>): string {
-  return [...refs.keys()].join("\u0000");
+  return [...refs].map(([label, url]) => `${label}\u0001${url}`).join("\u0000");
 }
 
 /**
@@ -240,11 +264,16 @@ function decorate(
    * 否则方向键会在隐藏的 `**`、链接 URL 里「空走」，打字会写进看不见的地方。
    * 块级 widget 不算：方向键要能进到表格 / 公式块里，让它换成可编辑的形态。
    */
-  const hide = (from: number, to: number) => {
-    if (to > from) decorations.push(Decoration.replace({ atom: true }).range(from, to));
+  /*
+   * `group`：这段原子属于哪个元素（元素的起点）。相邻的原子**只在同一个元素里**合并 ——
+   * 链接的 `[`、`](`、URL、`)` 要合成一块；但 `**a**[b](u)` 里粗体的收尾 `**` 和链接的 `[`
+   * 是两个元素，合并之后删除键就找不到「包住整块」的元素可拆，会把看不见的标记直接删掉。
+   */
+  const hide = (from: number, to: number, group = from) => {
+    if (to > from) decorations.push(Decoration.replace({ atom: true, group }).range(from, to));
   };
-  const replaceWith = (from: number, to: number, widget: WidgetType, block = false) => {
-    if (to > from) decorations.push(Decoration.replace({ widget, block, atom: !block }).range(from, to));
+  const replaceWith = (from: number, to: number, widget: WidgetType, block = false, group = from) => {
+    if (to > from) decorations.push(Decoration.replace({ widget, block, atom: !block, group }).range(from, to));
   };
   /**
    * 源码态**补白**：把这个块渲染成 widget 时的高度，与它现在（源码态）的高度的差额，
@@ -361,7 +390,7 @@ function decorate(
       for (let r = 0; r < rows.length && measurable; r += 1) {
         splits[r].cells.forEach((cell, i) => {
           if (i >= columns || !measurable) return;
-          const width = cellTextWidth(lines[r].text.slice(cell.from, cell.to).trim(), rows[r].header);
+          const width = cellTextWidth(visibleCellText(lines[r].text.slice(cell.from, cell.to).trim()), rows[r].header);
           if (width == null) measurable = false;
           else need[i] = Math.max(need[i], Math.ceil(width) + 1);
         });
@@ -553,13 +582,16 @@ function decorate(
           const markNode = node.getChild("HeaderMark");
           // 空标题（`## ` 后面还没有文字）显示源码 —— 它此刻还不成立。
           // 「敲下 `##` 看得见 → 敲进文字就消失 → 把文字删空又回来」全由这一条给出。
-          const empty = markNode ? isEmptyBlock(markNode.to, to) : false;
           if (!markNode) return;
+          // 「空」要扣掉收尾的 `##`：`## ##` 也是一个还没成立的标题，得露出源码（否则整行全藏、光标落进去什么都看不见）
+          const tail = node.lastChild;
+          const textTo = tail && tail.from > markNode.from && tail.name === "HeaderMark" ? tail.from : to;
+          const empty = isEmptyBlock(markNode.to, textTo);
           // 藏到第一个非空白字符为止（`##   标题` 的几个空格一起藏，不止一个）
           let markEnd = markNode.to;
           while (markEnd < to && /[ \t]/.test(doc.sliceString(markEnd, markEnd + 1))) markEnd += 1;
           if (!empty && !showsSource(from, to)) {
-            hide(markNode.from, markEnd);
+            hide(markNode.from, markEnd, from);
             // 收尾的 `##`（`## 标题 ##`）连同前面的空白一起藏
             // 按**位置**比，不能比对象：`lastChild` / `getChild` 每次都给一个新的 SyntaxNode 包装，
             // `!==` 恒为真 —— 只有一个 `#` 的标题会被当成「有收尾标记」，整行文字被藏掉。
@@ -567,7 +599,7 @@ function decorate(
             if (closing && closing.from > markNode.from && closing.name === "HeaderMark") {
               let closeFrom = closing.from;
               while (closeFrom > markEnd && /[ \t]/.test(doc.sliceString(closeFrom - 1, closeFrom))) closeFrom -= 1;
-              hide(closeFrom, to);
+              hide(closeFrom, to, from);
             }
           } else mark(markNode.from, Math.min(markNode.to + 1, to), "md-src");
           return;
@@ -607,7 +639,7 @@ function decorate(
           }
           if (!showsSource(from, to)) {
             for (let child = first; child; child = child.nextSibling) {
-              if (MARK_RE.test(child.name)) hide(child.from, child.to);
+              if (MARK_RE.test(child.name)) hide(child.from, child.to, from);
             }
           }
           return;
@@ -619,8 +651,8 @@ function decorate(
           if (first && last && first !== last && first.name === "CodeMark" && last.name === "CodeMark") {
             mark(first.to, last.from, "md-code");
             if (!showsSource(from, to)) {
-              hide(first.from, first.to);
-              hide(last.from, last.to);
+              hide(first.from, first.to, from);
+              hide(last.from, last.to, from);
             }
           }
           return false;
@@ -670,12 +702,12 @@ function decorate(
           }
           if (labelTo > labelFrom) mark(labelFrom, labelTo, "md-link");
           if (!showsSource(from, to)) {
-            for (const markNode of marks) hide(markNode.from, markNode.to);
-            if (urlNode) hide(urlNode.from, urlNode.to);
+            for (const markNode of marks) hide(markNode.from, markNode.to, from);
+            if (urlNode) hide(urlNode.from, urlNode.to, from);
             const title = node.getChild("LinkTitle");
-            if (title) hide(title.from, title.to);
+            if (title) hide(title.from, title.to, from);
             const label = node.getChild("LinkLabel");
-            if (label) hide(label.from, label.to);
+            if (label) hide(label.from, label.to, from);
           } else if (raw && urlNode) {
             mark(urlNode.from, urlNode.to, "md-src");
           }
@@ -869,7 +901,7 @@ function decorate(
               // 任务项只显示复选框，不再在它前面多一个圆点（与 Typora 一致）
               const task = item?.getChild("Task")?.getChild("TaskMarker");
               if (task && !showsSource(from, to)) {
-                hide(from, task.from);
+                hide(from, task.from, item!.from);
                 return false;
               }
               if (!empty && !showsSource(from, to)) {
@@ -889,7 +921,8 @@ function decorate(
 
         if (name === "TaskMarker") {
           const raw = state.sliceDoc(from, to);
-          replaceWith(from, to, new CheckboxWidget(/[xX]/.test(raw)));
+          // 与前面藏掉的 `- ` 同属这个列表项：两段合成一块原子
+          replaceWith(from, to, new CheckboxWidget(/[xX]/.test(raw)), false, node.parent?.parent?.from ?? from);
           return false;
         }
 
@@ -1131,6 +1164,44 @@ export const livePreviewField = StateField.define<LivePreviewValue>({
 
 export const livePreview = [livePreviewField];
 
+const ATOM = Decoration.replace({});
+
+interface AtomSpan extends Span {
+  group: number;
+}
+
+function atomSpans(state: EditorState, from: number, to: number): AtomSpan[] {
+  const value = state.field(livePreviewField, false);
+  if (!value) return [];
+  const spans: AtomSpan[] = [];
+  value.set.between(from, to, (a, b, deco) => {
+    const spec = deco.spec as { atom?: boolean; group?: number };
+    if (b > a && spec.atom) spans.push({ from: a, to: b, group: spec.group ?? a });
+  });
+  return spans;
+}
+
+/**
+ * 相邻的原子**在同一个元素里**才合并：链接的 `]`、`(`、URL、`)` 是四段挨着的隐藏范围，
+ * CodeMirror 只会把光标推出「严格落在某一段内部」的位置 —— 不合并的话交界处就成了
+ * 一个看不见的落点（真实浏览器实测：从 `文字` 末尾按 → 停在 `](` 中间）。
+ * 不同元素之间不合并（见 `hide()` 的 group）。
+ */
+function mergeAtoms(spans: AtomSpan[]): Span[] {
+  spans.sort((a, b) => a.from - b.from || a.to - b.to);
+  const merged: AtomSpan[] = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    if (last && span.from <= last.to && span.group === last.group) last.to = Math.max(last.to, span.to);
+    else merged.push({ ...span });
+  }
+  return merged;
+}
+
+/** 视口外各留这么多字符的余量：光标从视口边上往外走一两步也还在算过的范围里。 */
+const ATOM_MARGIN = 2000;
+const windowCache = new WeakMap<DecorationSet, { from: number; to: number; set: RangeSet<RangeValue> }>();
+
 /**
  * 光标不可进入的范围：所有**看不见的源码**（隐藏的标记）与**行内 widget**（图片、公式、
  * wiki 链接、圆点、复选框）。由 `cursorRules.ts` 交给 `EditorView.atomicRanges`，
@@ -1139,61 +1210,40 @@ export const livePreview = [livePreviewField];
  * 直接从装饰集里挑（`spec.atom`），所以和**显示状态天然一致**：拆开的那段（`unwrapSource`）、
  * 打开「显示标记」、块还没成立时，标记是可见的，自然也就不再是原子的。
  *
- * 按装饰集做缓存：一次按键只会建一份，方向键连按不重复扫描。
+ * **只算 `[from, to)` 这一段**（调用方给视口 + 余量）：大文档每次按键装饰集都会换一份，
+ * 整篇扫一遍要 5–10ms（30 万字实测 5.8ms，比整次 dispatch 还慢）。按装饰集缓存，同一份
+ * 装饰集、范围被覆盖时直接复用。
  */
-const atomCache = new WeakMap<DecorationSet, RangeSet<RangeValue>>();
-const ATOM = Decoration.replace({});
-
-export function atomsOf(state: EditorState): RangeSet<RangeValue> {
+export function atomsOf(state: EditorState, from = 0, to = state.doc.length): RangeSet<RangeValue> {
   const value = state.field(livePreviewField, false);
   if (!value) return RangeSet.empty;
-  const cached = atomCache.get(value.set);
-  if (cached) return cached;
-  const spans: Span[] = [];
-  value.set.between(0, state.doc.length, (from, to, deco) => {
-    if (to > from && (deco.spec as { atom?: boolean }).atom) spans.push({ from, to });
-  });
-  /*
-   * 相邻的原子**必须合并**：链接的 `]`、`(`、URL、`)` 是四段挨着的隐藏范围，CodeMirror 只会
-   * 把光标推出「严格落在某一段内部」的位置 —— 两段的交界处不算内部，光标就停在那儿，
-   * 方向键照样要按好几次（真实浏览器实测：从 `文字` 末尾按 → 停在 `](` 中间）。
-   */
-  spans.sort((a, b) => a.from - b.from || a.to - b.to);
-  const merged: Span[] = [];
-  for (const span of spans) {
-    const last = merged[merged.length - 1];
-    if (last && span.from <= last.to) last.to = Math.max(last.to, span.to);
-    else merged.push({ ...span });
-  }
-  const atoms = RangeSet.of<RangeValue>(merged.map((span) => ATOM.range(span.from, span.to)));
-  atomCache.set(value.set, atoms);
-  return atoms;
+  const lo = Math.max(0, from);
+  const hi = Math.min(state.doc.length, to);
+  const cached = windowCache.get(value.set);
+  if (cached && cached.from <= lo && cached.to >= hi) return cached.set;
+  const merged = mergeAtoms(atomSpans(state, lo, hi));
+  const set = RangeSet.of<RangeValue>(merged.map((span) => ATOM.range(span.from, span.to)));
+  windowCache.set(value.set, { from: lo, to: hi, set });
+  return set;
 }
 
-/** `[from, to)` 里有没有原子（看不见的源码 / 行内 widget）。 */
+/** 给 `EditorView.atomicRanges` 用：视口 + 选区附近。 */
+export function atomsNear(state: EditorState, viewport: { from: number; to: number }): RangeSet<RangeValue> {
+  const sel = state.selection;
+  const from = Math.min(viewport.from, sel.ranges[0].from) - ATOM_MARGIN;
+  const to = Math.max(viewport.to, sel.ranges[sel.ranges.length - 1].to) + ATOM_MARGIN;
+  return atomsOf(state, from, to);
+}
+
+/** `[from, to)` 里有没有原子（看不见的源码 / 行内 widget）。只扫这一小段。 */
 export function hasAtomIn(state: EditorState, from: number, to: number): boolean {
-  let found = false;
-  atomsOf(state).between(from, to, (a, b) => {
-    if (b > from && a < to) {
-      found = true;
-      return false;
-    }
-    return undefined;
-  });
-  return found;
+  return atomSpans(state, from, to).some((span) => span.to > from && span.from < to);
 }
 
-/** 盖住 `pos` 这个字符（`[pos, pos+1)`）的原子范围，没有就是 `null`。 */
+/** 盖住 `pos` 这个字符（`[pos, pos+1)`）的原子（未合并的那一段），没有就是 `null`。 */
 export function atomAt(state: EditorState, pos: number): { from: number; to: number } | null {
-  let hit: { from: number; to: number } | null = null;
-  atomsOf(state).between(pos, pos + 1, (from, to) => {
-    if (from <= pos && to > pos) {
-      hit = { from, to };
-      return false;
-    }
-    return undefined;
-  });
-  return hit;
+  const hit = atomSpans(state, pos, pos + 1).find((span) => span.from <= pos && span.to > pos);
+  return hit ? { from: hit.from, to: hit.to } : null;
 }
 
 /**

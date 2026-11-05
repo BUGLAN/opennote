@@ -896,3 +896,43 @@ describe("YAML front matter", () => {
     expect(keysContaining(keys, "md-frontmatter")).toHaveLength(0);
   });
 });
+
+describe("审查报告：渲染细节", () => {
+  it("`## ##` 是空标题：露出源码，不整行藏掉", () => {
+    const keys = currentKeys(stateFor("## ##\n", { anchor: 0 }));
+    expect(keys.filter((key) => /^\d+-\d+$/.test(key))).toEqual([]);
+  });
+
+  it("写在引用块 / 列表里的引用定义也能找到", () => {
+    const keys = currentKeys(stateFor("[t][r] 与 [u]\n\n> [r]: http://x\n\n- [u]: http://y\n", { anchor: 0 }));
+    expect(keys.filter((key) => key.endsWith("|md-link"))).toHaveLength(2);
+    expect(keysContaining(keys, "md-plain")).toHaveLength(0);
+  });
+
+  it("引用定义只改了地址：增量路径也换成新地址（大文档）", () => {
+    const filler = "正文段落填充。".repeat(4000);
+    let state = settled(stateFor(`![logo][l]\n\n${filler}\n\n[l]: a.png\n`, { anchor: 0 }));
+    expect(currentKeys(state).some((key) => key.includes("ImageWidget") && key.includes("a.png"))).toBe(true);
+    const at = state.doc.toString().lastIndexOf("a.png");
+    state = settled(state.update({ changes: { from: at, to: at + 1, insert: "b" } }).state);
+    const keys = currentKeys(state);
+    expect(keys.some((key) => key.includes("ImageWidget") && key.includes("b.png"))).toBe(true);
+  });
+});
+
+describe("front matter 的增量解析", () => {
+  it("在远处补上收尾的 `---`：开头立刻重新认成 front matter（与全量解析一致）", async () => {
+    const { keyKit } = await import("./testing/keyKit");
+    const filler = "正文很长。\n".repeat(600);
+    const kit = keyKit(`---\nfoo: 1\n${filler}‸`);
+    const kinds = () => {
+      const names: string[] = [];
+      for (let node = syntaxTree(kit.state).topNode.firstChild; node && names.length < 1; node = node.nextSibling) names.push(node.name);
+      return names[0];
+    };
+    expect(kinds()).toBe("HorizontalRule");
+    kit.type("\n---");
+    ensureSyntaxTree(kit.state, kit.state.doc.length, 5000);
+    expect(kinds()).toBe("FrontMatter");
+  });
+});

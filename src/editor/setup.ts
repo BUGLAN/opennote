@@ -18,7 +18,7 @@ import { createFindPanel } from "./findPanel";
 import { htmlClipboard } from "./htmlPaste";
 import { linkTip } from "./linkTip";
 import { livePreviewField } from "./livePreview";
-import { markdownSupport } from "./markdown";
+import { frontMatterReparse, markdownSupport } from "./markdown";
 import { linkClickHandler, mediaHandlers } from "./media";
 import { editorSettingsField, type EditorSettings } from "./settings";
 import { editorTheme } from "./theme";
@@ -170,6 +170,7 @@ export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
     // 表格就地编辑态的按键 / 光标吸附 / 粘贴 / 工具条 —— 见 `tableEdit.ts`。
     tableEdit,
     markdownSupport,
+    frontMatterReparse,
     history(),
     drawSelection(),
     dropCursor(),

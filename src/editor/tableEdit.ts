@@ -1,5 +1,6 @@
 import { syntaxTree } from "@codemirror/language";
-import { EditorSelection, EditorState, Prec, StateField, type Extension, type Transaction } from "@codemirror/state";
+import { completionStatus } from "@codemirror/autocomplete";
+import { CharCategory, EditorSelection, EditorState, Prec, StateField, type Extension, type Transaction } from "@codemirror/state";
 import { EditorView, keymap, showTooltip, type Command, type Tooltip } from "@codemirror/view";
 import type { SyntaxNode } from "@lezer/common";
 import { livePreviewField } from "./livePreview";
@@ -45,6 +46,8 @@ interface Row {
   line: number;
   from: number;
   to: number;
+  /** 行首的容器前缀：引用里的表格是 `> `，列表项里的表格是缩进。新行、重写都要带着它。 */
+  prefix: string;
   cells: Cell[];
   header: boolean;
   delimiter: boolean;
@@ -57,18 +60,26 @@ interface TableInfo {
   aligns: TableAlign[];
 }
 
-function cellsOf(lineFrom: number, text: string): Cell[] {
+/** 表格行前面的容器前缀（缩进、`> `）。它不是第一格 —— 当成格子会多出一列（审查报告 A2）。 */
+function rowPrefix(text: string): string {
+  return /^[ \t]*(?:>[ \t]?[ \t]*)*/.exec(text)?.[0] ?? "";
+}
+
+function cellsOf(lineFrom: number, fullText: string): Cell[] {
+  const prefix = rowPrefix(fullText);
+  const text = fullText.slice(prefix.length);
+  const base = lineFrom + prefix.length;
   return splitTableRow(text).cells.map(({ from, to }) => {
     const raw = text.slice(from, to);
     const lead = raw.length - raw.trimStart().length;
     const trail = raw.length - raw.trimEnd().length;
     const blank = raw.trim().length === 0;
-    const point = lineFrom + Math.min(from + 1, to);
+    const point = base + Math.min(from + 1, to);
     return {
-      from: lineFrom + from,
-      to: lineFrom + to,
-      contentFrom: blank ? point : lineFrom + from + lead,
-      contentTo: blank ? point : lineFrom + to - trail,
+      from: base + from,
+      to: base + to,
+      contentFrom: blank ? point : base + from + lead,
+      contentTo: blank ? point : base + to - trail,
       blank,
     };
   });
@@ -102,9 +113,17 @@ function tableAt(state: EditorState, pos: number): TableInfo | null {
     const line = doc.line(n);
     const index = n - first;
     if (index === 1) delimiterText = line.text;
-    rows.push({ line: n, from: line.from, to: line.to, cells: cellsOf(line.from, line.text), header: index === 0, delimiter: index === 1 });
+    rows.push({
+      line: n,
+      from: line.from,
+      to: line.to,
+      prefix: rowPrefix(line.text),
+      cells: cellsOf(line.from, line.text),
+      header: index === 0,
+      delimiter: index === 1,
+    });
   }
-  const aligns = parseTableAlignments(delimiterText);
+  const aligns = parseTableAlignments(delimiterText.slice(rowPrefix(delimiterText).length));
   const columns = aligns.length || rows[0]?.cells.length || 0;
   return columns > 0 ? { node, rows, columns, aligns } : null;
 }
@@ -133,13 +152,13 @@ function bodyRows(table: TableInfo): number[] {
   return table.rows.map((_, i) => i).filter((i) => !table.rows[i].delimiter);
 }
 
-function emptyRow(columns: number): string {
-  return `|${"  |".repeat(columns)}`;
+function emptyRow(columns: number, prefix = ""): string {
+  return `${prefix}|${"  |".repeat(columns)}`;
 }
 
 /** 新行里第 `col` 格的光标位置（`|  |  |` 里两个空格中间）。 */
-function emptyRowCaret(rowFrom: number, col: number): number {
-  return rowFrom + 3 * col + 2;
+function emptyRowCaret(rowFrom: number, col: number, prefix = ""): number {
+  return rowFrom + prefix.length + 3 * col + 2;
 }
 
 /* ------------------------------------------------------------ 按键 */
@@ -147,6 +166,13 @@ function emptyRowCaret(rowFrom: number, col: number): number {
 function single(state: EditorState): number | null {
   const range = state.selection.main;
   return range.empty && state.selection.ranges.length === 1 ? range.head : null;
+}
+
+/** 会改文档的表格命令：只读锁住时不动（`EditorState.readOnly` 拦不住程序派发的事务）。 */
+function editableCellAt(state: EditorState): CellAt | null {
+  if (state.readOnly) return null;
+  const pos = single(state);
+  return pos == null ? null : cellAt(state, pos);
 }
 
 function moveTo(view: EditorView, pos: number): true {
@@ -169,16 +195,20 @@ function cellAfter(table: TableInfo, row: number, col: number, step: 1 | -1): Ce
 }
 
 const tableTab: Command = (view) => {
+  // 补全弹窗开着时 Tab / 回车是「接受补全」的
+  if (completionStatus(view.state) === "active") return false;
   const pos = single(view.state);
   const at = pos == null ? null : cellAt(view.state, pos);
   if (!at) return false;
   const next = cellAfter(at.table, at.row, at.col, 1);
   if (next) return moveTo(view, next.contentTo);
+  if (view.state.readOnly) return true;
   // 最后一格：新起一行
-  const end = at.table.rows[at.table.rows.length - 1].to;
+  const lastRow = at.table.rows[at.table.rows.length - 1];
+  const end = lastRow.to;
   view.dispatch({
-    changes: { from: end, insert: `\n${emptyRow(at.table.columns)}` },
-    selection: { anchor: emptyRowCaret(end + 1, 0) },
+    changes: { from: end, insert: `\n${emptyRow(at.table.columns, lastRow.prefix)}` },
+    selection: { anchor: emptyRowCaret(end + 1, 0, lastRow.prefix) },
     userEvent: "input",
     scrollIntoView: true,
   });
@@ -196,19 +226,24 @@ const tableShiftTab: Command = (view) => {
 /** 跳出表格：在表格后面隔一个空行，光标落到新的一行。 */
 function exitTable(view: EditorView, table: TableInfo, removeLastRow: boolean): true {
   const last = table.rows[table.rows.length - 1];
+  // 引用里的表格：跳出表格但留在引用里（空行与新行都带 `>`）；列表里的表格同理带缩进
+  const keep = last.prefix.trimEnd();
+  const lead = last.prefix;
   if (removeLastRow) {
-    // 空行换成一个换行：`last.from` 前面那个换行留着，于是表格与新段落之间正好一个空行
+    // 空行换成「容器前缀的空行 + 新行」：表格与新段落之间正好一个空行
+    const insert = `${keep}\n${lead}`;
     view.dispatch({
-      changes: { from: last.from, to: last.to, insert: "\n" },
-      selection: { anchor: last.from + 1 },
+      changes: { from: last.from, to: last.to, insert },
+      selection: { anchor: last.from + insert.length },
       userEvent: "input",
       scrollIntoView: true,
     });
     return true;
   }
+  const insert = `\n${keep}\n${lead}`;
   view.dispatch({
-    changes: { from: last.to, insert: "\n\n" },
-    selection: { anchor: last.to + 2 },
+    changes: { from: last.to, insert },
+    selection: { anchor: last.to + insert.length },
     userEvent: "input",
     scrollIntoView: true,
   });
@@ -216,8 +251,8 @@ function exitTable(view: EditorView, table: TableInfo, removeLastRow: boolean): 
 }
 
 const tableEnter: Command = (view) => {
-  const pos = single(view.state);
-  const at = pos == null ? null : cellAt(view.state, pos);
+  if (completionStatus(view.state) === "active") return false;
+  const at = editableCellAt(view.state);
   if (!at) return false;
   const { table } = at;
   const row = table.rows[at.row];
@@ -226,8 +261,8 @@ const tableEnter: Command = (view) => {
   // 表头下面插行 ⇒ 插在分隔行之后（成为第一行正文）
   const after = row.header && table.rows[1]?.delimiter ? table.rows[1] : row;
   view.dispatch({
-    changes: { from: after.to, insert: `\n${emptyRow(table.columns)}` },
-    selection: { anchor: emptyRowCaret(after.to + 1, Math.min(at.col, table.columns - 1)) },
+    changes: { from: after.to, insert: `\n${emptyRow(table.columns, row.prefix)}` },
+    selection: { anchor: emptyRowCaret(after.to + 1, Math.min(at.col, table.columns - 1), row.prefix) },
     userEvent: "input",
     scrollIntoView: true,
   });
@@ -235,15 +270,14 @@ const tableEnter: Command = (view) => {
 };
 
 const tableExit: Command = (view) => {
-  const pos = single(view.state);
-  const at = pos == null ? null : cellAt(view.state, pos);
+  const at = editableCellAt(view.state);
   return at ? exitTable(view, at.table, false) : false;
 };
 
 const tableBackspace: Command = (view) => {
   const pos = single(view.state);
-  const at = pos == null ? null : cellAt(view.state, pos);
-  if (!at) return false;
+  const at = editableCellAt(view.state);
+  if (!at || pos == null) return false;
   const { cell } = at;
   if (pos! > cell.contentFrom && !cell.blank) {
     if (pos! <= cell.contentTo) return false; // 格子里面：普通的删一个字
@@ -269,8 +303,8 @@ const tableBackspace: Command = (view) => {
 
 const tableDelete: Command = (view) => {
   const pos = single(view.state);
-  const at = pos == null ? null : cellAt(view.state, pos);
-  if (!at) return false;
+  const at = editableCellAt(view.state);
+  if (!at || pos == null) return false;
   const { cell, table } = at;
   if (pos! < cell.contentTo && !cell.blank) {
     if (pos! >= cell.contentFrom) return false;
@@ -305,10 +339,54 @@ const tableRight: Command = (view) => {
   return last.to < view.state.doc.length ? moveTo(view, last.to + 1) : true;
 };
 
+/**
+ * 按词 / 按行删除（Ctrl/Alt/⌘ + 退格 / Delete）：范围收在当前格子的文字里。
+ * 竖线是用 mark 藏的（不是原子），不收的话一下就删掉竖线、两格合并（审查报告 A6）。
+ */
+function deleteInCell(forward: boolean, whole: boolean): Command {
+  return (view) => {
+    const pos = single(view.state);
+    const at = editableCellAt(view.state);
+    if (!at || pos == null) return false;
+    const { cell } = at;
+    const head = Math.max(cell.contentFrom, Math.min(pos, cell.contentTo));
+    let target: number;
+    if (whole) target = forward ? cell.contentTo : cell.contentFrom;
+    else {
+      const categorize = view.state.charCategorizer(head);
+      target = head;
+      const step = forward ? 1 : -1;
+      const charAt = (p: number) => view.state.sliceDoc(forward ? p : p - 1, forward ? p + 1 : p);
+      const limit = forward ? cell.contentTo : cell.contentFrom;
+      while (target !== limit && categorize(charAt(target)) === CharCategory.Space) target += step;
+      const kind = target !== limit ? categorize(charAt(target)) : null;
+      while (target !== limit && categorize(charAt(target)) === kind) target += step;
+    }
+    if (target === head) return true;
+    view.dispatch({
+      changes: { from: Math.min(head, target), to: Math.max(head, target) },
+      selection: { anchor: Math.min(head, target) },
+      userEvent: forward ? "delete.forward" : "delete.backward",
+    });
+    return true;
+  };
+}
+
+/** 光标前面是不是奇数个 `\`（那样下一个字符已经被转义了）。 */
+function escapedAt(text: string, pos: number): boolean {
+  let count = 0;
+  for (let i = pos - 1; i >= 0 && text[i] === "\\"; i -= 1) count += 1;
+  return count % 2 === 1;
+}
+
 const tablePipe: Command = (view) => {
-  const pos = single(view.state);
-  if (pos == null || !cellAt(view.state, pos)) return false;
-  view.dispatch(view.state.replaceSelection("\\|"), { userEvent: "input.type" });
+  const at = editableCellAt(view.state);
+  if (!at) return false;
+  const head = view.state.selection.main.head;
+  const line = view.state.doc.lineAt(head);
+  // 用户自己先敲了 `\`：再补一个就成了 `\\|`（转义的是反斜杠，竖线照样分格）
+  const insert = escapedAt(line.text, head - line.from) ? "|" : "\\|";
+  view.dispatch(view.state.replaceSelection(insert), { userEvent: "input.type" });
   return true;
 };
 
@@ -322,6 +400,12 @@ const tableKeymap = Prec.highest(
     { key: "ArrowLeft", run: tableLeft },
     { key: "ArrowRight", run: tableRight },
     { key: "|", run: tablePipe },
+    { key: "Mod-Backspace", run: deleteInCell(false, true) },
+    { key: "Mod-Delete", run: deleteInCell(true, true) },
+    { key: "Alt-Backspace", run: deleteInCell(false, false) },
+    { key: "Alt-Delete", run: deleteInCell(true, false) },
+    { key: "Ctrl-Backspace", run: deleteInCell(false, false) },
+    { key: "Ctrl-Delete", run: deleteInCell(true, false) },
   ]),
 );
 
@@ -334,35 +418,40 @@ const tableKeymap = Prec.highest(
 function snapIntoCell(tr: Transaction): Transaction | readonly [Transaction, { selection: EditorSelection; sequential: true }] {
   if (!tr.selection && !tr.docChanged) return tr;
   const sel = tr.newSelection;
-  if (sel.ranges.length !== 1 || !sel.main.empty) return tr;
-  const head = sel.main.head;
-  // 便宜的预检：这一行看起来像表格行才往下算
-  if (!tr.newDoc.lineAt(head).text.includes("|")) return tr;
+  // 便宜的预检：有光标落在看起来像表格行的行上才往下算
+  if (!sel.ranges.some((range) => range.empty && tr.newDoc.lineAt(range.head).text.includes("|"))) return tr;
   const state = tr.state;
+  let changed = false;
+  const ranges = sel.ranges.map((range, index) => {
+    if (!range.empty) return range;
+    const before = tr.startState.selection.ranges[index]?.head ?? tr.startState.selection.main.head;
+    const target = snapHead(state, range.head, before);
+    if (target === range.head) return range;
+    changed = true;
+    return EditorSelection.cursor(target);
+  });
+  if (!changed) return tr;
+  return [tr, { selection: EditorSelection.create(ranges, sel.mainIndex), sequential: true }] as const;
+}
+
+function snapHead(state: EditorState, head: number, before: number): number {
   const table = tableAt(state, head);
-  if (!table) return tr;
-  const rowIndex = table.rows.findIndex((r) => head >= r.from && head <= r.to);
-  if (rowIndex < 0) return tr;
-  let target = head;
-  const row = table.rows[rowIndex];
+  if (!table) return head;
+  const row = table.rows.find((r) => head >= r.from && head <= r.to);
+  if (!row) return head;
   if (row.delimiter) {
-    const before = tr.startState.selection.main.head;
     const fromBelow = before > row.to;
     const other = fromBelow ? table.rows[0] : (table.rows[2] ?? table.rows[0]);
     const col = Math.max(0, row.cells.findIndex((cell) => head >= cell.from && head <= cell.to));
     const cell = other.cells[Math.min(col, other.cells.length - 1)];
-    target = cell ? cell.contentTo : other.to;
-  } else if (row.cells.length) {
-    const cells = row.cells;
-    const inside = cells.find((cell) => head >= cell.contentFrom && head <= cell.contentTo);
-    if (!inside) {
-      const owner = cells.find((cell) => head >= cell.from && head <= cell.to)
-        ?? (head < cells[0].from ? cells[0] : cells[cells.length - 1]);
-      target = head <= owner.contentFrom ? owner.contentFrom : owner.contentTo;
-    }
+    return cell ? cell.contentTo : other.to;
   }
-  if (target === head) return tr;
-  return [tr, { selection: EditorSelection.single(target), sequential: true }] as const;
+  const cells = row.cells;
+  if (!cells.length) return head;
+  if (cells.some((cell) => head >= cell.contentFrom && head <= cell.contentTo)) return head;
+  const owner = cells.find((cell) => head >= cell.from && head <= cell.to)
+    ?? (head < cells[0].from ? cells[0] : cells[cells.length - 1]);
+  return head <= owner.contentFrom ? owner.contentFrom : owner.contentTo;
 }
 
 const cellSnap = EditorState.transactionFilter.of(snapIntoCell);
@@ -371,7 +460,8 @@ const cellSnap = EditorState.transactionFilter.of(snapIntoCell);
 const pasteIntoCell = EditorView.clipboardInputFilter.of((text, state) => {
   const pos = single(state);
   if (pos == null || !cellAt(state, pos)) return text;
-  return text.replace(/\r?\n+/g, " ").replace(/(?<!\\)\|/g, "\\|");
+  // 竖线前面有偶数个反斜杠（含 0 个）才是「真的竖线」，要补一个转义；`\\|` 前面是转义的反斜杠
+  return text.replace(/\r?\n+/g, " ").replace(/(\\*)\|/g, (all, slashes: string) => (slashes.length % 2 ? all : `${slashes}\\|`));
 });
 
 /* ------------------------------------------------------------ 工具条 */
@@ -390,34 +480,38 @@ function delimiterFor(align: TableAlign): string {
  * 对整张表做一次结构改动，整张表按规范格式重写一遍（`| a | b |`）。一次事务 ⇒ 一步撤销。
  */
 export function applyTableOp(view: EditorView, op: TableOp): boolean {
-  const pos = single(view.state);
-  const at = pos == null ? null : cellAt(view.state, pos);
+  const at = editableCellAt(view.state);
   if (!at) return false;
   const { table } = at;
   const state = view.state;
+  // 多出列数的格子**原样保留**（不规范的表常见），只在列数以内做插入 / 删除
   const grid = table.rows.map((row) => {
     const texts = cellTexts(state, row);
     while (texts.length < table.columns) texts.push("");
-    return texts.slice(0, table.columns);
+    return texts;
   });
+  const prefixes = table.rows.map((row) => row.prefix);
   let aligns = [...table.aligns];
   while (aligns.length < table.columns) aligns.push("left");
   let row = at.row;
   let col = Math.min(at.col, table.columns - 1);
-  const blankRow = () => new Array<string>(grid[0].length).fill("");
+  const blankRow = () => new Array<string>(aligns.length).fill("");
 
   switch (op) {
     case "rowAbove":
       if (row <= 1) return true; // 表头上面不能插正文行
       grid.splice(row, 0, blankRow());
+      prefixes.splice(row, 0, prefixes[row]);
       break;
     case "rowBelow":
       row = row === 0 ? 2 : row + 1;
       grid.splice(row, 0, blankRow());
+      prefixes.splice(row, 0, prefixes[Math.min(row - 1, prefixes.length - 1)]);
       break;
     case "rowDelete":
       if (row <= 1 || table.rows.length <= 3) return true; // 表头与唯一的正文行留着
       grid.splice(row, 1);
+      prefixes.splice(row, 1);
       row = Math.min(row, grid.length - 1);
       break;
     case "colLeft":
@@ -429,10 +523,10 @@ export function applyTableOp(view: EditorView, op: TableOp): boolean {
       break;
     }
     case "colDelete":
-      if (grid[0].length <= 1) return true;
+      if (aligns.length <= 1) return true;
       for (const cells of grid) cells.splice(col, 1);
       aligns.splice(col, 1);
-      col = Math.min(col, grid[0].length - 1);
+      col = Math.min(col, aligns.length - 1);
       break;
     default:
       aligns[col] = op;
@@ -440,7 +534,7 @@ export function applyTableOp(view: EditorView, op: TableOp): boolean {
   }
 
   const lines = grid.map((cells, i) =>
-    i === 1 ? `| ${aligns.map(delimiterFor).join(" | ")} |` : `| ${cells.join(" | ")} |`,
+    prefixes[i] + (i === 1 ? `| ${aligns.map(delimiterFor).join(" | ")} |` : `| ${cells.join(" | ")} |`),
   );
   const text = lines.join("\n");
   const from = table.rows[0].from;
@@ -468,6 +562,7 @@ const TOOLBAR: { op: TableOp; label: string; title: string }[] = [
 ];
 
 function toolbarFor(state: EditorState): Tooltip | null {
+  if (state.readOnly) return null;
   const pos = single(state);
   const at = pos == null ? null : cellAt(state, pos);
   if (!at) return null;
