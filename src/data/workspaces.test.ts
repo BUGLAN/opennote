@@ -218,6 +218,38 @@ describe("OPFS 工作区登记（D32 相关回归）", () => {
     expect(await store.list()).toEqual([]);
     expect(opfs.readText("opennote/我的笔记/a.md")).toBe("A");
   });
+
+  it("新建浏览器笔记本会申请持久存储（issue #2）", async () => {
+    const { fs, workspaces } = await setup();
+    fs.setDirectoryHandleStore(fs.createMemoryDirectoryHandleStore());
+
+    const opfs = new MemoryFileSystem();
+    const persist = vi.fn(async () => true);
+    const persisted = vi.fn(async () => false);
+    vi.stubGlobal("navigator", { storage: { getDirectory: async () => opfs.root, persist, persisted } });
+
+    const record = await workspaces.createBrowserWorkspace("持久化测试");
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1));
+    expect(persisted).toHaveBeenCalledTimes(1);
+
+    const { storagePersistenceStore } = await import("./storagePersistence");
+    expect(storagePersistenceStore.get()).toEqual({ workspaceId: record.id, status: "persisted" });
+  });
+
+  it("FSA 文件夹不申请浏览器持久存储（这条只作用于 OPFS）", async () => {
+    const { fs, workspaces } = await setup();
+    fs.setDirectoryHandleStore(fs.createMemoryDirectoryHandleStore());
+
+    const folder = new MemoryFileSystem();
+    const persist = vi.fn(async () => true);
+    vi.stubGlobal("navigator", { storage: { persist, persisted: vi.fn(async () => false) } });
+    vi.stubGlobal("window", { showDirectoryPicker: async () => folder.root });
+
+    const record = await workspaces.addLocalFolder();
+    expect(record?.kind).toBe("fsa");
+    await Promise.resolve();
+    expect(persist).not.toHaveBeenCalled();
+  });
 });
 
 describe("存储被禁用时仍能启动（与 D04 同源）", () => {

@@ -45,6 +45,7 @@ import {
   type WorkspaceRecord,
 } from "./data/workspaces";
 import { hasLegacyData } from "./data/legacy";
+import { ensureStoragePersistence, useStoragePersistence } from "./data/storagePersistence";
 import {
   commitInboxResult,
   discardInbox,
@@ -137,6 +138,7 @@ export default function App(): ReactNode {
   const library = useLibrary();
   const ui = useUi();
   const registry = useWorkspaces();
+  const storagePersistence = useStoragePersistence();
 
   const viewRef = useRef<EditorView | null>(null);
   const syncUi = useStore(syncUiStore);
@@ -165,6 +167,8 @@ export default function App(): ReactNode {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [inboxOpen, setInboxOpen] = useState(false);
   const [inboxPending, setInboxPending] = useState(0);
+  /** 用户点过「知道了」的浏览器笔记本 id（持久化提示按笔记本分别关闭）。 */
+  const [dismissedPersistenceNoticeFor, setDismissedPersistenceNoticeFor] = useState<string | null>(null);
   /** 当前笔记本的 GitHub 远端（读自 `.opennote/github.json`）；不是镜像笔记本就是 null。 */
   const [githubRemote, setGithubRemote] = useState<GithubBaseline | null>(null);
 
@@ -239,6 +243,18 @@ export default function App(): ReactNode {
   useEffect(() => {
     void initLibrary();
   }, []);
+
+  /*
+   * 浏览器笔记本（OPFS）默认是「尽力而为」的存储：打开时补一次持久存储申请。
+   * 新建时 `createBrowserWorkspace` 已经申请过，这里再走一次也只是 `persisted()` 为真后直接返回。
+   * 只在 OPFS 后端 —— 桌面版与 FSA 是磁盘上的真实文件夹，不需要也不该出现这个提示。
+   */
+  const activeWorkspaceId = library.workspace?.id ?? null;
+  const activeWorkspaceKind = library.workspace?.kind ?? null;
+  useEffect(() => {
+    if (!activeWorkspaceId || activeWorkspaceKind !== "opfs") return;
+    void ensureStoragePersistence(activeWorkspaceId);
+  }, [activeWorkspaceId, activeWorkspaceKind]);
 
   // D11: the desktop shell asks before it closes the window, so the last ≤450ms
   // of typing still reach the disk (flushAll, then the metadata). `flushForClose`
@@ -1450,6 +1466,15 @@ export default function App(): ReactNode {
     ? { chars: activeNote.chars, words: activeNote.words, minutes: Math.max(1, Math.round(activeNote.words / 300)) }
     : { chars: 0, words: 0, minutes: 0 };
   const workspaceName = library.workspace?.name ?? "";
+  /*
+   * 只有当前打开的确实是浏览器笔记本、且状态属于**这个**笔记本时才提示：
+   * 切换笔记本后，上一个笔记本的申请结果不能串到新笔记本上。
+   */
+  const storageWarning =
+    library.workspace?.kind === "opfs" &&
+    storagePersistence.workspaceId === library.workspace.id &&
+    (storagePersistence.status === "denied" || storagePersistence.status === "unsupported") &&
+    dismissedPersistenceNoticeFor !== library.workspace.id;
 
   return (
     <div
@@ -1460,6 +1485,23 @@ export default function App(): ReactNode {
         ui.sidebarOpen && "is-sidebar-open",
       )}
     >
+      {storageWarning ? (
+        <div className="storage-notice" role="status">
+          <p className="storage-notice__text">
+            {storagePersistence.status === "unsupported"
+              ? "当前浏览器不支持持久存储："
+              : "当前浏览器没有批准持久存储："}
+            这个浏览器可能会清掉浏览器笔记本，重要内容请开同步或改用「打开本机文件夹」。
+          </p>
+          <button
+            type="button"
+            className="storage-notice__close"
+            onClick={() => setDismissedPersistenceNoticeFor(library.workspace?.id ?? null)}
+          >
+            知道了
+          </button>
+        </div>
+      ) : null}
       <Sidebar
         library={library}
         ui={ui}

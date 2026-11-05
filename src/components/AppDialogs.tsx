@@ -19,6 +19,7 @@ import { ImportApiPanel } from "./ImportApiPanel";
 import { Modal } from "./Overlays";
 import { SyncPane } from "./sync/SyncPane";
 import { useStore } from "../lib/store";
+import { useStoragePersistence } from "../data/storagePersistence";
 import { syncUiStore } from "../sync/appSync";
 import { syncAccountStore } from "../sync/account";
 import type { NotebookSummary } from "../../shared/contract";
@@ -92,6 +93,13 @@ export function SettingsDialog({
   const [section, setSection] = useState<SectionId>(initialSection ?? "外观");
   const syncUi = useStore(syncUiStore);
   const syncAccount = useStore(syncAccountStore);
+  /*
+   * 浏览器笔记本的持久化状态。只认**当前这个**笔记本的记录：OPFS 的申请结果按 origin
+   * 共享，但界面文案说的是「这个笔记本」，切换笔记本后不能把上一个的结果显示过来。
+   */
+  const storagePersistence = useStoragePersistence();
+  const persistenceStatus =
+    workspace?.kind === "opfs" && storagePersistence.workspaceId === workspace.id ? storagePersistence.status : null;
   // 分类栏上「同步」带一个点：只在需要你处理时（冲突 / 待解锁 / 需要重新登录）。
   const syncNeedsYou =
     (syncUi.last?.conflicts.length ?? 0) > 0 || syncUi.reason === "locked" || syncAccount.needsSignIn || syncAccount.disabled;
@@ -297,6 +305,33 @@ export function SettingsDialog({
                   </>
                 )}
               </SettingRow>
+
+              {/*
+                OPFS 的持久化状态（issue #2）。只在浏览器笔记本里出现：FSA / 桌面版
+                是磁盘上的真实文件夹，不需要「向浏览器申请别清掉」。
+              */}
+              {workspace?.kind === "opfs" ? (
+                <SettingRow label="浏览器存储" hint="浏览器可能回收长期未使用的数据">
+                  <div className="setting__value">
+                    <strong>
+                      {persistenceStatus === "persisted"
+                        ? "已持久化"
+                        : persistenceStatus === "denied"
+                          ? "未获批准"
+                          : persistenceStatus === "unsupported"
+                            ? "无法申请"
+                            : "正在检查…"}
+                    </strong>
+                  </div>
+                  {persistenceStatus === "persisted" ? (
+                    <p className="dialog__note">浏览器已承诺保留这个笔记本，不会因为磁盘紧张或长期未打开而自动清掉。</p>
+                  ) : persistenceStatus ? (
+                    <p className="dialog__note">
+                      这个浏览器可能会清掉浏览器笔记本，重要内容请开同步或改用「打开本机文件夹」。
+                    </p>
+                  ) : null}
+                </SettingRow>
+              ) : null}
 
               {/*
                 「写完标题 5 秒后自动改名」的总开关（方案 #20）。
@@ -678,7 +713,7 @@ function workspaceHint(workspace: WorkspaceRecord): string {
   if (workspace.kind === "node") return "直接读写本机磁盘上的文件夹";
   if (workspace.kind === "fsa") return "浏览器已授权的磁盘文件夹（刷新后可能需要重新授权）";
   if (workspace.kind === "capacitor") return "手机里的真实文件夹，iOS「文件」App / Android 文件管理器都能看到";
-  return "浏览器自己的文件系统（OPFS），重开浏览器依然在";
+  return "浏览器自己的文件系统（OPFS），可能被浏览器回收（见下方「浏览器存储」）";
 }
 
 /* ================================= history ============================== */
