@@ -257,6 +257,69 @@
   transform: rotate(42deg);
 }
 
+/* ---- link tooltip ------------------------------------------------------ */
+/* 光标停在链接里时的地址浮层（`editor/linkTip.ts`）：地址 + 打开 / 编辑。
+   外框（底色、边、圆角、阴影）由 `theme.ts` 的 `.cm-tooltip` 统一给。 */
+.cm-tooltip .md-link-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(460px, 80vw);
+  padding: 4px 6px 4px 10px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.cm-tooltip .md-link-tip__url {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.cm-tooltip .md-link-tip__btn {
+  flex: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.cm-tooltip .md-link-tip__btn:hover {
+  background: var(--accent-soft);
+}
+
+/* ---- table toolbar ----------------------------------------------------- */
+/* 光标在表格里（就地编辑态）时贴在表格上方的工具条（`editor/tableEdit.ts`）。 */
+.cm-tooltip .md-table-tools {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+.cm-tooltip .md-table-tools__btn {
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 3px 7px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.cm-tooltip .md-table-tools__btn:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 /* ---- wiki links -------------------------------------------------------- */
 .cm-content .md-wikilink {
   color: var(--accent);

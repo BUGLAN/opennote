@@ -1,11 +1,12 @@
 import { syntaxTree } from "@codemirror/language";
 import type { SyntaxNode, Tree } from "@lezer/common";
-import { type EditorState, type Range, StateEffect, StateField, type Transaction } from "@codemirror/state";
+import { type EditorState, type Range, RangeSet, type RangeValue, StateField, type Transaction } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, type WidgetType } from "@codemirror/view";
 import { renderMarkdown } from "../lib/markdown";
 import { setBlockPad } from "./blockHeight";
 import { bridge } from "./bridge";
 import { stripMathDollars, stripMathFence } from "./math";
+import { unwrapSource } from "./unwrapEffect";
 import {
   defaultEditorSettings,
   editorSettingsField,
@@ -94,7 +95,7 @@ interface LivePreviewValue {
  * `` `代码` ``、链接、图片…）的边界上按删除时，先露源码、吃掉这次按键 —— 这就是
  * 「删掉这个粗体这一块」的手感；再按一次才真的删内容。
  */
-export const unwrapSource = StateEffect.define<{ from: number; to: number }>();
+export { unwrapSource };
 
 function selectionSpans(state: EditorState): SelectionSpan[] {
   const doc = state.doc;
@@ -173,11 +174,16 @@ function decorate(
       decorations.push(Decoration.mark(attributes ? { class: cls, attributes } : { class: cls }).range(from, to));
     }
   };
+  /*
+   * `atom: true`：这一段对光标是**原子**的（见 `atomsOf()`）—— 看不见的字符不许光标走进去，
+   * 否则方向键会在隐藏的 `**`、链接 URL 里「空走」，打字会写进看不见的地方。
+   * 块级 widget 不算：方向键要能进到表格 / 公式块里，让它换成可编辑的形态。
+   */
   const hide = (from: number, to: number) => {
-    if (to > from) decorations.push(Decoration.replace({}).range(from, to));
+    if (to > from) decorations.push(Decoration.replace({ atom: true }).range(from, to));
   };
   const replaceWith = (from: number, to: number, widget: WidgetType, block = false) => {
-    if (to > from) decorations.push(Decoration.replace({ widget, block }).range(from, to));
+    if (to > from) decorations.push(Decoration.replace({ widget, block, atom: !block }).range(from, to));
   };
   /**
    * 源码态**补白**：把这个块渲染成 widget 时的高度，与它现在（源码态）的高度的差额，
@@ -393,14 +399,24 @@ function decorate(
       //
       // 连竖线**后面那串空格**一起藏：空格若留在单元格开头，会占掉 4px 宽，
       // 长内容就会「渲染态两行、编辑态三行」，整块高度对不上（实测差 26px）。
+      //
+      // **空格子例外**：整格都是空白时只藏竖线、空白留着 —— 光标要有一个看得见的落点
+      // （全藏掉的话那一格只剩 font-size:0 的字符，光标画出来是 0 高，等于看不见）。
+      const blankAfter = (pipe: number) => {
+        const next = line.text.indexOf("|", pipe + 1);
+        return line.text.slice(pipe + 1, next < 0 ? line.text.length : next).trim().length === 0;
+      };
       for (const pipe of pipes) {
         let end = pipe + 1;
-        while (end < line.text.length && (line.text[end] === " " || line.text[end] === "\t")) end += 1;
+        if (!blankAfter(pipe)) {
+          while (end < line.text.length && (line.text[end] === " " || line.text[end] === "\t")) end += 1;
+        }
         mark(line.from + pipe, line.from + end, "md-tskip");
       }
       // 单元格**末尾的空白**也要藏：它会参与断行计算 —— 51px 的窄列里，
       // 「列一」+ 一个空格刚好放不下，渲染态一行、编辑态两行（整行高 26px）。
       for (const segment of segments) {
+        if (line.text.slice(segment.from, segment.to).replace(/\|/g, "").trim().length === 0) continue;
         let end = segment.to;
         if (end > segment.from && line.text[end - 1] === "|") end -= 1;
         let start = end;
@@ -971,6 +987,58 @@ export const livePreviewField = StateField.define<LivePreviewValue>({
 });
 
 export const livePreview = [livePreviewField];
+
+/**
+ * 光标不可进入的范围：所有**看不见的源码**（隐藏的标记）与**行内 widget**（图片、公式、
+ * wiki 链接、圆点、复选框）。由 `cursorRules.ts` 交给 `EditorView.atomicRanges`，
+ * 方向键因此一步跨过 `](https://…)` 这种整段隐藏的字符，而不是按 N 次光标才动一下。
+ *
+ * 直接从装饰集里挑（`spec.atom`），所以和**显示状态天然一致**：拆开的那段（`unwrapSource`）、
+ * 打开「显示标记」、块还没成立时，标记是可见的，自然也就不再是原子的。
+ *
+ * 按装饰集做缓存：一次按键只会建一份，方向键连按不重复扫描。
+ */
+const atomCache = new WeakMap<DecorationSet, RangeSet<RangeValue>>();
+
+export function atomsOf(state: EditorState): RangeSet<RangeValue> {
+  const value = state.field(livePreviewField, false);
+  if (!value) return RangeSet.empty;
+  const cached = atomCache.get(value.set);
+  if (cached) return cached;
+  const ranges: Range<Decoration>[] = [];
+  value.set.between(0, state.doc.length, (from, to, deco) => {
+    if (to > from && (deco.spec as { atom?: boolean }).atom) ranges.push(deco.range(from, to));
+  });
+  const atoms = RangeSet.of<RangeValue>(ranges, true);
+  atomCache.set(value.set, atoms);
+  return atoms;
+}
+
+/** `[from, to)` 里有没有原子（看不见的源码 / 行内 widget）。 */
+export function hasAtomIn(state: EditorState, from: number, to: number): boolean {
+  let found = false;
+  atomsOf(state).between(from, to, (a, b) => {
+    if (b > from && a < to) {
+      found = true;
+      return false;
+    }
+    return undefined;
+  });
+  return found;
+}
+
+/** 盖住 `pos` 这个字符（`[pos, pos+1)`）的原子范围，没有就是 `null`。 */
+export function atomAt(state: EditorState, pos: number): { from: number; to: number } | null {
+  let hit: { from: number; to: number } | null = null;
+  atomsOf(state).between(pos, pos + 1, (from, to) => {
+    if (from <= pos && to > pos) {
+      hit = { from, to };
+      return false;
+    }
+    return undefined;
+  });
+  return hit;
+}
 
 /**
  * @internal exported for the regression tests — the full, non-incremental build.

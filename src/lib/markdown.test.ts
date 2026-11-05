@@ -42,3 +42,13 @@ describe("markdown 渲染后的目标编码", () => {
     );
   });
 });
+
+describe("换行语义：单个换行就是换行（与编辑器所见一致）", () => {
+  it("段落里的单个 `\\n` 渲染成 <br>，而不是被合成一段", () => {
+    expect(renderMarkdown("第一行\n第二行")).toContain("第一行<br>");
+  });
+
+  it("空行仍然分段", () => {
+    expect(renderMarkdown("一段\n\n二段").match(/<p>/g)).toHaveLength(2);
+  });
+});

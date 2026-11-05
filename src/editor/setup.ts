@@ -11,8 +11,11 @@ import { EditorState, Compartment, type Extension } from "@codemirror/state";
 import { EditorView, keymap, drawSelection, dropCursor, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { blockPad } from "./blockPad";
 import { markdownCommands, setHeading, toggleLinePrefix } from "./commands";
+import { tableEdit } from "./tableEdit";
 import { slashCompletion, tagCompletion, wikiCompletion } from "./completion";
+import { cursorRules } from "./cursorRules";
 import { createFindPanel } from "./findPanel";
+import { linkTip } from "./linkTip";
 import { livePreviewField } from "./livePreview";
 import { markdownSupport } from "./markdown";
 import { linkClickHandler, mediaHandlers } from "./media";
@@ -161,6 +164,10 @@ export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
     livePreviewField,
     // 块级内容换形态时把高度差补成留白（见 `blockPad.ts`）—— 必须在 livePreviewField 之后。
     blockPad,
+    // 光标与隐藏源码之间的规则（原子范围、行首吸附、标题按键）—— 见 `cursorRules.ts`。
+    cursorRules,
+    // 表格就地编辑态的按键 / 光标吸附 / 粘贴 / 工具条 —— 见 `tableEdit.ts`。
+    tableEdit,
     markdownSupport,
     history(),
     drawSelection(),
@@ -193,6 +200,8 @@ export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
     }),
     mediaHandlers({ imageMode: hooks.imageMode, notify: hooks.notify }),
     linkClickHandler(),
+    // 光标停在链接里时显示地址 + 打开 / 编辑（地址藏着、光标又走不进去，这是唯一的入口）
+    linkTip,
     typewriterScroll,
     // 「光标停在边界按删除 ⇒ 先拆开这一段」——必须排在 defaultKeymap 之前抢下 Backspace/Delete。
     unwrapKeymap,

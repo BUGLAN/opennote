@@ -1,36 +1,67 @@
-import { EditorSelection, type ChangeSpec } from "@codemirror/state";
+import { syntaxTree } from "@codemirror/language";
+import { EditorSelection, type ChangeSpec, type EditorState } from "@codemirror/state";
+import type { SyntaxNode } from "@lezer/common";
 import type { Command, EditorView } from "@codemirror/view";
+
+/**
+ * 每种行内标记对应的语法节点。判断「这段已经是粗体了吗」必须问语法树，不能看两边的字符：
+ * `**粗体**` 里的「粗体」两边各有一个 `*`，按字符判就会以为它是斜体、把粗体拆成 `*粗体*`
+ * （排查报告问题 7）。
+ */
+const WRAP_NODES: Record<string, string> = {
+  "**": "StrongEmphasis",
+  "*": "Emphasis",
+  "~~": "Strikethrough",
+  "==": "Highlight",
+  "`": "InlineCode",
+};
+
+/** 节点首尾两个标记子节点（`**`…`**`），拿不到就是 null。 */
+function wrapMarks(node: SyntaxNode): { open: SyntaxNode; close: SyntaxNode } | null {
+  const open = node.firstChild;
+  const close = node.lastChild;
+  if (!open || !close || open === close || !/Mark$/.test(open.name) || !/Mark$/.test(close.name)) return null;
+  return { open, close };
+}
+
+/**
+ * 包住 `[from, to]` 的那个 `type` 节点。没有选区时要求光标在**内容**里（`**粗|体**`），
+ * 光标贴在收尾标记后面（`**粗体**|`）不算 —— 那里按 ⌘B 是要开始一段新的粗体。
+ */
+function enclosingNode(state: EditorState, from: number, to: number, type: string): SyntaxNode | null {
+  const tree = syntaxTree(state);
+  for (const side of [1, -1] as const) {
+    for (let node: SyntaxNode | null = tree.resolveInner(from, side); node; node = node.parent) {
+      if (node.name !== type || node.from > from || node.to < to) continue;
+      const marks = wrapMarks(node);
+      if (!marks) continue;
+      if (from === to && (from < marks.open.to || from > marks.close.from)) continue;
+      return node;
+    }
+  }
+  return null;
+}
 
 /** Wrap (or unwrap) the selection with markdown delimiters. */
 export function toggleWrap(before: string, after = before, placeholder = "文本"): Command {
   return (view) => {
     const { state } = view;
+    const type = WRAP_NODES[before];
     const spec = state.changeByRange((range) => {
+      const node = type ? enclosingNode(state, range.from, range.to, type) : null;
+      const marks = node ? wrapMarks(node) : null;
+      if (marks) {
+        // 已经是这种格式 ⇒ 去掉首尾标记；选区跟着内容走
+        const changes = state.changes([
+          { from: marks.open.from, to: marks.open.to },
+          { from: marks.close.from, to: marks.close.to },
+        ]);
+        return {
+          changes,
+          range: EditorSelection.range(changes.mapPos(range.anchor, -1), changes.mapPos(range.head, -1)),
+        };
+      }
       const text = state.sliceDoc(range.from, range.to);
-      const outerFrom = range.from - before.length;
-      const outerTo = range.to + after.length;
-      const wrappedOutside =
-        outerFrom >= 0 &&
-        outerTo <= state.doc.length &&
-        state.sliceDoc(outerFrom, range.from) === before &&
-        state.sliceDoc(range.to, outerTo) === after;
-
-      if (wrappedOutside) {
-        return {
-          changes: [
-            { from: outerFrom, to: range.from, insert: "" },
-            { from: range.to, to: outerTo, insert: "" },
-          ],
-          range: EditorSelection.range(outerFrom, outerTo - before.length - after.length),
-        };
-      }
-      if (text.length > before.length + after.length && text.startsWith(before) && text.endsWith(after)) {
-        const inner = text.slice(before.length, text.length - after.length);
-        return {
-          changes: { from: range.from, to: range.to, insert: inner },
-          range: EditorSelection.range(range.from, range.from + inner.length),
-        };
-      }
       const body = text || placeholder;
       return {
         changes: { from: range.from, to: range.to, insert: before + body + after },
@@ -49,6 +80,47 @@ export const toggleStrike = toggleWrap("~~", "~~", "删除线");
 export const toggleHighlight = toggleWrap("==", "==", "高亮");
 export const toggleInlineCode = toggleWrap("`", "`", "code");
 
+/* ------------------------------------------------------------- line anatomy */
+
+/**
+ * 一行的块级结构：`<缩进><引用 >…><列表标记><## >正文`。
+ *
+ * 设标题、换列表类型都只该动**自己那一段**：在 `- 项` 上设二级标题是 `- ## 项`（标题在
+ * 列表项里），不是 `## - 项`；把 `- 项` 换成有序列表是替换掉 `- `，不是在前面再叠一个
+ * `1. `（排查报告问题 8）。
+ */
+const LINE_ANATOMY =
+  /^([ \t]*(?:(?:>[ \t]?)+[ \t]*)?)((?:[-*+][ \t]+(?:\[[ xX]\][ \t]+)?|\d+[.)][ \t]+)?)((?:#{1,6}(?:[ \t]+|$))?)/;
+
+interface LineAnatomy {
+  /** 列表标记的起止（没有列表时两者相等，落在容器前缀之后）。 */
+  listFrom: number;
+  listTo: number;
+  list: "bullet" | "task" | "ordered" | null;
+  /** 标题标记的起止与级别（0 = 不是标题）。 */
+  headingFrom: number;
+  headingTo: number;
+  level: number;
+}
+
+function anatomy(line: { from: number; text: string }): LineAnatomy {
+  const match = LINE_ANATOMY.exec(line.text);
+  const container = match?.[1] ?? "";
+  const listText = match?.[2] ?? "";
+  const headingText = match?.[3] ?? "";
+  const listFrom = line.from + container.length;
+  const listTo = listFrom + listText.length;
+  const list = !listText ? null : /^\d/.test(listText) ? "ordered" : /\[[ xX]\]/.test(listText) ? "task" : "bullet";
+  return {
+    listFrom,
+    listTo,
+    list,
+    headingFrom: listTo,
+    headingTo: listTo + headingText.length,
+    level: (/^#+/.exec(headingText)?.[0].length ?? 0),
+  };
+}
+
 /* ------------------------------------------------------------------ headings */
 
 export function setHeading(level: number): Command {
@@ -56,13 +128,12 @@ export function setHeading(level: number): Command {
     const { state } = view;
     const spec = state.changeByRange((range) => {
       const line = state.doc.lineAt(range.from);
-      const match = /^(#{1,6})[ \t]+/.exec(line.text);
-      const strip = match ? match[0].length : 0;
-      const current = match ? match[1].length : 0;
-      const insert = current === level ? "" : `${"#".repeat(level)} `;
-      const anchor = Math.max(line.from + insert.length, range.from - strip + insert.length);
+      const parts = anatomy(line);
+      const insert = parts.level === level ? "" : `${"#".repeat(level)} `;
+      const strip = parts.headingTo - parts.headingFrom;
+      const anchor = Math.max(parts.headingFrom + insert.length, range.from - strip + insert.length);
       return {
-        changes: { from: line.from, to: line.from + strip, insert },
+        changes: { from: parts.headingFrom, to: parts.headingTo, insert },
         range: EditorSelection.cursor(anchor),
       };
     });
@@ -76,45 +147,38 @@ export function setHeading(level: number): Command {
 
 type PrefixKind = "bullet" | "ordered" | "task" | "quote";
 
-const PREFIX_PATTERNS: Record<PrefixKind, RegExp> = {
-  bullet: /^([ \t]*)[-*+][ \t]+/,
-  ordered: /^([ \t]*)\d+[.)][ \t]+/,
-  task: /^([ \t]*)[-*+][ \t]+\[[ xX]\][ \t]+/,
-  quote: /^([ \t]*)>[ \t]?/,
-};
+const QUOTE_PATTERN = /^([ \t]*)>[ \t]?/;
 
 export function toggleLinePrefix(kind: PrefixKind): Command {
   return (view) => {
     const { state } = view;
     const lines = selectedLines(state.doc, state.selection.main.from, state.selection.main.to);
-    const pattern = PREFIX_PATTERNS[kind];
-    const allPrefixed = lines.every((line) => pattern.test(line.text));
     const changes: ChangeSpec[] = [];
-    let counter = 1;
 
-    for (const line of lines) {
-      const match = pattern.exec(line.text);
-      if (allPrefixed) {
-        if (match) changes.push({ from: line.from, to: line.from + match[0].length, insert: "" });
-        continue;
+    if (kind === "quote") {
+      const allQuoted = lines.every((line) => QUOTE_PATTERN.test(line.text));
+      for (const line of lines) {
+        const match = QUOTE_PATTERN.exec(line.text);
+        if (allQuoted) {
+          if (match) changes.push({ from: line.from + match[1].length, to: line.from + match[0].length, insert: "" });
+          continue;
+        }
+        const indent = /^[ \t]*/.exec(line.text)?.[0] ?? "";
+        changes.push({ from: line.from + indent.length, insert: "> " });
       }
-      const indent = /^[ \t]*/.exec(line.text)?.[0] ?? "";
-      const rest = match ? line.text.slice(match[0].length) : line.text.slice(indent.length);
-      const body = match ? rest : line.text.slice(indent.length);
-      const prefix =
-        kind === "bullet"
-          ? "- "
-          : kind === "ordered"
-            ? `${counter++}. `
-            : kind === "task"
-              ? "- [ ] "
-              : "> ";
-      changes.push({
-        from: line.from,
-        to: line.from + (match ? match[0].length : indent.length),
-        insert: indent + prefix,
-      });
-      void body;
+    } else {
+      const allPrefixed = lines.every((line) => anatomy(line).list === kind);
+      let counter = 1;
+      for (const line of lines) {
+        const parts = anatomy(line);
+        if (allPrefixed) {
+          changes.push({ from: parts.listFrom, to: parts.listTo, insert: "" });
+          continue;
+        }
+        const marker = kind === "bullet" ? "- " : kind === "ordered" ? `${counter++}. ` : "- [ ] ";
+        // 已经是另一种列表 ⇒ 换掉它的标记；不是列表 ⇒ 插在容器前缀（缩进、引用）之后
+        changes.push({ from: parts.listFrom, to: parts.listTo, insert: marker });
+      }
     }
 
     if (!changes.length) return false;

@@ -4,7 +4,14 @@ import DOMPurify from "dompurify";
 const md = new MarkdownIt({
   html: true,
   linkify: true,
-  breaks: false,
+  /*
+   * 单个换行就是换行（排查报告问题 6，方案 A）。
+   *
+   * 编辑器里回车只插一个 `\n`，屏幕上就是两行；`breaks: false` 却会在阅读视图 / 导出里把它们
+   * 合成一段 —— 所见不等于所得。打开它之后，现有笔记在编辑器里的样子与渲染结果完全一致，
+   * 代价是导出的 HTML 与严格遵守 CommonMark 的工具在「单换行」上表现不同。
+   */
+  breaks: true,
   typographer: false,
 });
 
