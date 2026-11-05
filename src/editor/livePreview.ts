@@ -95,6 +95,11 @@ interface LivePreviewValue {
    * 只留**一段**：这是「我正在拆这一个」的临时状态，不是一份清单。
    */
   unwrapped: Span | null;
+  /**
+   * 文档里所有引用式链接定义（`[ref]: url`）的标签，拼成一个串。定义一变，别处的
+   * `[文字][ref]` 是不是链接也跟着变 —— 增量路径看不到那么远，所以这个串一变就整体重算。
+   */
+  refKey: string;
 }
 
 /**
@@ -156,6 +161,52 @@ function mergeSpans(spans: Span[]): Span[] {
   return merged;
 }
 
+/** 引用式链接的标签按 CommonMark 规则归一：去掉方括号、折叠空白、不分大小写。 */
+export function normalizeLinkLabel(raw: string): string {
+  return raw.replace(/^\[|\]$/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * 文档里的引用式链接定义：标签 → 地址。定义只能出现在顶层（或容器里），这里只扫
+ * `Document` 的直接子节点 —— 一次按块数的循环，不遍历整棵树。
+ */
+export function linkReferences(state: EditorState): Map<string, string> {
+  const refs = new Map<string, string>();
+  for (let node = syntaxTree(state).topNode.firstChild; node; node = node.nextSibling) {
+    if (node.name !== "LinkReference") continue;
+    const label = node.getChild("LinkLabel");
+    const url = node.getChild("URL");
+    if (!label || !url) continue;
+    const key = normalizeLinkLabel(state.sliceDoc(label.from, label.to));
+    if (key && !refs.has(key)) refs.set(key, state.sliceDoc(url.from, url.to));
+  }
+  return refs;
+}
+
+function refKeyOf(refs: ReadonlyMap<string, string>): string {
+  return [...refs.keys()].join("\u0000");
+}
+
+/**
+ * 一个 `Link` / `Image` 节点指向的地址。行内写法直接取 `URL`；引用式（`[文字][ref]`、
+ * `[文字][]`、`[文字]`）去定义里查 —— **查不到就不是链接**。
+ *
+ * 这一条很要紧：lezer 不解析引用，正文里随手写的 `[注]` 也会被它当成 `Link` 节点。
+ * 原来一律按链接渲染（方括号藏掉、文字染成链接色），普通的方括号文字就这样「消失」了。
+ */
+export function linkTarget(state: EditorState, node: SyntaxNode, refs?: ReadonlyMap<string, string>): string | null {
+  const url = node.getChild("URL");
+  if (url) return state.sliceDoc(url.from, url.to);
+  const marks: SyntaxNode[] = [];
+  for (let child = node.firstChild; child; child = child.nextSibling) if (LINK_MARK_RE.test(child.name)) marks.push(child);
+  const label = node.getChild("LinkLabel");
+  const labelText = label ? state.sliceDoc(label.from, label.to) : "";
+  const text = marks.length > 1 ? state.sliceDoc(marks[0].to, marks[1].from) : "";
+  const key = normalizeLinkLabel(labelText && labelText !== "[]" ? labelText : text);
+  if (!key) return null;
+  return (refs ?? linkReferences(state)).get(key) ?? null;
+}
+
 /**
  * Turn the markdown syntax tree into live-preview decorations for the given
  * document spans. Everything that needs a block widget (tables, formulas,
@@ -170,6 +221,7 @@ function decorate(
   decorations: Range<Decoration>[],
   pads: ReadonlyMap<string, number> = new Map(),
   unwrapped: Span | null = null,
+  refs: ReadonlyMap<string, string> = new Map(),
 ): void {
   const doc = state.doc;
   const tree = syntaxTree(state);
@@ -489,9 +541,19 @@ function decorate(
           // 「敲下 `##` 看得见 → 敲进文字就消失 → 把文字删空又回来」全由这一条给出。
           const empty = markNode ? isEmptyBlock(markNode.to, to) : false;
           if (!markNode) return;
-          const markEnd = Math.min(markNode.to + 1, to);
-          if (!empty && !showsSource(from, to)) hide(markNode.from, markEnd);
-          else mark(markNode.from, markEnd, "md-src");
+          // 藏到第一个非空白字符为止（`##   标题` 的几个空格一起藏，不止一个）
+          let markEnd = markNode.to;
+          while (markEnd < to && /[ \t]/.test(doc.sliceString(markEnd, markEnd + 1))) markEnd += 1;
+          if (!empty && !showsSource(from, to)) {
+            hide(markNode.from, markEnd);
+            // 收尾的 `##`（`## 标题 ##`）连同前面的空白一起藏
+            const closing = node.lastChild;
+            if (closing && closing !== markNode && closing.name === "HeaderMark") {
+              let closeFrom = closing.from;
+              while (closeFrom > markEnd && /[ \t]/.test(doc.sliceString(closeFrom - 1, closeFrom))) closeFrom -= 1;
+              hide(closeFrom, to);
+            }
+          } else mark(markNode.from, Math.min(markNode.to + 1, to), "md-src");
           return;
         }
         const setext = /^SetextHeading([12])$/.exec(name);
@@ -556,7 +618,7 @@ function decorate(
             if (LINK_MARK_RE.test(child.name)) marks.push(child);
           }
           const urlNode = node.getChild("URL");
-          const raw = urlNode ? state.sliceDoc(urlNode.from, urlNode.to) : "";
+          const raw = linkTarget(state, node, refs) ?? "";
           const labelFrom = marks.length ? marks[0].to : to;
           const labelTo = marks.length > 1 ? marks[1].from : to;
 
@@ -584,20 +646,40 @@ function decorate(
             return false;
           }
 
+          // 引用式写法查不到定义 ⇒ 不是链接，就是普通的方括号文字（见 `linkTarget`）。
+          // `md-plain` 压掉语法高亮给 Link 节点上的链接色。
+          if (!raw) {
+            mark(from, to, "md-plain");
+            return;
+          }
           if (labelTo > labelFrom) mark(labelFrom, labelTo, "md-link");
           if (!showsSource(from, to)) {
             for (const markNode of marks) hide(markNode.from, markNode.to);
             if (urlNode) hide(urlNode.from, urlNode.to);
             const title = node.getChild("LinkTitle");
             if (title) hide(title.from, title.to);
+            const label = node.getChild("LinkLabel");
+            if (label) hide(label.from, label.to);
           } else if (raw && urlNode) {
             mark(urlNode.from, urlNode.to, "md-src");
           }
           return;
         }
 
+        /*
+         * 行内公式与 wiki 链接也是**渲染态常驻**（与粗体同一条规则）：光标进这一行不再换成源码，
+         * 整行也就不再横向跳。要改它：边界按退格 / Delete 拆开，或者单击它（`unwrap.ts` 的
+         * `revealOnClick`、`WikiLinkWidget`）。
+         */
+        if (name === "LinkReference") {
+          const startLine = doc.lineAt(from);
+          const endLine = doc.lineAt(to);
+          for (let n = startLine.number; n <= endLine.number; n += 1) lineDeco(doc.line(n).from, "md-linkref");
+          return false;
+        }
+
         if (name === "InlineMath") {
-          if (!isActive(from, to)) {
+          if (!showsSource(from, to)) {
             replaceWith(from, to, new MathWidget(stripMathDollars(state.sliceDoc(from, to)), false));
             return false;
           }
@@ -623,7 +705,7 @@ function decorate(
 
         if (name === "WikiLink") {
           const label = state.sliceDoc(from + 2, Math.max(from + 2, to - 2));
-          if (!isActive(from, to)) {
+          if (!showsSource(from, to)) {
             replaceWith(from, to, new WikiLinkWidget(label, bridge.hasNote(label)));
             return false;
           }
@@ -716,13 +798,8 @@ function decorate(
           for (let n = startLine.number; n <= endLine.number; n += 1) {
             lineDeco(doc.line(n).from, `md-quote md-quote-${Math.min(depth, 3)}`);
           }
-          if (!showsSource(from, to)) {
-            for (let child = node.firstChild; child; child = child.nextSibling) {
-              if (child.name === "QuoteMark") {
-                hide(child.from, Math.min(child.to + 1, doc.lineAt(child.from).to));
-              }
-            }
-          }
+          // 标记的显隐全部交给下面的 QuoteMark 分支逐行判断（空引用要露出 `>`）。这里原来还会
+          // 无条件藏掉 Blockquote 的直接子标记，把空引用的 `>` 也藏了（排查报告问题 11）。
           return;
         }
 
@@ -773,6 +850,12 @@ function decorate(
               // 空列表项（`- ` 后面还没有文字）显示源码，和空标题/空引用同一条规则。
               const item = node.parent;
               const empty = item ? isEmptyBlock(to, item.to) : false;
+              // 任务项只显示复选框，不再在它前面多一个圆点（与 Typora 一致）
+              const task = item?.getChild("Task")?.getChild("TaskMarker");
+              if (task && !showsSource(from, to)) {
+                hide(from, task.from);
+                return false;
+              }
               if (!empty && !showsSource(from, to)) {
                 let depth = 0;
                 for (let cur: SyntaxNode | null = node; cur; cur = cur.parent) if (cur.name === "BulletList") depth += 1;
@@ -814,7 +897,12 @@ function decorate(
             replaceWith(
               startLine.from,
               Math.max(endLine.to, startLine.to),
-              new TableWidget(renderMarkdown(source), endLine.number - startLine.number + 1, state.sliceDoc(from, to)),
+              new TableWidget(
+                renderMarkdown(source),
+                endLine.number - startLine.number + 1,
+                state.sliceDoc(from, to),
+                settings.notePath,
+              ),
               true,
             );
             return false;
@@ -877,12 +965,13 @@ function buildDecorations(
   const doc = state.doc;
   const active = selectionSpans(state);
   if (doc.length === 0 || doc.length > MAX_DECORATED_LENGTH) {
-    return { set: Decoration.none, active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped };
+    return { set: Decoration.none, active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped, refKey: "" };
   }
   const settings = state.field(editorSettingsField, false) ?? defaultEditorSettings;
   const decorations: Range<Decoration>[] = [];
-  decorate(state, settings, [{ from: 0, to: doc.length }], active, decorations, pads, unwrapped);
-  return { set: Decoration.set(decorations, true), active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped };
+  const refs = linkReferences(state);
+  decorate(state, settings, [{ from: 0, to: doc.length }], active, decorations, pads, unwrapped, refs);
+  return { set: Decoration.set(decorations, true), active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped, refKey: refKeyOf(refs) };
 }
 
 /** Reuse the previous decoration set and only redo the blocks that changed. */
@@ -898,10 +987,12 @@ function updateDecorations(
   const active = selectionSpans(state);
   const epoch = value.epoch + 1;
   if (doc.length === 0 || doc.length > MAX_DECORATED_LENGTH) {
-    return { set: Decoration.none, active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped };
+    return { set: Decoration.none, active, parsedTo: syntaxTree(state).length, epoch, pads, unwrapped, refKey: "" };
   }
   // 补白变了就得整体重算：它落在具体某几行上，增量路径的 filter/update 不会把它带上。
   if (fullRebuild || doc.length < FULL_REBUILD_LENGTH) return buildDecorations(state, pads, epoch, unwrapped);
+  const refs = linkReferences(state);
+  if (refKeyOf(refs) !== value.refKey) return buildDecorations(state, pads, epoch, unwrapped);
   const settings = state.field(editorSettingsField, false) ?? defaultEditorSettings;
   const tree = syntaxTree(state);
 
@@ -931,10 +1022,10 @@ function updateDecorations(
       filter: (from, to) => !(from >= span.from && to <= span.to),
     });
     decorations.length = 0;
-    decorate(state, settings, [span], active, decorations, pads, unwrapped);
+    decorate(state, settings, [span], active, decorations, pads, unwrapped, refs);
     if (decorations.length) set = set.update({ add: decorations.slice(), sort: true });
   }
-  return { set, active, parsedTo: tree.length, epoch, pads, unwrapped };
+  return { set, active, parsedTo: tree.length, epoch, pads, unwrapped, refKey: value.refKey };
 }
 
 export const livePreviewField = StateField.define<LivePreviewValue>({

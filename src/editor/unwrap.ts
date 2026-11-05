@@ -1,8 +1,8 @@
 import { syntaxTree } from "@codemirror/language";
 import type { SyntaxNode } from "@lezer/common";
 import type { EditorState } from "@codemirror/state";
-import { keymap, type Command, type EditorView } from "@codemirror/view";
-import { atomAt, livePreviewField, unwrapSource } from "./livePreview";
+import { EditorView, keymap, type Command } from "@codemirror/view";
+import { atomAt, hasAtomIn, livePreviewField, unwrapSource } from "./livePreview";
 
 /**
  * 「光标停在边界按删除 ⇒ 先拆开这一段，而不是删内容」。
@@ -92,6 +92,9 @@ function skipSpaceBackwards(state: EditorState, pos: number): number {
 function unwrap(view: EditorView, node: SyntaxNode): boolean {
   const current = view.state.field(livePreviewField, false)?.unwrapped;
   if (current && current.from === node.from && current.to === node.to) return false;
+  // 里面没有藏着的东西（`[注]` 这种不是链接的方括号、打开了「显示标记」）⇒ 没什么可拆的，
+  // 这次按键照常删字 —— 否则用户要按两次退格才删得掉一个 `]`。表格是另一种形态，照拆。
+  if (node.name !== "Table" && !hasAtomIn(view.state, node.from, node.to)) return false;
   const head = view.state.selection.main.head;
   // 光标本来就在这个元素边界上（行内元素、表格自己的末尾）⇒ 位置不动。
   // 光标在**表格下面那一行的行首**时离得远，露出的源码会被「光标一离开就收起来」
@@ -210,3 +213,27 @@ export const unwrapKeymap = keymap.of([
   { key: "Alt-Delete", run: unwrapDelete },
   { key: "Ctrl-Delete", run: unwrapDelete },
 ]);
+
+/**
+ * 单击渲染出来的**行内公式** ⇒ 拆开它、光标落在公式末尾（收尾 `$` 前面）—— 和 Typora
+ * 点公式进入编辑一样。行内公式常驻渲染之后，这是除了边界按删除以外的第二个入口。
+ */
+export const revealOnClick = EditorView.domEventHandlers({
+  mousedown(event, view) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false;
+    const target = (event.target as HTMLElement | null)?.closest?.(".md-math:not(.math-block)");
+    if (!target || !view.contentDOM.contains(target)) return false;
+    let pos: number;
+    try {
+      pos = view.posAtDOM(target);
+    } catch {
+      return false;
+    }
+    const node = unwrappableStartingAt(view.state, pos);
+    if (!node || node.name !== "InlineMath") return false;
+    event.preventDefault();
+    view.dispatch({ effects: unwrapSource.of({ from: node.from, to: node.to }), selection: { anchor: node.to - 1 } });
+    view.focus();
+    return true;
+  },
+});

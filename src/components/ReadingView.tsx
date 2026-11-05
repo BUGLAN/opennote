@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { resolveImageSrc } from "../data/assets";
 import { splitFrontMatter } from "../lib/utils";
+import { hydrateMath } from "../editor/math";
 import { decodeMarkdownHref, renderMarkdown } from "../lib/markdown";
 import type { Note } from "../data/types";
 
@@ -22,6 +23,8 @@ export function ReadingView({ note }: { note: Note }): ReactNode {
     if (!host) return;
     const baseDir = note.folderId ?? "";
     let cancelled = false;
+    // 公式：渲染管线只输出 `data-tex` 占位（见 lib/markdown.ts），这里排成 KaTeX
+    hydrateMath(host);
     for (const img of Array.from(host.querySelectorAll("img"))) {
       // `renderMarkdown()` 会把目标百分号编码（中文目录名必然被编码），读盘前先解回来 ——
       // 不解就是「编辑器能显示、阅读视图是裂图」（用户实测的那个缺陷）。

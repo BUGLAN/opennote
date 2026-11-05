@@ -52,3 +52,29 @@ describe("换行语义：单个换行就是换行（与编辑器所见一致）"
     expect(renderMarkdown("一段\n\n二段").match(/<p>/g)).toHaveLength(2);
   });
 });
+
+describe("扩展语法：与编辑器同一套（高亮 / wiki 链接 / 公式）", () => {
+  it("==高亮== → <mark>", () => {
+    expect(renderMarkdown("一段 ==重要== 文字")).toContain("<mark>重要</mark>");
+  });
+
+  it("[[笔记]] → wikilink span，不是网址", () => {
+    expect(renderMarkdown("见 [[笔记]]")).toContain('<span class="wikilink" data-wiki="笔记">笔记</span>');
+  });
+
+  it("行内公式与公式块 → 带 data-tex、里面留着原文", () => {
+    expect(renderMarkdown("行内 $x^2$ 公式")).toContain('<span class="math" data-tex="x^2">$x^2$</span>');
+    expect(renderMarkdown("$$\na+b\n$$")).toContain('<div class="math math-block" data-tex="a+b">');
+  });
+
+  it("边界规则与编辑器一致：`$5 和 $` 不是公式；没闭合的公式块不吞后文", () => {
+    expect(renderMarkdown("价格 $5 和 $10")).not.toContain("data-tex");
+    expect(renderMarkdown("$$\na\n\n## 标题")).toContain("<h2>标题</h2>");
+  });
+
+  it("表格单元格里的扩展语法也生效", () => {
+    const html = renderMarkdown("| a | b |\n| - | - |\n| ==亮== | $x$ |");
+    expect(html).toContain("<mark>亮</mark>");
+    expect(html).toContain('data-tex="x"');
+  });
+});

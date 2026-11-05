@@ -21,7 +21,7 @@ import { markdownSupport } from "./markdown";
 import { linkClickHandler, mediaHandlers } from "./media";
 import { editorSettingsField, type EditorSettings } from "./settings";
 import { editorTheme } from "./theme";
-import { unwrapKeymap } from "./unwrap";
+import { revealOnClick, unwrapKeymap } from "./unwrap";
 
 export interface EditorHooks {
   settings: Partial<EditorSettings>;
@@ -202,6 +202,8 @@ export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
     linkClickHandler(),
     // 光标停在链接里时显示地址 + 打开 / 编辑（地址藏着、光标又走不进去，这是唯一的入口）
     linkTip,
+    // 单击行内公式 ⇒ 拆开编辑（渲染态常驻之后的入口之一）
+    revealOnClick,
     typewriterScroll,
     // 「光标停在边界按删除 ⇒ 先拆开这一段」——必须排在 defaultKeymap 之前抢下 Backspace/Delete。
     unwrapKeymap,

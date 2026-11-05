@@ -61,3 +61,26 @@ export function stripMathFence(raw: string): string {
 export function stripMathDollars(raw: string): string {
   return raw.replace(/^\$/, "").replace(/\$$/, "").trim();
 }
+
+/**
+ * 把渲染管线输出的公式占位（`renderMarkdown()` 的 `[data-tex]`，见 `lib/markdown.ts`）排成 KaTeX。
+ * 缓存命中的同步替换；其余异步，全部完成后调一次 `onDone`（调用方借此重新量高度）。
+ */
+export function hydrateMath(root: ParentNode, onDone?: () => void): void {
+  const pending: Promise<void>[] = [];
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>("[data-tex]"))) {
+    const tex = el.dataset.tex ?? "";
+    const display = el.classList.contains("math-block");
+    const cached = mathHtmlSync(tex, display);
+    if (cached) {
+      el.innerHTML = cached;
+      continue;
+    }
+    pending.push(
+      renderMath(tex, display).then((html) => {
+        el.innerHTML = html;
+      }),
+    );
+  }
+  if (pending.length && onDone) void Promise.all(pending).then(onDone);
+}

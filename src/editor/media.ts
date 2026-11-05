@@ -6,6 +6,7 @@ import { imageNameForPaste } from "../data/assets";
 import { saveImage } from "../data/library";
 import { blobToDataUrl } from "../lib/utils";
 import { rememberSourceSize } from "./imagePool";
+import { linkTarget } from "./livePreview";
 import { editorSettingsField } from "./settings";
 
 /**
@@ -215,9 +216,8 @@ export function findLinkAt(state: EditorState, pos: number): string | null {
   }
   for (let node: SyntaxNode | null = inner; node; node = node.parent) {
     if (node.name !== "Link" && node.name !== "Image") continue;
-    const url = node.getChild("URL");
-    if (!url) continue;
-    const raw = state.sliceDoc(url.from, url.to);
+    // 行内写法取 URL；引用式（`[文字][ref]`）去定义里查
+    const raw = linkTarget(state, node);
     if (raw) return normalizeUrl(raw);
   }
 

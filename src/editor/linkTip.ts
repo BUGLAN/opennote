@@ -3,7 +3,7 @@ import { StateField, type EditorState } from "@codemirror/state";
 import { showTooltip, type EditorView, type Tooltip } from "@codemirror/view";
 import type { SyntaxNode } from "@lezer/common";
 import { bridge } from "./bridge";
-import { livePreviewField } from "./livePreview";
+import { linkTarget, livePreviewField } from "./livePreview";
 import { editorSettingsField } from "./settings";
 import { unwrapSource } from "./unwrapEffect";
 
@@ -24,6 +24,18 @@ interface LinkAt {
   url: string;
   urlFrom: number;
   urlTo: number;
+  /** 引用式链接：地址不在链接里，在定义行上。 */
+  reference?: boolean;
+}
+
+/** 定义行里这个地址的位置（第一处）。 */
+function definitionUrl(state: EditorState, url: string): { from: number; to: number } | null {
+  for (let node = syntaxTree(state).topNode.firstChild; node; node = node.nextSibling) {
+    if (node.name !== "LinkReference") continue;
+    const child = node.getChild("URL");
+    if (child && state.sliceDoc(child.from, child.to) === url) return { from: child.from, to: child.to };
+  }
+  return null;
 }
 
 function linkAt(state: EditorState, pos: number): LinkAt | null {
@@ -33,8 +45,12 @@ function linkAt(state: EditorState, pos: number): LinkAt | null {
       if (node.name !== "Link") continue;
       if (pos < node.from || pos > node.to) break;
       const url = node.getChild("URL");
-      if (!url) return null;
-      return { from: node.from, to: node.to, url: state.sliceDoc(url.from, url.to), urlFrom: url.from, urlTo: url.to };
+      if (url) return { from: node.from, to: node.to, url: state.sliceDoc(url.from, url.to), urlFrom: url.from, urlTo: url.to };
+      // 引用式链接：地址在定义行上（那一行是可见的源码），「编辑」直接去那里选中它
+      const target = linkTarget(state, node);
+      if (!target) return null;
+      const def = definitionUrl(state, target);
+      return def ? { from: node.from, to: node.to, url: target, urlFrom: def.from, urlTo: def.to, reference: true } : null;
     }
   }
   return null;
@@ -92,8 +108,9 @@ function renderTip(view: EditorView, link: LinkAt): HTMLElement {
   }
   button("编辑", () => {
     view.dispatch({
-      effects: unwrapSource.of({ from: link.from, to: link.to }),
+      effects: link.reference ? [] : unwrapSource.of({ from: link.from, to: link.to }),
       selection: { anchor: link.urlFrom, head: link.urlTo },
+      scrollIntoView: link.reference,
     });
     view.focus();
   });

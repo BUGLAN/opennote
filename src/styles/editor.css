@@ -210,9 +210,10 @@
   padding-left: calc(2px + var(--li-gutter));
 }
 
+/* 任务项不画圆点了（只有复选框），槽宽 = 原来的 2.34em − 圆点槽 0.75em。 */
 .cm-content .cm-line.md-li[data-li="task"],
 .cm-content .cm-line.md-li-cont[data-li="task"] {
-  --li-gutter: 2.34em;
+  --li-gutter: 1.59em;
 }
 
 /* 首行左移一个槽宽：折行片段于是正好落在首行文字的左边缘上。 */
@@ -322,6 +323,20 @@
 .cm-tooltip.md-table-tools .md-table-tools__btn:hover {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+/* 不是链接的方括号文字（`[注]`，没有对应的引用定义）：语法高亮仍把它当 Link 染色，这里压回正文色。 */
+.cm-content .md-plain,
+.cm-content .md-plain * {
+  color: inherit;
+}
+
+/* ---- link reference definitions --------------------------------------- */
+/* `[ref]: https://…` 定义行：它是给链接查地址用的元数据，弱化显示。 */
+.cm-content .cm-line.md-linkref {
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
 }
 
 /* ---- wiki links -------------------------------------------------------- */

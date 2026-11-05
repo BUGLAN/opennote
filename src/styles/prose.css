@@ -104,6 +104,15 @@
   text-decoration-thickness: 1.5px;
 }
 
+/* 渲染管线里的 wiki 链接（`lib/markdown.ts`）：样式与编辑器里的 `.md-wikilink` 一致。 */
+.prose .wikilink {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+  padding: 0.08em 0.34em;
+  white-space: nowrap;
+}
+
 .prose mark {
   background: var(--mark);
   color: var(--ink);
