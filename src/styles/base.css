@@ -509,23 +509,49 @@ kbd {
   line-height: 1.7;
 }
 
-/* ---- storage notice (site data blocked, see D04) ------------------------ */
-.storage-notice {
+/* ---- storage notices（站点数据被禁用 D04 / 浏览器笔记本未持久化 issue #2） ----
+ * 两种提示都放进同一个 `#notice-stack`（见 `lib/noticeStack.ts`）竖向排开，不再各自
+ * fixed 叠在同一个位置。
+ * - 定位：容器用 `left/right` 拉满再 `margin-inline: auto` 居中，**不用 transform**——
+ *   提示条自己的 `animation: rise` 会改写 `transform`，之前的 `translateX(-50%)` 被它
+ *   覆盖，提示条只剩右半屏。
+ * - 宽度：显式 `width: min(720px, 100vw - 32px)`，窄屏不会被压成半屏宽。
+ * - 竖直位置：放在标签栏下面并叠加 `--inset-top`（刘海屏 PWA），不遮挡顶行按钮。
+ * - 层级：50 —— 高于标签栏（6）与笔记本菜单（40），低于移动端遮罩 / 抽屉（55 / 58）与
+ *   `.overlay-root`（60），打开对话框时提示条在遮罩下面，不会挡住关闭按钮。
+ */
+.notice-stack {
   position: fixed;
-  top: 10px;
-  left: 50%;
-  z-index: 95;
+  top: calc(var(--inset-top) + var(--tabbar-h) + 8px);
+  right: 0;
+  left: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s2);
+  width: min(720px, calc(100vw - 32px));
+  margin-inline: auto;
+  pointer-events: none;
+}
+
+.notice-stack:empty {
+  display: none;
+}
+
+.storage-notice {
   display: flex;
   align-items: center;
   gap: var(--s3);
-  max-width: min(720px, calc(100vw - 32px));
+  box-sizing: border-box;
+  width: 100%;
   padding: 7px 8px 7px 14px;
   border-radius: var(--radius);
   background: var(--ink);
   color: var(--paper);
   font-size: var(--fs-sm);
   box-shadow: var(--shadow-2);
-  transform: translateX(-50%);
+  pointer-events: auto;
   animation: rise var(--dur) var(--ease-out) both;
 }
 

@@ -373,7 +373,7 @@ export async function createBrowserWorkspace(name = "我的笔记"): Promise<Wor
    * 新建浏览器笔记本的第一时间申请持久存储；不 await —— `persist()` 在部分浏览器里会
    * 弹授权框，不能让「创建」按钮等它。申请结果进 `storagePersistenceStore`，界面据此提示。
    */
-  void ensureStoragePersistence(record.id);
+  void ensureStoragePersistence();
   return record;
 }
 
@@ -403,7 +403,7 @@ export async function createMirrorWorkspace(displayName: string, directoryName: 
   await opfsWorkspaceDir(directory);
   const record = rememberWorkspace({ name: displayName, kind: "opfs", location: directory });
   // GitHub 导入也落在 OPFS 里，与新建浏览器笔记本同一条持久化要求。
-  void ensureStoragePersistence(record.id);
+  void ensureStoragePersistence();
   return record;
 }
 

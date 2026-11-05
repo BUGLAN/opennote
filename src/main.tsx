@@ -18,6 +18,7 @@ import "./styles/editor.css";
 import "./styles/app.css";
 
 import App from "./App";
+import { noticeStack } from "./lib/noticeStack";
 import { applySystemThemeOnFirstVisit, applyUi, getUi, storageBlockedReason } from "./data/ui";
 
 declare global {
@@ -71,5 +72,5 @@ function notifyStorageBlocked(): void {
   close.addEventListener("click", () => notice.remove());
 
   notice.append(text, close);
-  document.body.appendChild(notice);
+  noticeStack().appendChild(notice);
 }
