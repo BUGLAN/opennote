@@ -5,7 +5,7 @@
  *
  * | 路径 | 是什么 | 谁用 |
  * | --- | --- | --- |
- * | `/` + 静态资源 | **PWA 客户端**（与其它两个同源，所以 CSP 不用放开任何 https） | 网页端 |
+ * | `/` + 静态资源 | **PWA 客户端**（与其它两个同源，所以 CSP 不用放开任何 https；`webApp.ts`） | 网页端 |
  * | `/v1/*` | 客户端 API | 桌面 / Android / 网页 |
  * | `/admin`、`/join`、`/reset` | **控制台**与两张公开页（`routes/panel.ts`） | 浏览器（运维 / 被邀请的人） |
  * | `/v1/health` | 公开健康检查 | 隧道 / 监控 |
@@ -52,6 +52,7 @@ import { createNotebookRoutes } from "./routes/notebooks";
 import { createV1Routes } from "./routes/v1";
 import { SettingsStore } from "./settings";
 import { csrfGuard, isHttps, securityHeaders } from "./panelSecurity";
+import { createWebAppRoutes, resolveWebRoot } from "./webApp";
 
 export interface AppOptions {
   config: ServerConfig;
@@ -64,6 +65,11 @@ export interface AppOptions {
   /** 覆盖 GitHub 接口（测试注入假实现）。 */
   github?: GithubApi;
   now?: () => number;
+  /**
+   * 网页版产物目录（issue #1）。`undefined` = 按 `WEB_ROOT` / 默认的 `web/` 找；
+   * `null` = 不托管；找不到 `index.html` 也不托管。
+   */
+  webRoot?: string | null;
 }
 
 export interface BuiltApp {
@@ -73,6 +79,8 @@ export interface BuiltApp {
   settings: SettingsStore;
   couch: CouchClient;
   couchAdmin: CouchClient;
+  /** 实际托管的网页版目录；null = 没托管。 */
+  webRoot: string | null;
 }
 
 /** 限流键用的短哈希（**不是**用来认证的，只是为了不在内存里存可用凭据）。 */
@@ -224,6 +232,13 @@ export function createApp(options: AppOptions): BuiltApp {
   app.route("/", createPanelRoutes({ accounts, notebooks, config, settings, throttle, audit, ...nowOption }));
   app.route("/", createGithubRoutes({ accounts, config, settings, oauth, github: options.github ?? createGithubApi(), audit, ...nowOption }));
 
+  /*
+   * 网页版（`/` + 静态资源，SPA 回落）。**必须最后挂**：它是 `GET *`，只回答前面没人认领的路径，
+   * 而且自己会跳过 `/v1`、`/admin`、`/panel`、`/join`、`/reset`、`/auth`（见 `webApp.ts`）。
+   */
+  const webRoot = resolveWebRoot(options.webRoot);
+  if (webRoot) app.route("/", createWebAppRoutes(webRoot));
+
   // 兜底 404：**形状与其它错误一致**（`{error, code}`），免得客户端要处理两种错误体。
   app.notFound((c) =>
     new Response(JSON.stringify({ error: `没有这个接口：${c.req.method} ${c.req.path}`, code: "not-found" }), {
@@ -245,5 +260,5 @@ export function createApp(options: AppOptions): BuiltApp {
     });
   });
 
-  return { app, accounts, notebooks, settings, couch, couchAdmin };
+  return { app, accounts, notebooks, settings, couch, couchAdmin, webRoot };
 }

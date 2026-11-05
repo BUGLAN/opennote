@@ -97,6 +97,12 @@ describe("状态栏同步位", () => {
     expect(syncStatusBarInfo(state({ status: idle }), true, { needsSignIn: false, disabled: true })?.label).toBe("账号已被停用");
   });
 
+  it("另一个标签页在同步这个笔记本 ⇒ 说出来，并说清关掉那边后这里会接手（issue #3）", () => {
+    const info = syncStatusBarInfo(state({ reason: "other-tab" }), true);
+    expect(info).toMatchObject({ tone: "warn", label: "在另一个标签页同步" });
+    expect(info?.title).toContain("自动接手");
+  });
+
   it("加密笔记本还没解锁 ⇒ warn「待解锁」", () => {
     expect(syncStatusBarInfo(state({ reason: "locked" }), true)).toMatchObject({ tone: "warn", label: "待解锁" });
   });

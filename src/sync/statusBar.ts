@@ -82,6 +82,9 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean, acc
   if (state.reason === "other-server") {
     return { tone: "warn", label: "服务器不一致", title: "这个笔记本绑的同步服务器与这台设备登录的不是同一台；点击查看" };
   }
+  if (state.reason === "other-tab") {
+    return { tone: "warn", label: "在另一个标签页同步", title: "这个笔记本正在另一个标签页里同步；这里的改动会交给那边上传，关掉那个标签页后这里自动接手" };
+  }
   // ② 没开同步：不是异常，别常驻。
   if (state.reason === "disabled") return null;
 

@@ -29,6 +29,7 @@ import {
   linkGithub,
   listDevices,
   openInBrowser,
+  probeSameOriginServer,
   probeServer,
   refreshAccount,
   remoteNotebooks,
@@ -195,8 +196,24 @@ function useServerProbe(initial: string): {
     }
   };
   useEffect(() => {
-    if (initial.trim() !== "") void probe();
-    // 只在第一次带着预填地址进来时探测一次。
+    if (initial.trim() !== "") {
+      void probe();
+      return;
+    }
+    /*
+     * 没有预填地址：网页版若就是同步服务器自己托管的（issue #1，同源），把这个源填上。
+     * 只在用户还没动过输入框时填；探测不到就什么也不显示。
+     */
+    let cancelled = false;
+    void probeSameOriginServer().then((found) => {
+      if (cancelled || !found) return;
+      setServer((current) => (current.trim() === "" ? found.server : current));
+      setState((current) => (current.checked === "" ? { checked: found.server, health: found.health, error: null, checking: false } : current));
+    });
+    return () => {
+      cancelled = true;
+    };
+    // 只在第一次进来时探测一次。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const health = state.checked === server.trim() ? state.health : null;
@@ -737,6 +754,7 @@ function ChooseView({ workspace, onDone, onDownloadRemote }: { workspace: Worksp
 function currentStatusText(ui: ReturnType<typeof syncUiStore.get>): string | null {
   if (ui.reason === "locked") return "等待解锁加密口令";
   if (ui.reason === "other-server") return "绑的是另一台服务器";
+  if (ui.reason === "other-tab") return "正在另一个标签页里同步";
   const status = ui.status;
   if (!status) return ui.phase === "attaching" ? "正在连接…" : null;
   if (status.phase === "syncing") return status.progress && status.progress.total > 0 ? `同步中 ${status.progress.done} / ${status.progress.total}` : "同步中…";
@@ -767,6 +785,9 @@ function Hero({ workspace }: { workspace: WorkspaceRecord | null }): ReactNode {
   if (ui.reason === "locked") return <UnlockHero name={workspaceDisplayName(workspace)} />;
   if (ui.reason === "other-server") {
     return <HeroBox attn icon="info" title="这个笔记本绑的是另一台服务器" sub={`它绑的是 ${config.baseUrl}，而这台设备登录的是 ${account.account?.server}。关掉它的同步再打开，就会改绑到当前服务器（按名字合并）。`} />;
+  }
+  if (ui.reason === "other-tab") {
+    return <HeroBox icon="info" title="这个笔记本正在另一个标签页里同步" sub="同一时间只让一个标签页同步，免得重复上传、互相覆盖同步记录。这里照常编辑，改动会交给那边上传；关掉那个标签页后，这里会自动接手。" />;
   }
   if (conflicts.length > 0) {
     return <HeroBox attn icon="info" title={`${conflicts.length} 篇笔记需要你决定保留哪一份`} sub="这几篇在你处理之前不会再上传或覆盖；其余笔记照常同步。" />;

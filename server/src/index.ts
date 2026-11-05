@@ -18,6 +18,7 @@ import { pathToFileURL } from "node:url";
 import { loadConfig, describeConfig, ConfigError } from "./config";
 import { openDatabase } from "./db";
 import { createApp } from "./app";
+import { describeWebRoot } from "./webApp";
 
 export interface StartedServer {
   port: number;
@@ -43,10 +44,11 @@ export function startServer(options: { env?: Record<string, string | undefined>;
   });
 
   const startedAt = Date.now();
-  const { app } = createApp({ config, db, startedAt });
+  const { app, webRoot } = createApp({ config, db, startedAt });
 
   console.log(`[opennote-server] ${describeConfig(config)}`);
   console.log(`[opennote-server] 协议版本 ${config.protocolVersionExpected}`);
+  console.log(`[opennote-server] ${describeWebRoot(webRoot)}`);
 
   return new Promise<StartedServer>((resolve, reject) => {
     const server = serve(

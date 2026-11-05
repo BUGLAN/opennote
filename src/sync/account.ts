@@ -222,6 +222,36 @@ export async function probeServer(server: string): Promise<HealthResponse> {
   return health;
 }
 
+/**
+ * 网页版是不是由同步服务器自己托管的（issue #1：同源部署）。是就返回这个源与它的健康信息，
+ * 登录表单据此把「服务器地址」预填好；不是（GitHub Pages、桌面 `file://`、开发服务器没接代理）
+ * 就安静地返回 null —— 这是猜测，不是用户发起的探测，失败不该显示任何错误。
+ */
+export async function probeSameOriginServer(timeoutMs = 4000): Promise<{ server: string; health: HealthResponse } | null> {
+  if (devicePlatform() !== "web") return null;
+  let origin: string;
+  try {
+    if (location.protocol !== "https:" && location.protocol !== "http:") return null;
+    origin = location.origin;
+  } catch {
+    return null;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const health = await Promise.race([
+      probeServer(origin),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+      }),
+    ]);
+    return { server: origin, health };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function saveCredentials(next: SyncCredentials): Promise<void> {
   credentials = next;
   await store.save(encodeCredentials(next));

@@ -288,6 +288,13 @@ export default defineConfig({
           "**/*.ttf",
         ],
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+        /*
+         * 网页版由同步服务器在 `/` 下托管时（issue #1），同一个源上还有控制台与公开页。
+         * Service Worker 的导航回落（`index.html`）绝不能接管它们，否则打开 `/admin`、
+         * 邀请链接 `/join/…`、GitHub 回调 `/auth/…` 看到的都是笔记应用。
+         * GitHub Pages 那份挂在 `/opennote/` 子路径，这些路径本就不在它的作用域里。
+         */
+        navigateFallbackDenylist: [/^\/(?:v1|admin|panel|join|reset|auth)(?:\/|$)/],
         cleanupOutdatedCaches: true,
         runtimeCaching: [
           {

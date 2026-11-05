@@ -137,6 +137,23 @@ for (const sub of ["assets"]) {
 }
 console.log("[build:server] 已拷贝控制台静态资源 → dist/panel/");
 
+/*
+ * ★ `--with-web`：把网页版产物（仓库根的 `dist/`，先 `pnpm build`）拷到 `dist/web/`，
+ * 由同步服务器在 `/` 下同源托管（issue #1，`server/src/webApp.ts`）。
+ *
+ * 不带这个参数就不拷 —— 服务端照常起，只是 `/` 是 404（与以前一样）。
+ * 带了却找不到 `dist/index.html` 就**直接失败**：宁可构建时停下，也不要部署上去才发现网页版没了。
+ */
+if (process.argv.includes("--with-web")) {
+  const webDist = join(root, "dist");
+  if (!existsSync(join(webDist, "index.html"))) {
+    console.error("[build:server] --with-web：找不到 dist/index.html，先跑 `pnpm build`（网页版，VITE_BASE 保持默认 /）");
+    process.exit(1);
+  }
+  cpSync(webDist, join(outDir, "web"), { recursive: true });
+  console.log("[build:server] 已拷贝网页版 dist/ → server/dist/web/");
+}
+
 const { statSync } = await import("node:fs");
 for (const entry of entries) {
   const size = statSync(entry.out).size;

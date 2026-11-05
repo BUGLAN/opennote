@@ -34,7 +34,8 @@ import { desktopSyncBridge } from "./http";
 import { attachWorkspaceSync, type AttachResult, type AttachSkipReason } from "./attach";
 import { deriveNotebookKey } from "./accountKey";
 import { derivePathMapKey } from "./crypto";
-import { createRemoteNotebook, currentCredentials, currentEncRoot, loadAccount, onAccountChange, remoteNotebooks, reportSessionProblem } from "./account";
+import { createRemoteNotebook, currentCredentials, currentEncRoot, devicePlatform, loadAccount, onAccountChange, remoteNotebooks, reportSessionProblem } from "./account";
+import { announceLocalWrite, onRemoteTabLocalWrite, syncLockKey, tryAcquireSyncLock, waitForSyncLock, type HeldSyncLock } from "./tabLock";
 import type { NotebookSummary } from "../../shared/contract";
 import { createSyncLedger, isSameRemote, readSyncLedger, writeSyncLedger, type SyncLedger } from "./state";
 import { PROTOCOL_VERSION } from "./contract";
@@ -292,8 +293,96 @@ function handleSynced(
   }));
 }
 
-/** attach 的真身：读密钥 → （E2EE）解锁 → 账本 → attach。可预期的跳过返回 ok:false。 */
+/* ============================================================================
+   多标签页互斥（issue #3，`tabLock.ts`）
+   ============================================================================ */
+
+/** 这个标签页持有的同步锁（只在网页端；桌面 / Android 永远是 null）。 */
+let heldLock: HeldSyncLock | null = null;
+/** 正在排队等的锁：持锁的标签页关掉 / 切走后，浏览器把锁交过来，这边随即接上同步。 */
+let lockWait: { key: string; abort: AbortController } | null = null;
+/** 持锁期间：收别的标签页的「有本地改动」通知。 */
+let remoteWritesOff: (() => void) | null = null;
+
+function lockKeyFor(record: WorkspaceRecord): string | null {
+  // 桌面版一个笔记本一个窗口、主进程管同步；Android 是单 WebView —— 都不需要标签页互斥。
+  if (devicePlatform() !== "web") return null;
+  return syncLockKey(record);
+}
+
+function adoptSyncLock(lock: HeldSyncLock): void {
+  heldLock = lock;
+  remoteWritesOff?.();
+  remoteWritesOff = onRemoteTabLocalWrite((key) => {
+    if (key === lock.key) void checkLocalChangesAndSchedule();
+  });
+}
+
+/** 放掉持有的锁、停止排队（关笔记本 / 换笔记本 / 这个笔记本不再需要同步）。 */
+function releaseSyncLock(): void {
+  remoteWritesOff?.();
+  remoteWritesOff = null;
+  heldLock?.release();
+  heldLock = null;
+  lockWait?.abort.abort();
+  lockWait = null;
+}
+
+function waitForTurn(key: string): void {
+  if (lockWait?.key === key) return;
+  lockWait?.abort.abort();
+  const abort = new AbortController();
+  lockWait = { key, abort };
+  void waitForSyncLock(key, abort.signal).then((lock) => {
+    if (!lock) return;
+    const stillWanted = lockWait?.abort === abort && currentRecord !== null && lockKeyFor(currentRecord) === key;
+    if (!stillWanted) {
+      lock.release();
+      return;
+    }
+    lockWait = null;
+    adoptSyncLock(lock);
+    // 轮到我们了：重新接上（这次 `claimSyncLock` 会看到锁已经在手上）。
+    void binding.start();
+  });
+}
+
+/**
+ * 为当前笔记本拿同步锁。`ok` = 可以建会话（拿到了 / 本来就持有 / 环境不支持锁）；
+ * `busy` = 另一个标签页正在同步它，已经排上队。
+ */
+async function claimSyncLock(record: WorkspaceRecord): Promise<"ok" | "busy"> {
+  const key = lockKeyFor(record);
+  if (!key) return "ok";
+  if (heldLock?.key === key) return "ok";
+  releaseSyncLock();
+  const result = await tryAcquireSyncLock(key);
+  if (result.kind === "unsupported") return "ok";
+  // 拿锁期间笔记本被关掉 / 换掉了：这把锁已经不属于任何人，立刻还回去。
+  if (currentRecord === null || lockKeyFor(currentRecord) !== key) {
+    if (result.kind === "held") result.lock.release();
+    return "busy";
+  }
+  if (result.kind === "held") {
+    adoptSyncLock(result.lock);
+    return "ok";
+  }
+  waitForTurn(key);
+  return "busy";
+}
+
+/**
+ * attach 的外壳：除了「另一个标签页在同步」，其余跳过（没开同步、没登录、待解锁……）
+ * 都不该占着锁 —— 否则排在后面的标签页永远轮不到。
+ */
 async function attachCurrent(): Promise<AttachResult> {
+  const result = await attachCurrentInner();
+  if (!result.ok && result.reason !== "other-tab") releaseSyncLock();
+  return result;
+}
+
+/** attach 的真身：读密钥 → 标签页互斥 → （E2EE）解锁 → 账本 → attach。可预期的跳过返回 ok:false。 */
+async function attachCurrentInner(): Promise<AttachResult> {
   const record = currentRecord;
   const backend = currentBackend;
   const token = ++attachToken;
@@ -308,6 +397,14 @@ async function attachCurrent(): Promise<AttachResult> {
   if (config.baseUrl !== credentials.server) {
     return { ok: false, reason: "other-server", message: `这个笔记本绑的是 ${config.baseUrl}，而这台设备登录的是 ${credentials.server}` };
   }
+  /*
+   * 标签页互斥（issue #3）放在**一切会动云端或账本的事之前**：按名字配对云端笔记本
+   * （可能新建）、读写 `.opennote/sync.json` 都只该由持锁的那一个标签页做。
+   */
+  if ((await claimSyncLock(record)) === "busy") {
+    return { ok: false, reason: "other-tab", message: "这个笔记本正在另一个标签页里同步" };
+  }
+  if (token !== attachToken) return { ok: false, reason: "disabled", message: "已经换了笔记本" };
   config = await resolveRemoteNotebook(record, config);
   if (token !== attachToken) return { ok: false, reason: "disabled", message: "已经换了笔记本" };
   const boundRecord: WorkspaceRecord = { ...record, sync: config };
@@ -463,6 +560,7 @@ export function closeWorkspaceSync(): void {
   attachToken += 1;
   unsubscribeWorkspaceWrites();
   binding.stop();
+  releaseSyncLock();
   setSyncActive(false);
   /*
    * ★ `last` 必须一起清掉（L8）：它是「最近一次成功同步的概要」，带着冲突清单、
@@ -505,12 +603,15 @@ function subscribeWorkspaceWrites(): void {
     if (!write.content) return;
     // 说不出路径的外部改动：没法按路径过滤，先核对本地有没有真改动再决定推不推。
     if (write.pathsUnknown) {
-      void checkLocalChangesAndSchedule();
+      if (!activeSession && lockWait) announceLocalWrite(lockWait.key);
+      else void checkLocalChangesAndSchedule();
       return;
     }
     // 全是忽略路径（账本 / 元数据 / 收件箱暂存）⇒ 这一批与同步范围无关。
     if (write.paths.every((path) => shouldSkipEntry(rules, normalizePath(path), false))) return;
-    activeSession?.runner.scheduleAfterLocalWrite();
+    if (activeSession) activeSession.runner.scheduleAfterLocalWrite();
+    // 另一个标签页在同步这个笔记本（issue #3）：本地写入照常，只是告诉它去推。
+    else if (lockWait) announceLocalWrite(lockWait.key);
   });
 }
 

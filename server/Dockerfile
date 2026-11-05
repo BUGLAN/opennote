@@ -4,6 +4,17 @@
 #   `shared/`（协议契约）与服务端代码，于是产物与 API **天然同版本**（§5.6）。
 #   这也正是单仓相对 v7 双仓的主要收益之一。
 
+# ============================================================ 网页版构建阶段
+# 同步服务器在 `/` 下同源托管网页版（issue #1，`server/src/webApp.ts`）：同源后服务端不发
+# CORS 头、网页版 CSP 的 connect-src 也不用放开任何 https。
+FROM node:22-bookworm-slim AS web
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile --ignore-scripts
+COPY . .
+# 根路径部署（不设 VITE_BASE）：网页版就挂在同步服务器的 `/`。
+RUN pnpm run build
+
 # ============================================================ 构建阶段
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
@@ -36,6 +47,8 @@ ENV SQLITE_PATH=/app/data/control.db
 # ★ 不要把 `node_modules` 拷进来：产物是**自洽的**（`scripts/build-server.mjs` 把依赖
 #   打进了 bundle）。镜像因此小很多，也少一大片供应链面。
 COPY --from=build /app/server/dist ./dist
+# 网页版产物落在 `dist/web/`：`webApp.ts` 默认就找与入口同层的 `web/`。
+COPY --from=web /app/dist ./dist/web
 
 # ★ 非 root 运行（§7.3 Node 第 6 条）。node 镜像自带 uid 1000 的 `node` 用户。
 # 数据目录要在切换用户**之前**建好并 chown，否则非 root 用户写不进去。

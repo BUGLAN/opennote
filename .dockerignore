@@ -1,0 +1,18 @@
+# 服务端镜像的构建上下文是仓库根（server/Dockerfile）。网页版阶段 `COPY . .`，
+# 这些不能进去：宿主的 node_modules 会盖掉镜像里装好的依赖，旧产物会混进新产物。
+.git
+node_modules
+**/node_modules
+dist
+server/dist
+release
+android
+ios
+.claude
+.vite
+coverage
+*.log
+dist-clip
+.env
+.env.*
+!.env.example

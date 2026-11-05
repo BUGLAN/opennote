@@ -73,7 +73,9 @@ export type AttachSkipReason =
   /** 加密笔记本，但这台设备还没解锁加密口令。 */
   | "locked"
   /** 这个笔记本绑的是另一台服务器（不是这台设备登录的那台）。 */
-  | "other-server";
+  | "other-server"
+  /** 网页端：同一个笔记本正在另一个标签页里同步（issue #3，`tabLock.ts`）；那边关掉后自动接手。 */
+  | "other-tab";
 
 export type AttachResult =
   | { ok: true; controller: SyncController; /** 建好的会话（provider/ledger 供冲突裁决用）。 */

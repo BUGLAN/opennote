@@ -39,6 +39,7 @@
     "dev:server": "tsx watch server/src/index.ts",
     "cli:server": "tsx server/src/cli.ts",
     "build:server": "node scripts/build-server.mjs",
+    "build:server:web": "pnpm run build && node scripts/build-server.mjs --with-web",
     "test": "vitest run",
     "test:watch": "vitest",
     "icons": "python scripts/make_icons.py",
