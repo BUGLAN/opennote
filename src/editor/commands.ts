@@ -20,7 +20,7 @@ const WRAP_NODES: Record<string, string> = {
 function wrapMarks(node: SyntaxNode): { open: SyntaxNode; close: SyntaxNode } | null {
   const open = node.firstChild;
   const close = node.lastChild;
-  if (!open || !close || open === close || !/Mark$/.test(open.name) || !/Mark$/.test(close.name)) return null;
+  if (!open || !close || open.from === close.from || !/Mark$/.test(open.name) || !/Mark$/.test(close.name)) return null;
   return { open, close };
 }
 

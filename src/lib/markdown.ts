@@ -1,5 +1,6 @@
 import MarkdownIt, { type StateBlock, type StateInline } from "markdown-it";
 import DOMPurify from "dompurify";
+import { splitFrontMatter } from "./utils";
 
 const md = new MarkdownIt({
   html: true,
@@ -163,7 +164,9 @@ md.renderer.rules.math_block = (tokens, idx) => {
 
 /** Render markdown to HTML with the exact same pipeline used for export. */
 export function renderMarkdown(source: string): string {
-  return sanitizeHtml(md.render(source));
+  // 文件头的 front matter 是元数据，不是正文（否则 `---` 成了分隔线、`title: x` 成了二级标题）。
+  // 规则与编辑器（`mdExtensions.ts` 的 FrontMatter）同一个：`splitFrontMatter()`。
+  return sanitizeHtml(md.render(splitFrontMatter(source).body));
 }
 
 export function renderInline(source: string): string {

@@ -90,6 +90,52 @@ export const MathBlock: BlockParser = {
   endLeaf: (_cx, line) => line.text.slice(line.pos).startsWith("$$"),
 };
 
+/* ------------------------------------------------------------- front matter */
+
+/**
+ * 文件开头的 YAML front matter（剪藏的笔记一律带着它）。
+ *
+ * 不认它的话，`---` 被当成分隔线、`title: x` 加下一行的 `---` 成了**二级标题** —— 元数据
+ * 直接被渲染成正文（排查报告特性 3）。
+ *
+ * 判定规则必须与 `lib/utils.ts` 的 `splitFrontMatter()` **逐字一致**（侧栏标签、阅读视图、
+ * 自动改名都按它切）：文件最开头（允许 BOM）一行 `---`，之后至少一行，再以一行 `---`（可带
+ * 行尾空白）收尾。没闭合就**不是** front matter —— 否则一个开头的分隔线会把整篇吞成元数据。
+ *
+ * 为什么要读 `cx.input`：块解析器一旦 `nextLine()` 就回不了头，而「有没有闭合」必须在消费任何
+ * 一行之前就知道。`input` 在类型上是 `@internal`，拿不到就安静地不认 front matter（退回旧行为）。
+ */
+const FRONT_MATTER_RE = /^\uFEFF?---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
+/** front matter 不会长到这个程度；只读文件头这一段，不把整篇读进来。 */
+const FRONT_MATTER_SCAN = 64 * 1024;
+
+export const FrontMatter: BlockParser = {
+  name: "FrontMatter",
+  parse(cx: BlockContext, line: Line) {
+    if (cx.lineStart !== 0 || line.text.replace(/^\uFEFF/, "") !== "---") return false;
+    const input = (cx as unknown as { input?: { length: number; read(from: number, to: number): string } }).input;
+    if (!input || typeof input.read !== "function") return false;
+    const head = input.read(0, Math.min(input.length, FRONT_MATTER_SCAN));
+    const match = FRONT_MATTER_RE.exec(head);
+    if (!match) return false;
+    const end = match[0].replace(/\r?\n$/, "").length;
+    const marks = [cx.elt("FrontMatterMark", 0, line.text.length)];
+    let closeFrom = -1;
+    while (cx.nextLine()) {
+      const lineEnd = cx.lineStart + line.text.length;
+      if (lineEnd >= end) {
+        closeFrom = cx.lineStart;
+        cx.nextLine();
+        break;
+      }
+    }
+    if (closeFrom >= 0) marks.push(cx.elt("FrontMatterMark", closeFrom, closeFrom + 3));
+    cx.addElement(cx.elt("FrontMatter", 0, end, marks));
+    return true;
+  },
+  before: "HorizontalRule",
+};
+
 /* --------------------------------------------------------------- highlight */
 
 /** `==重要==` — markdown has no highlight; Typora users expect it anyway. */
@@ -149,9 +195,20 @@ export const WikiLinkInline: InlineParser = {
 };
 
 export const opennoteMarkdown: MarkdownExtension = [
-  { defineNodes: ["InlineMath", "MathBlock", "Highlight", "HighlightMark", "WikiLink", "WikiLinkMark"] },
+  {
+    defineNodes: [
+      "InlineMath",
+      "MathBlock",
+      "Highlight",
+      "HighlightMark",
+      "WikiLink",
+      "WikiLinkMark",
+      { name: "FrontMatter", block: true },
+      "FrontMatterMark",
+    ],
+  },
   { parseInline: [MathInline, HighlightInline, WikiLinkInline] },
-  { parseBlock: [MathBlock] },
+  { parseBlock: [FrontMatter, MathBlock] },
 ];
 
 /** The same parser the editor uses, without any CodeMirror dependency. */

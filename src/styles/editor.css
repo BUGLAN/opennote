@@ -331,6 +331,29 @@
   color: inherit;
 }
 
+/* ---- front matter ------------------------------------------------------ */
+/* 文件头的 YAML 元数据（`mdExtensions.ts` 的 FrontMatter）：等宽、弱化、一块浅底。 */
+.cm-content .cm-line.md-frontmatter {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  color: var(--ink-3);
+  background: var(--code-bg);
+  padding-left: 0.9em;
+  padding-right: 0.9em;
+}
+
+.cm-content .cm-line.md-frontmatter-first {
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+  padding-top: 0.35em;
+}
+
+.cm-content .cm-line.md-frontmatter-last {
+  border-bottom-left-radius: 6px;
+  border-bottom-right-radius: 6px;
+  padding-bottom: 0.35em;
+}
+
 /* ---- link reference definitions --------------------------------------- */
 /* `[ref]: https://…` 定义行：它是给链接查地址用的元数据，弱化显示。 */
 .cm-content .cm-line.md-linkref {

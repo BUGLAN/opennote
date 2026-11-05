@@ -78,3 +78,12 @@ describe("扩展语法：与编辑器同一套（高亮 / wiki 链接 / 公式�
     expect(html).toContain('data-tex="x"');
   });
 });
+
+describe("front matter 不进正文", () => {
+  it("文件头的 YAML 不渲染成分隔线 + 二级标题", () => {
+    const html = renderMarkdown("---\ntitle: x\n---\n\n# 标题\n");
+    expect(html).not.toContain("<hr>");
+    expect(html).not.toContain("title: x");
+    expect(html).toContain("<h1>标题</h1>");
+  });
+});

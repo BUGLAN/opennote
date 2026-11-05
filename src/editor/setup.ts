@@ -15,6 +15,7 @@ import { tableEdit } from "./tableEdit";
 import { slashCompletion, tagCompletion, wikiCompletion } from "./completion";
 import { cursorRules } from "./cursorRules";
 import { createFindPanel } from "./findPanel";
+import { htmlClipboard } from "./htmlPaste";
 import { linkTip } from "./linkTip";
 import { livePreviewField } from "./livePreview";
 import { markdownSupport } from "./markdown";
@@ -199,6 +200,8 @@ export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
       maxRenderedOptions: 24,
     }),
     mediaHandlers({ imageMode: hooks.imageMode, notify: hooks.notify }),
+    // 粘贴富文本 ⇒ Markdown；复制 ⇒ 附一份渲染好的 HTML（排在附件处理之后：有文件时由它接手）
+    htmlClipboard,
     linkClickHandler(),
     // 光标停在链接里时显示地址 + 打开 / 编辑（地址藏着、光标又走不进去，这是唯一的入口）
     linkTip,

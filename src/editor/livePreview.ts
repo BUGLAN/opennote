@@ -532,6 +532,20 @@ function decorate(
         const to = ref.to;
         const node = ref.node;
 
+        /* -------------------------------------------------------- front matter */
+        // 文件头的 YAML 元数据：保持源码可见（它就是给人改的），排成一块弱化的等宽区域。
+        if (name === "FrontMatter") {
+          const startLine = doc.lineAt(from);
+          const endLine = doc.lineAt(to);
+          for (let n = startLine.number; n <= endLine.number; n += 1) {
+            const cls = ["md-frontmatter"];
+            if (n === startLine.number) cls.push("md-frontmatter-first");
+            if (n === endLine.number) cls.push("md-frontmatter-last");
+            lineDeco(doc.line(n).from, cls.join(" "));
+          }
+          return false;
+        }
+
         /* ------------------------------------------------------------ headings */
         const atx = /^ATXHeading([1-6])$/.exec(name);
         if (atx) {
@@ -547,8 +561,10 @@ function decorate(
           if (!empty && !showsSource(from, to)) {
             hide(markNode.from, markEnd);
             // 收尾的 `##`（`## 标题 ##`）连同前面的空白一起藏
+            // 按**位置**比，不能比对象：`lastChild` / `getChild` 每次都给一个新的 SyntaxNode 包装，
+            // `!==` 恒为真 —— 只有一个 `#` 的标题会被当成「有收尾标记」，整行文字被藏掉。
             const closing = node.lastChild;
-            if (closing && closing !== markNode && closing.name === "HeaderMark") {
+            if (closing && closing.from > markNode.from && closing.name === "HeaderMark") {
               let closeFrom = closing.from;
               while (closeFrom > markEnd && /[ \t]/.test(doc.sliceString(closeFrom - 1, closeFrom))) closeFrom -= 1;
               hide(closeFrom, to);

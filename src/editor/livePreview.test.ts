@@ -863,10 +863,36 @@ describe("引用式链接", () => {
 });
 
 describe("ATX 标题的标记", () => {
+  it("普通标题只藏 `# `，文字一个都不藏（回归：收尾标记的判定曾把整行藏掉）", () => {
+    const keys = currentKeys(stateFor("# 标题\n", { anchor: 0 }));
+    expect(keys).toContain("0-2");
+    expect(keys.filter((key) => /^\d+-\d+$/.test(key))).toEqual(["0-2"]);
+  });
+
   it("`##   标题` 的空白一起藏；`## 标题 ##` 收尾的 `##` 也藏", () => {
     expect(currentKeys(stateFor("##   标题\n", { anchor: 0 }))).toContain("0-5");
     const keys = currentKeys(stateFor("## 标题 ##\n", { anchor: 0 }));
     expect(keys).toContain("0-3");
     expect(keys).toContain("5-8");
+  });
+});
+
+describe("YAML front matter", () => {
+  it("文件头的 front matter 是一块元数据：不是分隔线、`title:` 也不是二级标题", () => {
+    const doc = "---\ntitle: x\ntags: [a]\n---\n\n正文\n";
+    const keys = currentKeys(stateFor(doc, { anchor: doc.length }));
+    expect(keysContaining(keys, "HrWidget")).toHaveLength(0);
+    expect(keysContaining(keys, "md-h2")).toHaveLength(0);
+    expect(keysContaining(keys, "md-frontmatter")).toHaveLength(4);
+  });
+
+  it("与 splitFrontMatter 同一条规则：没闭合就不是 front matter（开头的 `---` 仍是分隔线）", () => {
+    const keys = currentKeys(stateFor("---\n正文第一段\n\n第二段\n", { anchor: 0 }));
+    expect(keysContaining(keys, "md-frontmatter")).toHaveLength(0);
+  });
+
+  it("不在文件开头的 `---` 照旧", () => {
+    const keys = currentKeys(stateFor("正文\n\n---\na: 1\n---\n", { anchor: 0 }));
+    expect(keysContaining(keys, "md-frontmatter")).toHaveLength(0);
   });
 });
