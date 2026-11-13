@@ -58,17 +58,8 @@ const TITLE_LIMIT = 90;
  * 绝对行号 —— 不加这个偏移，带 front matter 的笔记会把光标判定整体错位几行
  * （多认成「光标在标题行上」→ 永远不改名，或少认成「光标不在」→ 用户还在改就改名）。
  */
-/**
- * front matter 的判定规则 —— **唯一产地**。编辑器的 lezer 解析器（`editor/mdExtensions.ts` 的
- * FrontMatter）用的也是它，两边才不会一个当元数据、一个当正文。
- *
- * 开头的 `---` 后面**紧跟空行**就不是 front matter（与 pandoc 一致）：那是一条分隔线。不这样判，
- * 「开头一条分隔线、后面某处再一条分隔线」会把中间整段正文当成元数据吞掉（审查报告 B5）。
- */
-export const FRONT_MATTER_RE = /^\uFEFF?---\r?\n(?![ \t]*\r?\n)([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
-
 export function splitFrontMatter(md: string): { front: string; body: string; bodyLineOffset: number } {
-  const match = FRONT_MATTER_RE.exec(md);
+  const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(md);
   if (!match) return { front: "", body: md, bodyLineOffset: 0 };
   const consumed = match[0];
   const newlines = consumed.split("\n").length - 1;

@@ -1,11 +1,4 @@
-import {
-  insertCompletionText,
-  pickedCompletion,
-  type Completion,
-  type CompletionContext,
-  type CompletionResult,
-  type CompletionSource,
-} from "@codemirror/autocomplete";
+import type { Completion, CompletionContext, CompletionResult, CompletionSource } from "@codemirror/autocomplete";
 import type { EditorView } from "@codemirror/view";
 
 /* --------------------------------------------------------------- wiki links */
@@ -24,17 +17,6 @@ export function wikiCompletion(getTitles: () => string[]): CompletionSource {
         displayLabel: title,
         type: "text",
         detail: "笔记",
-        /*
-         * 自动补全括号（`closeBrackets`）在敲 `[[` 时已经补好了 `]]`。照默认的 apply 把
-         * `[[查询` 换成 `[[标题]]`，后面那对 `]]` 就多出来了（`[[标题]]]]`）。
-         */
-        apply: (view: EditorView, completion: Completion, from: number, to: number) => {
-          const after = view.state.sliceDoc(to, to + 2) === "]]" ? 2 : 0;
-          view.dispatch({
-            ...insertCompletionText(view.state, completion.label, from, to + after),
-            annotations: pickedCompletion.of(completion),
-          });
-        },
       }));
     if (!options.length) return null;
     return {

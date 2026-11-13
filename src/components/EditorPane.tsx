@@ -5,7 +5,7 @@ import { syntaxTree } from "@codemirror/language";
 import { imageUrlStore } from "../data/assets";
 import { onIdsRemapped } from "../data/library";
 import type { Id, UiSettings } from "../data/types";
-import { mergeExternal, minimalReplace } from "../editor/externalReplace";
+import { minimalReplace } from "../editor/externalReplace";
 import { editorSettingsField, refreshDecorations, setEditorSettings, type EditorSettings } from "../editor/settings";
 import { buildEditorExtensions, readOnlyCompartment, spellcheckCompartment } from "../editor/setup";
 import { notify } from "../lib/toast";
@@ -191,55 +191,12 @@ function EditorHost(props: EditorHostProps): ReactNode {
      effect）。`display: none` 时 CM 量不到尺寸，`viewportIsAppropriate()` 一律放行：
      改动落在旧视口里面时，映射后的视口会把新插进来的整段都包进去 —— 实测一篇短笔记在
      后台被整篇改成 25 万字符，10503 行全部进了 DOM，之后它每变一次都要 ~140ms。 */
-  /**
-   * 输入法合成期间推迟的外部改动：`base` = 外部改动到达时编辑器里的文档，`remote` = 外部内容
-   * （期间又来了几次就只留最新的那份）。合成结束时三方合并落地（只挂一个监听）。
-   */
-  const pendingRef = useRef<{ base: string; remote: string } | null>(null);
   const applyExternalContent = useCallback(() => {
     const view = viewRef.current;
     if (!view) return;
-    const current = view.state.doc.toString();
-    const pending = pendingRef.current;
-    /*
-     * 合成中不改文档（排查报告问题 10）：同步 / 「磁盘为准」的改动恰好在中文输入合成期间到达时，
-     * 直接 dispatch 会打断输入法 —— 候选词丢失、已输入的拼音被吞或重复。等 `compositionend`、
-     * CodeMirror 把合成结果落进文档之后再落。
-     *
-     * 推迟时必须把外部内容**存下来**（审查报告 B1）：合成期间每一次合成改动都会经 onChange 把
-     * store 写回本地版本，等合成结束再读 `props.content`，读到的已经是本地版 —— 外部改动就这样
-     * 被静默丢掉，本地版还会被当成一次编辑同步出去，把远端回滚。
-     */
-    if (pending && !view.composing) {
-      pendingRef.current = null;
-      const merged = mergeExternal(pending.base, current, pending.remote);
-      if (merged !== current) {
-        expectedRef.current = merged;
-        const { changes, selection } = minimalReplace(current, merged, view.state.selection.main);
-        // 这次 dispatch 会经 onChange 把合并结果写回 store（它此刻还是合成期间写进去的本地版）
-        view.dispatch({ changes, selection, annotations: Transaction.addToHistory.of(false) });
-      }
-      return;
-    }
     const next = propsRef.current.content;
+    const current = view.state.doc.toString();
     if (next === expectedRef.current || next === current) return;
-    if (view.composing) {
-      const first = !pendingRef.current;
-      pendingRef.current = { base: pendingRef.current?.base ?? current, remote: next };
-      if (first) {
-        view.contentDOM.addEventListener(
-          "compositionend",
-          () => {
-            // CodeMirror 在 compositionend 之后才把合成结果落进文档：让它先走完
-            setTimeout(() => {
-              if (viewRef.current === view && view.dom.isConnected) applyExternalContent();
-            }, 0);
-          },
-          { once: true },
-        );
-      }
-      return;
-    }
     expectedRef.current = next;
     const { changes, selection } = minimalReplace(current, next, view.state.selection.main);
     view.dispatch({
@@ -247,7 +204,6 @@ function EditorHost(props: EditorHostProps): ReactNode {
       selection,
       annotations: Transaction.addToHistory.of(false),
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 自引用：合成结束时重跑自己
   }, []);
 
   const hidden = !props.active || props.locked;

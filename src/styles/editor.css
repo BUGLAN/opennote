@@ -210,10 +210,9 @@
   padding-left: calc(2px + var(--li-gutter));
 }
 
-/* 任务项不画圆点了（只有复选框），槽宽 = 原来的 2.34em − 圆点槽 0.75em。 */
 .cm-content .cm-line.md-li[data-li="task"],
 .cm-content .cm-line.md-li-cont[data-li="task"] {
-  --li-gutter: 1.59em;
+  --li-gutter: 2.34em;
 }
 
 /* 首行左移一个槽宽：折行片段于是正好落在首行文字的左边缘上。 */
@@ -256,110 +255,6 @@
   border: solid var(--accent-ink);
   border-width: 0 2px 2px 0;
   transform: rotate(42deg);
-}
-
-/* ---- link tooltip ------------------------------------------------------ */
-/* 光标停在链接里时的地址浮层（`editor/linkTip.ts`）：地址 + 打开 / 编辑。
-   外框（底色、边、圆角、阴影）由 `theme.ts` 的 `.cm-tooltip` 统一给；元素本身就是 `.cm-tooltip`。 */
-.cm-tooltip.md-link-tip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  max-width: min(460px, 80vw);
-  padding: 4px 6px 4px 10px;
-  font-family: var(--font-ui);
-  font-size: 12.5px;
-  color: var(--ink-2);
-}
-
-.cm-tooltip.md-link-tip .md-link-tip__url {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.cm-tooltip.md-link-tip .md-link-tip__btn {
-  flex: none;
-  border: 0;
-  border-radius: var(--radius-sm);
-  padding: 3px 8px;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  cursor: pointer;
-}
-
-.cm-tooltip.md-link-tip .md-link-tip__btn:hover {
-  background: var(--accent-soft);
-}
-
-/* ---- table toolbar ----------------------------------------------------- */
-/* 光标在表格里（就地编辑态）时贴在表格上方的工具条（`editor/tableEdit.ts`）。 */
-/* 注意选择器是**复合**的：`create()` 交出去的元素本身就被 CodeMirror 加上 `.cm-tooltip`，
-   不是套在一个 `.cm-tooltip` 里面。
-   工具条挂在表头第一个字的上方；表头行有 1.05em 的上内边距，整体再往上抬一截才不压住表头。 */
-.cm-tooltip.md-table-tools {
-  translate: 0 -1.35em;
-  display: flex;
-  gap: 2px;
-  padding: 3px;
-  font-family: var(--font-ui);
-  font-size: 12px;
-}
-
-.cm-tooltip.md-table-tools .md-table-tools__btn {
-  border: 0;
-  border-radius: var(--radius-sm);
-  padding: 3px 7px;
-  background: transparent;
-  color: var(--ink-2);
-  font: inherit;
-  cursor: pointer;
-}
-
-.cm-tooltip.md-table-tools .md-table-tools__btn:hover {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-/* 不是链接的方括号文字（`[注]`，没有对应的引用定义）：语法高亮仍把它当 Link 染色，这里压回正文色。 */
-.cm-content .md-plain,
-.cm-content .md-plain * {
-  color: inherit;
-}
-
-/* ---- front matter ------------------------------------------------------ */
-/* 文件头的 YAML 元数据（`mdExtensions.ts` 的 FrontMatter）：等宽、弱化、一块浅底。 */
-.cm-content .cm-line.md-frontmatter {
-  font-family: var(--font-mono);
-  font-size: 0.82em;
-  color: var(--ink-3);
-  background: var(--code-bg);
-  padding-left: 0.9em;
-  padding-right: 0.9em;
-}
-
-.cm-content .cm-line.md-frontmatter-first {
-  border-top-left-radius: 6px;
-  border-top-right-radius: 6px;
-  padding-top: 0.35em;
-}
-
-.cm-content .cm-line.md-frontmatter-last {
-  border-bottom-left-radius: 6px;
-  border-bottom-right-radius: 6px;
-  padding-bottom: 0.35em;
-}
-
-/* ---- link reference definitions --------------------------------------- */
-/* `[ref]: https://…` 定义行：它是给链接查地址用的元数据，弱化显示。 */
-.cm-content .cm-line.md-linkref {
-  color: var(--ink-3);
-  font-family: var(--font-mono);
-  font-size: 0.85em;
 }
 
 /* ---- wiki links -------------------------------------------------------- */

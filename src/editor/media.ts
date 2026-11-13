@@ -1,12 +1,11 @@
 import { syntaxTree } from "@codemirror/language";
 import type { SyntaxNode } from "@lezer/common";
 import { EditorView } from "@codemirror/view";
-import { type EditorState, type Extension, StateEffect, StateField } from "@codemirror/state";
+import type { EditorState, Extension } from "@codemirror/state";
 import { imageNameForPaste } from "../data/assets";
 import { saveImage } from "../data/library";
 import { blobToDataUrl } from "../lib/utils";
 import { rememberSourceSize } from "./imagePool";
-import { linkTarget } from "./livePreview";
 import { editorSettingsField } from "./settings";
 
 /**
@@ -116,129 +115,65 @@ async function readImageSize(file: File): Promise<{ width: number; height: numbe
   }
 }
 
-/* ------------------------------------------------------------ 插入位置跟踪 */
-
-/**
- * 附件落盘是异步的（读文件、写盘、量尺寸），期间用户可能还在打字。原来插入位置在 `await`
- * **之前**就取好了，落盘回来直接用 —— 期间改过前面的内容，附件就插到半个词中间
- * （排查报告问题 19）。这里把待插入的范围登记成一个跟着文档变化移动的区间。
- */
-export const trackRange = StateEffect.define<{ id: number; from: number; to: number }>();
-const untrackRange = StateEffect.define<number>();
-
-export const pendingInserts = StateField.define<ReadonlyMap<number, { from: number; to: number }>>({
-  create: () => new Map(),
-  update(value, tr) {
-    let next = value;
-    if (tr.docChanged && value.size) {
-      const mapped = new Map<number, { from: number; to: number }>();
-      for (const [id, range] of value) {
-        const from = tr.changes.mapPos(range.from, 1);
-        mapped.set(id, { from, to: Math.max(from, tr.changes.mapPos(range.to, -1)) });
-      }
-      next = mapped;
-    }
-    for (const effect of tr.effects) {
-      if (effect.is(trackRange)) {
-        next = new Map(next);
-        (next as Map<number, { from: number; to: number }>).set(effect.value.id, { from: effect.value.from, to: effect.value.to });
-      } else if (effect.is(untrackRange) && next.has(effect.value)) {
-        next = new Map(next);
-        (next as Map<number, { from: number; to: number }>).delete(effect.value);
-      }
-    }
-    return next;
-  },
-});
-
-let nextTrackId = 1;
-
-/**
- * 把附件片段插进 `[from, to)`（有选区就替换选区）。
- *
- * 附件各占一行：插入点不在行首就先换行，免得把一行字劈成「前半截 + 图片」；
- * 光标落到附件**下面新起的一行**（附件所在行不「活跃」，粘贴完当场就是渲染态）。
- */
-export function attachmentInsertion(
-  state: EditorState,
-  from: number,
-  to: number,
-  snippets: string[],
-): { changes: { from: number; to: number; insert: string }; selection: { anchor: number } } {
-  const start = Math.min(from, state.doc.length);
-  const end = Math.min(Math.max(start, to), state.doc.length);
-  const lead = start > state.doc.lineAt(start).from ? "\n" : "";
-  const text = `${lead}${snippets.join("\n")}\n`;
-  return { changes: { from: start, to: end, insert: text }, selection: { anchor: start + text.length } };
-}
-
 export function mediaHandlers(options: {
   imageMode: () => "asset" | "inline";
   notify: (message: string) => void;
 }): Extension {
-  const insertFiles = async (view: EditorView, files: File[], from: number, to: number) => {
+  const insertFiles = async (view: EditorView, files: File[], at: number) => {
     const notePath = view.state.field(editorSettingsField, false)?.notePath ?? "";
-    const id = nextTrackId++;
-    view.dispatch({ effects: trackRange.of({ id, from, to }) });
-    let snippets: string[] = [];
-    try {
-      snippets = await insertFileSnippets(files, {
-        notePath,
-        imageMode: options.imageMode(),
-        notify: options.notify,
-      });
-    } finally {
-      // 视图可能在落盘期间被销毁（关标签）—— 那就什么都不插
-      if (!view.dom.isConnected) return;
-      const range = view.state.field(pendingInserts, false)?.get(id) ?? { from, to };
-      view.dispatch({ effects: untrackRange.of(id) });
-      if (snippets.length) {
-        view.dispatch({
-          ...attachmentInsertion(view.state, range.from, range.to, snippets),
-          userEvent: "input.paste",
-          scrollIntoView: true,
-        });
-        options.notify(files.length > 1 ? `已插入 ${files.length} 个附件` : "已插入附件");
-      }
-    }
+    const snippets = await insertFileSnippets(files, {
+      notePath,
+      imageMode: options.imageMode(),
+      notify: options.notify,
+    });
+    if (!snippets.length) return;
+    // 光标落到附件**下面新起的一行**：附件所在行不「活跃」，粘贴完当场就是渲染态。
+    // 停在附件行上会让它先显示 `![…](…)` 源码，等回车或移开才换成渲染态 ——
+    // 那一下的高度突变正是用户 2026-10-10 报的跳动。
+    const text = `${snippets.join("\n")}\n`;
+    const pos = Math.min(at, view.state.doc.length);
+    view.dispatch({
+      changes: { from: pos, insert: text },
+      selection: { anchor: pos + text.length },
+      userEvent: "input.paste",
+      scrollIntoView: true,
+    });
+    options.notify(files.length > 1 ? `已插入 ${files.length} 个附件` : "已插入附件");
   };
 
-  return [
-    pendingInserts,
-    EditorView.domEventHandlers({
-      paste: (event, view) => {
-        const data = event.clipboardData;
-        if (!data) return false;
-        const files: File[] = [];
-        for (const item of Array.from(data.items)) {
-          if (item.kind !== "file") continue;
-          const file = item.getAsFile();
-          if (file) files.push(file);
-        }
-        if (!files.length) {
-          const dropped = Array.from(data.files ?? []);
-          files.push(...dropped);
-        }
-        if (!files.length) return false;
-        event.preventDefault();
-        const { from, to } = view.state.selection.main;
-        void insertFiles(view, files, from, to);
-        return true;
-      },
-      drop: (event, view) => {
-        const data = event.dataTransfer;
-        if (!data?.files?.length) return false;
-        event.preventDefault();
-        const position = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.from;
-        void insertFiles(view, Array.from(data.files), position, position);
-        return true;
-      },
-      dragover: (event) => {
-        if (event.dataTransfer?.types?.includes("Files")) event.preventDefault();
-        return false;
-      },
-    }),
-  ];
+  return EditorView.domEventHandlers({
+    paste: (event, view) => {
+      const data = event.clipboardData;
+      if (!data) return false;
+      const files: File[] = [];
+      for (const item of Array.from(data.items)) {
+        if (item.kind !== "file") continue;
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+      if (!files.length) {
+        const dropped = Array.from(data.files ?? []);
+        files.push(...dropped);
+      }
+      if (!files.length) return false;
+      event.preventDefault();
+      const at = view.state.selection.main.from;
+      void insertFiles(view, files, at);
+      return true;
+    },
+    drop: (event, view) => {
+      const data = event.dataTransfer;
+      if (!data?.files?.length) return false;
+      event.preventDefault();
+      const position = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.from;
+      void insertFiles(view, Array.from(data.files), position);
+      return true;
+    },
+    dragover: (event) => {
+      if (event.dataTransfer?.types?.includes("Files")) event.preventDefault();
+      return false;
+    },
+  });
 }
 
 /** Cmd/Ctrl-click follows a link without leaving the writing surface. */
@@ -280,8 +215,9 @@ export function findLinkAt(state: EditorState, pos: number): string | null {
   }
   for (let node: SyntaxNode | null = inner; node; node = node.parent) {
     if (node.name !== "Link" && node.name !== "Image") continue;
-    // 行内写法取 URL；引用式（`[文字][ref]`）去定义里查
-    const raw = linkTarget(state, node);
+    const url = node.getChild("URL");
+    if (!url) continue;
+    const raw = state.sliceDoc(url.from, url.to);
     if (raw) return normalizeUrl(raw);
   }
 

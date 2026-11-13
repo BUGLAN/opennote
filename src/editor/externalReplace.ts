@@ -1,4 +1,3 @@
-import { ChangeSet, Text } from "@codemirror/state";
 /**
  * 外部改动（磁盘赢）落到编辑器时的**最小改动**。
  *
@@ -95,22 +94,4 @@ export function minimalReplace(
       head: Math.min(selection.head, nextText.length),
     },
   };
-}
-
-/**
- * 三方合并：`base` 是外部改动到达时编辑器里的文档，`remote` 是外部内容，`local` 是此刻编辑器里的
- * 文档（期间用户又打了字，典型的是输入法合成那几秒）。把 base→remote 的改动搬到 local 上。
- *
- * 两边各取**最小改动**（公共前后缀之外的那一段），用 CodeMirror 的 ChangeSet.map 把远端改动
- * 映射过本地改动：不重叠时两边都保住；重叠时远端那段照样落下，本地在重叠区里插入的字也保留
- * （`map` 的语义），不会整段丢掉任何一方。
- */
-export function mergeExternal(base: string, local: string, remote: string): string {
-  if (local === base) return remote;
-  if (remote === base || remote === local) return local;
-  const toRemote = minimalReplace(base, remote, { anchor: 0, head: 0 }).changes;
-  const toLocal = minimalReplace(base, local, { anchor: 0, head: 0 }).changes;
-  const remoteSet = ChangeSet.of([toRemote], base.length);
-  const localSet = ChangeSet.of([toLocal], base.length);
-  return remoteSet.map(localSet).apply(Text.of(local.split("\n"))).toString();
 }
