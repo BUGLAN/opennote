@@ -232,6 +232,8 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       headers: { "content-type": "application/json; charset=utf-8" },
     });
   const badRequest = (message: string): Response => json({ error: message, code: "bad-request" }, 400);
+  const passwordLoginDisabled = (message = "这台服务器关闭了邮箱密码登录，请用 GitHub 登录"): Response =>
+    json({ error: message, code: "password-login-disabled" }, 403);
 
   const readBody = async <T>(c: Context, schema: { safeParse(value: unknown): { success: true; data: T } | { success: false; error: { issues: { message: string }[] } } }): Promise<T | Response> => {
     const raw = await c.req.json().catch(() => null);
@@ -280,7 +282,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
 
   routes.post("/auth/login", async (c) => {
     if (!deps.settings.get("passwordLogin")) {
-      return json({ error: "这台服务器关闭了邮箱密码登录，请用其它方式登录", code: "password-login-disabled" }, 403);
+      return passwordLoginDisabled("这台服务器关闭了邮箱密码登录，请用 GitHub 登录");
     }
     const body = await readBody(c, loginRequestSchema);
     if (body instanceof Response) return body;
@@ -310,6 +312,9 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
 
   /** 开放注册（服务设置里「谁可以注册 = 开放」时才可用）。 */
   routes.post("/auth/register", async (c) => {
+    if (!deps.settings.get("passwordLogin")) {
+      return passwordLoginDisabled("这台服务器关闭了邮箱密码登录，不能用密码注册，请用 GitHub 登录");
+    }
     if (deps.settings.get("registration") !== "open") {
       return json({ error: "这台服务器只接受邀请注册", code: "registration-closed" }, 403);
     }
@@ -362,6 +367,9 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   });
 
   routes.post("/auth/invites/:code", async (c) => {
+    if (!deps.settings.get("passwordLogin")) {
+      return passwordLoginDisabled("这台服务器关闭了邮箱密码登录，请用 GitHub 接受邀请");
+    }
     const closed = registrationClosed();
     if (closed) return closed;
     const body = await readBody(c, inviteAcceptRequestSchema);
@@ -379,6 +387,9 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   /* ------------------------------------------------------------ 重置密码 */
 
   routes.get("/auth/password-resets/:code", (c) => {
+    if (!deps.settings.get("passwordLogin")) {
+      return passwordLoginDisabled("这台服务器关闭了邮箱密码登录，密码重置链接暂时不可用，请用 GitHub 登录");
+    }
     try {
       return json({ email: deps.accounts.passwordResetInfo(c.req.param("code"), now()).email }, 200);
     } catch (error) {
@@ -388,6 +399,9 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   });
 
   routes.post("/auth/password-resets/:code", async (c) => {
+    if (!deps.settings.get("passwordLogin")) {
+      return passwordLoginDisabled("这台服务器关闭了邮箱密码登录，密码重置链接暂时不可用，请用 GitHub 登录");
+    }
     const body = await readBody(c, passwordResetRequestSchema);
     if (body instanceof Response) return body;
     try {

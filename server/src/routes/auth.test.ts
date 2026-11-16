@@ -229,6 +229,16 @@ describe("开放注册", () => {
     expect(open.status).toBe(200);
     expect(open.body?.me).toMatchObject({ email: "new@example.com", displayName: "New" });
   });
+
+  it("关闭邮箱密码登录后，开放注册也拒绝且不建号", async () => {
+    const world = makeWorld();
+    world.settings.set({ registration: "open", passwordLogin: false });
+    const body = { email: "new@example.com", password: PASSWORD, device: DEVICE_A };
+    const response = await world.call("/v1/auth/register", { body });
+    expect(response.status).toBe(403);
+    expect(response.body?.code).toBe("password-login-disabled");
+    expect(world.accounts.findByEmail("new@example.com")).toBeNull();
+  });
 });
 
 describe("邀请链接", () => {
@@ -256,6 +266,22 @@ describe("邀请链接", () => {
     const world = makeWorld();
     expect((await world.call("/v1/auth/invites/join_nope")).status).toBe(404);
   });
+
+  it("关闭邮箱密码登录后，/join 仍能读邀请给 GitHub 用；密码接受 403 且不消耗邀请", async () => {
+    const world = makeWorld();
+    const admin = await world.accounts.setup({ email: "admin@example.com", password: PASSWORD });
+    const { code } = world.accounts.createInvite({ createdBy: admin.id });
+    world.settings.set({ passwordLogin: false });
+
+    expect((await world.call(`/v1/auth/invites/${code}`)).status).toBe(200);
+    const rejected = await world.call(`/v1/auth/invites/${code}`, { body: { email: "chen@example.com", password: PASSWORD } });
+    expect(rejected.status).toBe(403);
+    expect(rejected.body?.code).toBe("password-login-disabled");
+    expect(world.accounts.findByEmail("chen@example.com")).toBeNull();
+
+    world.settings.set({ passwordLogin: true });
+    expect((await world.call(`/v1/auth/invites/${code}`, { body: { email: "chen@example.com", password: PASSWORD } })).status).toBe(201);
+  });
 });
 
 describe("重置密码链接", () => {
@@ -276,6 +302,28 @@ describe("重置密码链接", () => {
     expect((await world.call(`/v1/auth/password-resets/${code}`, { body: { password: "brand-new-password" } })).status).toBe(204);
 
     expect((await world.call("/v1/me", { token: miaToken })).status).toBe(401);
+    expect((await world.login("mia@example.com", "brand-new-password", DEVICE_B)).status).toBe(200);
+  });
+
+  it("关闭邮箱密码登录后，读取和提交重置都 403；链接不消耗，重开后仍可用", async () => {
+    const world = makeWorld();
+    const member = await world.accounts.create({ email: "mia@example.com", password: "old-password-1" });
+    const { code } = world.accounts.createPasswordReset({ accountId: member.id, createdBy: null });
+    const oldSession = world.accounts.createSession({ accountId: member.id, kind: "device", deviceId: DEVICE_B.deviceId }).token;
+    world.settings.set({ passwordLogin: false });
+
+    for (const response of [
+      await world.call(`/v1/auth/password-resets/${code}`),
+      await world.call(`/v1/auth/password-resets/${code}`, { body: { password: "brand-new-password" } }),
+    ]) {
+      expect(response.status).toBe(403);
+      expect(response.body?.code).toBe("password-login-disabled");
+    }
+    expect((await world.call("/v1/me", { token: oldSession })).status).toBe(200);
+
+    world.settings.set({ passwordLogin: true });
+    expect((await world.call(`/v1/auth/password-resets/${code}`, { body: { password: "brand-new-password" } })).status).toBe(204);
+    expect((await world.call("/v1/me", { token: oldSession })).status).toBe(401);
     expect((await world.login("mia@example.com", "brand-new-password", DEVICE_B)).status).toBe(200);
   });
 });

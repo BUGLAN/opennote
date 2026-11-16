@@ -24,6 +24,9 @@
  *
  * 只有管理员能登录控制台：普通账号在这里输对密码也拿不到 cookie（403），
  * 免得一个用不了任何页面的会话挂在浏览器里。
+ *
+ * 邮箱密码登录受 `passwordLogin` 开关约束：关闭后客户端和控制台都只能走 GitHub。
+ * 关闭开关前，管理接口要求至少一名活跃管理员已经绑定 GitHub（见 `routes/admin.ts`）。
  */
 
 import { Hono, type Context } from "hono";
@@ -135,6 +138,9 @@ export function createPanelRoutes(deps: PanelRoutesDeps): Hono {
   routes.post("/v1/panel/login", async (c) => {
     const missing = csrfMissing(c);
     if (missing) return missing;
+    if (!deps.settings.get("passwordLogin")) {
+      return json({ error: "这台服务器关闭了邮箱密码登录，控制台也请用 GitHub 登录", code: "password-login-disabled" }, 403);
+    }
     const parsed = loginRequestSchema.pick({ email: true, password: true }).safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return json({ error: "请填写邮箱和密码", code: "bad-request" }, 400);
     const { email, password } = parsed.data;

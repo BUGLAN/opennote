@@ -156,6 +156,17 @@ describe("登录与退出", () => {
     expect((await world.call("/v1/panel/login", { body: { email: "admin@example.com", password: PASSWORD } })).status).toBe(400);
   });
 
+  it("关闭邮箱密码登录后，控制台密码登录也 403，页面会话报 false", async () => {
+    const world = makeWorld();
+    await world.accounts.create({ email: "admin@example.com", password: PASSWORD, isAdmin: true });
+    world.settings.set({ passwordLogin: false });
+    expect((await world.call("/v1/panel/session")).body?.passwordLogin).toBe(false);
+    const response = await world.call("/v1/panel/login", { body: { email: "admin@example.com", password: PASSWORD }, headers: CSRF });
+    expect(response.status).toBe(403);
+    expect(response.body?.code).toBe("password-login-disabled");
+    expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
   it("退出吊销会话并清 cookie；之后同一个 cookie 不能再用", async () => {
     const world = makeWorld();
     await world.accounts.create({ email: "admin@example.com", password: PASSWORD, isAdmin: true });

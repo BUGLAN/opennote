@@ -160,7 +160,9 @@ export function renderLogin(root, session, onDone) {
       h("p", { class: "message", text: host() + " · 只有管理员能登录控制台。普通账号请在 Opennote 客户端里登录。" }),
       session.github ? h("div", { class: "stack mt-lg" }, githubButton("使用 GitHub 登录", "/auth/github?mode=panel"), session.passwordLogin ? h("div", { class: "divider", text: "或用邮箱登录" }) : null) : null,
       form,
-      h("p", { class: "note" }, "忘了密码：请另一位管理员发一个设置密码链接，或在服务器上运行 ", h("code", { text: "node dist/cli.js reset-password <邮箱>" }), "。"),
+      session.passwordLogin
+        ? h("p", { class: "note" }, "忘了密码：请另一位管理员发一个设置密码链接，或在服务器上运行 ", h("code", { text: "node dist/cli.js reset-password <邮箱>" }), "。")
+        : h("p", { class: "note", text: "这台服务器关闭了邮箱密码登录；控制台也请用 GitHub 登录。关闭期间密码重置链接也不可用。" }),
     ),
   );
   email.focus();
@@ -209,6 +211,9 @@ export async function renderJoin(root, code) {
     if (error.status === 410) return deadEnd(root, "这个邀请用不了了", error.message);
     return deadEnd(root, "打不开这个邀请", error.message);
   }
+  const health = await get("/v1/health").catch(() => null);
+  const github = health && health.auth && health.auth.github;
+  const passwordLogin = health && health.auth ? health.auth.password : true;
 
   const email = input({ type: "email", autocomplete: "username", required: true, value: info.email || "", readOnly: !!info.email });
   const name = input({ autocomplete: "nickname", placeholder: "可以不填" });
@@ -257,18 +262,16 @@ export async function renderJoin(root, code) {
     submit,
   );
 
-  const health = await get("/v1/health").catch(() => null);
-  const github = health && health.auth && health.auth.github;
   mount(
     root,
     card(
       "加入 " + host(),
       h("p", { class: "message", text: intro }),
-      github ? h("div", { class: "stack mt-lg" }, githubButton("用 GitHub 接受邀请", "/auth/github?mode=join&invite=" + encodeURIComponent(code)), h("div", { class: "divider", text: "或设置一个密码" })) : null,
-      form,
+      github ? h("div", { class: "stack mt-lg" }, githubButton("用 GitHub 接受邀请", "/auth/github?mode=join&invite=" + encodeURIComponent(code)), passwordLogin ? h("div", { class: "divider", text: "或设置一个密码" }) : null) : null,
+      passwordLogin ? form : h("p", { class: "note mt-lg", text: github ? "这台服务器关闭了邮箱和密码登录，请用 GitHub 接受邀请。" : "这台服务器关闭了邮箱和密码登录，GitHub 登录也不可用，请联系管理员。" }),
     ),
   );
-  (info.email ? name : email).focus();
+  if (passwordLogin) (info.email ? name : email).focus();
 }
 
 /* ------------------------------------------------------------ /reset */
@@ -278,6 +281,16 @@ export async function renderReset(root, code) {
   try {
     info = await get("/v1/auth/password-resets/" + encodeURIComponent(code));
   } catch (error) {
+    if (error.code === "password-login-disabled") {
+      return mount(
+        root,
+        card(
+          "暂时不能设置密码",
+          h("p", { class: "message", text: error.message }),
+          h("p", { class: "note", text: "请改用 GitHub 登录。管理员重新开启邮箱密码登录后，这个链接仍可继续使用。" }),
+        ),
+      );
+    }
     if (error.status === 404) return deadEnd(root, "这个链接不对", "链接可能复制得不完整，请从原消息里重新复制一次。");
     return deadEnd(root, "这个链接用不了了", error.message);
   }

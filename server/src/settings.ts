@@ -14,7 +14,10 @@ export type RegistrationMode = "invite" | "open" | "closed";
 export interface ServerSettings {
   /** 谁可以注册：仅限邀请（默认）/ 开放 / 关闭。 */
   registration: RegistrationMode;
-  /** 是否允许邮箱 + 密码登录。关掉后只剩 GitHub（要求 GitHub 已可用，见 `routes/admin.ts`）。 */
+  /**
+   * 是否允许邮箱 + 密码登录。关掉后客户端与控制台都只剩 GitHub；密码注册、
+   * 密码接受邀请和密码重置也一并停用（配置约束见 `routes/admin.ts`）。
+   */
   passwordLogin: boolean;
   /** 新用户默认空间配额（字节）。账号自己的 `quota_bytes` 为空时用它。 */
   defaultQuotaBytes: number;

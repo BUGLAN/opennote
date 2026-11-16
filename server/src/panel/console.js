@@ -1430,7 +1430,7 @@ async function pageSettings(main) {
           "邮箱和密码",
           null,
           h("label", { class: "switch" }, passwordSwitch, "允许"),
-          h("div", { class: "setting__meta", text: "关掉后只能用 GitHub 登录（要先把 GitHub 配好）；已有的密码保留，重新打开即可恢复。" }),
+          h("div", { class: "setting__meta", text: "关掉后客户端和控制台都只能用 GitHub 登录；密码注册、密码接受邀请和密码重置也会停用。关闭前要先把 GitHub 配好，并让至少一名管理员绑定 GitHub。已有密码保留，重新打开即可恢复。" }),
         ),
         setting(
           "GitHub",

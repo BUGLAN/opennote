@@ -386,13 +386,21 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
       patch.githubOrgs = [...new Set(orgs.map((org: string) => org.toLowerCase()))];
     }
     /*
-     * 关掉邮箱密码登录之后，只剩 GitHub 能进来。GitHub 不可用时关掉它 = 所有人、
-     * 包括管理员自己都登录不了，只能上服务器改库 —— 所以按「保存之后的样子」检查一遍。
+     * 关掉邮箱密码登录之后，客户端和控制台都只剩 GitHub 能进来。GitHub 不可用，或
+     * 没有任何活跃管理员绑定过 GitHub，都会把控制台锁死 —— 所以按「保存之后的样子」检查。
      */
     const projected = { ...deps.settings.all(), ...patch };
     const githubAfter = projected.githubEnabled && projected.githubClientId.trim() !== "" && projected.githubClientSecret.trim() !== "";
     if (!projected.passwordLogin && !githubAfter) {
       return json({ error: "GitHub 登录还没配好，关掉邮箱密码登录会让所有人都登录不了", code: "no-other-login" }, 409);
+    }
+    if (!projected.passwordLogin) {
+      const adminGithub = deps.accounts.list().some(
+        (account) => account.is_admin === 1 && account.status === "active" && deps.accounts.identityOf(account.id, "github") !== null,
+      );
+      if (!adminGithub) {
+        return json({ error: "关闭邮箱密码登录前，至少一名活跃管理员要先绑定 GitHub，否则控制台也会进不去", code: "no-admin-github" }, 409);
+      }
     }
     if ("defaultQuotaBytes" in raw) {
       const value = raw.defaultQuotaBytes;

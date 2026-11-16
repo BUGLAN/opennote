@@ -5,7 +5,7 @@
  * - 没绑定的 GitHub 账号进不来（除非组织策略放行）；不按邮箱自动绑定已有账号；
  * - 一次性登录码离了 PKCE verifier 换不出会话，而且错一次就作废；
  * - `join` / `panel` / `link` 各自的收尾；
- * - Secret 只写不读；GitHub 配好之前不许关密码登录。
+ * - Secret 只写不读；GitHub 配好、且管理员已绑定之前不许关密码登录。
  */
 
 import { createHash } from "node:crypto";
@@ -101,11 +101,20 @@ describe("开关", () => {
     expect((await world.call("/v1/health")).body?.auth.github).toBe(true);
   });
 
-  it("Secret 只写不读；GitHub 配好之前不许关密码登录，配好之后可以", async () => {
+  it("Secret 只写不读；GitHub 配好之前、管理员绑定之前都不许关密码登录", async () => {
     const world = makeWorld();
     const admin = seedAccount(world.accounts, { isAdmin: true });
     const auth = { authorization: `Bearer ${admin.token}` };
     expect((await world.call("/v1/admin/settings", { method: "PATCH", body: { passwordLogin: false }, headers: auth })).status).toBe(409);
+    const configured = await world.call("/v1/admin/settings", { method: "PATCH", body: { githubEnabled: true, githubClientId: "Ov23li", githubClientSecret: "s3cret", passwordLogin: false }, headers: auth });
+    expect(configured.status).toBe(409);
+    expect(configured.body?.code).toBe("no-admin-github");
+
+    const member = seedAccount(world.accounts);
+    world.accounts.linkIdentity({ accountId: member.id, provider: "github", subject: "2", login: "staff" });
+    expect((await world.call("/v1/admin/settings", { method: "PATCH", body: { githubEnabled: true, githubClientId: "Ov23li", githubClientSecret: "s3cret", passwordLogin: false }, headers: auth })).status).toBe(409);
+
+    world.accounts.linkIdentity({ accountId: admin.id, provider: "github", subject: "1", login: "boss" });
     const saved = await world.call("/v1/admin/settings", { method: "PATCH", body: { githubEnabled: true, githubClientId: "Ov23li", githubClientSecret: "s3cret", passwordLogin: false }, headers: auth });
     expect(saved.status).toBe(200);
     expect(saved.body).toMatchObject({ passwordLogin: false, githubAvailable: true, githubClientSecretSet: true });
