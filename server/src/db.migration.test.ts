@@ -49,6 +49,25 @@ function createV1Database(path: string): void {
       last_seen_at INTEGER,
       last_ip      TEXT
     );
+    -- 真实的 v1 库也一定有笔记本与笔记本邀请码（迁移 8 要给后者加列）。
+    CREATE TABLE notebooks (
+      id          TEXT PRIMARY KEY,
+      owner_id    TEXT NOT NULL REFERENCES accounts(id),
+      name        TEXT NOT NULL,
+      db_name     TEXT NOT NULL UNIQUE,
+      crypto_mode TEXT NOT NULL DEFAULT 'user-key',
+      created_at  INTEGER NOT NULL,
+      deleted_at  INTEGER
+    );
+    CREATE TABLE notebook_invites (
+      code_hash   TEXT PRIMARY KEY,
+      notebook_id TEXT NOT NULL REFERENCES notebooks(id),
+      role        TEXT NOT NULL,
+      created_by  TEXT NOT NULL REFERENCES accounts(id),
+      created_at  INTEGER NOT NULL,
+      expires_at  INTEGER,
+      used_at     INTEGER
+    );
     -- ★ v1 的形状：created_by 是 NOT NULL 且指向 accounts(id)
     CREATE TABLE invites (
       code_hash  TEXT PRIMARY KEY,
@@ -73,6 +92,42 @@ function createV1Database(path: string): void {
     3,
     1,
   );
+  db.close();
+}
+
+/**
+ * 造一个「schema_version = 7、`notebook_invites` 还是旧形状」的库。
+ *
+ * 迁移 8 只碰这一张表，所以 fixture 只需要它和它引用的两张父表 ——
+ * 不必把迁移 1–7 的全部表都搬过来（那会让这个用例和无关 schema 绑死）。
+ */
+function createV7DatabaseWithNotebookInvites(path: string): void {
+  const db = new DatabaseSync(path);
+  db.exec("PRAGMA foreign_keys = ON");
+  db.exec(`
+    CREATE TABLE schema_version (version INTEGER NOT NULL);
+    CREATE TABLE accounts (id TEXT PRIMARY KEY, email TEXT, created_at INTEGER NOT NULL);
+    CREATE TABLE notebooks (id TEXT PRIMARY KEY);
+    CREATE TABLE notebook_invites (
+      code_hash   TEXT PRIMARY KEY,
+      notebook_id TEXT NOT NULL REFERENCES notebooks(id),
+      role        TEXT NOT NULL,
+      created_by  TEXT NOT NULL REFERENCES accounts(id),
+      created_at  INTEGER NOT NULL,
+      expires_at  INTEGER,
+      used_at     INTEGER
+    );
+  `);
+  db.prepare("INSERT INTO schema_version (version) VALUES (7)").run();
+  db.prepare("INSERT INTO accounts (id, email, created_at) VALUES ('acc-old', 'old@example.com', 1)").run();
+  db.prepare("INSERT INTO notebooks (id) VALUES ('nb-old')").run();
+  // 一条**已经用掉**的一次性邀请，和一条没用过的：迁移不能把用过的复活。
+  db.prepare(
+    "INSERT INTO notebook_invites (code_hash, notebook_id, role, created_by, created_at, expires_at, used_at) VALUES (?, 'nb-old', 'editor', 'acc-old', ?, NULL, ?)",
+  ).run("nb-invite-used", 1_700_000_000_003, 1_700_000_000_004);
+  db.prepare(
+    "INSERT INTO notebook_invites (code_hash, notebook_id, role, created_by, created_at, expires_at, used_at) VALUES (?, 'nb-old', 'viewer', 'acc-old', ?, NULL, NULL)",
+  ).run("nb-invite-unused", 1_700_000_000_005);
   db.close();
 }
 
@@ -204,5 +259,31 @@ describe("迁移 4 · 账号改为邮箱 + 密码（重建 accounts）", () => {
     db.prepare("INSERT INTO accounts (id, email, created_at) VALUES ('a1', 'lan@example.com', 1)").run();
     expect(() => db.prepare("INSERT INTO accounts (id, email, created_at) VALUES ('a2', 'LAN@example.com', 1)").run()).toThrow();
     db.close();
+  });
+});
+
+describe("迁移 8 · 笔记本邀请码 max_uses / uses", () => {
+  it("旧行按一次性兼容：用过的 `uses=1`（不能复活），没用过的 `uses=0`", () => {
+    withTempDb((path) => {
+      createV7DatabaseWithNotebookInvites(path);
+      const db = openDatabase({ path });
+
+      const used = db.prepare("SELECT * FROM notebook_invites WHERE code_hash = ?").get("nb-invite-used") as unknown as {
+        max_uses: number;
+        uses: number;
+        used_at: number | null;
+      };
+      expect(used.max_uses).toBe(1);
+      expect(used.uses).toBe(1);
+      expect(used.used_at).not.toBeNull();
+
+      const unused = db.prepare("SELECT * FROM notebook_invites WHERE code_hash = ?").get("nb-invite-unused") as unknown as {
+        max_uses: number;
+        uses: number;
+      };
+      expect(unused.max_uses).toBe(1);
+      expect(unused.uses).toBe(0);
+      db.close();
+    });
   });
 });

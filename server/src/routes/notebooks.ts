@@ -267,6 +267,7 @@ export function createNotebookRoutes(deps: NotebookRoutesDeps): Hono {
         role: input.role,
         createdBy: auth.id,
         expiresAt,
+        maxUses,
         now,
       });
     } catch (error) {

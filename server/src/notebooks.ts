@@ -60,6 +60,8 @@ export interface NotebookInviteRow {
   created_at: number;
   expires_at: number | null;
   used_at: number | null;
+  max_uses: number;
+  uses: number;
 }
 
 export class NotebookError extends Error {
@@ -270,16 +272,28 @@ export class NotebookStore {
   /* ------------------------------------------------------- 成员与邀请码 */
 
   /**
-   * 加入笔记本（凭一次性邀请码）。
+   * 加入笔记本（凭邀请码）。
    *
    * ⚠️ **`crypto_mode != 'none'` 直接拒绝**（§1.4 的 v1 规则）。这条必须在**发码**与
    * **用码**两处都判：只判发码处的话，一个在改 crypto_mode 之前发出去的码仍然能用。
+   *
+   * ## 为什么消费必须在事务内用一条带条件的 UPDATE
+   *
+   * 事务外的检查只负责给出友好错误，**不能**作为放行依据：两个连接可以同时读到
+   * `uses < max_uses`。真正的判定放在 `BEGIN IMMEDIATE` 之后：
+   *
+   * - `uses < max_uses` 让一张邀请最多被消费 `max_uses` 次（单次邀请只有一个赢家）；
+   * - `expires_at` 在 UPDATE 里复查，堵住「预检查之后刚好过期」的窗口；
+   * - 成员行在事务内复查，同账号并发请求不会插入两次，也不会白扣一次。
+   *
+   * `used_at` 记的是**用尽**的时刻（单次邀请仍是「用过的时刻」）；多用途邀请
+   * 还没用尽时保持 NULL。
    */
   joinByInvite(codeHash: string, accountId: string, now = Date.now()): { notebookId: string; role: Role } {
     const invite = this.db.prepare("SELECT * FROM notebook_invites WHERE code_hash = ?").get(codeHash) as unknown as NotebookInviteRow | undefined;
     if (!invite) throw new NotebookError("bad-invite", "邀请码无效");
-    if (invite.used_at !== null) throw new NotebookError("invite-used", "邀请码已经被用过了");
     if (invite.expires_at !== null && now > invite.expires_at) throw new NotebookError("invite-expired", "邀请码已过期");
+    if (invite.uses >= invite.max_uses) throw new NotebookError("invite-used", "邀请码已经被用完了");
 
     const notebook = this.findById(invite.notebook_id);
     if (!notebook) throw new NotebookError("not-found", "笔记本不存在");
@@ -292,28 +306,68 @@ export class NotebookStore {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const fresh = this.db.prepare("SELECT * FROM notebook_invites WHERE code_hash = ?").get(codeHash) as unknown as NotebookInviteRow | undefined;
+      if (!fresh) throw new NotebookError("bad-invite", "邀请码无效");
+      if (fresh.expires_at !== null && now > fresh.expires_at) throw new NotebookError("invite-expired", "邀请码已过期");
+      if (fresh.uses >= fresh.max_uses) throw new NotebookError("invite-used", "邀请码已经被用完了");
+
+      const freshNotebook = this.findById(fresh.notebook_id);
+      if (!freshNotebook) throw new NotebookError("not-found", "笔记本不存在");
+      if (freshNotebook.crypto_mode !== CRYPTO_MODE_SHAREABLE) {
+        throw new NotebookError("crypto-mode-not-shareable", "端到端加密的笔记本在 v1 里不可共享");
+      }
+      if (this.resolveMembership(freshNotebook.id, accountId)) {
+        throw new NotebookError("already-member", "你已经是这个笔记本的成员了");
+      }
+
+      const consumed = this.db
+        .prepare(
+          `UPDATE notebook_invites
+              SET uses = uses + 1,
+                  used_at = CASE WHEN uses + 1 >= max_uses THEN ? ELSE used_at END
+            WHERE code_hash = ?
+              AND uses < max_uses
+              AND (expires_at IS NULL OR expires_at > ?)`,
+        )
+        .run(now, codeHash, now);
+      if (Number(consumed.changes ?? 0) === 0) {
+        // 事务内也没消费成功：按当前状态返回既有错误码。
+        if (fresh.expires_at !== null && now > fresh.expires_at) throw new NotebookError("invite-expired", "邀请码已过期");
+        throw new NotebookError("invite-used", "邀请码已经被用完了");
+      }
+
       this.db
         .prepare("INSERT INTO memberships (notebook_id, account_id, role, created_at) VALUES (?, ?, ?, ?)")
-        .run(notebook.id, accountId, invite.role, now);
-      this.db.prepare("UPDATE notebook_invites SET used_at = ? WHERE code_hash = ?").run(now, codeHash);
+        .run(freshNotebook.id, accountId, fresh.role, now);
       this.db.exec("COMMIT");
+      return { notebookId: freshNotebook.id, role: fresh.role as Role };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    return { notebookId: notebook.id, role: invite.role as Role };
   }
 
-  createInvite(input: { codeHash: string; notebookId: string; role: Role; createdBy: string; expiresAt?: number | null; now?: number }): void {
+  createInvite(input: {
+    codeHash: string;
+    notebookId: string;
+    role: Role;
+    createdBy: string;
+    expiresAt?: number | null;
+    maxUses?: number;
+    now?: number;
+  }): void {
     const notebook = this.findById(input.notebookId);
     if (!notebook) throw new NotebookError("not-found", "笔记本不存在");
     if (notebook.crypto_mode !== CRYPTO_MODE_SHAREABLE) {
       throw new NotebookError("crypto-mode-not-shareable", "端到端加密的笔记本在 v1 里不可共享");
     }
     if (input.role === "owner") throw new NotebookError("forbidden", "owner 不能通过邀请码分发");
+    const maxUses = input.maxUses ?? 1;
     this.db
-      .prepare("INSERT INTO notebook_invites (code_hash, notebook_id, role, created_by, created_at, expires_at, used_at) VALUES (?, ?, ?, ?, ?, ?, NULL)")
-      .run(input.codeHash, input.notebookId, input.role, input.createdBy, input.now ?? Date.now(), input.expiresAt ?? null);
+      .prepare(
+        "INSERT INTO notebook_invites (code_hash, notebook_id, role, created_by, created_at, expires_at, used_at, max_uses, uses) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0)",
+      )
+      .run(input.codeHash, input.notebookId, input.role, input.createdBy, input.now ?? Date.now(), input.expiresAt ?? null, maxUses);
   }
 
   /* ---------------------------------------------------------------- 配额 */

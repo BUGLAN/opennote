@@ -342,6 +342,31 @@ describe("§1.4 · E2EE 笔记本不可共享（M7）", () => {
     expect(((await second.json()) as { code: string }).code).toBe("invite-used");
   });
 
+  it("§10.1 M6 / K4 · 响应里的 `maxUses` 真的生效：2 人能加入，第 3 人 `invite-used`", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const bob = world.account();
+    const carol = world.account();
+    const dave = world.account();
+    const notebookId = await makeNotebook(world, alice.token, "none");
+    const invite = (await (
+      await call(world, `/v1/notebooks/${notebookId}/invites`, {
+        method: "POST",
+        headers: jsonAuth(alice.token),
+        body: JSON.stringify({ role: "viewer", maxUses: 2 }),
+      })
+    ).json()) as { code: string; maxUses: number };
+
+    // 调用方拿到的 `maxUses` 必须就是实际生效的次数（这正是报告里的症状）。
+    expect(invite.maxUses).toBe(2);
+    expect((await call(world, "/v1/notebooks/join", { method: "POST", headers: jsonAuth(bob.token), body: JSON.stringify({ code: invite.code }) })).status).toBe(200);
+    expect((await call(world, "/v1/notebooks/join", { method: "POST", headers: jsonAuth(carol.token), body: JSON.stringify({ code: invite.code }) })).status).toBe(200);
+    const third = await call(world, "/v1/notebooks/join", { method: "POST", headers: jsonAuth(dave.token), body: JSON.stringify({ code: invite.code }) });
+    expect(third.status).toBe(400);
+    expect(((await third.json()) as { code: string }).code).toBe("invite-used");
+    expect(world.notebooks.resolveMembership(notebookId, dave.id)).toBeNull();
+  });
+
   it("成员列表只有成员能看", async () => {
     const world = makeWorld();
     const alice = world.account();

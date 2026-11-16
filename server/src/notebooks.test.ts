@@ -241,6 +241,131 @@ describe("§4.4 / §10.1 M6 · 笔记本邀请码：一次性 / 过期 / 伪造"
   });
 });
 
+describe("§10.1 M6 / K4 · 笔记本邀请码 maxUses 真正生效", () => {
+  it("多用途邀请按 `max_uses` 放行：3 次成功后第 4 次 `invite-used`", () => {
+    const { accounts, notebooks, db } = makeWorld();
+    const alice = makeAccount(accounts);
+    const bob = makeAccount(accounts);
+    const carol = makeAccount(accounts);
+    const dave = makeAccount(accounts);
+    const eve = makeAccount(accounts);
+    const notebook = notebooks.create({ ownerId: alice.id, name: "x", cryptoMode: "none" });
+    notebooks.createInvite({ codeHash: "h3", notebookId: notebook.id, role: "editor", createdBy: alice.id, maxUses: 3 });
+
+    for (const person of [bob, carol, dave]) {
+      expect(notebooks.joinByInvite("h3", person.id)).toEqual({ notebookId: notebook.id, role: "editor" });
+    }
+    try {
+      notebooks.joinByInvite("h3", eve.id);
+      expect.unreachable("第 4 次应该被拒绝");
+    } catch (error) {
+      expect((error as NotebookError).code).toBe("invite-used");
+    }
+
+    const row = db.prepare("SELECT uses, used_at FROM notebook_invites WHERE code_hash = ?").get("h3") as unknown as {
+      uses: number;
+      used_at: number | null;
+    };
+    expect(row.uses).toBe(3);
+    // `used_at` 记的是**用尽**的时刻：单次邀请仍是「用过的时刻」。
+    expect(row.used_at).not.toBeNull();
+    // 第 4 个人没有变成成员。
+    expect(notebooks.resolveMembership(notebook.id, eve.id)).toBeNull();
+  });
+
+  it("多用途邀请没用尽时 `used_at` 保持 NULL", () => {
+    const { accounts, notebooks, db } = makeWorld();
+    const alice = makeAccount(accounts);
+    const bob = makeAccount(accounts);
+    const notebook = notebooks.create({ ownerId: alice.id, name: "x", cryptoMode: "none" });
+    notebooks.createInvite({ codeHash: "h5", notebookId: notebook.id, role: "viewer", createdBy: alice.id, maxUses: 5 });
+    notebooks.joinByInvite("h5", bob.id);
+
+    const row = db.prepare("SELECT uses, used_at FROM notebook_invites WHERE code_hash = ?").get("h5") as unknown as {
+      uses: number;
+      used_at: number | null;
+    };
+    expect(row.uses).toBe(1);
+    expect(row.used_at).toBeNull();
+  });
+
+  it("默认仍是一次性（不给 maxUses 时 max_uses = 1）", () => {
+    const { accounts, notebooks, db } = makeWorld();
+    const alice = makeAccount(accounts);
+    const bob = makeAccount(accounts);
+    const carol = makeAccount(accounts);
+    const notebook = notebooks.create({ ownerId: alice.id, name: "x", cryptoMode: "none" });
+    notebooks.createInvite({ codeHash: "h1", notebookId: notebook.id, role: "editor", createdBy: alice.id });
+    notebooks.joinByInvite("h1", bob.id);
+    try {
+      notebooks.joinByInvite("h1", carol.id);
+      expect.unreachable("默认一次性邀请不能给第二个人");
+    } catch (error) {
+      expect((error as NotebookError).code).toBe("invite-used");
+    }
+    const row = db.prepare("SELECT max_uses, uses FROM notebook_invites WHERE code_hash = ?").get("h1") as unknown as {
+      max_uses: number;
+      uses: number;
+    };
+    expect(row).toEqual({ max_uses: 1, uses: 1 });
+  });
+
+  it("过期、作废、用尽都返回既有错误码", () => {
+    const { accounts, notebooks, db } = makeWorld();
+    const alice = makeAccount(accounts);
+    const bob = makeAccount(accounts);
+    const carol = makeAccount(accounts);
+    const notebook = notebooks.create({ ownerId: alice.id, name: "x", cryptoMode: "none" });
+
+    notebooks.createInvite({ codeHash: "h-exp", notebookId: notebook.id, role: "editor", createdBy: alice.id, expiresAt: 1000, maxUses: 5 });
+    try {
+      notebooks.joinByInvite("h-exp", bob.id, 5000);
+      expect.unreachable("过期的邀请不能加入");
+    } catch (error) {
+      expect((error as NotebookError).code).toBe("invite-expired");
+    }
+
+    notebooks.createInvite({ codeHash: "h-revoked", notebookId: notebook.id, role: "editor", createdBy: alice.id, maxUses: 5 });
+    db.prepare("DELETE FROM notebook_invites WHERE code_hash = ?").run("h-revoked");
+    try {
+      notebooks.joinByInvite("h-revoked", bob.id);
+      expect.unreachable("作废（删行）的邀请不能加入");
+    } catch (error) {
+      expect((error as NotebookError).code).toBe("bad-invite");
+    }
+
+    notebooks.createInvite({ codeHash: "h-used", notebookId: notebook.id, role: "editor", createdBy: alice.id });
+    notebooks.joinByInvite("h-used", bob.id);
+    try {
+      notebooks.joinByInvite("h-used", carol.id);
+      expect.unreachable("用尽的邀请不能再加入");
+    } catch (error) {
+      expect((error as NotebookError).code).toBe("invite-used");
+    }
+  });
+
+  it("已经是成员的账号再用同一个码：`already-member`，不消耗次数", () => {
+    const { accounts, notebooks, db } = makeWorld();
+    const alice = makeAccount(accounts);
+    const bob = makeAccount(accounts);
+    const notebook = notebooks.create({ ownerId: alice.id, name: "x", cryptoMode: "none" });
+    notebooks.createInvite({ codeHash: "h2", notebookId: notebook.id, role: "editor", createdBy: alice.id, maxUses: 2 });
+
+    try {
+      notebooks.joinByInvite("h2", alice.id); // owner 已经是成员
+      expect.unreachable("已经是成员");
+    } catch (error) {
+      expect((error as NotebookError).code).toBe("already-member");
+    }
+    const before = db.prepare("SELECT uses FROM notebook_invites WHERE code_hash = ?").get("h2") as unknown as { uses: number };
+    expect(before.uses).toBe(0);
+
+    notebooks.joinByInvite("h2", bob.id);
+    const after = db.prepare("SELECT uses FROM notebook_invites WHERE code_hash = ?").get("h2") as unknown as { uses: number };
+    expect(after.uses).toBe(1);
+  });
+});
+
 describe("§4.5 · 置备：五步 + 幂等 + 回滚", () => {
   const base = { syncUser: "sync-service", protocolVersion: 1, cryptoMode: "none" as const, maxFileBytes: 32 * 1024 * 1024 };
 

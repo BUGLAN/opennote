@@ -27,7 +27,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 interface Migration {
   version: number;
@@ -432,6 +432,25 @@ const MIGRATIONS: readonly Migration[] = [
           revoked_at   INTEGER
         );
         CREATE INDEX idx_shares_account ON shares(account_id);
+      `);
+    },
+  },
+  {
+    version: 8,
+    description: "笔记本邀请码按 max_uses 消费：notebook_invites 增加 max_uses / uses",
+    up: (db) => {
+      /*
+       * 发码接口早就接受 `maxUses`，但表里没有对应的列：`createInvite` 把它丢了，
+       * 用码时也只看 `used_at`。于是 `maxUses > 1` 的邀请实际只能用一次，
+       * 而响应仍然声称可以多次使用。
+       *
+       * 旧行按「一次性邀请」兼容：`max_uses = 1`；已经用过的行 `uses = 1`。
+       * 若只给默认值 0，会把**已经用掉**的旧邀请复活成可用，那是一个安全回归。
+       */
+      db.exec(`
+        ALTER TABLE notebook_invites ADD COLUMN max_uses INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE notebook_invites ADD COLUMN uses INTEGER NOT NULL DEFAULT 0;
+        UPDATE notebook_invites SET uses = CASE WHEN used_at IS NOT NULL THEN 1 ELSE 0 END;
       `);
     },
   },
