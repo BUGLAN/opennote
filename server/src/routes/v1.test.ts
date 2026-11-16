@@ -684,6 +684,33 @@ describe("§4.3 · 客户端统计：只记计数", () => {
     // 1 + 2 = 3（累加），pushes 也是 3 + 3 = 6。
     expect(stats[0]).toMatchObject({ day: "2026-10-13", conflicts: 3, pushes: 6, pulls: 4, deletes: 2 });
   });
+
+  it("请求体伪造别的 notebookId 或写不存在的 id → 只记到 `?nb=` 解析出的库", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const bob = world.account();
+    const aliceNotebook = world.notebook(alice.id);
+    const bobNotebook = world.notebook(bob.id);
+    const missingNotebookId = "00000000-0000-4000-8000-000000000000";
+    const payload = (notebookId: string) =>
+      JSON.stringify({ notebookId, day: "2026-10-14", conflicts: 1, errors: 2, pushes: 3, pulls: 4, deletes: 5 });
+
+    for (const forgedId of [aliceNotebook.id, missingNotebookId]) {
+      const response = await call(world, `/v1/stats?nb=${bobNotebook.id}`, {
+        method: "POST",
+        headers: { ...auth(bob.token), "content-type": "application/json" },
+        body: payload(forgedId),
+      });
+      expect(response.status).toBe(204);
+    }
+
+    expect(world.notebooks.statsFor(bob.id, { notebookId: bobNotebook.id })).toMatchObject([
+      { day: "2026-10-14", conflicts: 2, errors: 4, pushes: 6, pulls: 8, deletes: 10 },
+    ]);
+    expect(world.notebooks.statsFor(bob.id, { notebookId: aliceNotebook.id })).toEqual([]);
+    expect(world.notebooks.statsFor(bob.id, { notebookId: missingNotebookId })).toEqual([]);
+    expect(world.notebooks.statsFor(alice.id)).toEqual([]);
+  });
 });
 
 describe("§4.7 · `/v1/events`（SSE 中继）", () => {

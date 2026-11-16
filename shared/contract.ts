@@ -552,11 +552,13 @@ export type SyncInfo = z.infer<typeof syncInfoSchema>;
 /**
  * `POST /v1/stats`：客户端上报的按天计数（§4.3 `client_stats`）。
  *
+ * 笔记本只由 `?nb=` 指定：请求体里**没有** `notebookId`，避免鉴权对象与写入对象
+ * 出现两个来源。旧客户端若仍发送该字段，zod 会安全地忽略它。
+ *
  * **服务端看不到冲突内容，只有计数** —— 这与红线 2 一致：Node 不参与裁决，
  * 而且 E2EE 下它也只有密文。
  */
 export const clientStatsRequestSchema = z.object({
-  notebookId: notebookIdSchema,
   day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "day 必须是 YYYY-MM-DD"),
   conflicts: z.number().int().nonnegative(),
   errors: z.number().int().nonnegative(),

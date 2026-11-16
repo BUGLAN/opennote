@@ -809,10 +809,10 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     } catch {
       return json({ error: "统计载荷形状不对", code: "bad-request" }, 400);
     }
-    const { account } = resolved;
+    const { account, notebook } = resolved;
     deps.notebooks.reportStats?.({
       accountId: account.id,
-      notebookId: input.notebookId,
+      notebookId: notebook.id,
       day: input.day,
       conflicts: input.conflicts,
       errors: input.errors,
