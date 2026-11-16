@@ -471,6 +471,47 @@ describe("批量取（/v1/files）：一个请求拿多条", () => {
     expect(singleReads).toBe(3);
   });
 
+  it("★ 整批 413（服务端整批上限）时**对半拆批**，不整批退化成逐条", async () => {
+    const remote = createMemoryProvider({ cryptoMode: "none" });
+    const ledger = createSyncLedger({ baseUrl: "https://x", notebookId: "nb", cryptoMode: "none", protocolVersion: 1 });
+    for (const name of ["a", "b", "c", "d"]) {
+      remote.seed(idForPath("notes/" + name + ".md"), "hash-" + name, new TextEncoder().encode("# " + name));
+    }
+
+    const batchSizes: number[] = [];
+    let singleReads = 0;
+    const provider: SyncProvider = {
+      name: "batch-limited",
+      cryptoMode: "none",
+      tree: (options) => remote.tree(options),
+      changes: (options) => remote.changes(options),
+      read: async (did) => {
+        singleReads += 1;
+        return remote.read(did);
+      },
+      // 服务端的整批上限：一批 > 1 条就 413（单条取仍然成功）。
+      readMany: async (dids) => {
+        batchSizes.push(dids.length);
+        if (dids.length > 1) throw new SyncProviderError("server", "这一批正文超过上限", 413, "too-large");
+        const out = new Map<string, { bytes: Uint8Array; hash: string; rev: string }>();
+        const result = await remote.read(dids[0]!);
+        if (result !== null) out.set(dids[0]!, result);
+        return out;
+      },
+      put: (input) => remote.put(input),
+      delete: (input) => remote.delete(input),
+      checkpoint: (cursor) => remote.checkpoint(cursor),
+    };
+
+    const local = new Map<string, Uint8Array>();
+    const result = await syncOnceIncremental({ provider, ledger, deps: makeDeps(local), since: null });
+    expect(result.pulled).toBe(4);
+    expect(local.size).toBe(4);
+    // 深度优先：4 → 左 2 → 左 1+1 → 右 2 → 左 1+1。都是批量接口，一条都没走单条 `read()`。
+    expect(batchSizes).toEqual([4, 2, 1, 1, 2, 1, 1]);
+    expect(singleReads).toBe(0);
+  });
+
   it("★ 批量接口撞 429 时**绝不**退化成逐条（1 次限流会被放大成 N 个请求）", async () => {
     /*
      * 这是真机踩到的放大路径：批量取 50 篇撞一次 429 → 原来的「失败就逐条退回」

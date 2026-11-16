@@ -969,8 +969,10 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    * 批量之后 555 篇 = 12 个请求 —— 首次全量从十几秒降到几秒量级，
    * 而且限流压力也小了一个数量级。
    *
-   * 为什么要有退路：老服务端没有这个端点（404）、或单条超限（413）。
-   * 那时**逐条退回**，绝不让整轮同步失败 —— 批量只是优化。
+   * 为什么要有退路：老服务端没有这个端点（404）、或整批/单条超限（413）。
+   * 404 时**逐条退回**；413 时先**对半拆批**（服务端上限比正常一批大得多，
+   * 拆几次就回到上限内），拆到单条仍超限才走 `read()` 拿到准确的错误。
+   * 绝不让整轮同步因为批量失败 —— 批量只是优化。
    */
   if (typeof provider.readMany === "function" && pullPlan.download.length > 1) {
     /*
@@ -1003,11 +1005,14 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     if (current.length > 0) chunks.push(current);
     if (singles.length > 0) log("pull", { large: singles.length });
     // 先小后大：几百篇小笔记先落地，界面上先「有东西」，大文件慢慢来。
-    await runBounded(chunks, concurrency, async (items) => {
+    type PullItem = (typeof pullPlan.download)[number];
+
+    /** 取一批；404 逐条退回，413 对半拆批，其余错误如实抛（见下）。 */
+    const readChunk = async (items: PullItem[]): Promise<{ item: PullItem; result: ProviderReadResult | null }[]> => {
       const dids = items.map((item) => deps.didOf(item.path));
-      let results: Map<string, ProviderReadResult>;
       try {
-        results = await provider.readMany!(dids);
+        const results = await provider.readMany!(dids);
+        return items.map((item, index) => ({ item, result: results.get(dids[index]!) ?? null }));
       } catch (error) {
         /*
          * ★ **429 / 网络错误不能退化成逐条读**。
@@ -1016,20 +1021,38 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
          * 但 429 也被吞进这条路时，一次「等 30 秒就好」会被放大成 **50 个请求**，
          * 每一个又各自撞 429 —— 限流从「等一下」变成「打死」。
          *
-         * 所以只有「这个端点不可用」才退回逐条；其余（限流、5xx、网络）如实抛，
+         * 所以只有「这个端点不可用」才退；其余（限流、5xx、网络）如实抛，
          * 交给调度器按退避重试整轮。
          */
         const status = error instanceof SyncProviderError ? error.status : null;
-        if (status !== 404 && status !== 413) throw error;
-        log("pull", { batchFailed: true, reason: error instanceof Error ? error.message : String(error) });
-        results = new Map();
-        for (const did of dids) {
-          const single = await provider.read(did);
-          if (single !== null) results.set(did, single);
+        if (status === 404) {
+          log("pull", { batchFailed: true, reason: error instanceof Error ? error.message : String(error) });
+          const out: { item: PullItem; result: ProviderReadResult | null }[] = [];
+          for (let index = 0; index < items.length; index += 1) {
+            out.push({ item: items[index]!, result: await provider.read(dids[index]!) });
+          }
+          return out;
         }
+        if (status === 413) {
+          /*
+           * 413 有两种：整批超过 `FILES_BATCH_MAX_BYTES`，或单条超过 `maxFileBytes`。
+           * 对半拆对两者都成立：整批超限几次拆分就回到上限内；单条超限拆到 1 条时，
+           * `read()` 会抛出与服务端一致的那条错误（和旧行为一样，不掩盖真错误）。
+           */
+          if (items.length === 1) {
+            log("pull", { batchFailed: true, reason: "single item too large" });
+            return [{ item: items[0]!, result: await provider.read(dids[0]!) }];
+          }
+          log("pull", { batchSplit: items.length });
+          const middle = Math.ceil(items.length / 2);
+          return [...(await readChunk(items.slice(0, middle))), ...(await readChunk(items.slice(middle)))];
+        }
+        throw error;
       }
-      for (let index = 0; index < items.length; index += 1) {
-        await applyPulled(items[index]!, results.get(dids[index]!) ?? null);
+    };
+    await runBounded(chunks, concurrency, async (items) => {
+      for (const { item, result } of await readChunk(items)) {
+        await applyPulled(item, result);
       }
     });
     // 大文件同时只取两个：它们拼的是带宽，不是往返，并发开大只会让每一个都更慢。

@@ -24,7 +24,7 @@
  * - **没有 `@noble/*` 相关配置**：服务端不做加解密（红线 3、§4.9）。
  */
 
-import { PROTOCOL_VERSION } from "../../shared/contract";
+import { FILES_BATCH_MAX_BYTES, PROTOCOL_VERSION } from "../../shared/contract";
 
 export interface ServerConfig {
   /** HTTP 监听端口（compose 里是 8787）。 */
@@ -47,6 +47,13 @@ export interface ServerConfig {
 
   /** 单文件上限（字节）。受边缘 30s 写超时约束（U18）。 */
   maxFileBytes: number;
+  /**
+   * `POST /v1/files` 整批原始字节上限（base64 之前）。
+   *
+   * 单条上限只挡住「一个大文件」，挡不住「200 个刚好合规的大文件」：路由会把整批读进
+   * 内存再 base64 + `JSON.stringify`。这个上限把单个请求的驻留内存钉住。
+   */
+  filesBatchMaxBytes: number;
   /** 每账号配额。 */
   defaultAccountQuotaBytes: number;
   defaultAccountQuotaNotebooks: number;
@@ -86,6 +93,8 @@ const DEFAULTS = {
   PROTOCOL_VERSION_EXPECTED: String(PROTOCOL_VERSION),
   SQLITE_PATH: "./data/control.db",
   MAX_FILE_BYTES: "33554432",
+  /** 8 MiB：正常客户端一批 ≤ 512 KiB，有 16 倍余量；最坏情况单请求内存不再随 did 数膨胀。 */
+  FILES_BATCH_MAX_BYTES: String(FILES_BATCH_MAX_BYTES),
   DEFAULT_ACCOUNT_QUOTA_BYTES: "2147483648",
   DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS: "100",
   SSE_HEARTBEAT_MS: "25000",
@@ -199,6 +208,7 @@ export function loadConfig(env: Env = process.env): ServerConfig {
   // 数值项也全部先读一遍（`readPositiveInt` 会把非法值记进 `problems`）。
   const port = readPositiveInt(env, "PORT", DEFAULTS.PORT, problems);
   const maxFileBytes = readPositiveInt(env, "MAX_FILE_BYTES", DEFAULTS.MAX_FILE_BYTES, problems);
+  const filesBatchMaxBytes = readPositiveInt(env, "FILES_BATCH_MAX_BYTES", DEFAULTS.FILES_BATCH_MAX_BYTES, problems);
   const defaultAccountQuotaBytes = readPositiveInt(env, "DEFAULT_ACCOUNT_QUOTA_BYTES", DEFAULTS.DEFAULT_ACCOUNT_QUOTA_BYTES, problems);
   const defaultAccountQuotaNotebooks = readPositiveInt(env, "DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS", DEFAULTS.DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS, problems);
   const accountRequestsPerMinute = readPositiveInt(env, "ACCOUNT_REQUESTS_PER_MINUTE", DEFAULTS.ACCOUNT_REQUESTS_PER_MINUTE, problems);
@@ -237,6 +247,7 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     couchAdminPassword: required.get("COUCH_ADMIN_PASSWORD") ?? "",
     sqlitePath: env.SQLITE_PATH?.trim() || DEFAULTS.SQLITE_PATH,
     maxFileBytes,
+    filesBatchMaxBytes,
     defaultAccountQuotaBytes,
     defaultAccountQuotaNotebooks,
     sseHeartbeatMs,
@@ -276,6 +287,7 @@ export function describeConfig(config: ServerConfig): Record<string, string | nu
     couchUrl: config.couchUrl,
     sqlitePath: config.sqlitePath,
     maxFileBytes: config.maxFileBytes,
+    filesBatchMaxBytes: config.filesBatchMaxBytes,
     sseHeartbeatMs: config.sseHeartbeatMs,
     trustedProxyHeaders: config.trustedProxyHeaders,
     accountRequestsPerMinute: config.accountRequestsPerMinute,

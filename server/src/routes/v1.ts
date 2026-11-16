@@ -555,7 +555,9 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
    * 三条纪律：
    * 1. **只读**（用 `POST` 只是因为 did 太多放不进 URL），不产生任何版本语义；
    * 2. 找不到 / 没有内容标识的条目**直接跳过**，不编造 —— 客户端按「跳过 = 远端没有这一条」处理；
-   * 3. 单条超限时整批 413，让客户端退回单条路径拿到准确的错误，而不是静默截断。
+   * 3. 单条超限、或整批累计超过 `filesBatchMaxBytes` 时整批 413，让客户端缩小批次
+   *    （对半拆）后重试，而不是静默截断；
+   * 4. 累计字节在**转 base64 之前**判定 —— 超限的那一条不会被编码进内存。
    */
   routes.post("/files", async (c) => {
     const resolved = resolveNotebook(c, "read");
@@ -581,6 +583,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     const parsed = checked.data;
 
     const files: { did: string; hash: string; rev: string; data: string }[] = [];
+    let batchBytes = 0;
     try {
       for (const did of parsed.dids) {
         const doc = await deps.couch.getDoc(notebook.db_name, did);
@@ -592,6 +595,20 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         if (bytes.byteLength > deps.config.maxFileBytes) {
           return json({ error: `文件超过上限（${deps.config.maxFileBytes} 字节）`, code: "too-large" }, 413);
         }
+        /*
+         * ★ 整批上限：单条合规不等于一批合规。必须在 `Buffer.from(...).toString("base64")`
+         * **之前**判，否则超限的那一条已经被编码进内存，上限就只挡住了响应、没挡住分配。
+         */
+        if (batchBytes + bytes.byteLength > deps.config.filesBatchMaxBytes) {
+          return json(
+            {
+              error: `这一批正文超过上限（${deps.config.filesBatchMaxBytes} 字节）；请减少 dids 后分批取`,
+              code: "too-large",
+            },
+            413,
+          );
+        }
+        batchBytes += bytes.byteLength;
         files.push({ did, hash, rev: String(doc._rev ?? ""), data: Buffer.from(bytes).toString("base64") });
       }
       return json(parseContract(filesBatchResponseSchema, { files }, "POST /v1/files"), 200);

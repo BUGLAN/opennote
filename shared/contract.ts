@@ -506,6 +506,20 @@ export const filesBatchRequestSchema = z.object({
 });
 export type FilesBatchRequest = z.infer<typeof filesBatchRequestSchema>;
 
+/**
+ * `POST /v1/files` 一次请求的**整批原始字节上限**（base64 之前），也是服务端默认值。
+ *
+ * 为什么单条够小、整批仍会打爆内存：路由会把每条正文读成 `Uint8Array`、转成 base64、
+ * 再合成一份 JSON 响应。只校验单条时，200 × 32 MiB 的「合规」请求能让 Node 同时持有
+ * 数 GiB 的原始字节 + base64 字符串 + `JSON.stringify` 的副本。
+ *
+ * 8 MiB 的取舍：正常客户端一批最多 50 条 / 512 KiB（`src/sync/engine.ts` 的
+ * `PULL_BATCH_BYTES`），有 16 倍余量；而最坏情况单请求的驻留内存被压在
+ * 约 `limit × 3 + 单条上限`，不再随 did 数量线性膨胀。超过时整批 413（不静默截断），
+ * 客户端按「对半拆批」缩小批次，单条仍超限时才退回 `/v1/file`。
+ */
+export const FILES_BATCH_MAX_BYTES = 8 * 1024 * 1024;
+
 /** `POST /v1/account/rotate` 之后旧 `authToken` **立即失效** —— 客户端要能给明确文案（§1.5 代价 2）。 */
 export const authErrorSchema = z.object({
   error: z.string(),

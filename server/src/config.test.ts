@@ -119,6 +119,8 @@ describe("数值项的校验", () => {
     const config = loadConfig(baseEnv());
     expect(config.port).toBe(8787);
     expect(config.maxFileBytes).toBe(33554432);
+    // 整批上限：正常客户端一批 ≤ 512 KiB，8 MiB 留 16 倍余量，同时钉住单请求内存。
+    expect(config.filesBatchMaxBytes).toBe(8 * 1024 * 1024);
     expect(config.defaultAccountQuotaBytes).toBe(2147483648);
     expect(config.defaultAccountQuotaNotebooks).toBe(100);
     // ★ 2026-10-22 改：协议是「一篇一请求」，120/分钟 = 2 篇/秒，等于把正常同步按死。
@@ -128,6 +130,11 @@ describe("数值项的校验", () => {
     // 突发容量默认取每分钟速率的 1/10（10 秒的量），且至少 20。
     expect(config.accountBurst).toBe(120);
     expect(config.globalBurst).toBe(600);
+  });
+
+  it("整批上限可以单独配（运维按内存余量调整）", () => {
+    expect(loadConfig({ ...baseEnv(), FILES_BATCH_MAX_BYTES: "1048576" }).filesBatchMaxBytes).toBe(1048576);
+    expect(() => loadConfig({ ...baseEnv(), FILES_BATCH_MAX_BYTES: "0" })).toThrow(/FILES_BATCH_MAX_BYTES/);
   });
 });
 

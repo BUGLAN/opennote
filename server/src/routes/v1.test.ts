@@ -52,12 +52,12 @@ interface World {
   notebook(ownerId: string, name?: string, cryptoMode?: "none" | "user-key"): { id: string; dbName: string };
 }
 
-function makeWorld(): World {
+function makeWorld(envOverrides: Record<string, string> = {}): World {
   const db = openDatabase({ path: ":memory:" });
   const fake = new FakeCouch();
   const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
-  const config = loadConfig(ENV);
+  const config = loadConfig({ ...ENV, ...envOverrides });
   const couch = couchClient(fake);
   // 测试里 admin 与运行时用同一个假客户端（真实部署里是两套凭据）。
   const deps = { accounts, notebooks, config, couch, couchAdmin: couch, audit: (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event) };
@@ -992,6 +992,56 @@ describe("批量取 · `POST /v1/files`（把请求数从「= 文件数」压到
       body: JSON.stringify({ dids: [] }),
     });
     expect(response.status).toBe(400);
+  });
+
+  it("★ 单条都合规、整批超限 ⇒ 413，且响应体很小（没有把整批编码进内存）", async () => {
+    // 上限调到 1 KiB，避免用例真的分配 8 MiB；语义与默认值完全一样。
+    const world = makeWorld({ FILES_BATCH_MAX_BYTES: "1024" });
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const text = "x".repeat(800); // 单条 800 B < maxFileBytes，也 < 整批上限
+    seedDocs(world, notebook.dbName, [
+      { did: "f:a", path: "a.md", text, hash: "a".repeat(64) },
+      { did: "f:b", path: "b.md", text, hash: "b".repeat(64) },
+    ]);
+
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: ["f:a", "f:b"] }),
+    });
+    expect(response.status).toBe(413);
+    const body = (await response.json()) as { error: string; code: string };
+    expect(body.code).toBe("too-large");
+    expect(body.error).toContain("超过上限");
+    expect(body.error).toContain("分批");
+    // 错误响应只该是那一小段文案：如果先编码再判定，这里会带上 >1 KiB 的 base64。
+    expect(JSON.stringify(body).length).toBeLessThan(512);
+  });
+
+  it("整批上限按**累计原始字节**算：刚好在上限内 200，多一条就 413", async () => {
+    const world = makeWorld({ FILES_BATCH_MAX_BYTES: "1000" });
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    seedDocs(world, notebook.dbName, [
+      { did: "f:a", path: "a.md", text: "a".repeat(600), hash: "a".repeat(64) },
+      { did: "f:b", path: "b.md", text: "b".repeat(400), hash: "b".repeat(64) },
+      { did: "f:c", path: "c.md", text: "c".repeat(1), hash: "c".repeat(64) },
+    ]);
+
+    const within = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: ["f:a", "f:b"] }),
+    });
+    expect(within.status).toBe(200);
+
+    const over = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: ["f:a", "f:b", "f:c"] }),
+    });
+    expect(over.status).toBe(413);
   });
 });
 
