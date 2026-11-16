@@ -16,7 +16,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
-import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
+import { FakeCouch, couchAdminClient, couchClient } from "../couch/fakeCouch.test-helper";
+import type { CouchClient } from "../couch/client";
 import type { AccountStore } from "../auth/accounts";
 import { PROTOCOL_VERSION } from "../../../shared/contract";
 import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
@@ -50,6 +51,8 @@ interface World {
   notebooks: NotebookStore;
   config: ServerConfig;
   app: Hono;
+  couch: CouchClient;
+  couchAdmin: CouchClient;
   /** 造一个**管理员**账号。 */
   admin(): { id: string; token: string };
   /** 造一个普通账号。 */
@@ -58,11 +61,13 @@ interface World {
 
 function makeWorld(options: { startedAt?: number } = {}): World {
   const db = openDatabase({ path: ":memory:" });
-  const fake = new FakeCouch();
+  // 模拟 CouchDB 3.x：只有 server admin 能删库，运行时 sync 账号会 403。
+  const fake = new FakeCouch({ deleteRequiresUser: "admin" });
   const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
   const config = loadConfig(ENV);
   const couch = couchClient(fake);
+  const couchAdmin = couchAdminClient(fake);
   const app = new Hono();
   app.route(
     "/v1/admin",
@@ -71,6 +76,7 @@ function makeWorld(options: { startedAt?: number } = {}): World {
       notebooks,
       config,
       couch,
+      couchAdmin,
       settings: new SettingsStore(db, config),
       audit: (event) => notebooks.audit(event),
       ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
@@ -80,7 +86,7 @@ function makeWorld(options: { startedAt?: number } = {}): World {
     const { id, token } = seedAccount(accounts, { isAdmin });
     return { id, token };
   };
-  return { fake, accounts, notebooks, config, app, admin: () => create(true), member: () => create(false) };
+  return { fake, accounts, notebooks, config, app, couch, couchAdmin, admin: () => create(true), member: () => create(false) };
 }
 
 const call = (world: World, path: string, init: RequestInit = {}): Promise<Response> =>
@@ -262,6 +268,84 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
     expect(world.accounts.findById(alice.id)).toBeNull();
   });
 
+  it("sync 凭据删库被 CouchDB 拒绝；账号删除走 admin 凭据", async () => {
+    const world = makeWorld();
+    const admin = world.admin();
+    const alice = world.member();
+    const exclusive = world.notebooks.create({ ownerId: alice.id, name: "独占", cryptoMode: "none" });
+    world.fake.databases.set(exclusive.db_name, new Map());
+
+    // CouchDB 3.x 的纪律：`DELETE /{db}` 只有 server admin 能做，运行时 sync 账号是 403。
+    await expect(world.couch.deleteDatabase(exclusive.db_name)).rejects.toMatchObject({ code: "forbidden", status: 403 });
+    expect(world.fake.databases.has(exclusive.db_name)).toBe(true);
+
+    const response = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    expect(response.status).toBe(200);
+    expect(world.fake.databases.has(exclusive.db_name)).toBe(false);
+  });
+
+  it("删库失败 ⇒ 账号与笔记本保留、审计可见；重试成功后计数一致", async () => {
+    const world = makeWorld();
+    const admin = world.admin();
+    const alice = world.member();
+    const exclusive = world.notebooks.create({ ownerId: alice.id, name: "独占", cryptoMode: "none" });
+    world.fake.databases.set(exclusive.db_name, new Map());
+    world.fake.failNext = `DELETE /${exclusive.db_name}`;
+
+    const failed = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({
+      code: "couch-delete-failed",
+      databasesDeleted: 0,
+      failedDatabases: [{ notebookId: exclusive.id, dbName: exclusive.db_name }],
+    });
+    // 控制面一行都没动：账号、笔记本、成员关系都还在，可以直接重试。
+    expect(world.accounts.findById(alice.id)).not.toBeNull();
+    expect(world.notebooks.findById(exclusive.id)).not.toBeNull();
+    expect(world.notebooks.resolveMembership(exclusive.id, alice.id)?.role).toBe("owner");
+    expect(world.fake.databases.has(exclusive.db_name)).toBe(true);
+    const failedActions = world.notebooks.recentAudit(20).map((event) => event.action);
+    expect(failedActions).toContain("delete_database_failed");
+    expect(failedActions).toContain("delete_account_failed");
+    expect(failedActions).not.toContain("delete_account");
+
+    const retried = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    expect(retried.status).toBe(200);
+    expect(await retried.json()).toEqual({ databasesDeleted: 1, notebooksTransferred: 0 });
+    expect(world.accounts.findById(alice.id)).toBeNull();
+    expect(world.notebooks.findById(exclusive.id)).toBeNull();
+    const finalAudit = world.notebooks.recentAudit(20).find((event) => event.action === "delete_account");
+    expect(finalAudit?.detail).toContain("databasesDeleted=1");
+  });
+
+  it("部分库已删后重试：最终 databasesDeleted 等于实际不存在的独占库数", async () => {
+    const world = makeWorld();
+    const admin = world.admin();
+    const alice = world.member();
+    const first = world.notebooks.create({ ownerId: alice.id, name: "独占 1", cryptoMode: "none" });
+    const second = world.notebooks.create({ ownerId: alice.id, name: "独占 2", cryptoMode: "none" });
+    world.fake.databases.set(first.db_name, new Map());
+    world.fake.databases.set(second.db_name, new Map());
+    world.fake.failNext = `DELETE /${second.db_name}`;
+
+    const partial = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    expect(partial.status).toBe(503);
+    expect(await partial.json()).toMatchObject({ databasesDeleted: 1 });
+    expect(world.fake.databases.has(first.db_name)).toBe(false);
+    expect(world.fake.databases.has(second.db_name)).toBe(true);
+    expect(world.accounts.findById(alice.id)).not.toBeNull();
+    expect(world.notebooks.findById(first.id)).not.toBeNull();
+    expect(world.notebooks.findById(second.id)).not.toBeNull();
+
+    const retried = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    expect(retried.status).toBe(200);
+    expect(await retried.json()).toEqual({ databasesDeleted: 2, notebooksTransferred: 0 });
+    expect(world.fake.databases.has(first.db_name)).toBe(false);
+    expect(world.fake.databases.has(second.db_name)).toBe(false);
+    const finalAudit = world.notebooks.recentAudit(20).find((event) => event.action === "delete_account");
+    expect(finalAudit?.detail).toContain("databasesDeleted=2");
+  });
+
   it("**不能删自己**", async () => {
     const world = makeWorld();
     const admin = world.admin();
@@ -351,6 +435,7 @@ describe("服务器信息与审计", () => {
         notebooks: world.notebooks,
         config: world.config,
         settings: new SettingsStore(world.accounts.db, world.config),
+        couchAdmin: world.couchAdmin,
         couch: new (await import("../couch/client")).CouchClient({
           baseUrl: "http://couchdb:5984",
           user: "u",

@@ -177,7 +177,9 @@ export function describeAudit(event: AuditEvent, labels: ActivityLabels): Activi
 
     /* ------------------------------------------------------------ 错误 */
     case "delete_database_failed":
-      return entry("error", `删除笔记本「${target ? labels.notebook(target) : "?"}」的库失败，需要人工清理`);
+      return entry("error", `删除笔记本「${target ? labels.notebook(target) : "?"}」的库失败，账号删除已中止，可重试`);
+    case "delete_account_failed":
+      return entry("error", `删除账号失败：${fields.failedDatabases ?? "?"} 个独占库没删掉，账号与笔记本已保留，可重试`);
     case "create_notebook_failed":
       return entry("error", `新建笔记本「${target ? labels.notebook(target) : "?"}」失败`);
 

@@ -43,6 +43,8 @@ export interface AdminRoutesDeps {
   config: ServerConfig;
   /** 运行时客户端（报 CouchDB 版本用）。 */
   couch: CouchClient;
+  /** admin 客户端：删账号时要真删 CouchDB 库（sync 账号没有 server admin 权限）。 */
+  couchAdmin: CouchClient;
   settings: SettingsStore;
   audit?: (event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null }) => void;
   /** 进程启动时间（算 uptime；测试可注入）。 */
@@ -173,28 +175,57 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     if (!target) return json({ error: "账号不存在", code: "not-found" }, 404);
 
     /*
-     * ★ **先算出「哪些独占库要真删」，交给编排去清控制面**，再删库。
+     * ★ **先删库、再清控制面** —— 顺序和「删单个笔记本」一致。
      *
-     * 顺序是刻意的：库（CouchDB）与控制面（SQLite）跨两个系统、没有共同事务。
-     * 先清控制面、后删库 ⇒ 最坏是留下一个没人引用的库（可人工清）；
-     * 反过来 ⇒ 先删了库、控制面还指着它（用户会看到「这个笔记本还在」但打不开）。
+     * 库（CouchDB）与控制面（SQLite）跨两个系统、没有共同事务。删库用
+     * **admin 客户端**：CouchDB 3.x 只允许 server admin `DELETE /{db}`，
+     * 运行时 sync 账号会拿到 403。
+     *
+     * 只要有一个库没删掉就**不碰控制面**：账号、笔记本行、成员关系全部保留，
+     * 控制台会看到错误，点一次「删除账号」就能重试。反过来（先清控制面）
+     * 会让独占库失去所有引用，永远留在 CouchDB 里。
      *
      * 编排在 `deleteAccountCascade()`（与控制台走同一条），这里只负责删库。
      */
     const owned = deps.notebooks.listForAccount(accountId).filter((item) => item.role === "owner");
-    const cascade = deps.notebooks.deleteAccountCascade(accountId);
+    const exclusive = owned.filter((item) => deps.notebooks.otherMembersOf(item.notebook.id).length === 0);
     let databasesDeleted = 0;
-    for (const notebookId of cascade.exclusiveNotebooks) {
-      const notebook = owned.find((item) => item.notebook.id === notebookId)?.notebook;
-      if (!notebook) continue;
+    const failed: { notebookId: string; dbName: string; error: string }[] = [];
+    for (const { notebook } of exclusive) {
       try {
-        await deps.couch.deleteDatabase(notebook.db_name);
+        // `false` = 库已经不存在；从「这个账号独占的库」的角度看同样算删掉了（重试时会遇到）。
+        await deps.couchAdmin.deleteDatabase(notebook.db_name);
         databasesDeleted += 1;
       } catch (error) {
-        // 删库失败**不**阻断账号删除（账号已经没用了），但如实记审计。
+        failed.push({ notebookId: notebook.id, dbName: notebook.db_name, error: String(error) });
         deps.audit?.({ actorId: admin.id, action: "delete_database_failed", target: notebook.id, ip: null, detail: String(error) });
       }
     }
+
+    if (failed.length > 0) {
+      deps.audit?.({
+        actorId: admin.id,
+        action: "delete_account_failed",
+        target: accountId,
+        ip: null,
+        detail: `failedDatabases=${failed.length},label=${accountLabel(target).replace(/[,=]/g, " ")}`,
+      });
+      /*
+       * 503 而不是 500：这是一次可重试的上游依赖失败（CouchDB 不可用 / 权限不对），
+       * 不是控制面的程序错误。响应里带上已经删掉的库数，运维能据此判断重试范围。
+       */
+      return json(
+        {
+          error: `有 ${failed.length} 个独占库没能删除；账号和笔记本数据已保留，可以重试（本次已删掉 ${databasesDeleted} 个库）`,
+          code: "couch-delete-failed",
+          databasesDeleted,
+          failedDatabases: failed,
+        },
+        503,
+      );
+    }
+
+    const cascade = deps.notebooks.deleteAccountCascade(accountId);
     const notebooksTransferred = cascade.transferredNotebooks.length;
     const deleted = deps.accounts.delete(accountId);
     if (!deleted) return json({ error: "账号不存在", code: "not-found" }, 404);

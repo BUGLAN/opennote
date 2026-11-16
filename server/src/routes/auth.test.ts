@@ -37,7 +37,10 @@ function makeWorld() {
   const audit = (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event);
   const app = new Hono();
   app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit }));
-  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, config, settings, couch: couchClient(new FakeCouch()), audit }));
+  app.route(
+    "/v1/admin",
+    createAdminRoutes({ accounts, notebooks, config, settings, couch: couchClient(new FakeCouch()), couchAdmin: couchClient(new FakeCouch()), audit }),
+  );
   const call = async (path: string, init: { method?: string; token?: string; body?: unknown } = {}) => {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (init.token) headers.authorization = `Bearer ${init.token}`;

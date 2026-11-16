@@ -49,7 +49,7 @@ function makeWorld(env: Record<string, string> = ENV, options: { now?: () => num
   app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, throttle, ...now }));
   app.use("/v1/admin/*", csrfGuard());
   app.route("/v1/admin", createAdminViewRoutes({ accounts, notebooks, config, couch, settings, ...now }));
-  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, config, couch, settings, audit, ...now }));
+  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, config, couch, couchAdmin: couch, settings, audit, ...now }));
   app.route("/", createPanelRoutes({ accounts, notebooks, config, settings, throttle, audit, ...now }));
 
   const call = async (path: string, init: { method?: string; body?: unknown; headers?: Record<string, string> } = {}) => {

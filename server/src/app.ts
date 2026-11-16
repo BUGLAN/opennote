@@ -226,6 +226,7 @@ export function createApp(options: AppOptions): BuiltApp {
       notebooks,
       config,
       couch,
+      couchAdmin,
       settings,
       audit: (event) => notebooks.audit(event),
       ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),

@@ -41,7 +41,7 @@ function makeWorld() {
   const app = new Hono();
   app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, now }));
   app.route("/v1/admin", createAdminViewRoutes({ accounts, notebooks, config, couch, settings, now, startedAt: NOW - 3600_000 }));
-  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, config, couch, settings, audit, now }));
+  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, config, couch, couchAdmin: couch, settings, audit, now }));
   const call = async (path: string, init: { method?: string; token?: string; body?: unknown } = {}) => {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (init.token) headers.authorization = `Bearer ${init.token}`;

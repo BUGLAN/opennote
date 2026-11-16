@@ -15,6 +15,14 @@ interface FakeDoc {
   [key: string]: unknown;
 }
 
+export interface FakeCouchOptions {
+  /**
+   * 模拟 CouchDB 3.x 的删库权限：只有这个用户名（server admin）能 `DELETE /{db}`，
+   * 其它账号（运行时 `sync` 账号）得到 403。不设时不做账号区分（大多数用例不需要）。
+   */
+  deleteRequiresUser?: string;
+}
+
 export class FakeCouch {
   readonly databases = new Map<string, Map<string, FakeDoc>>();
   readonly calls: string[] = [];
@@ -30,6 +38,11 @@ export class FakeCouch {
   /** 设成真时下一次请求抛网络错误（测回滚）。 */
   failNext: string | null = null;
   private counter = 0;
+  private readonly deleteRequiresUser: string | null;
+
+  constructor(options: FakeCouchOptions = {}) {
+    this.deleteRequiresUser = options.deleteRequiresUser ?? null;
+  }
 
   private rev(): string {
     this.counter += 1;
@@ -76,6 +89,10 @@ export class FakeCouch {
         return json(201, { ok: true });
       }
       if (method === "DELETE") {
+        // CouchDB 3.x：删库是 server admin 操作，运行时 sync 账号会拿到 403。
+        if (this.deleteRequiresUser !== null && userOf(init) !== this.deleteRequiresUser) {
+          return json(403, { error: "forbidden", reason: "Only server admins can delete databases" });
+        }
         if (!docs) return json(404, { error: "not_found" });
         this.databases.delete(dbName);
         return json(200, { ok: true });
@@ -236,4 +253,18 @@ export class FakeCouch {
 
 export function couchClient(fake: FakeCouch): CouchClient {
   return new CouchClient({ baseUrl: "http://couchdb:5984", user: "sync-service", password: "pw", fetchImpl: fake.fetchImpl });
+}
+
+/** 和 `couchClient` 同一个假 CouchDB，但用 server admin 凭据（删库用）。 */
+export function couchAdminClient(fake: FakeCouch): CouchClient {
+  return new CouchClient({ baseUrl: "http://couchdb:5984", user: "admin", password: "apw", fetchImpl: fake.fetchImpl });
+}
+
+/** Basic 认证里的用户名（夹具只看用户名，不校验密码）。 */
+function userOf(init?: RequestInit): string | null {
+  const header = new Headers(init?.headers).get("authorization");
+  if (!header?.startsWith("Basic ")) return null;
+  const decoded = Buffer.from(header.slice("Basic ".length), "base64").toString("utf8");
+  const colon = decoded.indexOf(":");
+  return colon >= 0 ? decoded.slice(0, colon) : null;
 }
