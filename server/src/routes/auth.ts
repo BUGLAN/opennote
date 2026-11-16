@@ -158,13 +158,36 @@ export function accountErrorResponse(error: AccountError): Response {
  *
  * 只在内存里：服务重启会清零，这对「挡在线爆破」足够了（攻击者拿不到重启开关），
  * 也免得为一张临时表加迁移。按邮箱而不是按 IP 计，是因为爆破一个账号可以换 IP，换不了邮箱。
+ *
+ * 邮箱来自请求体，攻击者可以每次换一个随机邮箱，所以这张表必须有界：全局清理过期条目，
+ * 并限制 key 的数量（超过时淘汰最久没有新失败的）。
  */
 export class LoginThrottle {
   private readonly failures = new Map<string, number[]>();
   constructor(
     private readonly maxFailures = 5,
     private readonly windowMs = 15 * 60_000,
+    private readonly maxKeys = 100_000,
   ) {}
+
+  /** 当前记着的邮箱数（测试与排障用）。 */
+  get size(): number {
+    return this.failures.size;
+  }
+
+  /**
+   * 全局清理过期邮箱：不会有人再访问的随机邮箱也在这里被删掉。
+   *
+   * 这张表的顺序就是「最后一次失败的时间」顺序（`fail` 总是把 key 移到末尾），
+   * 所以过期的只会排在前面，删到第一个还没过期的就停，不用每次扫全表。
+   */
+  private sweep(now: number): void {
+    for (const [key, times] of this.failures) {
+      const last = times[times.length - 1];
+      if (last !== undefined && now - last < this.windowMs) break;
+      this.failures.delete(key);
+    }
+  }
 
   private recent(key: string, now: number): number[] {
     const kept = (this.failures.get(key) ?? []).filter((at) => now - at < this.windowMs);
@@ -175,13 +198,23 @@ export class LoginThrottle {
 
   /** 被锁时返回还要等多少秒，否则 null。 */
   lockedFor(key: string, now = Date.now()): number | null {
+    this.sweep(now);
     const recent = this.recent(key, now);
     if (recent.length < this.maxFailures) return null;
     return Math.ceil((recent[0]! + this.windowMs - now) / 1000);
   }
 
   fail(key: string, now = Date.now()): void {
-    this.failures.set(key, [...this.recent(key, now), now]);
+    this.sweep(now);
+    const kept = [...this.recent(key, now), now];
+    // 每个邮箱只需要记最近 maxFailures 次；Map 的顺序同时用作淘汰顺序。
+    this.failures.delete(key);
+    this.failures.set(key, kept.length > this.maxFailures ? kept.slice(kept.length - this.maxFailures) : kept);
+    while (this.failures.size > this.maxKeys) {
+      const oldest = this.failures.keys().next();
+      if (oldest.done) break;
+      this.failures.delete(oldest.value);
+    }
   }
 
   succeed(key: string): void {

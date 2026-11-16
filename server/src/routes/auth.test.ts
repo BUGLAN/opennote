@@ -11,7 +11,7 @@ import { loadConfig } from "../config";
 import { NotebookStore } from "../notebooks";
 import { SettingsStore } from "../settings";
 import { testAccountStore } from "../auth/testAccounts.test-helper";
-import { createAuthRoutes } from "./auth";
+import { createAuthRoutes, LoginThrottle } from "./auth";
 import { createAdminRoutes } from "./admin";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
 
@@ -174,6 +174,47 @@ describe("登录", () => {
       expect(text).not.toContain("token_hash");
       expect(text).not.toContain("scrypt$");
     }
+  });
+});
+
+describe("LoginThrottle", () => {
+  it("大量随机邮箱不会无界增长：超过上限时淘汰最久没失败的", () => {
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100);
+    const now = 1_000_000;
+    for (let i = 0; i < 100; i += 1) {
+      for (let attempt = 0; attempt < 5; attempt += 1) throttle.fail(`random-${i}@example.com`, now);
+    }
+    expect(throttle.size).toBe(100);
+    expect(throttle.lockedFor("random-0@example.com", now)).not.toBeNull();
+
+    throttle.fail("one-more@example.com", now);
+    expect(throttle.size).toBe(100);
+    expect(throttle.lockedFor("random-0@example.com", now)).toBeNull();
+    expect(throttle.lockedFor("random-1@example.com", now)).not.toBeNull();
+  });
+
+  it("没人再访问的过期邮箱也会被全局清理", () => {
+    const throttle = new LoginThrottle(5, 60_000, 100);
+    const now = 1_000_000;
+    throttle.fail("old@example.com", now);
+    expect(throttle.size).toBe(1);
+
+    throttle.fail("new@example.com", now + 60_001);
+    expect(throttle.size).toBe(1);
+    expect(throttle.lockedFor("old@example.com", now + 60_001)).toBeNull();
+  });
+
+  it("5 次失败锁 15 分钟，成功后立即清零", () => {
+    const throttle = new LoginThrottle();
+    const now = 1_000_000;
+    for (let attempt = 0; attempt < 5; attempt += 1) throttle.fail("lan@example.com", now + attempt);
+    expect(throttle.lockedFor("lan@example.com", now + 4)).not.toBeNull();
+    expect(throttle.lockedFor("lan@example.com", now + 4 + 15 * 60_000)).toBeNull();
+
+    for (let attempt = 0; attempt < 4; attempt += 1) throttle.fail("lan@example.com", now + 200 + attempt);
+    throttle.succeed("lan@example.com");
+    for (let attempt = 0; attempt < 4; attempt += 1) throttle.fail("lan@example.com", now + 300 + attempt);
+    expect(throttle.lockedFor("lan@example.com", now + 303)).toBeNull();
   });
 });
 
