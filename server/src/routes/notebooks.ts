@@ -219,8 +219,8 @@ export function createNotebookRoutes(deps: NotebookRoutesDeps): Hono {
     } catch (error) {
       return json({ error: `删除库失败：${String(error)}`, code: "server" }, 500);
     }
-    deps.notebooks.markDeleted(notebook.id);
-    deps.notebooks.recomputeNotebookCount(auth.id);
+    deps.notebooks.deleteNotebookCascade(notebook.id);
+    deps.notebooks.recomputeNotebookCount(notebook.owner_id);
     deps.notebooks.audit({ actorId: auth.id, action: "delete_notebook", target: notebook.id, ip: null, detail: null });
     return new Response(null, { status: 204 });
   });

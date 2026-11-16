@@ -210,6 +210,25 @@ export class NotebookStore {
   }
 
   /**
+   * 用户明确删除笔记本：无条件软删，并清掉这个库在控制面的全部子行。
+   *
+   * 与 `markDeleted()` 的「删账号时保留共享库」分开：这里库已经被显式删掉，
+   * 不能再因为「还有别的成员」而变成静默 no-op。
+   */
+  deleteNotebookCascade(notebookId: string, now = Date.now()): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db.prepare("UPDATE notebooks SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").run(now, notebookId);
+      this.deleteNotebookChildren(notebookId);
+      this.db.exec("COMMIT");
+      return Number(result.changes ?? 0) > 0;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /**
    * **只看**这个笔记本除了 owner 还有没有别的成员（**不写**）。
    *
    * 为什么要单独拆出来：删账号的处理流程需要**先问再决定**（独占 ⇒ 删库删行；
@@ -634,24 +653,9 @@ export class NotebookStore {
     for (const id of ids) {
       /*
        * ⚠️ **顺序：先把所有「指向这个笔记本」的子行清掉，最后才删 `notebooks` 本身。**
-       *
-       * `notebooks` 被三张表引用：`memberships`、`notebook_invites`、
-       * `notebook_provisioning`（还有 `client_stats`，它不是外键但同样按 notebook_id 记）。
-       * 第一版漏了 `memberships` 与 `client_stats`，于是删 `notebooks` 时
-       * `FOREIGN KEY constraint failed` —— 而且我在 admin 那侧把它包成了 500，
-       * 现象是「删账号直接 500」，根因藏在一层之外。
+       * 漏掉任何一张都会在删 `notebooks` 时 `FOREIGN KEY constraint failed`。
        */
-      this.db.prepare("DELETE FROM memberships WHERE notebook_id = ?").run(id);
-      this.db.prepare("DELETE FROM notebook_invites WHERE notebook_id = ?").run(id);
-      this.db.prepare("DELETE FROM notebook_provisioning WHERE notebook_id = ?").run(id);
-      this.db.prepare("DELETE FROM client_stats WHERE notebook_id = ?").run(id);
-      /*
-       * ★ 迁移 3 的两张新表也有 `notebook_id`（`notebook_usage` 还是外键）。
-       * 漏掉它们的症状与当年漏掉 `memberships` 一模一样：`FOREIGN KEY constraint failed`，
-       * 而且报错位置离根因很远（在删账号的 HTTP 处理器里）。
-       */
-      this.db.prepare("DELETE FROM notebook_usage WHERE notebook_id = ?").run(id);
-      this.db.prepare("DELETE FROM sync_activity WHERE notebook_id = ?").run(id);
+      this.deleteNotebookChildren(id);
       this.db.prepare("DELETE FROM notebooks WHERE id = ?").run(id);
     }
     /*
@@ -738,13 +742,17 @@ export class NotebookStore {
 
   /** 物理删掉**一个**笔记本的全部子行（不含 CouchDB 库）。 */
   private deleteNotebookRow(notebookId: string): void {
+    this.deleteNotebookChildren(notebookId);
+    this.db.prepare("DELETE FROM notebooks WHERE id = ?").run(notebookId);
+  }
+
+  private deleteNotebookChildren(notebookId: string): void {
     this.db.prepare("DELETE FROM memberships WHERE notebook_id = ?").run(notebookId);
     this.db.prepare("DELETE FROM notebook_invites WHERE notebook_id = ?").run(notebookId);
     this.db.prepare("DELETE FROM notebook_provisioning WHERE notebook_id = ?").run(notebookId);
     this.db.prepare("DELETE FROM client_stats WHERE notebook_id = ?").run(notebookId);
     this.db.prepare("DELETE FROM notebook_usage WHERE notebook_id = ?").run(notebookId);
     this.db.prepare("DELETE FROM sync_activity WHERE notebook_id = ?").run(notebookId);
-    this.db.prepare("DELETE FROM notebooks WHERE id = ?").run(notebookId);
   }
 
   /** 删一个账号的设备账本行（设备**不是凭据**，所以删行不会留下安全后果）。 */

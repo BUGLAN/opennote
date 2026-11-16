@@ -210,6 +210,59 @@ describe("§4.4 · 单条读写：越权 404 / 无权 403", () => {
     expect(world.fake.databases.has(dbName)).toBe(false);
     expect(world.notebooks.findById(created.notebookId)).toBeNull();
   });
+
+  it("owner 删共享笔记本 → 所有成员立刻看不到，成员 / 邀请 / 用量 / 统计行一起清掉", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const bob = world.account();
+    const carol = world.account();
+    const created = (await (
+      await call(world, "/v1/notebooks", { method: "POST", headers: jsonAuth(alice.token), body: JSON.stringify({ name: "共享" }) })
+    ).json()) as { notebookId: string };
+    const dbName = world.notebooks.findById(created.notebookId)!.db_name;
+
+    const invite = (await (
+      await call(world, `/v1/notebooks/${created.notebookId}/invites`, {
+        method: "POST",
+        headers: jsonAuth(alice.token),
+        body: JSON.stringify({ role: "editor" }),
+      })
+    ).json()) as { code: string };
+    expect(
+      (await call(world, "/v1/notebooks/join", { method: "POST", headers: jsonAuth(bob.token), body: JSON.stringify({ code: invite.code }) })).status,
+    ).toBe(200);
+    world.notebooks.createInvite({ codeHash: "left-after-delete", notebookId: created.notebookId, role: "viewer", createdBy: alice.id });
+    world.notebooks.addNotebookBytes(created.notebookId, 4096);
+    world.notebooks.recordActivity({ accountId: alice.id, notebookId: created.notebookId, day: "2026-11-16", kind: "push" });
+    world.notebooks.reportStats({
+      accountId: alice.id,
+      notebookId: created.notebookId,
+      day: "2026-11-16",
+      conflicts: 1,
+      errors: 0,
+      pushes: 2,
+      pulls: 3,
+      deletes: 0,
+    });
+
+    const response = await call(world, `/v1/notebooks/${created.notebookId}`, { method: "DELETE", headers: auth(alice.token) });
+    expect(response.status).toBe(204);
+    expect(world.fake.databases.has(dbName)).toBe(false);
+    expect(world.notebooks.findById(created.notebookId)).toBeNull();
+    expect(world.notebooks.resolveMembership(created.notebookId, alice.id)).toBeNull();
+    expect(world.notebooks.resolveMembership(created.notebookId, bob.id)).toBeNull();
+
+    for (const account of [alice, bob]) {
+      const list = (await (await call(world, "/v1/notebooks", { headers: auth(account.token) })).json()) as { notebooks: { notebookId: string }[] };
+      expect(list.notebooks.map((item) => item.notebookId)).not.toContain(created.notebookId);
+    }
+
+    // 控制面不留可继续用的邀请码、用量或统计。
+    expect(() => world.notebooks.joinByInvite("left-after-delete", carol.id)).toThrowError(/邀请码无效/);
+    expect(world.notebooks.quotaOf(alice.id)).toMatchObject({ notebooks: 0, bytesUsed: 0 });
+    expect(world.notebooks.statsFor(alice.id, { notebookId: created.notebookId })).toEqual([]);
+    expect(world.notebooks.activityForAccount(alice.id, { notebookId: created.notebookId })).toEqual([]);
+  });
 });
 
 describe("§1.4 · E2EE 笔记本不可共享（M7）", () => {
