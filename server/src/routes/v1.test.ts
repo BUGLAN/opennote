@@ -52,15 +52,28 @@ interface World {
   notebook(ownerId: string, name?: string, cryptoMode?: "none" | "user-key"): { id: string; dbName: string };
 }
 
-function makeWorld(envOverrides: Record<string, string> = {}): World {
+interface WorldOptions {
+  env?: Record<string, string>;
+  now?: () => number;
+}
+
+function makeWorld(options: WorldOptions = {}): World {
   const db = openDatabase({ path: ":memory:" });
   const fake = new FakeCouch();
   const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
-  const config = loadConfig({ ...ENV, ...envOverrides });
+  const config = loadConfig({ ...ENV, ...options.env });
   const couch = couchClient(fake);
   // 测试里 admin 与运行时用同一个假客户端（真实部署里是两套凭据）。
-  const deps = { accounts, notebooks, config, couch, couchAdmin: couch, audit: (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event) };
+  const deps = {
+    accounts,
+    notebooks,
+    config,
+    couch,
+    couchAdmin: couch,
+    audit: (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  };
   const app = new Hono();
   app.route("/v1", createV1Routes(deps));
   return {
@@ -143,6 +156,73 @@ describe("§4.7 · `/v1/health`：公开、且是协议闸门", () => {
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.couchVersion).toBeNull();
     expect(body.protocolVersion).toBe(PROTOCOL_VERSION);
+  });
+
+  it("CouchDB 版本在短 TTL 内缓存，并发请求也只探测一次", async () => {
+    let clock = 1_000_000;
+    const world = makeWorld({ now: () => clock });
+    const probes = () => world.fake.calls.filter((call) => call === "GET /").length;
+
+    // 首屏并发：只允许一个请求穿透到 CouchDB。
+    const first = await Promise.all(Array.from({ length: 5 }, () => call(world, "/v1/health")));
+    expect(first.every((response) => response.status === 200)).toBe(true);
+    expect(probes()).toBe(1);
+
+    // TTL 内继续请求：仍不再探测。
+    await call(world, "/v1/health");
+    expect(probes()).toBe(1);
+
+    // TTL 过后才重新探测；并发的这一波仍只算一次。
+    clock += world.config.healthCouchVersionCacheMs;
+    await Promise.all(Array.from({ length: 3 }, () => call(world, "/v1/health")));
+    expect(probes()).toBe(2);
+  });
+
+  it("CouchDB 版本探测失败会缓存，并在健康检查专用超时内返回", async () => {
+    let attempts = 0;
+    let aborts = 0;
+    const hanging = new (await import("../couch/client")).CouchClient({
+      baseUrl: "http://couchdb:5984",
+      user: "u",
+      password: "p",
+      fetchImpl: ((_input: string | URL | Request, init?: RequestInit) => {
+        attempts += 1;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              aborts += 1;
+              const error = new Error("aborted");
+              error.name = "AbortError";
+              reject(error);
+            },
+            { once: true },
+          );
+        });
+      }) as typeof fetch,
+    });
+    const config = loadConfig({ ...ENV, HEALTH_COUCH_TIMEOUT_MS: "20", HEALTH_COUCH_VERSION_CACHE_MS: "1000" });
+    const app = new Hono();
+    const db = openDatabase({ path: ":memory:" });
+    const accounts = testAccountStore(db);
+    const notebooks = new NotebookStore(db);
+    app.route(
+      "/v1",
+      createV1Routes({ accounts, notebooks, config, couch: hanging, couchAdmin: hanging }),
+    );
+
+    const startedAt = Date.now();
+    const first = await app.request("http://localhost/v1/health");
+    const firstBody = (await first.json()) as Record<string, unknown>;
+    expect(first.status).toBe(200);
+    expect(firstBody.couchVersion).toBeNull();
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(aborts).toBe(1);
+
+    // 失败结果也缓存：CouchDB 持续不通时，后续健康检查不再撞同一个超时。
+    const second = await app.request("http://localhost/v1/health");
+    expect(((await second.json()) as Record<string, unknown>).couchVersion).toBeNull();
+    expect(attempts).toBe(1);
   });
 
   it("`webBuildHash` 默认 null，设了环境变量就报出来（§5.6⑤ 的可核对性）", async () => {
@@ -996,7 +1076,7 @@ describe("批量取 · `POST /v1/files`（把请求数从「= 文件数」压到
 
   it("★ 单条都合规、整批超限 ⇒ 413，且响应体很小（没有把整批编码进内存）", async () => {
     // 上限调到 1 KiB，避免用例真的分配 8 MiB；语义与默认值完全一样。
-    const world = makeWorld({ FILES_BATCH_MAX_BYTES: "1024" });
+    const world = makeWorld({ env: { FILES_BATCH_MAX_BYTES: "1024" } });
     const alice = world.account();
     const notebook = world.notebook(alice.id);
     const text = "x".repeat(800); // 单条 800 B < maxFileBytes，也 < 整批上限
@@ -1020,7 +1100,7 @@ describe("批量取 · `POST /v1/files`（把请求数从「= 文件数」压到
   });
 
   it("整批上限按**累计原始字节**算：刚好在上限内 200，多一条就 413", async () => {
-    const world = makeWorld({ FILES_BATCH_MAX_BYTES: "1000" });
+    const world = makeWorld({ env: { FILES_BATCH_MAX_BYTES: "1000" } });
     const alice = world.account();
     const notebook = world.notebook(alice.id);
     seedDocs(world, notebook.dbName, [

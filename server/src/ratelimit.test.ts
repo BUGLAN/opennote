@@ -12,7 +12,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PROTOCOL_VERSION } from "../../shared/contract";
 import { Hono } from "hono";
-import { globalRateLimitKey, rateLimit, rateLimitKeyFromHeader } from "./ratelimit";
+import { globalRateLimitKey, healthRateLimitKey, rateLimit, rateLimitKeyFromHeader } from "./ratelimit";
 
 const shortHash = (value: string): string => `h(${value.slice(0, 6)})`;
 
@@ -153,6 +153,12 @@ describe("§4.11 · 限流键的取法", () => {
     // 两者都没有（测试里的 `app.request()`、或拿不到 socket）：才退回共用桶。
     expect(globalRateLimitKey(null)).toBe("ip:unknown");
   });
+
+  it("健康检查键与全局桶分开，但仍按 IP 分桶", () => {
+    expect(healthRateLimitKey("1.2.3.4")).toBe("health:ip:1.2.3.4");
+    expect(healthRateLimitKey(null)).toBe("health:ip:unknown");
+    expect(healthRateLimitKey("1.2.3.4")).not.toBe(globalRateLimitKey("1.2.3.4"));
+  });
 });
 
 describe("应用装配（§2.4）", () => {
@@ -200,10 +206,33 @@ describe("应用装配（§2.4）", () => {
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
     expect(response.headers.get("access-control-allow-credentials")).toBeNull();
   });
+
+  it("健康检查有独立 IP 桶：不再绕过限流，也不重复消耗全局桶", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { app } = await buildApp({
+      TRUSTED_PROXY_HEADERS: "cf-connecting-ip",
+      HEALTH_REQUESTS_PER_MINUTE: "60",
+      HEALTH_BURST: "1",
+      GLOBAL_REQUESTS_PER_MINUTE: "1",
+      GLOBAL_BURST: "1",
+    });
+    const firstIp = { "cf-connecting-ip": "198.51.100.7" };
+
+    expect((await app.request("http://localhost/v1/health", { headers: firstIp })).status).toBe(200);
+    const limited = await app.request("http://localhost/v1/health", { headers: firstIp });
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("x-ratelimit-burst")).toBe("1");
+
+    // 另一个 IP 有自己的健康检查桶。
+    expect((await app.request("http://localhost/v1/health", { headers: { "cf-connecting-ip": "198.51.100.8" } })).status).toBe(200);
+
+    // 健康检查没有吃掉全局桶：同一 IP 的第一个普通请求仍有完整额度（落 404 而不是 429）。
+    expect((await app.request("http://localhost/v1/not-a-route", { headers: firstIp })).status).toBe(404);
+  });
 });
 
 /** 装配一个测试用 app（假 CouchDB + 内存 SQLite）。 */
-async function buildApp() {
+async function buildApp(overrides: Record<string, string> = {}) {
   const { createApp } = await import("./app");
   const { openDatabase } = await import("./db");
   const { loadConfig } = await import("./config");
@@ -217,6 +246,7 @@ async function buildApp() {
       COUCH_PASSWORD: "pw",
       COUCH_ADMIN_USER: "admin",
       COUCH_ADMIN_PASSWORD: "apw",
+      ...overrides,
     }),
     db: openDatabase({ path: ":memory:" }),
     couch: couchClient(fake),

@@ -110,9 +110,21 @@ describe("数值项的校验", () => {
   });
 
   it("突发容量可以单独配（令牌桶的 burst）", () => {
-    const config = loadConfig({ ...baseEnv(), ACCOUNT_BURST: "50", GLOBAL_BURST: "7" });
+    const config = loadConfig({
+      ...baseEnv(),
+      ACCOUNT_BURST: "50",
+      GLOBAL_BURST: "7",
+      HEALTH_REQUESTS_PER_MINUTE: "30",
+      HEALTH_BURST: "9",
+      HEALTH_COUCH_VERSION_CACHE_MS: "5000",
+      HEALTH_COUCH_TIMEOUT_MS: "750",
+    });
     expect(config.accountBurst).toBe(50);
     expect(config.globalBurst).toBe(7);
+    expect(config.healthRequestsPerMinute).toBe(30);
+    expect(config.healthBurst).toBe(9);
+    expect(config.healthCouchVersionCacheMs).toBe(5000);
+    expect(config.healthCouchTimeoutMs).toBe(750);
   });
 
   it("没配的数值项用 §4.11 的默认值", () => {
@@ -130,6 +142,11 @@ describe("数值项的校验", () => {
     // 突发容量默认取每分钟速率的 1/10（10 秒的量），且至少 20。
     expect(config.accountBurst).toBe(120);
     expect(config.globalBurst).toBe(600);
+    // 健康检查有自己的桶；版本探测默认缓存 15 秒、最多等 2 秒。
+    expect(config.healthRequestsPerMinute).toBe(600);
+    expect(config.healthBurst).toBe(60);
+    expect(config.healthCouchVersionCacheMs).toBe(15000);
+    expect(config.healthCouchTimeoutMs).toBe(2000);
   });
 
   it("整批上限可以单独配（运维按内存余量调整）", () => {

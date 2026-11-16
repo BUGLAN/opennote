@@ -40,7 +40,7 @@ import { clientIpFrom } from "./config";
 import { CouchClient } from "./couch/client";
 import { AccountStore } from "./auth/accounts";
 import { NotebookStore } from "./notebooks";
-import { rateLimit, globalRateLimitKey, rateLimitKeyFromHeader } from "./ratelimit";
+import { rateLimit, globalRateLimitKey, healthRateLimitKey, rateLimitKeyFromHeader } from "./ratelimit";
 import { createAuthRoutes, LoginThrottle } from "./routes/auth";
 import { createAdminRoutes } from "./routes/admin";
 import { createAdminViewRoutes } from "./routes/adminView";
@@ -130,6 +130,20 @@ export function createApp(options: AppOptions): BuiltApp {
   const couchAdmin = options.couchAdmin ?? CouchClient.adminFromConfig(config);
 
   const app = new Hono();
+  const limitedClientIp = (c: Context): string | null => clientIpFrom(c.req.raw.headers, config) ?? socketAddress(c);
+
+  /*
+   * 健康检查的专用桶。它仍然按 IP 限流，但额度独立且更宽松：监控高频探测是正常流量，
+   * 而它背后的 CouchDB 版本探测已由 `routes/v1.ts` 缓存，不能再成为「完全不记账」的缺口。
+   */
+  app.use(
+    "/v1/health",
+    rateLimit({
+      perMinute: config.healthRequestsPerMinute,
+      burst: config.healthBurst,
+      keyOf: (c) => healthRateLimitKey(limitedClientIp(c)),
+    }),
+  );
 
   /*
    * 全局兜底限流（令牌桶）：**可信头优先，socket 地址兜底**。
@@ -144,9 +158,9 @@ export function createApp(options: AppOptions): BuiltApp {
       perMinute: config.globalRequestsPerMinute,
       burst: config.globalBurst,
       keyOf: (c) => {
-        // 健康检查不记账：它要能被监控高频打，而且它不查库。
+        // 健康检查已经走上面的专用桶，不重复消耗全局桶。
         if (c.req.path === "/v1/health") return null;
-        return globalRateLimitKey(clientIpFrom(c.req.raw.headers, config) ?? socketAddress(c));
+        return globalRateLimitKey(limitedClientIp(c));
       },
     }),
   );
@@ -157,7 +171,8 @@ export function createApp(options: AppOptions): BuiltApp {
     rateLimit({
       perMinute: config.accountRequestsPerMinute,
       burst: config.accountBurst,
-      keyOf: (c) => rateLimitKeyFromHeader(c, shortHash),
+      // 健康检查不消耗账号额度；即使监控带了 Bearer，也仍走专用桶。
+      keyOf: (c) => (c.req.path === "/v1/health" ? null : rateLimitKeyFromHeader(c, shortHash)),
     }),
   );
 
@@ -200,7 +215,7 @@ export function createApp(options: AppOptions): BuiltApp {
   );
   app.route(
     "/v1",
-    createV1Routes({ accounts, notebooks, config, couch, couchAdmin, settings, audit: (event) => notebooks.audit(event) }),
+    createV1Routes({ accounts, notebooks, config, couch, couchAdmin, settings, audit: (event) => notebooks.audit(event), ...nowOption }),
   );
   /*
    * 控制台用 cookie 调管理接口：cookie 会被浏览器自动带上，所以变更请求必须带自定义头

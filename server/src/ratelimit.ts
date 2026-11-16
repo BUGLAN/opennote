@@ -177,6 +177,16 @@ export function globalRateLimitKey(clientIp: string | null): string {
   return `ip:${clientIp ?? "unknown"}`;
 }
 
+/**
+ * 健康检查的限流键。
+ *
+ * 它和全局桶**分开**：监控可以高频探测，但不能把额度打成一个无限放行的缺口。
+ * 键仍按 IP，`unknown` 只用于拿不到可信头与 socket 地址的测试/极端情况。
+ */
+export function healthRateLimitKey(clientIp: string | null): string {
+  return `health:ip:${clientIp ?? "unknown"}`;
+}
+
 /** 只读快照（诊断/测试用）。 */
 export interface RateLimitSnapshot {
   buckets: number;

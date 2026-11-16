@@ -65,6 +65,8 @@ export interface V1RoutesDeps {
   /** 服务设置（health 要报登录方式与注册方式）。测试里可以不给，按默认值报。 */
   settings?: SettingsStore;
   audit?: (event: { actorId: string | null; action: string; target?: string | null; ip?: string | null; detail?: string | null }) => void;
+  /** 当前时间（健康检查版本缓存测试可注入）。 */
+  now?: () => number;
 }
 
 /** 笔记本的加密模式（`syncinfo` 与 SQLite 都记着；以 SQLite 为准）。 */
@@ -190,6 +192,34 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       status,
       headers: { "content-type": "application/json; charset=utf-8", ...headers },
     });
+  const now = deps.now ?? (() => Date.now());
+  let couchVersionCache: { value: string | null; expiresAt: number } | null = null;
+  let couchVersionProbe: Promise<string | null> | null = null;
+
+  /**
+   * 健康检查的 CouchDB 版本探测：短 TTL、失败也缓存、并发的首个请求共享同一次探测。
+   *
+   * 为什么失败也要缓存：CouchDB 挂掉时，每个健康检查请求都等一次超时会让监控把
+   * Node 的连接与事件循环占满。失败结果缓存后，这段时间里健康检查仍能快速返回
+   * `ok: true` + `couchVersion: null`，恢复后最多一个 TTL 再重新探到版本。
+   */
+  const cachedCouchVersion = (): Promise<string | null> => {
+    const at = now();
+    if (couchVersionCache !== null && at < couchVersionCache.expiresAt) return Promise.resolve(couchVersionCache.value);
+    if (couchVersionProbe !== null) return couchVersionProbe;
+    couchVersionProbe = deps.couch
+      .version({ timeoutMs: deps.config.healthCouchTimeoutMs })
+      .then((info) => info.version)
+      .catch(() => null)
+      .then((value) => {
+        couchVersionCache = { value, expiresAt: now() + deps.config.healthCouchVersionCacheMs };
+        return value;
+      })
+      .finally(() => {
+        couchVersionProbe = null;
+      });
+    return couchVersionProbe;
+  };
 
   /** 认证（与 account 路由同一条链路，只有这一条）。 */
   const authenticate = (c: { req: { header: (name: string) => string | undefined } }): AccountRow | Response => {
@@ -301,13 +331,8 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
    * 这是浏览器端 E2EE 的固有边界。报出哈希让在意的人能核对「今天这份 JS 是不是我本地那份」。
    */
   routes.get("/health", async () => {
-    let couchVersion: string | null = null;
-    try {
-      couchVersion = (await deps.couch.version()).version;
-    } catch {
-      // CouchDB 不通也要能报健康（否则控制台连「哪里坏了」都看不到）。
-      couchVersion = null;
-    }
+    // CouchDB 不通也要能报健康（否则控制台连「哪里坏了」都看不到）。
+    const couchVersion = await cachedCouchVersion();
     return json(
       {
         ok: true,

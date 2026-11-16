@@ -127,8 +127,11 @@ export class CouchClient {
   }
 
   /** 服务端版本（`GET /`）。控制台与 `/v1/health` 都要它。 */
-  async version(): Promise<{ version: string; vendor: string | null }> {
-    const body = await this.request<{ couchdb?: string; version?: string; vendor?: { name?: string } }>("GET", "/", { idempotent: true });
+  async version(options: { timeoutMs?: number } = {}): Promise<{ version: string; vendor: string | null }> {
+    const body = await this.request<{ couchdb?: string; version?: string; vendor?: { name?: string } }>("GET", "/", {
+      idempotent: true,
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    });
     return { version: body.version ?? body.couchdb ?? "unknown", vendor: body.vendor?.name ?? null };
   }
 

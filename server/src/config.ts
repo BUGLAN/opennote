@@ -73,6 +73,14 @@ export interface ServerConfig {
   globalRequestsPerMinute: number;
   /** 全局的突发容量（令牌桶容量）。 */
   globalBurst: number;
+  /** 健康检查专用限流（req/min per IP）：独立于全局桶，监控仍可高频打。 */
+  healthRequestsPerMinute: number;
+  /** 健康检查专用突发容量。 */
+  healthBurst: number;
+  /** CouchDB 版本缓存时长（毫秒；成功和失败结果都缓存）。 */
+  healthCouchVersionCacheMs: number;
+  /** 健康检查探测 CouchDB 版本的单次超时（毫秒）。 */
+  healthCouchTimeoutMs: number;
 
   /** 日志级别。 */
   logLevel: "debug" | "info" | "warn" | "error";
@@ -113,6 +121,9 @@ const DEFAULTS = {
   ACCOUNT_REQUESTS_PER_MINUTE: "1200",
   ACCOUNT_SSE_CONNECTIONS: "4",
   GLOBAL_REQUESTS_PER_MINUTE: "6000",
+  HEALTH_REQUESTS_PER_MINUTE: "600",
+  HEALTH_COUCH_VERSION_CACHE_MS: "15000",
+  HEALTH_COUCH_TIMEOUT_MS: "2000",
   LOG_LEVEL: "info",
 } as const;
 
@@ -222,6 +233,10 @@ export function loadConfig(env: Env = process.env): ServerConfig {
   const accountSseConnections = readPositiveInt(env, "ACCOUNT_SSE_CONNECTIONS", DEFAULTS.ACCOUNT_SSE_CONNECTIONS, problems);
   const globalRequestsPerMinute = readPositiveInt(env, "GLOBAL_REQUESTS_PER_MINUTE", DEFAULTS.GLOBAL_REQUESTS_PER_MINUTE, problems);
   const globalBurst = readPositiveInt(env, "GLOBAL_BURST", String(defaultBurst(globalRequestsPerMinute)), problems);
+  const healthRequestsPerMinute = readPositiveInt(env, "HEALTH_REQUESTS_PER_MINUTE", DEFAULTS.HEALTH_REQUESTS_PER_MINUTE, problems);
+  const healthBurst = readPositiveInt(env, "HEALTH_BURST", String(defaultBurst(healthRequestsPerMinute)), problems);
+  const healthCouchVersionCacheMs = readPositiveInt(env, "HEALTH_COUCH_VERSION_CACHE_MS", DEFAULTS.HEALTH_COUCH_VERSION_CACHE_MS, problems);
+  const healthCouchTimeoutMs = readPositiveInt(env, "HEALTH_COUCH_TIMEOUT_MS", DEFAULTS.HEALTH_COUCH_TIMEOUT_MS, problems);
 
   const trustedProxyHeaders = (env.TRUSTED_PROXY_HEADERS ?? DEFAULTS.TRUSTED_PROXY_HEADERS)
     .split(",")
@@ -257,6 +272,10 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     accountSseConnections,
     globalRequestsPerMinute,
     globalBurst,
+    healthRequestsPerMinute,
+    healthBurst,
+    healthCouchVersionCacheMs,
+    healthCouchTimeoutMs,
     logLevel: logLevelRaw as ServerConfig["logLevel"],
   };
 }
@@ -294,6 +313,10 @@ export function describeConfig(config: ServerConfig): Record<string, string | nu
     accountBurst: config.accountBurst,
     globalRequestsPerMinute: config.globalRequestsPerMinute,
     globalBurst: config.globalBurst,
+    healthRequestsPerMinute: config.healthRequestsPerMinute,
+    healthBurst: config.healthBurst,
+    healthCouchVersionCacheMs: config.healthCouchVersionCacheMs,
+    healthCouchTimeoutMs: config.healthCouchTimeoutMs,
     logLevel: config.logLevel,
     // 凭据一律**不回显**，连「配了没配」都不说（避免变成一次探测信号）。
   };
