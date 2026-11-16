@@ -32,15 +32,18 @@
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import {
+  MAX_DOC_PATH_LENGTH,
   MIN_SUPPORTED_PROTOCOL_VERSION,
   changesResponseSchema,
   clientStatsRequestSchema,
+  didSchema,
   filesBatchRequestSchema,
   filesBatchResponseSchema,
   parseContract,
   treeResponseSchema,
   type CryptoMode,
 } from "../../../shared/contract";
+import { assertSafeRelative } from "../../../shared/paths";
 import type { AccountRow } from "../auth/accounts";
 import { AccountError, AccountStore } from "../auth/accounts";
 import { CouchError, type CouchClient, type CouchDocument } from "../couch/client";
@@ -135,6 +138,49 @@ function contentIdOf(doc: CouchDocument): string | null {
 function validTreeEntry(entry: { did: string; hash?: string; ehash?: string }): boolean {
   const id = entry.hash ?? entry.ehash;
   return typeof id === "string" && /^[0-9a-f]{64}$/.test(id);
+}
+
+/**
+ * `did` 的线上形状校验。单条接口与批量接口共用 `didSchema`。
+ *
+ * 保留 id 单独判一次：`didSchema` 只接受 f:/h:/m:，本来就会挡住它们；但
+ * `_local/*`（别的设备的检查点）与 `syncinfo`（协议元数据）不是「形状不对」，
+ * 而是「这条路径根本不该被转发给 CouchDB」。显式写出来，避免以后放宽 didSchema
+ * 时把这两类文档悄悄放进来。
+ */
+function didProblem(did: string): string | null {
+  if (did.startsWith("_") || did === "syncinfo") return "did 不能是 CouchDB 的保留文档 id";
+  const checked = didSchema.safeParse(did);
+  return checked.success ? null : (checked.error.issues[0]?.message ?? "did 形状不对");
+}
+
+/**
+ * 明文 `path` 的校验。`assertSafeRelative` 与 `_design/opennote` 的
+ * `validate_doc_update` 是同一条路径规则的 TS 侧实现；长度与控制字符是
+ * HTTP 契约（`treeEntrySchema` / `changesResponseSchema`）额外要求的。
+ */
+function pathProblem(path: string): string | null {
+  if (path.length === 0) return "path 不能为空";
+  if (path.length > MAX_DOC_PATH_LENGTH) return `path 不能超过 ${MAX_DOC_PATH_LENGTH} 个字符`;
+  if (/[\u0000-\u001f\u007f]/.test(path)) return "path 不能包含控制字符";
+  try {
+    assertSafeRelative(path);
+  } catch (error) {
+    return error instanceof Error ? error.message : "path 不合法";
+  }
+  return null;
+}
+
+/**
+ * 投影到 tree / changes 时，坏 `path` 只跳过这一条并记日志 —— 与
+ * `validTreeEntry` 跳过坏 hash 同理：一条历史坏数据不该让整本笔记本列不了树。
+ */
+function validProjectedPath(did: string, path: string | undefined): boolean {
+  if (path === undefined) return true;
+  const problem = pathProblem(path);
+  if (problem === null) return true;
+  console.warn(`[opennote-server] 跳过 path 不合法的文档 ${did}：${problem}`);
+  return false;
 }
 
 export function createV1Routes(deps: V1RoutesDeps): Hono {
@@ -332,7 +378,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
           .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
           .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
           .filter((entry) => entry.deleted !== true)
-          .filter((entry) => validTreeEntry(entry));
+          .filter((entry) => validTreeEntry(entry) && validProjectedPath(entry.did, entry.path));
         const truncated = page.rows.length >= limit;
         /*
          * ★ 翻页锚点取**原始行**的最后一条（`page.rows` 是过滤之前的）。
@@ -360,7 +406,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
         .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
         .filter((entry) => entry.deleted !== true)
-        .filter((entry) => validTreeEntry(entry));
+        .filter((entry) => validTreeEntry(entry) && validProjectedPath(entry.did, entry.path));
       const truncated = page.rows.length >= limit;
       const nextStartKey = truncated ? page.rows.at(-1)?.id : undefined;
       return json(
@@ -405,21 +451,26 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
        * 只是几百字节的元数据，不是正文。
        */
       const page = await deps.couch.changes(notebook.db_name, { since, limit: 500, includeDocs: true });
+      type ChangeEntry = {
+        did: string;
+        op: "delete" | "update";
+        path?: string;
+        hash?: string;
+        ehash?: string;
+      };
       const changes = page.results
         // `_design` / `_local` / `syncinfo` 不参与同步（它们不是笔记）。
         .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
-        .map((row) => {
+        .map((row): ChangeEntry | null => {
           const op = row.deleted === true ? ("delete" as const) : ("update" as const);
-          const entry: {
-            did: string;
-            op: "delete" | "update";
-            path?: string;
-            hash?: string;
-            ehash?: string;
-          } = { did: row.id, op };
+          const entry: ChangeEntry = { did: row.id, op };
           if (op === "update" && row.doc) {
             // 明文模式下 `path` 是可以带回去的（服务端本来就看得见，见 `treeEntryFromDoc`）。
-            if (cryptoMode === "none" && typeof row.doc.path === "string") entry.path = row.doc.path;
+            if (cryptoMode === "none" && typeof row.doc.path === "string") {
+              // 坏 path 只跳过这一条（契约要求 ≤ 1024 且无控制字符），否则整页会 500。
+              if (!validProjectedPath(row.id, row.doc.path)) return null;
+              entry.path = row.doc.path;
+            }
             const contentId = contentIdOf(row.doc);
             if (contentId) {
               if (cryptoMode === "none") entry.hash = contentId;
@@ -427,7 +478,8 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
             }
           }
           return entry;
-        });
+        })
+        .filter((entry): entry is ChangeEntry => entry !== null);
       return json(
         parseContract(
           changesResponseSchema,
@@ -471,6 +523,8 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     const { notebook, account } = resolved;
     const did = c.req.query("did");
     if (!did) return json({ error: "缺少 did 参数", code: "bad-request" }, 400);
+    const problem = didProblem(did);
+    if (problem !== null) return json({ error: `did 不合法：${problem}`, code: "bad-request" }, 400);
     record(account.id, notebook.id, "pull");
 
     try {
@@ -558,6 +612,8 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     const { notebook, account } = resolved;
     const did = c.req.query("did");
     if (!did) return json({ error: "缺少 did 参数", code: "bad-request" }, 400);
+    const problem = didProblem(did);
+    if (problem !== null) return json({ error: `did 不合法：${problem}`, code: "bad-request" }, 400);
     // 一次写 = 一次**推送**（哪怕随后冲突，客户端也确实推了）。
     record(account.id, notebook.id, "push");
 
@@ -569,6 +625,10 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     const cryptoMode = cryptoModeOf(notebook);
     // 模式 A 的明文路径由客户端给；模式 B **忽略**它（红线 3：服务端看不到明文路径）。
     const pathFromQuery = cryptoMode === "none" ? (c.req.query("path") ?? null) : null;
+    if (pathFromQuery !== null) {
+      const pathIssue = pathProblem(pathFromQuery);
+      if (pathIssue !== null) return json({ error: `path 不合法：${pathIssue}`, code: "bad-request" }, 400);
+    }
 
     /*
      * ★ **这一版的内容标识由客户端给**（`X-Opennote-Hash`）。
@@ -712,6 +772,8 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     const { notebook, account } = resolved;
     const did = c.req.query("did");
     if (!did) return json({ error: "缺少 did 参数", code: "bad-request" }, 400);
+    const problem = didProblem(did);
+    if (problem !== null) return json({ error: `did 不合法：${problem}`, code: "bad-request" }, 400);
     record(account.id, notebook.id, "delete");
 
     try {

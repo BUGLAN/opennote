@@ -12,7 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
-import { MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION } from "../../../shared/contract";
+import { MAX_DOC_PATH_LENGTH, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION } from "../../../shared/contract";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
 import type { AccountStore } from "../auth/accounts";
 import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
@@ -275,6 +275,90 @@ describe("§3.4 / §4.7 设计点 2 · `path` 只在明文模式出现", () => {
 
     const body = (await (await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) })).json()) as { files: { did: string }[] };
     expect(body.files.map((entry) => entry.did)).toEqual(["f:real"]);
+  });
+});
+
+describe("★ 单条文件接口与批量接口同强度校验（保留 id / 坏 path）", () => {
+  const HASH = "a".repeat(64);
+
+  it("保留 id 与形状不对的 did 在 GET/PUT/DELETE 上一律 400，且不转发给 CouchDB", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+
+    for (const method of ["GET", "PUT", "DELETE"] as const) {
+      for (const did of ["_local/device-abc", "_design/opennote", "syncinfo", "plain-id", "f:bad!"]) {
+        const response = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}`, {
+          method,
+          headers: auth(alice.token),
+          ...(method === "PUT" ? { body: "x" } : {}),
+        });
+        expect(response.status).toBe(400);
+        expect(((await response.json()) as { code: string }).code).toBe("bad-request");
+      }
+    }
+    // `_local/*` 是别的设备的检查点，`syncinfo` 是协议元数据：单条接口不该把它们转发给 CouchDB。
+    expect(world.fake.calls.filter((entry) => entry.includes("_local") || entry.includes("syncinfo") || entry.includes("_design"))).toEqual([]);
+  });
+
+  it("明文 path 超长、含控制字符、绝对路径、越界、NTFS 冒号、空串 → 400", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const invalid = [
+      "a".repeat(MAX_DOC_PATH_LENGTH + 1),
+      `a${String.fromCharCode(1)}b.md`,
+      "/abs/x.md",
+      "../x.md",
+      "a.md:secret",
+      "",
+    ];
+
+    for (const path of invalid) {
+      const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:bad&path=${encodeURIComponent(path)}`, {
+        method: "PUT",
+        headers: auth(alice.token),
+        body: "x",
+      });
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as { code: string }).code).toBe("bad-request");
+    }
+  });
+
+  it("已存在的坏 path 文档被跳过，`/v1/tree` 仍然 200（一条坏数据不拖垮整本笔记本）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    docs.set("f:long", { _id: "f:long", _rev: "1-a", path: "a".repeat(MAX_DOC_PATH_LENGTH + 1), hash: HASH });
+    docs.set("f:ctrl", { _id: "f:ctrl", _rev: "1-b", path: `a${String.fromCharCode(1)}b.md`, hash: HASH });
+    docs.set("f:dotdot", { _id: "f:dotdot", _rev: "1-c", path: "../x.md", hash: HASH });
+    docs.set("f:ok", { _id: "f:ok", _rev: "1-d", path: "notes/ok.md", hash: HASH });
+
+    const response = await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { files: { did: string; path?: string }[] };
+    expect(body.files.map((entry) => entry.did)).toEqual(["f:ok"]);
+    expect(body.files[0]!.path).toBe("notes/ok.md");
+  });
+
+  it("已存在的坏 path 文档被跳过，`/v1/changes` 仍然 200 且游标正常返回", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    docs.set("f:long", { _id: "f:long", _rev: "1-a", path: "a".repeat(MAX_DOC_PATH_LENGTH + 1), hash: HASH });
+    docs.set("f:ctrl", { _id: "f:ctrl", _rev: "1-b", path: `a${String.fromCharCode(1)}b.md`, hash: HASH });
+    docs.set("f:ok", { _id: "f:ok", _rev: "1-d", path: "notes/ok.md", hash: HASH });
+
+    const response = await call(world, `/v1/changes?nb=${notebook.id}`, { headers: auth(alice.token) });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      cursor: string;
+      changes: { did: string; op: string; path?: string; hash?: string }[];
+    };
+    expect(body.cursor).toBeTruthy();
+    expect(body.changes).toEqual([{ did: "f:ok", op: "update", path: "notes/ok.md", hash: HASH }]);
   });
 });
 

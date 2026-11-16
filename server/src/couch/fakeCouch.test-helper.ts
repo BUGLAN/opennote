@@ -167,6 +167,22 @@ export class FakeCouch {
     }
 
     /*
+     * `_changes`（`/v1/changes` 的数据源）。只实现到「够路由用例摆几条文档」的程度：
+     * `since` 在这里不参与过滤，`pending` 恒为 0。这不是假装完整的复制协议 ——
+     * 真实 CouchDB 的 `_changes` 语义（部分有序、游标回溯）仍由上游负责。
+     */
+    if (rest[0] === "_changes") {
+      const includeDocs = url.searchParams.get("include_docs") === "true";
+      const results = [...docs.values()].map((doc) => ({
+        seq: doc._rev,
+        id: doc._id,
+        ...(doc._deleted === true ? { deleted: true } : {}),
+        ...(includeDocs ? { doc } : {}),
+      }));
+      return json(200, { results, last_seq: `${this.counter}-fake`, pending: 0 });
+    }
+
+    /*
      * 附件：`/{db}/{id}/{name}`（三段以上）。CouchDB 用它存二进制正文（§3.5）。
      *
      * ⚠️ 必须在「文档」分支**之前**判断 —— 否则 `PUT /nb-x/f:abc/blob` 会被当成

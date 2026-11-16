@@ -98,6 +98,9 @@ export type Platform = z.infer<typeof platformSchema>;
  */
 export const DID_PREFIXES = ["f:", "h:", "m:"] as const;
 
+/** 明文路径上限。`PUT /v1/file` 的服务端校验与 tree/changes 契约共用这个数。 */
+export const MAX_DOC_PATH_LENGTH = 1024;
+
 /** 路径映射表的固定 `did`（每个笔记本一份，覆盖式更新）。 */
 export const PATH_MAP_DID = "m:pathmap";
 
@@ -394,7 +397,7 @@ export const treeEntrySchema = z
      * ⚠️ **E2EE 下必须缺省** —— 服务端看不到明文路径，也**不许**试图解密（红线 3）。
      * 那时新设备只能靠「全树解密」重建映射（§2.2）。
      */
-    path: z.string().min(1).max(1024).optional(),
+    path: z.string().min(1).max(MAX_DOC_PATH_LENGTH).optional(),
     hash: contentIdSchema.optional(),
     ehash: contentIdSchema.optional(),
     size: z.number().int().nonnegative().optional(),
@@ -456,7 +459,7 @@ export const changesResponseSchema = z.object({
       did: didSchema,
       op: changeOpSchema,
       /** 明文模式下这一条的工作区相对路径（服务端可逆地解出来，省客户端一次反查失败）。 */
-      path: z.string().min(1).max(1024).optional(),
+      path: z.string().min(1).max(MAX_DOC_PATH_LENGTH).optional(),
       /** 明文模式的内容标识。 */
       hash: contentIdSchema.optional(),
       /** E2EE 的内容标识。 */
