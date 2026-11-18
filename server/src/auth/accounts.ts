@@ -628,8 +628,9 @@ export class AccountStore {
     return { ok: true, changed: true };
   }
 
-  delete(accountId: string): boolean {
+  delete(accountId: string, beforeDelete?: () => void): boolean {
     return this.transaction(() => {
+      beforeDelete?.();
       this.db.prepare("DELETE FROM quota_usage WHERE account_id = ?").run(accountId);
       const result = this.db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
       return Number(result.changes ?? 0) > 0;

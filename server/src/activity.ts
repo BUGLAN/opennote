@@ -157,7 +157,12 @@ export function describeAudit(event: AuditEvent, labels: ActivityLabels): Activi
     case "enable_account":
       return entry("admin", `重新启用了 ${target ? labels.account(target) : "?"}`);
     case "delete_account":
-      return entry("admin", `删除了账号 ${fields.label ?? (target ? labels.account(target) : "?")}（删掉 ${fields.databasesDeleted ?? 0} 个库，移交 ${fields.notebooksTransferred ?? 0} 个共享笔记本）`);
+      return entry(
+        "admin",
+        `删除了账号 ${fields.label ?? (target ? labels.account(target) : "?")}（删掉 ${fields.databasesDeleted ?? 0} 个库，移交 ${fields.notebooksTransferred ?? 0} 个共享笔记本，清理 ${fields.shareSnapshotsDeleted ?? 0} 份分享快照${Number(fields.shareSnapshotsPending ?? 0) > 0 ? `，${fields.shareSnapshotsPending} 份待重试` : ""}）`,
+      );
+    case "share_snapshot_cleanup":
+      return entry("admin", `清理了 ${fields.deleted ?? 0} 份待删除的公开分享快照`);
     case "create_password_reset":
       return entry("admin", `为 ${target ? labels.account(target) : "?"} 生成了设置密码链接`);
     case "cli_reset_password":
@@ -180,6 +185,9 @@ export function describeAudit(event: AuditEvent, labels: ActivityLabels): Activi
       return entry("error", `删除笔记本「${target ? labels.notebook(target) : "?"}」的库失败，账号删除已中止，可重试`);
     case "delete_account_failed":
       return entry("error", `删除账号失败：${fields.failedDatabases ?? "?"} 个独占库没删掉，账号与笔记本已保留，可重试`);
+    case "delete_account_snapshot_cleanup_failed":
+    case "share_snapshot_cleanup_failed":
+      return entry("error", `公开分享快照还有 ${fields.pending ?? "?"} 份没删掉，已留在清理队列里，可以重试`);
     case "create_notebook_failed":
       return entry("error", `新建笔记本「${target ? labels.notebook(target) : "?"}」失败`);
 

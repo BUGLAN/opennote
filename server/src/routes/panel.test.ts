@@ -15,6 +15,7 @@ import { openDatabase } from "../db";
 import { loadConfig } from "../config";
 import { NotebookStore } from "../notebooks";
 import { SettingsStore } from "../settings";
+import { ShareStore } from "../shares";
 import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
 import { csrfGuard, PANEL_COOKIE } from "../panelSecurity";
@@ -40,6 +41,7 @@ function makeWorld(env: Record<string, string> = ENV, options: { now?: () => num
   const config = loadConfig(env);
   const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
+  const shares = new ShareStore(db);
   const settings = new SettingsStore(db, config);
   const couch = couchClient(new FakeCouch());
   const audit = (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event);
@@ -49,7 +51,7 @@ function makeWorld(env: Record<string, string> = ENV, options: { now?: () => num
   app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, throttle, ...now }));
   app.use("/v1/admin/*", csrfGuard());
   app.route("/v1/admin", createAdminViewRoutes({ accounts, notebooks, config, couch, settings, ...now }));
-  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, config, couch, couchAdmin: couch, settings, audit, ...now }));
+  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, shares, config, couch, couchAdmin: couch, settings, audit, ...now }));
   app.route("/", createPanelRoutes({ accounts, notebooks, config, settings, throttle, audit, ...now }));
 
   const call = async (path: string, init: { method?: string; body?: unknown; headers?: Record<string, string> } = {}) => {

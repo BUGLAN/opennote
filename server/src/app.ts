@@ -239,6 +239,7 @@ export function createApp(options: AppOptions): BuiltApp {
     createAdminRoutes({
       accounts,
       notebooks,
+      shares,
       config,
       couch,
       couchAdmin,

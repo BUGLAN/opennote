@@ -24,7 +24,16 @@ import { formatBytes } from "../activity";
 import type { NotebookStore } from "../notebooks";
 import { securityHeaders } from "../panelSecurity";
 import type { SettingsStore } from "../settings";
-import { SHARE_DATABASE, cleanShareName, contentTypeFor, sha256Hex, shareDatabaseProvisioner, type ShareRow, type ShareStore } from "../shares";
+import {
+  SHARE_DATABASE,
+  cleanShareName,
+  contentTypeFor,
+  deleteShareSnapshot,
+  sha256Hex,
+  shareDatabaseProvisioner,
+  type ShareRow,
+  type ShareStore,
+} from "../shares";
 import { SHARE_PAGE_CSP, SHARE_RAW_CSP, renderShareMissing, renderSharePage } from "../sharePage";
 import { bearerToken } from "./auth";
 
@@ -160,8 +169,7 @@ export function createShareRoutes(deps: ShareRoutesDeps): Hono {
     }
     /* 字节一并删掉；失败不影响撤销（公开页以 SQLite 为准，链接已经失效）。 */
     try {
-      const doc = await deps.couch.getDoc(SHARE_DATABASE, share.id);
-      if (doc?._rev) await deps.couch.putDoc(SHARE_DATABASE, { _id: share.id, _rev: String(doc._rev), _deleted: true });
+      await deleteShareSnapshot(deps.couch, share.id);
     } catch (error) {
       console.warn("[opennote-server] 撤销分享时删快照字节失败（链接已失效）", error);
     }

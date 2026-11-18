@@ -668,7 +668,13 @@ async function openUser(accountId) {
               if (!ok) return;
               try {
                 const result = await del("/v1/admin/accounts/" + x.accountId);
-                toast("已删除" + (result.databasesDeleted ? "，清掉 " + result.databasesDeleted + " 个库" : ""));
+                const pending = result.shareSnapshotsPending || 0;
+                toast(
+                  "已删除" +
+                    (result.databasesDeleted ? "，清掉 " + result.databasesDeleted + " 个库" : "") +
+                    (pending ? "；" + pending + " 份公开分享快照待清理，可稍后在服务设置里重试" : ""),
+                  pending ? "error" : undefined,
+                );
                 ctx.navigate("/admin/users");
                 if (usersRedraw) usersRedraw();
               } catch (error) {
@@ -1406,6 +1412,20 @@ async function pageSettings(main) {
   );
 
   const setting = (label, sub, ...control) => h("div", { class: "setting" }, h("div", { class: "setting__label" }, label, sub ? h("small", { text: sub }) : null), h("div", { class: "setting__control" }, control));
+  const cleanupShares = h("button", {
+    type: "button",
+    class: "btn btn--sm",
+    text: "重试清理",
+    onClick: (event) =>
+      busy(event.currentTarget, async () => {
+        try {
+          const result = await post("/v1/admin/share-snapshots/cleanup");
+          toast(result.deleted ? "已清理 " + result.deleted + " 份分享快照" : "没有待清理的分享快照");
+        } catch (failure) {
+          toastError(failure);
+        }
+      }),
+  });
   mount(
     main,
     pageHead("服务设置", "改动立即生效，不需要重启容器", save),
@@ -1477,6 +1497,20 @@ async function pageSettings(main) {
           null,
           h("div", { class: "row" }, admins.map((x) => a("/admin/users/" + x.accountId, x.email || accountName(x), "tag"))),
           h("div", { class: "setting__meta" }, "要增加管理员：在", a("/admin/users", "用户"), "里打开对方，点「设为管理员」；或者发邀请时把身份选成「管理员」。"),
+        ),
+      ),
+    ),
+    panel(
+      "数据维护",
+      null,
+      h(
+        "div",
+        { class: "panel__body" },
+        setting(
+          "待删除的分享快照",
+          null,
+          cleanupShares,
+          h("div", { class: "setting__meta", text: "删账号时 CouchDB 暂时不可用，快照 id 会留在清理队列里。公开链接已经失效；CouchDB 恢复后点这里重试删除正文。" }),
         ),
       ),
     ),

@@ -18,6 +18,7 @@ import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper"
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
 import { SHARE_DATABASE, ShareStore, cleanShareName, contentTypeFor } from "../shares";
 import { createShareRoutes, contentDisposition } from "./shares";
+import { createAdminRoutes } from "./admin";
 
 const ENV: Record<string, string> = {
   EXTERNAL_BASE_URL: "https://notes.example.com",
@@ -38,7 +39,9 @@ function makeWorld() {
   const fake = new FakeCouch();
   const couch = couchClient(fake);
   const app = new Hono();
-  app.route("/", createShareRoutes({ accounts, notebooks, shares, config, couch, couchAdmin: couch, settings, audit: (event) => notebooks.audit(event) }));
+  const audit = (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event);
+  app.route("/", createShareRoutes({ accounts, notebooks, shares, config, couch, couchAdmin: couch, settings, audit }));
+  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, shares, config, couch, couchAdmin: couch, settings, audit }));
   const request = (path: string, init: RequestInit = {}) => Promise.resolve(app.request(`http://localhost${path}`, init));
   const share = async (token: string, name: string, body: string | Uint8Array) => {
     const response = await request(`/v1/shares?name=${encodeURIComponent(name)}`, {
@@ -48,7 +51,8 @@ function makeWorld() {
     });
     return { status: response.status, body: (await response.json()) as Record<string, any> };
   };
-  return { db, accounts, shares, fake, request, share };
+  const admin = seedAccount(accounts, { isAdmin: true });
+  return { db, accounts, shares, fake, request, share, admin };
 }
 
 describe("创建", () => {
@@ -198,12 +202,63 @@ describe("撤销", () => {
     expect(world.shares.activeBytesOf(owner.id)).toBe(0);
   });
 
-  it("删账号级联删掉它的分享", async () => {
+  it("删账号会清理活跃与已撤销分享的快照字节，公开链接立即 404", async () => {
     const world = makeWorld();
-    const { id, token } = seedAccount(world.accounts);
-    const { body } = await world.share(token, "a.md", "x");
-    world.accounts.delete(id);
+    const owner = seedAccount(world.accounts);
+    const active = await world.share(owner.token, "active.md", "active secret");
+    const revoked = await world.share(owner.token, "revoked.md", "revoked secret");
+
+    world.fake.failNext = `PUT /${SHARE_DATABASE}`;
+    const revoke = await world.request(`/v1/shares/${revoked.body.id}`, { method: "DELETE", headers: { authorization: `Bearer ${owner.token}` } });
+    expect(revoke.status).toBe(204);
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${revoked.body.id}/blob`)).toBe(true);
+
+    expect((await world.request(`/s/${active.body.id}`)).status).toBe(200);
+    const deleted = await world.request(`/v1/admin/accounts/${owner.id}`, { method: "DELETE", headers: { authorization: `Bearer ${world.admin.token}` } });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toMatchObject({ shareSnapshotsDeleted: 2, shareSnapshotsPending: 0 });
+
+    expect(world.accounts.findById(owner.id)).toBeNull();
+    expect(world.shares.find(active.body.id)).toBeNull();
+    expect(world.shares.find(revoked.body.id)).toBeNull();
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${active.body.id}/blob`)).toBe(false);
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${revoked.body.id}/blob`)).toBe(false);
+    expect((await world.request(`/s/${active.body.id}`)).status).toBe(404);
+    expect((await world.request(`/s/${revoked.body.id}`)).status).toBe(404);
+  });
+
+  it("快照清理失败不阻止删账号：链接仍 404，队列保留 id 并可重试", async () => {
+    const world = makeWorld();
+    const owner = seedAccount(world.accounts);
+    const { body } = await world.share(owner.token, "a.md", "secret");
+    world.fake.failNext = `PUT /${SHARE_DATABASE}`;
+
+    const deleted = await world.request(`/v1/admin/accounts/${owner.id}`, { method: "DELETE", headers: { authorization: `Bearer ${world.admin.token}` } });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toMatchObject({ shareSnapshotsDeleted: 0, shareSnapshotsPending: 1 });
+    expect(world.accounts.findById(owner.id)).toBeNull();
     expect(world.shares.find(body.id)).toBeNull();
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${body.id}/blob`)).toBe(true);
+    expect((await world.request(`/s/${body.id}`)).status).toBe(404);
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(1);
+
+    world.fake.failNext = `PUT /${SHARE_DATABASE}`;
+    const failedRetry = await world.request("/v1/admin/share-snapshots/cleanup", {
+      method: "POST",
+      headers: { authorization: `Bearer ${world.admin.token}` },
+    });
+    expect(failedRetry.status).toBe(503);
+    expect(await failedRetry.json()).toMatchObject({ code: "couch-delete-failed", pending: 1 });
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(1);
+
+    const retried = await world.request("/v1/admin/share-snapshots/cleanup", {
+      method: "POST",
+      headers: { authorization: `Bearer ${world.admin.token}` },
+    });
+    expect(retried.status).toBe(200);
+    expect(await retried.json()).toEqual({ deleted: 1, pending: 0 });
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${body.id}/blob`)).toBe(false);
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(0);
   });
 });
 

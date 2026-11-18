@@ -23,6 +23,7 @@ import { PROTOCOL_VERSION } from "../../../shared/contract";
 import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
 import { SettingsStore } from "../settings";
 import { NotebookStore } from "../notebooks";
+import { ShareStore } from "../shares";
 import { createAdminRoutes } from "./admin";
 import { loadConfig, type ServerConfig } from "../config";
 
@@ -49,6 +50,7 @@ interface World {
   fake: FakeCouch;
   accounts: AccountStore;
   notebooks: NotebookStore;
+  shares: ShareStore;
   config: ServerConfig;
   app: Hono;
   couch: CouchClient;
@@ -65,6 +67,7 @@ function makeWorld(options: { startedAt?: number } = {}): World {
   const fake = new FakeCouch({ deleteRequiresUser: "admin" });
   const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
+  const shares = new ShareStore(db);
   const config = loadConfig(ENV);
   const couch = couchClient(fake);
   const couchAdmin = couchAdminClient(fake);
@@ -74,6 +77,7 @@ function makeWorld(options: { startedAt?: number } = {}): World {
     createAdminRoutes({
       accounts,
       notebooks,
+      shares,
       config,
       couch,
       couchAdmin,
@@ -86,7 +90,7 @@ function makeWorld(options: { startedAt?: number } = {}): World {
     const { id, token } = seedAccount(accounts, { isAdmin });
     return { id, token };
   };
-  return { fake, accounts, notebooks, config, app, couch, couchAdmin, admin: () => create(true), member: () => create(false) };
+  return { fake, accounts, notebooks, shares, config, app, couch, couchAdmin, admin: () => create(true), member: () => create(false) };
 }
 
 const call = (world: World, path: string, init: RequestInit = {}): Promise<Response> =>
@@ -255,7 +259,7 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
     const response = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
     const delBody = response.status === 200 ? "" : await response.clone().text();
     expect(response.status, delBody).toBe(200);
-    expect(await response.json()).toEqual({ databasesDeleted: 1, notebooksTransferred: 1 });
+    expect(await response.json()).toEqual({ databasesDeleted: 1, notebooksTransferred: 1, shareSnapshotsDeleted: 0, shareSnapshotsPending: 0 });
 
     // 独占那本：库删了、行也标删了。
     expect(world.fake.databases.has(exclusive.db_name)).toBe(false);
@@ -311,7 +315,7 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
 
     const retried = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
     expect(retried.status).toBe(200);
-    expect(await retried.json()).toEqual({ databasesDeleted: 1, notebooksTransferred: 0 });
+    expect(await retried.json()).toEqual({ databasesDeleted: 1, notebooksTransferred: 0, shareSnapshotsDeleted: 0, shareSnapshotsPending: 0 });
     expect(world.accounts.findById(alice.id)).toBeNull();
     expect(world.notebooks.findById(exclusive.id)).toBeNull();
     const finalAudit = world.notebooks.recentAudit(20).find((event) => event.action === "delete_account");
@@ -339,7 +343,7 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
 
     const retried = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
     expect(retried.status).toBe(200);
-    expect(await retried.json()).toEqual({ databasesDeleted: 2, notebooksTransferred: 0 });
+    expect(await retried.json()).toEqual({ databasesDeleted: 2, notebooksTransferred: 0, shareSnapshotsDeleted: 0, shareSnapshotsPending: 0 });
     expect(world.fake.databases.has(first.db_name)).toBe(false);
     expect(world.fake.databases.has(second.db_name)).toBe(false);
     const finalAudit = world.notebooks.recentAudit(20).find((event) => event.action === "delete_account");
@@ -433,6 +437,7 @@ describe("服务器信息与审计", () => {
       createAdminRoutes({
         accounts: world.accounts,
         notebooks: world.notebooks,
+        shares: world.shares,
         config: world.config,
         settings: new SettingsStore(world.accounts.db, world.config),
         couchAdmin: world.couchAdmin,

@@ -9,6 +9,7 @@ import { openDatabase } from "../db";
 import { loadConfig } from "../config";
 import { NotebookStore } from "../notebooks";
 import { SettingsStore } from "../settings";
+import { ShareStore } from "../shares";
 import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
 import { buildTimeline, describeAudit, describeSyncActivity } from "../activity";
@@ -34,6 +35,7 @@ function makeWorld() {
   const config = loadConfig(ENV);
   const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
+  const shares = new ShareStore(db);
   const settings = new SettingsStore(db, config);
   const couch = couchClient(new FakeCouch());
   const audit = (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit({ ...event, now: NOW });
@@ -41,7 +43,7 @@ function makeWorld() {
   const app = new Hono();
   app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, now }));
   app.route("/v1/admin", createAdminViewRoutes({ accounts, notebooks, config, couch, settings, now, startedAt: NOW - 3600_000 }));
-  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, config, couch, couchAdmin: couch, settings, audit, now }));
+  app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, shares, config, couch, couchAdmin: couch, settings, audit, now }));
   const call = async (path: string, init: { method?: string; token?: string; body?: unknown } = {}) => {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (init.token) headers.authorization = `Bearer ${init.token}`;

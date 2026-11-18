@@ -33,6 +33,7 @@ import type { CouchClient } from "../couch/client";
 import type { NotebookStore } from "../notebooks";
 import type { ServerConfig } from "../config";
 import type { SettingsStore } from "../settings";
+import type { ShareStore } from "../shares";
 import { accountErrorResponse } from "./auth";
 import { createAdminGate } from "./adminGate";
 import { accountSummaries } from "./adminView";
@@ -40,6 +41,7 @@ import { accountSummaries } from "./adminView";
 export interface AdminRoutesDeps {
   accounts: AccountStore;
   notebooks: NotebookStore;
+  shares: ShareStore;
   config: ServerConfig;
   /** 运行时客户端（报 CouchDB 版本用）。 */
   couch: CouchClient;
@@ -227,17 +229,59 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
 
     const cascade = deps.notebooks.deleteAccountCascade(accountId);
     const notebooksTransferred = cascade.transferredNotebooks.length;
-    const deleted = deps.accounts.delete(accountId);
+    const deleted = deps.accounts.delete(accountId, () => {
+      deps.shares.enqueueSnapshotCleanup(accountId, deps.shares.listIdsForAccount(accountId), now());
+    });
     if (!deleted) return json({ error: "账号不存在", code: "not-found" }, 404);
+    let shareSnapshots = { deleted: 0, failed: 0, pending: 0 };
+    try {
+      shareSnapshots = await deps.shares.cleanupQueuedSnapshots(deps.couch, now());
+    } catch (error) {
+      shareSnapshots.pending = deps.shares.pendingSnapshotCleanupCount();
+      console.warn("[opennote-server] 删除账号后清理分享快照失败（已进入待清理队列）", error);
+    }
+    if (shareSnapshots.pending > 0) {
+      deps.audit?.({
+        actorId: admin.id,
+        action: "delete_account_snapshot_cleanup_failed",
+        target: accountId,
+        ip: null,
+        detail: `pending=${shareSnapshots.pending},failed=${shareSnapshots.failed}`,
+      });
+    }
     deps.audit?.({
       actorId: admin.id,
       action: "delete_account",
       target: accountId,
       ip: null,
       // 账号删掉之后就查不到名字了，所以名字跟着审计走（去掉逗号：detail 按逗号分字段）。
-      detail: `databasesDeleted=${databasesDeleted},notebooksTransferred=${notebooksTransferred},label=${accountLabel(target).replace(/[,=]/g, " ")}`,
+      detail: `databasesDeleted=${databasesDeleted},notebooksTransferred=${notebooksTransferred},shareSnapshotsDeleted=${shareSnapshots.deleted},shareSnapshotsPending=${shareSnapshots.pending},label=${accountLabel(target).replace(/[,=]/g, " ")}`,
     });
-    return json({ databasesDeleted, notebooksTransferred }, 200);
+    return json(
+      { databasesDeleted, notebooksTransferred, shareSnapshotsDeleted: shareSnapshots.deleted, shareSnapshotsPending: shareSnapshots.pending },
+      200,
+    );
+  });
+
+  /** 重试删除账号时留在队列里的公开分享快照。 */
+  routes.post("/share-snapshots/cleanup", async (c) => {
+    const admin = requireAdmin(c as never);
+    if (admin instanceof Response) return admin;
+    const result = await deps.shares.cleanupQueuedSnapshots(deps.couch, now());
+    deps.audit?.({
+      actorId: admin.id,
+      action: result.pending > 0 ? "share_snapshot_cleanup_failed" : "share_snapshot_cleanup",
+      target: null,
+      ip: null,
+      detail: `deleted=${result.deleted},pending=${result.pending}`,
+    });
+    if (result.pending > 0) {
+      return json(
+        { error: `还有 ${result.pending} 个公开分享快照没能删除，可以稍后重试`, code: "couch-delete-failed", deleted: result.deleted, pending: result.pending },
+        503,
+      );
+    }
+    return json({ deleted: result.deleted, pending: 0 }, 200);
   });
 
   /* -------------------------------------------------------------- 邀请码 */

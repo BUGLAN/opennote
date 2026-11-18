@@ -41,6 +41,12 @@ export interface ShareRow {
   revoked_at: number | null;
 }
 
+export interface ShareSnapshotCleanupResult {
+  deleted: number;
+  failed: number;
+  pending: number;
+}
+
 /** 文件名的上限（与常见文件系统的 255 一致）。 */
 export const SHARE_NAME_MAX = 255;
 
@@ -105,6 +111,18 @@ export function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+/** 删除一份快照文档；文档已经不存在也算成功。 */
+export async function deleteShareSnapshot(couch: CouchClient, shareId: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const doc = await couch.getDoc(SHARE_DATABASE, shareId);
+    if (!doc || doc._deleted === true) return;
+    if (!doc._rev) throw new Error("分享快照文档缺少 revision");
+    const result = await couch.putDoc(SHARE_DATABASE, { _id: shareId, _rev: String(doc._rev), _deleted: true });
+    if (!("conflict" in result)) return;
+  }
+  throw new Error("删除分享快照时连续发生 revision 冲突");
+}
+
 export class ShareStore {
   constructor(private readonly db: DatabaseSync) {}
 
@@ -149,6 +167,44 @@ export class ShareStore {
       total: number;
     };
     return Number(row.total);
+  }
+
+  /** 一个账号的全部分享 id，含已撤销但可能没清掉字节的。 */
+  listIdsForAccount(accountId: string): string[] {
+    return (
+      this.db.prepare("SELECT id FROM shares WHERE account_id = ? ORDER BY created_at ASC").all(accountId) as unknown as { id: string }[]
+    ).map((row) => row.id);
+  }
+
+  /** 把待删的快照 id 记进清理队列；应由账号删除事务调用，保证账号、分享行与队列一起提交。 */
+  enqueueSnapshotCleanup(accountId: string, shareIds: readonly string[], now: number): void {
+    const insert = this.db.prepare("INSERT OR IGNORE INTO share_cleanup (share_id, account_id, queued_at) VALUES (?, ?, ?)");
+    for (const shareId of shareIds) insert.run(shareId, accountId, now);
+  }
+
+  pendingSnapshotCleanupCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM share_cleanup").get() as unknown as { n: number };
+    return Number(row.n);
+  }
+
+  /** 依次清理队列里的 CouchDB 文档；失败的留在队列里，下一次调用继续重试。 */
+  async cleanupQueuedSnapshots(couch: CouchClient, now = Date.now()): Promise<ShareSnapshotCleanupResult> {
+    const rows = this.db.prepare("SELECT share_id FROM share_cleanup ORDER BY queued_at ASC, share_id ASC").all() as unknown as { share_id: string }[];
+    let deleted = 0;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        await deleteShareSnapshot(couch, row.share_id);
+        this.db.prepare("DELETE FROM share_cleanup WHERE share_id = ?").run(row.share_id);
+        deleted += 1;
+      } catch (error) {
+        failed += 1;
+        this.db
+          .prepare("UPDATE share_cleanup SET attempts = attempts + 1, last_attempt_at = ?, last_error = ? WHERE share_id = ?")
+          .run(now, String(error).slice(0, 1000), row.share_id);
+      }
+    }
+    return { deleted, failed, pending: this.pendingSnapshotCleanupCount() };
   }
 }
 

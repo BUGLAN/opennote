@@ -10,6 +10,7 @@ import { openDatabase } from "../db";
 import { loadConfig } from "../config";
 import { NotebookStore } from "../notebooks";
 import { SettingsStore } from "../settings";
+import { ShareStore } from "../shares";
 import { testAccountStore } from "../auth/testAccounts.test-helper";
 import { createAuthRoutes, LoginThrottle } from "./auth";
 import { createAdminRoutes } from "./admin";
@@ -33,13 +34,14 @@ function makeWorld() {
   const config = loadConfig(ENV);
   const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
+  const shares = new ShareStore(db);
   const settings = new SettingsStore(db, config);
   const audit = (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event);
   const app = new Hono();
   app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit }));
   app.route(
     "/v1/admin",
-    createAdminRoutes({ accounts, notebooks, config, settings, couch: couchClient(new FakeCouch()), couchAdmin: couchClient(new FakeCouch()), audit }),
+    createAdminRoutes({ accounts, notebooks, shares, config, settings, couch: couchClient(new FakeCouch()), couchAdmin: couchClient(new FakeCouch()), audit }),
   );
   const call = async (path: string, init: { method?: string; token?: string; body?: unknown } = {}) => {
     const headers: Record<string, string> = { "content-type": "application/json" };

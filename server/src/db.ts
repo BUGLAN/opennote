@@ -27,7 +27,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 interface Migration {
   version: number;
@@ -451,6 +451,23 @@ const MIGRATIONS: readonly Migration[] = [
         ALTER TABLE notebook_invites ADD COLUMN max_uses INTEGER NOT NULL DEFAULT 1;
         ALTER TABLE notebook_invites ADD COLUMN uses INTEGER NOT NULL DEFAULT 0;
         UPDATE notebook_invites SET uses = CASE WHEN used_at IS NOT NULL THEN 1 ELSE 0 END;
+      `);
+    },
+  },
+  {
+    version: 9,
+    description: "公开分享快照的待清理队列：share_cleanup",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE share_cleanup (
+          share_id        TEXT PRIMARY KEY,
+          account_id      TEXT NOT NULL,
+          queued_at       INTEGER NOT NULL,
+          attempts        INTEGER NOT NULL DEFAULT 0,
+          last_attempt_at INTEGER,
+          last_error      TEXT
+        );
+        CREATE INDEX idx_share_cleanup_queued ON share_cleanup(queued_at);
       `);
     },
   },
