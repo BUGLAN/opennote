@@ -43,7 +43,7 @@ import {
   treeResponseSchema,
   type CryptoMode,
 } from "../../../shared/contract";
-import { assertSafeRelative } from "../../../shared/paths";
+import { assertSafeRelative, idForPath } from "../../../shared/paths";
 import type { AccountRow } from "../auth/accounts";
 import { AccountError, AccountStore } from "../auth/accounts";
 import { CouchError, type CouchClient, type CouchDocument } from "../couch/client";
@@ -670,10 +670,13 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     if (pathFromQuery !== null) {
       const pathIssue = pathProblem(pathFromQuery);
       if (pathIssue !== null) return json({ error: `path 不合法：${pathIssue}`, code: "bad-request" }, 400);
+      if (idForPath(pathFromQuery) !== did) {
+        return json({ error: "did 与 path 不对应：did 必须是 idForPath(path)", code: "bad-request" }, 400);
+      }
     }
 
     /*
-     * ★ **这一版的内容标识由客户端给**（`X-Opennote-Hash`）。
+     * ★ **这一版的内容标识**（`X-Opennote-Hash`）。
      *
      * `If-Match` 是 **CAS**（「我以为远端现在是哪一版」），不是「我这次写的是什么」——
      * 两者是**不同的东西**，第一版把它们混成了一个，于是一个必然的后果：
@@ -684,13 +687,19 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
      * 这个 bug 之所以没被早发现：前面所有用例都只写了「空笔记本列树」，
      * **从来没有真的往库里写过一条笔记**。补上之后就有了。
      *
-     * 模式 A 下允许省略：明文正文就在我们手里，`sha256(body)` 与客户端算的**必然相同**。
-     * 模式 B 下**必须**给 —— 服务端算不出 `ehash`（那是 `HMAC(nk.mac, …)`，红线 3）。
+     * 模式 A 下服务端从正文重算：header 缺省时直接使用；给了就必须与 `sha256(body)`
+     * 相同，否则拒绝写入。这样不会把「声明 A、正文 B」的文档落进库，也不会让其他
+     * 设备按错误的 hash 认为远端没有变化。
+     *
+     * 模式 B 下**必须**给 —— 服务端算不出 `ehash`（那是 `HMAC(nk.mac, …)`，红线 3），
+     * 也不能用明文 hash 校验或改写客户端给的标识。
      */
     const declaredHash = c.req.header("x-opennote-hash") ?? null;
-    const newHash =
-      declaredHash ??
-      (cryptoMode === "none" ? await sha256Hex(bytes) : null);
+    const actualHash = cryptoMode === "none" ? sha256Hex(bytes) : null;
+    if (actualHash !== null && declaredHash !== null && declaredHash !== actualHash) {
+      return json({ error: "X-Opennote-Hash 与请求体的 sha256 不一致", code: "bad-request" }, 400);
+    }
+    const newHash = declaredHash ?? actualHash;
     if (newHash === null) {
       return json({ error: "E2EE 模式必须带 X-Opennote-Hash 头（服务端算不出 ehash，红线 3）", code: "bad-request" }, 400);
     }

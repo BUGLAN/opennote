@@ -10,9 +10,11 @@
  * - **`truncated` 如实上报**（§6.4 规则 1）。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
 import { MAX_DOC_PATH_LENGTH, MIN_SUPPORTED_PROTOCOL_VERSION, PROTOCOL_VERSION } from "../../../shared/contract";
+import { idForPath } from "../../../shared/paths";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
 import type { AccountStore } from "../auth/accounts";
 import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
@@ -103,6 +105,12 @@ function call(world: World, path: string, init: RequestInit = {}): Promise<Respo
 
 function auth(token: string): Record<string, string> {
   return { authorization: `Bearer ${token}` };
+}
+
+function hashOf(value: string | Uint8Array): string {
+  return createHash("sha256")
+    .update(typeof value === "string" ? new TextEncoder().encode(value) : value)
+    .digest("hex");
 }
 
 beforeEach(() => {
@@ -562,7 +570,7 @@ describe("§4.7 设计点 3 · `If-Match` 语义", () => {
     const notebook = world.notebook(alice.id);
     world.fake.databases.get(notebook.dbName)!.set("f:a", { _id: "f:a", _rev: "2-live", path: "a.md", hash: "L".repeat(64) });
 
-    const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, {
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, {
       method: "PUT",
       headers: { ...auth(alice.token), "if-match": "S".repeat(64) },
       body: "new content",
@@ -579,7 +587,7 @@ describe("§4.7 设计点 3 · `If-Match` 语义", () => {
     const alice = world.account();
     const notebook = world.notebook(alice.id);
     world.fake.databases.get(notebook.dbName)!.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "L".repeat(64) });
-    const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, { method: "PUT", headers: auth(alice.token), body: "x" });
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { method: "PUT", headers: auth(alice.token), body: "x" });
     expect(response.status).toBe(409);
   });
 
@@ -587,7 +595,7 @@ describe("§4.7 设计点 3 · `If-Match` 语义", () => {
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:big&path=big.md`, {
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:big`, {
       method: "PUT",
       headers: auth(alice.token),
       body: new Uint8Array(world.config.maxFileBytes + 1),
@@ -612,17 +620,19 @@ describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有�
    *
    * 修法：新增 `X-Opennote-Hash` 头带**这一版**的标识；`If-Match` 回归纯 CAS 语义。
    */
-  const HASH = "a".repeat(64);
-
-  it("★ 新建时必须带 `X-Opennote-Hash`，并且它真的落进了文档（列树能读到）", async () => {
+  it("★ 新建时可带 `X-Opennote-Hash`，并且它真的落进了文档（列树能读到）", async () => {
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
+    const path = "notes/a.md";
+    const did = idForPath(path);
+    const text = "# 第一条笔记";
+    const HASH = hashOf(text);
 
-    const created = await call(world, `/v1/file?nb=${notebook.id}&did=f:aaa&path=notes/a.md`, {
+    const created = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}&path=${encodeURIComponent(path)}`, {
       method: "PUT",
       headers: { ...auth(alice.token), "x-opennote-hash": HASH },
-      body: "# 第一条笔记",
+      body: text,
     });
     expect(created.status).toBe(201);
     // 响应里回**这一版**的标识与 rev（客户端据此更新基线）。
@@ -635,16 +645,17 @@ describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有�
     expect(tree.status).toBe(200);
     const listed = (await tree.json()) as { files: { did: string; hash?: string; path?: string }[] };
     expect(listed.files).toHaveLength(1);
-    expect(listed.files[0]!.did).toBe("f:aaa");
+    expect(listed.files[0]!.did).toBe(did);
     expect(listed.files[0]!.hash).toBe(HASH);
-    expect(listed.files[0]!.path).toBe("notes/a.md");
+    expect(listed.files[0]!.path).toBe(path);
   });
 
   it("模式 A 允许省略那个头（明文正文在我们手里 ⇒ 服务端算 `sha256` 兜底，值必然一致）", async () => {
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    const created = await call(world, `/v1/file?nb=${notebook.id}&did=f:bbb&path=b.md`, {
+    const path = "b.md";
+    const created = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath(path))}&path=${encodeURIComponent(path)}`, {
       method: "PUT",
       headers: auth(alice.token),
       body: "abc",
@@ -674,14 +685,17 @@ describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有�
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    const HASH2 = "b".repeat(64);
+    const path = "c.md";
+    const did = idForPath(path);
+    const HASH = hashOf("v1");
+    const HASH2 = hashOf("v2");
 
-    await call(world, `/v1/file?nb=${notebook.id}&did=f:ccc&path=c.md`, {
+    await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}&path=${encodeURIComponent(path)}`, {
       method: "PUT",
       headers: { ...auth(alice.token), "x-opennote-hash": HASH },
       body: "v1",
     });
-    const updated = await call(world, `/v1/file?nb=${notebook.id}&did=f:ccc&path=c.md`, {
+    const updated = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}&path=${encodeURIComponent(path)}`, {
       method: "PUT",
       headers: { ...auth(alice.token), "if-match": HASH, "x-opennote-hash": HASH2 },
       body: "v2",
@@ -700,14 +714,17 @@ describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有�
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    await call(world, `/v1/file?nb=${notebook.id}&did=f:ddd&path=d.md`, {
+    const path = "d.md";
+    const did = idForPath(path);
+    const HASH = hashOf("v1");
+    await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}&path=${encodeURIComponent(path)}`, {
       method: "PUT",
       headers: { ...auth(alice.token), "x-opennote-hash": HASH },
       body: "v1",
     });
-    const conflict = await call(world, `/v1/file?nb=${notebook.id}&did=f:ddd&path=d.md`, {
+    const conflict = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}&path=${encodeURIComponent(path)}`, {
       method: "PUT",
-      headers: { ...auth(alice.token), "if-match": "c".repeat(64), "x-opennote-hash": "d".repeat(64) },
+      headers: { ...auth(alice.token), "if-match": "c".repeat(64), "x-opennote-hash": hashOf("v2") },
       body: "v2",
     });
     expect(conflict.status).toBe(409);
@@ -720,7 +737,10 @@ describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有�
     const alice = world.account();
     const notebook = world.notebook(alice.id);
     const payload = new TextEncoder().encode("# 中文 📓 与 CRLF 行尾" + String.fromCharCode(13) + String.fromCharCode(10) + "第二行");
-    await call(world, `/v1/file?nb=${notebook.id}&did=f:eee&path=e.md`, {
+    const path = "e.md";
+    const did = idForPath(path);
+    const HASH = hashOf(payload);
+    await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}&path=${encodeURIComponent(path)}`, {
       method: "PUT",
       headers: { ...auth(alice.token), "x-opennote-hash": HASH },
       body: payload,
@@ -748,7 +768,7 @@ describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有�
         couchAdmin: client,
       }),
     );
-    const response = await app.request(`http://localhost/v1/file?nb=${notebook.id}&did=f:eee`, { headers: auth(alice.token) });
+    const response = await app.request(`http://localhost/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}`, { headers: auth(alice.token) });
     expect(response.status).toBe(200);
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(payload);
     expect(response.headers.get("x-opennote-hash")).toBe(HASH);
@@ -761,7 +781,7 @@ describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有�
     const notebook = world.notebook(alice.id);
     // 塞几条形状不同的：明文、密文、以及一条坏的（既无 hash 也无 ehash）。
     const docs = world.fake.databases.get(notebook.dbName)!;
-    docs.set("f:ok1", { _id: "f:ok1", _rev: "1-a", path: "a.md", hash: HASH, size: 1 });
+    docs.set("f:ok1", { _id: "f:ok1", _rev: "1-a", path: "a.md", hash: hashOf("a"), size: 1 });
     docs.set(`h:${"a".repeat(32)}`, { _id: `h:${"a".repeat(32)}`, _rev: "1-b", ehash: "e".repeat(64), esize: 2 });
     docs.set("f:bad", { _id: "f:bad", _rev: "1-c", path: "bad.md" });
     docs.set("syncinfo", { _id: "syncinfo", _rev: "1-d", protocolVersion: 1 });
@@ -771,6 +791,80 @@ describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有�
     expect(response.status).toBe(200);
     const listed = (await response.json()) as { files: { did: string }[] };
     expect(listed.files.map((entry) => entry.did).sort()).toEqual(["f:ok1", `h:${"a".repeat(32)}`].sort());
+  });
+});
+
+describe("★ 明文写入：正文、内容标识与 did/path 必须一致", () => {
+  it("`X-Opennote-Hash` 与正文不符 → 400，CouchDB 不产生新 revision", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    const oldHash = hashOf("old");
+    docs.set("f:a", { _id: "f:a", _rev: "1-a", hash: oldHash, size: 3 });
+
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "if-match": oldHash, "x-opennote-hash": hashOf("not-the-body") },
+      body: "new",
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { code: string }).code).toBe("bad-request");
+    expect(docs.get("f:a")).toMatchObject({ _rev: "1-a", hash: oldHash, size: 3 });
+  });
+
+  it("`did != idForPath(path)` → 400，且不落库", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+
+    const response = await call(
+      world,
+      `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath("notes/a.md"))}&path=${encodeURIComponent("notes/b.md")}`,
+      { method: "PUT", headers: auth(alice.token), body: "x" },
+    );
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string; code: string };
+    expect(body.code).toBe("bad-request");
+    expect(body.error).toContain("did 与 path 不对应");
+    expect(world.fake.databases.get(notebook.dbName)!.size).toBe(0);
+  });
+
+  it("NFC/NFD 等价的 path 指向同一个 did，仍可正常写入", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const nfc = "notes/é.md";
+    const nfd = "notes/é.md";
+    const text = "同一篇笔记";
+    expect(nfd).not.toBe(nfc);
+    expect(idForPath(nfd)).toBe(idForPath(nfc));
+
+    const response = await call(
+      world,
+      `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath(nfc))}&path=${encodeURIComponent(nfd)}`,
+      { method: "PUT", headers: { ...auth(alice.token), "x-opennote-hash": hashOf(text) }, body: text },
+    );
+    expect(response.status).toBe(201);
+  });
+
+  it("模式 B（E2EE）不重算 hash、不校验也不写入明文 path", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id, "加密", "user-key");
+    const did = `h:${"a".repeat(32)}`;
+    const ehash = "c".repeat(64);
+    const response = await call(
+      world,
+      `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}&path=${encodeURIComponent("not/for/the/server.md")}`,
+      { method: "PUT", headers: { ...auth(alice.token), "x-opennote-hash": ehash }, body: "ciphertext" },
+    );
+    expect(response.status).toBe(201);
+    expect(((await response.json()) as { ehash: string }).ehash).toBe(ehash);
+    const stored = world.fake.databases.get(notebook.dbName)!.get(did)!;
+    expect(stored).toMatchObject({ ehash });
+    expect(stored.path).toBeUndefined();
+    expect(stored.hash).toBeUndefined();
   });
 });
 
@@ -1141,15 +1235,16 @@ describe("列树的游标 · 增量同步的起点", () => {
 });
 
 describe("★ M1 · 一次写入：hash 与正文永远同属一个 revision", () => {
-  const HASH = "a".repeat(64);
-
   it("写入后：声明的 hash 与读回的字节一致（没有再拆成两步）", async () => {
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
     const bytes = new TextEncoder().encode("# 你好");
+    const path = "a.md";
+    const did = idForPath(path);
+    const HASH = hashOf(bytes);
 
-    const put = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, {
+    const put = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}&path=${encodeURIComponent(path)}`, {
       method: "PUT",
       headers: { ...auth(alice.token), "x-opennote-hash": HASH },
       body: bytes,
@@ -1158,7 +1253,7 @@ describe("★ M1 · 一次写入：hash 与正文永远同属一个 revision", (
     const putBody = (await put.json()) as { rev: string; hash: string };
     expect(putBody.hash).toBe(HASH);
 
-    const get = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { headers: auth(alice.token) });
+    const get = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}`, { headers: auth(alice.token) });
     expect(get.status).toBe(200);
     // 三个东西必须来自**同一个** revision：hash 头、rev 头、正文。
     expect(get.headers.get("x-opennote-hash")).toBe(HASH);
@@ -1171,17 +1266,20 @@ describe("★ M1 · 一次写入：hash 与正文永远同属一个 revision", (
     const alice = world.account();
     const notebook = world.notebook(alice.id);
     const original = new TextEncoder().encode("原始正文");
+    const path = "a.md";
+    const did = idForPath(path);
+    const HASH = hashOf(original);
 
-    const put = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, {
+    const put = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}&path=${encodeURIComponent(path)}`, {
       method: "PUT",
       headers: { ...auth(alice.token), "x-opennote-hash": HASH },
       body: original,
     });
     const putBody = (await put.json()) as { rev: string };
 
-    const conflict = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, {
+    const conflict = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}&path=${encodeURIComponent(path)}`, {
       method: "PUT",
-      headers: { ...auth(alice.token), "if-match": "S".repeat(64), "x-opennote-hash": "b".repeat(64) },
+      headers: { ...auth(alice.token), "if-match": "S".repeat(64), "x-opennote-hash": hashOf("对方不该被写进来") },
       body: new TextEncoder().encode("对方不该被写进来"),
     });
     expect(conflict.status).toBe(409);
@@ -1190,7 +1288,7 @@ describe("★ M1 · 一次写入：hash 与正文永远同属一个 revision", (
     expect(body.current.rev).toBe(putBody.rev);
 
     // 冲突之后读回来的仍然是原来那一版（正文与标识都自洽）。
-    const get = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { headers: auth(alice.token) });
+    const get = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}`, { headers: auth(alice.token) });
     expect(get.headers.get("x-opennote-hash")).toBe(HASH);
     expect(get.headers.get("x-opennote-rev")).toBe(putBody.rev);
     expect(new Uint8Array(await get.arrayBuffer())).toEqual(original);
@@ -1263,7 +1361,7 @@ describe("控制台取数 · 服务端在数据面上**自己数**（不依赖�
     const notebook = world.notebook(alice.id);
 
     await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) });
-    await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { method: "PUT", headers: { ...auth(alice.token), "x-opennote-hash": "a".repeat(64) }, body: "hello" });
+    await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { method: "PUT", headers: auth(alice.token), body: "hello" });
 
     const rows = world.notebooks.activityForAccount(alice.id, { notebookId: notebook.id });
     expect(rows).toHaveLength(1);
@@ -1274,12 +1372,12 @@ describe("控制台取数 · 服务端在数据面上**自己数**（不依赖�
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { method: "PUT", headers: { ...auth(alice.token), "x-opennote-hash": "a".repeat(64) }, body: "v1" });
+    await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { method: "PUT", headers: auth(alice.token), body: "v1" });
 
     const conflict = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, {
       method: "PUT",
       // 一个不存在的 base rev：服务端必须回 409 + 当前值。
-      headers: { ...auth(alice.token), "if-match": "b".repeat(64), "x-opennote-hash": "c".repeat(64) },
+      headers: { ...auth(alice.token), "if-match": "b".repeat(64), "x-opennote-hash": hashOf("v2") },
       body: "v2",
     });
     expect(conflict.status).toBe(409);
@@ -1298,7 +1396,8 @@ describe("控制台取数 · 服务端在数据面上**自己数**（不依赖�
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id, "明文", "none");
-    const headers = { ...auth(alice.token), "x-opennote-hash": "a".repeat(64) };
+    const firstHash = hashOf("0123456789");
+    const headers = { ...auth(alice.token), "x-opennote-hash": firstHash };
 
     await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { method: "PUT", headers, body: "0123456789" });
     expect(world.notebooks.notebookBytesOf(notebook.id)).toBe(10);
@@ -1311,7 +1410,7 @@ describe("控制台取数 · 服务端在数据面上**自己数**（不依赖�
      */
     const overwrite = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, {
       method: "PUT",
-      headers: { ...headers, "if-match": "a".repeat(64), "x-opennote-hash": "b".repeat(64) },
+      headers: { ...auth(alice.token), "if-match": firstHash, "x-opennote-hash": hashOf("012") },
       body: "012",
     });
     expect(overwrite.status).toBe(200);
@@ -1326,8 +1425,8 @@ describe("控制台取数 · 服务端在数据面上**自己数**（不依赖�
     const alice = world.account();
     const a = world.notebook(alice.id, "a", "none");
     const b = world.notebook(alice.id, "b", "none");
-    await call(world, `/v1/file?nb=${a.id}&did=f:a`, { method: "PUT", headers: { ...auth(alice.token), "x-opennote-hash": "a".repeat(64) }, body: "12345" });
-    await call(world, `/v1/file?nb=${b.id}&did=f:b`, { method: "PUT", headers: { ...auth(alice.token), "x-opennote-hash": "b".repeat(64) }, body: "123" });
+    await call(world, `/v1/file?nb=${a.id}&did=f:a`, { method: "PUT", headers: auth(alice.token), body: "12345" });
+    await call(world, `/v1/file?nb=${b.id}&did=f:b`, { method: "PUT", headers: auth(alice.token), body: "123" });
     expect(world.notebooks.quotaOf(alice.id).bytesUsed).toBe(8);
   });
 
@@ -1410,18 +1509,18 @@ describe("空间配额：超出就拒收让用量变多的写", () => {
     const alice = world.account();
     const notebook = world.notebook(alice.id);
     world.accounts.setQuota(alice.id, 10);
-    const put = (did: string, path: string, body: string, ifMatch?: string) =>
-      call(world, `/v1/file?nb=${notebook.id}&did=${did}&path=${path}`, {
+    const put = (path: string, body: string, ifMatch?: string) =>
+      call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath(path))}&path=${encodeURIComponent(path)}`, {
         method: "PUT",
         headers: { ...auth(alice.token), ...(ifMatch === undefined ? {} : { "if-match": ifMatch }) },
         body,
       });
 
-    const first = await put("f:a", "a.md", "12345678");
+    const first = await put("a.md", "12345678");
     expect(first.status).toBe(201);
     const firstHash = ((await first.json()) as { hash: string }).hash;
 
-    const over = await put("f:b", "b.md", "12345678");
+    const over = await put("b.md", "12345678");
     expect(over.status).toBe(413);
     const body = (await over.json()) as { code: string; error: string; bytesUsed: number; bytesLimit: number };
     expect(body.code).toBe("quota");
@@ -1429,15 +1528,15 @@ describe("空间配额：超出就拒收让用量变多的写", () => {
     expect(body).toMatchObject({ bytesUsed: 8, bytesLimit: 10 });
 
     // 改小：用量变少，放行。
-    const smaller = await put("f:a", "a.md", "1234", firstHash);
+    const smaller = await put("a.md", "1234", firstHash);
     expect(smaller.status).toBe(200);
     expect(world.notebooks.bytesOwnedBy(alice.id)).toBe(4);
 
     // 腾出空间之后，原来被拒的那条能写进去了。
-    expect((await put("f:b", "b.md", "123456")).status).toBe(201);
+    expect((await put("b.md", "123456")).status).toBe(201);
 
     // 读不受配额影响。
-    const read = await call(world, `/v1/file?nb=${notebook.id}&did=f:a`, { headers: auth(alice.token) });
+    const read = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath("a.md"))}`, { headers: auth(alice.token) });
     expect(read.status).toBe(200);
   });
 
@@ -1446,7 +1545,7 @@ describe("空间配额：超出就拒收让用量变多的写", () => {
     const alice = world.account();
     const notebook = world.notebook(alice.id);
     world.accounts.setQuota(alice.id, 0);
-    const response = await call(world, `/v1/file?nb=${notebook.id}&did=f:a&path=a.md`, {
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath("a.md"))}&path=a.md`, {
       method: "PUT",
       headers: auth(alice.token),
       body: "x".repeat(100),
