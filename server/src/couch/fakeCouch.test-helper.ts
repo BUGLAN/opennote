@@ -34,6 +34,13 @@ export class FakeCouch {
    * 而那个 502 看起来像产品坏了，其实是夹具缺了一块。**写路径的用例必须先有它**。
    */
   readonly attachments = new Map<string, Uint8Array>();
+  /** 每个附件按 revision 留下的历史字节：`db/doc/name` → `_rev` → bytes。 */
+  readonly attachmentRevisions = new Map<string, Map<string, Uint8Array>>();
+  /**
+   * 读附件前的注入点。用例可以在这里写一条新 revision，精确模拟
+   * 「读完文档、还没读附件」之间的并发写入。
+   */
+  beforeAttachmentGet: ((request: { dbName: string; docId: string; name: string; rev: string | null }) => void | Promise<void>) | null = null;
   readonly revsLimits = new Map<string, number>();
   /** 设成真时下一次请求抛网络错误（测回滚）。 */
   failNext: string | null = null;
@@ -208,13 +215,24 @@ export class FakeCouch {
         const revParam = url.searchParams.get("rev");
         if (revParam !== null && revParam !== doc._rev) return json(409, { error: "conflict" });
         // ★ 正文是**原始字节**（不是 base64）—— 见 `CouchClient.putAttachment` 的说明。
-        this.attachments.set(key, bodyBytes ?? new Uint8Array());
+        const bytes = bodyBytes ?? new Uint8Array();
         const written = { ...doc, _rev: this.rev() };
+        this.attachments.set(key, bytes);
+        const revisions = this.attachmentRevisions.get(key) ?? new Map<string, Uint8Array>();
+        revisions.set(written._rev, bytes);
+        this.attachmentRevisions.set(key, revisions);
         docs.set(docId, written);
         return json(201, { ok: true, rev: written._rev });
       }
       if (method === "GET") {
-        const bytes = this.attachments.get(key);
+        const revParam = url.searchParams.get("rev");
+        if (this.beforeAttachmentGet) await this.beforeAttachmentGet({ dbName, docId, name, rev: revParam });
+        // 指定 rev 时只返回那个 revision 的字节；当前 revision 没历史记录时（手工
+        // 往 `attachments` 里塞的夹具）才退回当前值。绝不把当前附件冒充旧 revision。
+        const historical = revParam === null ? undefined : this.attachmentRevisions.get(key)?.get(revParam);
+        const bytes = revParam === null
+          ? this.attachments.get(key)
+          : historical ?? (docs.get(docId)?._rev === revParam ? this.attachments.get(key) : undefined);
         if (!bytes) return json(404, { error: "not_found" });
         return new Response(bytes, { status: 200, headers: { "content-type": "application/octet-stream" } });
       }
@@ -250,17 +268,27 @@ export class FakeCouch {
        */
       const prefix = `${dbName}/${docId}/`;
       const previous = new Map([...this.attachments].filter(([key]) => key.startsWith(prefix)));
+      const writtenAttachments = new Map<string, Uint8Array>();
       for (const key of previous.keys()) this.attachments.delete(key);
       const inline = (payload._attachments ?? {}) as Record<string, { data?: unknown; stub?: unknown }>;
       for (const [name, attachment] of Object.entries(inline)) {
         const key = `${prefix}${name}`;
         if (typeof attachment.data === "string") {
-          this.attachments.set(key, Uint8Array.from(Buffer.from(attachment.data, "base64")));
+          const bytes = Uint8Array.from(Buffer.from(attachment.data, "base64"));
+          this.attachments.set(key, bytes);
+          writtenAttachments.set(key, bytes);
         } else if (attachment.stub === true && previous.has(key)) {
-          this.attachments.set(key, previous.get(key)!);
+          const bytes = previous.get(key)!;
+          this.attachments.set(key, bytes);
+          writtenAttachments.set(key, bytes);
         }
       }
       docs.set(docId, written);
+      for (const [key, bytes] of writtenAttachments) {
+        const revisions = this.attachmentRevisions.get(key) ?? new Map<string, Uint8Array>();
+        revisions.set(written._rev, bytes);
+        this.attachmentRevisions.set(key, revisions);
+      }
       return json(201, { ok: true, rev: written._rev });
     }
     return json(400, { error: "bad_request", reason: `fake 不支持 ${method}` });

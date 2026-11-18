@@ -553,14 +553,19 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     record(account.id, notebook.id, "pull");
 
     try {
-      const bytes = await deps.couch.getAttachment(notebook.db_name, did);
-      if (bytes === null) return json({ error: "这一条不存在", code: "not-found" }, 404);
       const doc = await deps.couch.getDoc(notebook.db_name, did);
+      if (!doc) return json({ error: "这一条不存在", code: "not-found" }, 404);
+      // 正文必须读取**这个 `_rev` 的附件**，不能跟随「当前 revision」：读文档与读附件
+      // 之间若发生写入，后者会让字节和上面的 hash/rev 来自不同版本。
+      const rev = typeof doc._rev === "string" ? doc._rev : null;
+      if (rev === null) return json({ error: "这一条缺少 revision，无法稳定读取正文", code: "not-found" }, 404);
+      const bytes = await deps.couch.getAttachment(notebook.db_name, did, "blob", { rev });
+      if (bytes === null) return json({ error: "这一条的正文已不在该 revision", code: "not-found" }, 404);
       const headers: Record<string, string> = {
         "content-type": "application/octet-stream",
         // 内容标识放进头里，省掉客户端再拉一次元数据（`If-Match` 回传时要用）。
-        ...(doc && contentIdOf(doc) ? { "x-opennote-hash": contentIdOf(doc)! } : {}),
-        ...(doc?._rev ? { "x-opennote-rev": String(doc._rev) } : {}),
+        ...(contentIdOf(doc) ? { "x-opennote-hash": contentIdOf(doc)! } : {}),
+        "x-opennote-rev": rev,
       };
       return new Response(bytes, { status: 200, headers });
     } catch (error) {
@@ -615,7 +620,9 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         if (!doc) continue;
         const hash = contentIdOf(doc);
         if (!hash) continue;
-        const bytes = await deps.couch.getAttachment(notebook.db_name, did);
+        const rev = typeof doc._rev === "string" ? doc._rev : "";
+        if (!rev) continue;
+        const bytes = await deps.couch.getAttachment(notebook.db_name, did, "blob", { rev });
         if (bytes === null) continue;
         if (bytes.byteLength > deps.config.maxFileBytes) {
           return json({ error: `文件超过上限（${deps.config.maxFileBytes} 字节）`, code: "too-large" }, 413);
@@ -634,7 +641,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
           );
         }
         batchBytes += bytes.byteLength;
-        files.push({ did, hash, rev: String(doc._rev ?? ""), data: Buffer.from(bytes).toString("base64") });
+        files.push({ did, hash, rev, data: Buffer.from(bytes).toString("base64") });
       }
       return json(parseContract(filesBatchResponseSchema, { files }, "POST /v1/files"), 200);
     } catch (error) {

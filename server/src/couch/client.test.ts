@@ -220,6 +220,13 @@ describe("附件：读回**原始字节**（§3.5：正文不走 JSON base64）"
     expect(await couch.getAttachment("nb-x", "f:abc")).toBeNull();
   });
 
+  it("可固定读取某个 revision 的附件（URL 带 `?rev=`）", async () => {
+    const payload = new TextEncoder().encode("旧版本");
+    const { couch, calls } = client([{ status: 200, raw: payload }]);
+    expect(await couch.getAttachment("nb-x", "f:abc", "blob", { rev: "2-old" })).toEqual(payload);
+    expect(calls[0]!.url).toContain("rev=2-old");
+  });
+
   it("★ 写附件以**原始字节**提交（不是 base64）并带 rev", async () => {
     /*
      * 这条用例第一版断言的是「body 是 base64 字符串」。而那个调用方式在真 CouchDB 上

@@ -353,11 +353,15 @@ export class CouchClient {
    *
    * 为什么不用 `?attachments=true`：那会让 JSON 里带 base64，官方明确警告有 33%
    * 传输开销（§3.5）。所以我们**永远不用那个参数**，正文一律走这条路。
+   *
+   * `options.rev` 会转成 `?rev=`，把附件固定在一个 revision 上。调用方若已经读过
+   * 文档元数据，必须把它传进来；否则读文档与读附件之间发生写入时，会拿到另一版的字节。
    */
-  async getAttachment(db: string, id: string, name = "blob"): Promise<Uint8Array | null> {
+  async getAttachment(db: string, id: string, name = "blob", options: { rev?: string } = {}): Promise<Uint8Array | null> {
+    const query = options.rev === undefined ? "" : `?${new URLSearchParams({ rev: options.rev })}`;
     const response = await this.rawRequest(
       "GET",
-      `/${encodeURIComponent(db)}/${encodeDocId(id)}/${encodeURIComponent(name)}`,
+      `/${encodeURIComponent(db)}/${encodeDocId(id)}/${encodeURIComponent(name)}${query}`,
       { idempotent: true },
     );
     if (response.status === 404) return null;

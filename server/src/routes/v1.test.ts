@@ -113,6 +113,27 @@ function hashOf(value: string | Uint8Array): string {
     .digest("hex");
 }
 
+async function putTextVersion(
+  world: World,
+  notebookId: string,
+  token: string,
+  did: string,
+  text: string,
+  ifMatch?: string,
+): Promise<{ hash: string; rev: string }> {
+  const response = await call(world, `/v1/file?nb=${notebookId}&did=${encodeURIComponent(did)}`, {
+    method: "PUT",
+    headers: {
+      ...auth(token),
+      "x-opennote-hash": hashOf(text),
+      ...(ifMatch === undefined ? {} : { "if-match": ifMatch }),
+    },
+    body: text,
+  });
+  expect(response.status).toBe(ifMatch === undefined ? 201 : 200);
+  return (await response.json()) as { hash: string; rev: string };
+}
+
 beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
@@ -560,6 +581,94 @@ describe("§4.7 设计点 7 · 正文走原始字节", () => {
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(payload);
     expect(response.headers.get("x-opennote-hash")).toBe("h".repeat(64));
     expect(response.headers.get("x-opennote-rev")).toBe("1-a");
+  });
+});
+
+describe("★ 正文、hash 与 rev 必须来自同一个 revision", () => {
+  const DID = "f:concurrent";
+
+  async function writeNewRevision(world: World, notebookDbName: string, baseRev: string, text: string): Promise<string> {
+    const bytes = new TextEncoder().encode(text);
+    const result = await world.couch.putDoc(
+      notebookDbName,
+      {
+        _id: DID,
+        hash: hashOf(bytes),
+        size: bytes.byteLength,
+        _attachments: { blob: { data: Buffer.from(bytes).toString("base64") } },
+      },
+      { baseRev },
+    );
+    if ("conflict" in result) throw new Error("并发写入夹具撞上了 CAS 冲突");
+    return result.rev;
+  }
+
+  it("GET /v1/file 在两次 CouchDB 调用之间发生写入时，仍完整返回旧 revision", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const first = await putTextVersion(world, notebook.id, alice.token, DID, "version one");
+    const second = await putTextVersion(world, notebook.id, alice.token, DID, "version two", first.hash);
+    let fired = false;
+    world.fake.beforeAttachmentGet = async ({ dbName, docId, rev }) => {
+      if (fired || dbName !== notebook.dbName || docId !== DID || rev !== second.rev) return;
+      fired = true;
+      world.fake.beforeAttachmentGet = null;
+      await writeNewRevision(world, notebook.dbName, second.rev, "concurrent version three");
+    };
+
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(DID)}`, { headers: auth(alice.token) });
+    expect(fired).toBe(true);
+    expect(response.status).toBe(200);
+    expect(new TextDecoder().decode(await response.arrayBuffer())).toBe("version two");
+    expect(response.headers.get("x-opennote-hash")).toBe(second.hash);
+    expect(response.headers.get("x-opennote-rev")).toBe(second.rev);
+    expect(world.fake.databases.get(notebook.dbName)!.get(DID)!._rev).not.toBe(second.rev);
+  });
+
+  it("POST /v1/files 的每条 data/hash/rev 也来自同一个 revision", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const first = await putTextVersion(world, notebook.id, alice.token, DID, "batch version one");
+    const second = await putTextVersion(world, notebook.id, alice.token, DID, "batch version two", first.hash);
+    let fired = false;
+    world.fake.beforeAttachmentGet = async ({ dbName, docId, rev }) => {
+      if (fired || dbName !== notebook.dbName || docId !== DID || rev !== second.rev) return;
+      fired = true;
+      world.fake.beforeAttachmentGet = null;
+      await writeNewRevision(world, notebook.dbName, second.rev, "batch concurrent version three");
+    };
+
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: [DID] }),
+    });
+    expect(fired).toBe(true);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { files: { did: string; hash: string; rev: string; data: string }[] };
+    expect(body.files).toEqual([
+      { did: DID, hash: second.hash, rev: second.rev, data: Buffer.from("batch version two").toString("base64") },
+    ]);
+  });
+
+  it("固定 revision 的附件已不可取时返回 404，绝不回退到当前 revision", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const first = await putTextVersion(world, notebook.id, alice.token, DID, "compacted one");
+    const second = await putTextVersion(world, notebook.id, alice.token, DID, "compacted two", first.hash);
+    world.fake.beforeAttachmentGet = async ({ dbName, docId, rev }) => {
+      if (dbName !== notebook.dbName || docId !== DID || rev !== second.rev) return;
+      world.fake.beforeAttachmentGet = null;
+      await writeNewRevision(world, notebook.dbName, second.rev, "compacted three");
+      world.fake.attachmentRevisions.get(`${notebook.dbName}/${DID}/blob`)?.delete(second.rev);
+    };
+
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(DID)}`, { headers: auth(alice.token) });
+    expect(response.status).toBe(404);
+    expect(((await response.json()) as { code: string }).code).toBe("not-found");
   });
 });
 
