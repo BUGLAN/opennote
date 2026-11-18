@@ -10,7 +10,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
-import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
+import { FakeCouch, blockDeleteDatabase, couchClient } from "../couch/fakeCouch.test-helper";
 import type { AccountStore } from "../auth/accounts";
 import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
 import { NotebookStore } from "../notebooks";
@@ -262,6 +262,89 @@ describe("§4.4 · 单条读写：越权 404 / 无权 403", () => {
     expect(world.notebooks.quotaOf(alice.id)).toMatchObject({ notebooks: 0, bytesUsed: 0 });
     expect(world.notebooks.statsFor(alice.id, { notebookId: created.notebookId })).toEqual([]);
     expect(world.notebooks.activityForAccount(alice.id, { notebookId: created.notebookId })).toEqual([]);
+  });
+});
+
+describe("§7.1 · 删库与成员加入的并发窗口", () => {
+  async function makeNotebook(world: World, token: string): Promise<string> {
+    const response = await call(world, "/v1/notebooks", {
+      method: "POST",
+      headers: jsonAuth(token),
+      body: JSON.stringify({ name: "并发", cryptoMode: "none" }),
+    });
+    return ((await response.json()) as { notebookId: string }).notebookId;
+  }
+
+  async function makeInvite(world: World, token: string, notebookId: string): Promise<string> {
+    const response = await call(world, `/v1/notebooks/${notebookId}/invites`, {
+      method: "POST",
+      headers: jsonAuth(token),
+      body: JSON.stringify({ role: "editor" }),
+    });
+    return ((await response.json()) as { code: string }).code;
+  }
+
+  it("删库 await 期间：加入与发邀请都被 409 拒绝", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const bob = world.account();
+    const notebookId = await makeNotebook(world, alice.token);
+    const dbName = world.notebooks.findById(notebookId)!.db_name;
+    const code = await makeInvite(world, alice.token, notebookId);
+
+    const gate = blockDeleteDatabase(world.fake, dbName);
+    const deleting = call(world, `/v1/notebooks/${notebookId}`, { method: "DELETE", headers: auth(alice.token) });
+    await gate.entered;
+
+    // 保留状态在 await 之前已经落库；这就是并发加入能看见的那份真相。
+    expect(world.notebooks.findById(notebookId)!).toMatchObject({ deleting_at: expect.any(Number), deletion_state: "notebook" });
+
+    const join = await call(world, "/v1/notebooks/join", {
+      method: "POST",
+      headers: jsonAuth(bob.token),
+      body: JSON.stringify({ code }),
+    });
+    expect(join.status).toBe(409);
+    expect(((await join.json()) as { code: string }).code).toBe("deletion-in-progress");
+
+    const invite = await call(world, `/v1/notebooks/${notebookId}/invites`, {
+      method: "POST",
+      headers: jsonAuth(alice.token),
+      body: JSON.stringify({ role: "viewer" }),
+    });
+    expect(invite.status).toBe(409);
+    // 被拒的加入没有留下半条成员关系。
+    expect(world.notebooks.resolveMembership(notebookId, bob.id)).toBeNull();
+
+    gate.release();
+    const response = await deleting;
+    expect(response.status).toBe(204);
+    expect(world.fake.databases.has(dbName)).toBe(false);
+    expect(world.notebooks.findById(notebookId)).toBeNull();
+  });
+
+  it("删库失败：清除保留状态、控制面原样保留，邀请仍可正常加入", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const bob = world.account();
+    const notebookId = await makeNotebook(world, alice.token);
+    const dbName = world.notebooks.findById(notebookId)!.db_name;
+    const code = await makeInvite(world, alice.token, notebookId);
+
+    world.fake.failNext = `DELETE /${dbName}`;
+    const failed = await call(world, `/v1/notebooks/${notebookId}`, { method: "DELETE", headers: auth(alice.token) });
+    expect(failed.status).toBe(500);
+
+    expect(world.notebooks.findById(notebookId)).toMatchObject({ deleting_at: null, deletion_state: null });
+    expect(world.fake.databases.has(dbName)).toBe(true);
+
+    const join = await call(world, "/v1/notebooks/join", {
+      method: "POST",
+      headers: jsonAuth(bob.token),
+      body: JSON.stringify({ code }),
+    });
+    expect(join.status).toBe(200);
+    expect(world.notebooks.resolveMembership(notebookId, bob.id)?.role).toBe("editor");
   });
 });
 

@@ -16,15 +16,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
-import { FakeCouch, couchAdminClient, couchClient } from "../couch/fakeCouch.test-helper";
+import { FakeCouch, blockDeleteDatabase, couchAdminClient, couchClient } from "../couch/fakeCouch.test-helper";
 import type { CouchClient } from "../couch/client";
-import type { AccountStore } from "../auth/accounts";
+import { generateCode, hashCode, type AccountStore } from "../auth/accounts";
 import { PROTOCOL_VERSION } from "../../../shared/contract";
 import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
 import { SettingsStore } from "../settings";
 import { NotebookStore } from "../notebooks";
 import { ShareStore } from "../shares";
 import { createAdminRoutes } from "./admin";
+import { createNotebookRoutes } from "./notebooks";
 import { loadConfig, type ServerConfig } from "../config";
 
 vi.mock("../db", async (importOriginal) => {
@@ -85,6 +86,10 @@ function makeWorld(options: { startedAt?: number } = {}): World {
       audit: (event) => notebooks.audit(event),
       ...(options.startedAt === undefined ? {} : { startedAt: options.startedAt }),
     }),
+  );
+  app.route(
+    "/v1",
+    createNotebookRoutes({ accounts, notebooks, config, couch, couchAdmin, audit: (event) => notebooks.audit(event) }),
   );
   const create = (isAdmin: boolean): { id: string; token: string } => {
     const { id, token } = seedAccount(accounts, { isAdmin });
@@ -288,6 +293,141 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
     expect(world.fake.databases.has(exclusive.db_name)).toBe(false);
   });
 
+  it("删库 await 期间：邀请加入被拒绝，Bob 不会接手指向空库的笔记本", async () => {
+    const world = makeWorld();
+    const admin = world.admin();
+    const alice = world.member();
+    const bob = world.member();
+    const exclusive = world.notebooks.create({ ownerId: alice.id, name: "独占", cryptoMode: "none" });
+    world.fake.databases.set(exclusive.db_name, new Map());
+    const code = generateCode("nb");
+    world.notebooks.createInvite({ codeHash: hashCode(code), notebookId: exclusive.id, role: "editor", createdBy: alice.id });
+
+    const gate = blockDeleteDatabase(world.fake, exclusive.db_name);
+    const deleting = call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    await gate.entered;
+
+    // 保留状态已经落库：邀请码仍然存在，但加入必须在事务里看到 deleting_at 并拒绝。
+    expect(world.notebooks.findById(exclusive.id)!).toMatchObject({ deleting_at: expect.any(Number), deletion_state: "account" });
+    const join = await call(world, "/v1/notebooks/join", {
+      method: "POST",
+      headers: jsonAuth(bob.token),
+      body: JSON.stringify({ code }),
+    });
+    expect(join.status).toBe(409);
+    expect(world.notebooks.resolveMembership(exclusive.id, bob.id)).toBeNull();
+
+    gate.release();
+    const response = await deleting;
+    expect(response.status).toBe(200);
+    expect(world.fake.databases.has(exclusive.db_name)).toBe(false);
+    expect(world.notebooks.findById(exclusive.id)).toBeNull();
+    expect(world.notebooks.resolveMembership(exclusive.id, bob.id)).toBeNull();
+  });
+
+  it("删库 await 期间：另一个成员的删账号被 409 延后，不会改变待移交库的成员快照", async () => {
+    const world = makeWorld();
+    const admin = world.admin();
+    const alice = world.member();
+    const bob = world.member();
+    const exclusive = world.notebooks.create({ ownerId: alice.id, name: "独占", cryptoMode: "none" });
+    world.fake.databases.set(exclusive.db_name, new Map());
+    const shared = world.notebooks.create({ ownerId: alice.id, name: "共享", cryptoMode: "none" });
+    world.fake.databases.set(shared.db_name, new Map());
+    world.notebooks.createInvite({ codeHash: "h-race-share", notebookId: shared.id, role: "editor", createdBy: alice.id });
+    world.notebooks.joinByInvite("h-race-share", bob.id);
+
+    const gate = blockDeleteDatabase(world.fake, exclusive.db_name);
+    const deleting = call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    await gate.entered;
+
+    const blocked = await call(world, `/v1/admin/accounts/${bob.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    expect(blocked.status).toBe(409);
+    expect(((await blocked.json()) as { code: string }).code).toBe("deletion-in-progress");
+    expect(world.accounts.findById(bob.id)).not.toBeNull();
+    expect(world.notebooks.resolveMembership(shared.id, bob.id)?.role).toBe("editor");
+
+    gate.release();
+    const response = await deleting;
+    expect(response.status).toBe(200);
+    expect(world.fake.databases.has(exclusive.db_name)).toBe(false);
+    expect(world.fake.databases.has(shared.db_name)).toBe(true);
+    expect(world.notebooks.findById(shared.id)!.owner_id).toBe(bob.id);
+    expect(world.notebooks.resolveMembership(shared.id, bob.id)?.role).toBe("owner");
+  });
+
+  it("两个删账号交错：后开始的保留会让先开始的最终化延后，而不是移除保留库的成员", async () => {
+    const world = makeWorld();
+    const admin = world.admin();
+    const alice = world.member();
+    const bob = world.member();
+
+    // Alice 与 Bob 共享 A；Alice 另有独占库 A2；Bob 另有独占库 B。
+    const shared = world.notebooks.create({ ownerId: alice.id, name: "共享 A", cryptoMode: "none" });
+    world.fake.databases.set(shared.db_name, new Map());
+    world.notebooks.createInvite({ codeHash: "h-interleave", notebookId: shared.id, role: "editor", createdBy: alice.id });
+    world.notebooks.joinByInvite("h-interleave", bob.id);
+    const aliceExclusive = world.notebooks.create({ ownerId: alice.id, name: "Alice 独占", cryptoMode: "none" });
+    world.fake.databases.set(aliceExclusive.db_name, new Map());
+    const bobExclusive = world.notebooks.create({ ownerId: bob.id, name: "Bob 独占", cryptoMode: "none" });
+    world.fake.databases.set(bobExclusive.db_name, new Map());
+
+    let releaseBob!: () => void;
+    let releaseAlice!: () => void;
+    let enteredBob!: () => void;
+    let enteredAlice!: () => void;
+    const bobEntered = new Promise<void>((resolve) => {
+      enteredBob = resolve;
+    });
+    const aliceEntered = new Promise<void>((resolve) => {
+      enteredAlice = resolve;
+    });
+    const bobReleased = new Promise<void>((resolve) => {
+      releaseBob = resolve;
+    });
+    const aliceReleased = new Promise<void>((resolve) => {
+      releaseAlice = resolve;
+    });
+    world.fake.beforeDeleteDatabase = async (name) => {
+      if (name === bobExclusive.db_name) {
+        enteredBob();
+        await bobReleased;
+      }
+      if (name === aliceExclusive.db_name) {
+        enteredAlice();
+        await aliceReleased;
+      }
+    };
+
+    // Bob 先开始：保留 B，卡在删库。此时共享库 A 还没被 Alice 保留。
+    const bobDeleting = call(world, `/v1/admin/accounts/${bob.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    await bobEntered;
+
+    // Alice 随后开始：保留共享库 A 与独占库 A2，卡在删 A2。
+    const aliceDeleting = call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    await aliceEntered;
+
+    releaseBob();
+    const bobFailed = await bobDeleting;
+    expect(bobFailed.status).toBe(409);
+    expect(world.accounts.findById(bob.id)).not.toBeNull();
+    // 共享库 A 里 Bob 的成员关系没有被先开始的那次删除移走。
+    expect(world.notebooks.resolveMembership(shared.id, bob.id)?.role).toBe("editor");
+
+    releaseAlice();
+    const aliceDone = await aliceDeleting;
+    expect(aliceDone.status).toBe(200);
+    expect(world.notebooks.findById(shared.id)!.owner_id).toBe(bob.id);
+    expect(world.notebooks.resolveMembership(shared.id, bob.id)?.role).toBe("owner");
+
+    // Bob 重试：接手 A 后现在是独占库，和 B 一起删干净。
+    const bobRetried = await call(world, `/v1/admin/accounts/${bob.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    expect(bobRetried.status).toBe(200);
+    expect(world.accounts.findById(bob.id)).toBeNull();
+    expect(world.fake.databases.has(shared.db_name)).toBe(false);
+    expect(world.fake.databases.has(bobExclusive.db_name)).toBe(false);
+  });
+
   it("删库失败 ⇒ 账号与笔记本保留、审计可见；重试成功后计数一致", async () => {
     const world = makeWorld();
     const admin = world.admin();
@@ -322,14 +462,41 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
     expect(finalAudit?.detail).toContain("databasesDeleted=1");
   });
 
+  it("删账号的删库失败后：保留状态被清除，邀请仍可正常加入", async () => {
+    const world = makeWorld();
+    const admin = world.admin();
+    const alice = world.member();
+    const bob = world.member();
+    const exclusive = world.notebooks.create({ ownerId: alice.id, name: "独占", cryptoMode: "none" });
+    world.fake.databases.set(exclusive.db_name, new Map());
+    const code = generateCode("nb");
+    world.notebooks.createInvite({ codeHash: hashCode(code), notebookId: exclusive.id, role: "editor", createdBy: alice.id });
+    world.fake.failNext = `DELETE /${exclusive.db_name}`;
+
+    const failed = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    expect(failed.status).toBe(503);
+    expect(world.notebooks.findById(exclusive.id)).toMatchObject({ deleting_at: null, deletion_state: null });
+
+    const join = await call(world, "/v1/notebooks/join", {
+      method: "POST",
+      headers: jsonAuth(bob.token),
+      body: JSON.stringify({ code }),
+    });
+    expect(join.status).toBe(200);
+    expect(world.notebooks.resolveMembership(exclusive.id, bob.id)?.role).toBe("editor");
+  });
+
   it("部分库已删后重试：最终 databasesDeleted 等于实际不存在的独占库数", async () => {
     const world = makeWorld();
     const admin = world.admin();
     const alice = world.member();
+    const bob = world.member();
     const first = world.notebooks.create({ ownerId: alice.id, name: "独占 1", cryptoMode: "none" });
     const second = world.notebooks.create({ ownerId: alice.id, name: "独占 2", cryptoMode: "none" });
     world.fake.databases.set(first.db_name, new Map());
     world.fake.databases.set(second.db_name, new Map());
+    const code = generateCode("nb");
+    world.notebooks.createInvite({ codeHash: hashCode(code), notebookId: first.id, role: "editor", createdBy: alice.id });
     world.fake.failNext = `DELETE /${second.db_name}`;
 
     const partial = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
@@ -338,8 +505,16 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
     expect(world.fake.databases.has(first.db_name)).toBe(false);
     expect(world.fake.databases.has(second.db_name)).toBe(true);
     expect(world.accounts.findById(alice.id)).not.toBeNull();
-    expect(world.notebooks.findById(first.id)).not.toBeNull();
+    // 第一个库已经不可逆地删掉了：行先逻辑删，不能再被加入 / 发邀请；重试时再清行。
+    expect(world.notebooks.findById(first.id)).toBeNull();
     expect(world.notebooks.findById(second.id)).not.toBeNull();
+    expect(world.notebooks.findById(second.id)!.deleting_at).toBeNull();
+    const join = await call(world, "/v1/notebooks/join", {
+      method: "POST",
+      headers: jsonAuth(bob.token),
+      body: JSON.stringify({ code }),
+    });
+    expect(join.status).toBe(404);
 
     const retried = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
     expect(retried.status).toBe(200);

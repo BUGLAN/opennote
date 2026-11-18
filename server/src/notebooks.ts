@@ -42,6 +42,8 @@ export interface NotebookRow {
   crypto_mode: string;
   created_at: number;
   deleted_at: number | null;
+  deleting_at: number | null;
+  deletion_state: "notebook" | "account" | null;
 }
 
 export interface MembershipRow {
@@ -74,6 +76,7 @@ export class NotebookError extends Error {
       | "invite-used"
       | "invite-expired"
       | "already-member"
+      | "deletion-in-progress"
       | "quota",
     message: string,
   ) {
@@ -212,22 +215,257 @@ export class NotebookStore {
   }
 
   /**
+   * **在删库 await 之前**保留一个笔记本（单本删除）。
+   *
+   * 返回 `true` = 这次调用建立了保留；`false` = 之前已经由同一条删除路径保留，
+   * 可以继续重试（CouchDB 删库幂等，已经不存在也算成功）。
+   *
+   * 与删账号的保留互斥：账号删除进行中的笔记本不能被另一条单本删除路径抢走，
+   * 否则最终化时不知道该移交还是该删行。
+   */
+  prepareNotebookDeletion(notebookId: string, now = Date.now()): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const notebook = this.db.prepare("SELECT * FROM notebooks WHERE id = ? AND deleted_at IS NULL").get(notebookId) as unknown as
+        | NotebookRow
+        | undefined;
+      if (!notebook) throw new NotebookError("not-found", "笔记本不存在");
+      if (notebook.deleting_at !== null) {
+        if (notebook.deletion_state === "notebook") {
+          this.db.exec("COMMIT");
+          return false;
+        }
+        throw new NotebookError("deletion-in-progress", "笔记本正在删除，请稍后重试");
+      }
+      this.db
+        .prepare("UPDATE notebooks SET deleting_at = ?, deletion_state = 'notebook' WHERE id = ? AND deleting_at IS NULL")
+        .run(now, notebookId);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** 删库失败时清除单本删除的保留状态；失败路径上控制面一行都不动。 */
+  cancelNotebookDeletion(notebookId: string): void {
+    this.db
+      .prepare("UPDATE notebooks SET deleting_at = NULL, deletion_state = NULL WHERE id = ? AND deletion_state = 'notebook'")
+      .run(notebookId);
+  }
+
+  /**
+   * CouchDB 库删除成功之后，才把单本删除落到控制面。
+   *
+   * 保留状态必须仍然是 `notebook`。并发重复请求会看到本请求已经完成，返回 `false`。
+   */
+  finalizeNotebookDeletion(notebookId: string, now = Date.now()): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const notebook = this.db.prepare("SELECT * FROM notebooks WHERE id = ? AND deleted_at IS NULL").get(notebookId) as unknown as
+        | NotebookRow
+        | undefined;
+      if (!notebook) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+      if (notebook.deletion_state !== "notebook") {
+        throw new NotebookError("deletion-in-progress", "笔记本正在删除，请稍后重试");
+      }
+      this.db
+        .prepare("UPDATE notebooks SET deleted_at = ?, deleting_at = NULL, deletion_state = NULL WHERE id = ?")
+        .run(now, notebookId);
+      this.deleteNotebookChildren(notebookId);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /**
+   * 删账号的第一步：**一个事务**里把该账号拥有的全部笔记本保留下来。
+   *
+   * 独占的库要真删，共享的库要移交。两类都先置成 `deletion_state = 'account'`：
+   * 共享库的成员关系在 await 期间也必须冻结，否则「预检时共享、最终化时独占」
+   * 会删掉行却留下没人引用的 CouchDB 库。加入、发邀请、并发删账号看到这个状态
+   * 会拒绝/延后，所以最终化时重读到的成员快照仍然可信。
+   *
+   * 该方法只做控制面保留，不碰 CouchDB；调用方随后 await 删库，成功后调
+   * `finalizeAccountDeletion()`，失败则调 `cancelAccountDeletion()`。
+   */
+  prepareAccountDeletion(accountId: string, now = Date.now()): {
+    deleteDatabases: { notebookId: string; dbName: string }[];
+    transferNotebooks: { notebookId: string; dbName: string }[];
+  } {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      /*
+       * 并发删另一个账号时，如果这个人还是某个「正在删账号」的笔记本成员，
+       * 先拒绝：那个笔记本的移交/删行还没决定，此时移除成员会让快照失真。
+       */
+      const foreignReservation = this.db
+        .prepare(
+          `SELECT n.id FROM memberships m
+             JOIN notebooks n ON n.id = m.notebook_id
+            WHERE m.account_id = ? AND n.owner_id <> ? AND n.deleted_at IS NULL AND n.deleting_at IS NOT NULL
+            LIMIT 1`,
+        )
+        .get(accountId, accountId) as { id: string } | undefined;
+      if (foreignReservation) throw new NotebookError("deletion-in-progress", "有笔记本正在删除，请稍后重试");
+
+      const owned = this.db
+        .prepare("SELECT * FROM notebooks WHERE owner_id = ? ORDER BY created_at ASC")
+        .all(accountId) as unknown as NotebookRow[];
+      const deleteDatabases: { notebookId: string; dbName: string }[] = [];
+      const transferNotebooks: { notebookId: string; dbName: string }[] = [];
+
+      for (const notebook of owned) {
+        const item = { notebookId: notebook.id, dbName: notebook.db_name };
+        /*
+         * 已经逻辑删过的行（用户单本删除成功 / 上次部分删库成功后软删）不再参与
+         * 独占 vs 共享判断：库本来就要删，重试时把删库调用当作幂等确认，最后清行。
+         */
+        if (notebook.deleted_at !== null) {
+          deleteDatabases.push(item);
+          continue;
+        }
+        if (notebook.deleting_at !== null) {
+          if (notebook.deletion_state !== "account") {
+            throw new NotebookError("deletion-in-progress", "有笔记本正在删除，请稍后重试");
+          }
+        } else {
+          this.db
+            .prepare("UPDATE notebooks SET deleting_at = ?, deletion_state = 'account' WHERE id = ? AND deleting_at IS NULL")
+            .run(now, notebook.id);
+        }
+        if (this.otherMembersOf(notebook.id).length === 0) deleteDatabases.push(item);
+        else transferNotebooks.push(item);
+      }
+
+      this.db.exec("COMMIT");
+      return { deleteDatabases, transferNotebooks };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** 删账号失败时清除该账号拥有的全部保留状态；账号与控制面数据原样保留。 */
+  cancelAccountDeletion(accountId: string): void {
+    this.db
+      .prepare("UPDATE notebooks SET deleting_at = NULL, deletion_state = NULL WHERE owner_id = ? AND deletion_state = 'account'")
+      .run(accountId);
+  }
+
+  /**
+   * 记下「这个库已经在 CouchDB 里删掉了」。
+   *
+   * 删账号可能要删多个库；如果第 2 个失败，第 1 个已经不可逆地没了。只清除保留
+   * 状态会让第 1 个笔记本重新对成员可见，邀请甚至能加入一个库已不存在的笔记本。
+   * 所以每成功删一个库就先逻辑删行（`deleted_at` 非空），使加入 / 发邀请立即
+   * 变成 not-found；重试最终化时再物理清掉这一行。
+   */
+  markDatabaseDeleted(notebookId: string, now = Date.now()): void {
+    this.db.prepare("UPDATE notebooks SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").run(now, notebookId);
+  }
+
+  /**
+   * 删账号的最后一步：所有独占库确认删除成功后，在一个事务里完成移交与清行。
+   *
+   * `deletedNotebookIds` 是调用方确认已经不存在（本次删掉或本来就不存在）的库。
+   * 独占库不在这份集合里就整体回滚 —— 绝不能删掉 SQLite 行却留下 CouchDB 库。
+   * 共享库在保留期间成员关系被冻结；最终化时若发现没有其他成员，同样回滚让人重试，
+   * 而不是猜一个 owner 或留下孤儿库。
+   */
+  finalizeAccountDeletion(
+    accountId: string,
+    options: { deletedNotebookIds: string[]; now?: number },
+  ): { exclusiveNotebooks: string[]; transferredNotebooks: string[] } {
+    const now = options.now ?? Date.now();
+    const deleted = new Set(options.deletedNotebookIds);
+    const exclusiveNotebooks: string[] = [];
+    const transferredNotebooks: string[] = [];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      /*
+       * 保留发生在 await 之前，但另一个账号的删除可能在这之后才开始。最终化时
+       * 再查一次：如果这个人已经是某个「别人拥有、正在删除」的笔记本成员，
+       * 现在移除成员会让对方的成员快照失真。整体回滚、延后到下一次重试。
+       */
+      const foreignReservation = this.db
+        .prepare(
+          `SELECT n.id FROM memberships m
+             JOIN notebooks n ON n.id = m.notebook_id
+            WHERE m.account_id = ? AND n.owner_id <> ? AND n.deleted_at IS NULL AND n.deleting_at IS NOT NULL
+            LIMIT 1`,
+        )
+        .get(accountId, accountId) as { id: string } | undefined;
+      if (foreignReservation) throw new NotebookError("deletion-in-progress", "有笔记本正在删除，请稍后重试");
+
+      const owned = this.db
+        .prepare("SELECT * FROM notebooks WHERE owner_id = ? ORDER BY created_at ASC")
+        .all(accountId) as unknown as NotebookRow[];
+
+      for (const notebook of owned) {
+        if (notebook.deleted_at !== null) {
+          // 单本删除已经把库删掉、行标软删；这里只做账号外键所需的物理清行。
+          this.deleteNotebookRow(notebook.id);
+          continue;
+        }
+        if (notebook.deleting_at === null || notebook.deletion_state !== "account") {
+          throw new NotebookError("deletion-in-progress", "删除期间笔记本状态发生变化，请重试");
+        }
+
+        const otherMembers = this.otherMembersOf(notebook.id);
+        if (otherMembers.length === 0) {
+          if (!deleted.has(notebook.id)) {
+            throw new NotebookError("deletion-in-progress", "删除期间成员关系发生变化，请重试");
+          }
+          this.deleteNotebookRow(notebook.id);
+          exclusiveNotebooks.push(notebook.id);
+          continue;
+        }
+        if (deleted.has(notebook.id)) {
+          // 计划里是移交的库被误删了：保留状态回滚，让调用方以错误结束，不能静默转移一个空库。
+          throw new NotebookError("deletion-in-progress", "删除期间成员关系发生变化，请重试");
+        }
+
+        const next = otherMembers[0]!;
+        this.db
+          .prepare("UPDATE notebooks SET owner_id = ?, deleting_at = NULL, deletion_state = NULL WHERE id = ?")
+          .run(next, notebook.id);
+        this.db
+          .prepare("INSERT OR REPLACE INTO memberships (notebook_id, account_id, role, created_at) VALUES (?, ?, 'owner', ?)")
+          .run(notebook.id, next, now);
+        transferredNotebooks.push(notebook.id);
+      }
+
+      this.removeMembershipsOf(accountId);
+      this.deleteDevicesOf(accountId);
+      this.db.prepare("DELETE FROM notebook_invites WHERE created_by = ?").run(accountId);
+      this.db.prepare("DELETE FROM invites WHERE created_by = ?").run(accountId);
+      this.db.prepare("DELETE FROM sync_activity WHERE account_id = ?").run(accountId);
+      this.db.prepare("DELETE FROM client_stats WHERE account_id = ?").run(accountId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { exclusiveNotebooks, transferredNotebooks };
+  }
+
+  /**
    * 用户明确删除笔记本：无条件软删，并清掉这个库在控制面的全部子行。
    *
    * 与 `markDeleted()` 的「删账号时保留共享库」分开：这里库已经被显式删掉，
    * 不能再因为「还有别的成员」而变成静默 no-op。
    */
   deleteNotebookCascade(notebookId: string, now = Date.now()): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = this.db.prepare("UPDATE notebooks SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").run(now, notebookId);
-      this.deleteNotebookChildren(notebookId);
-      this.db.exec("COMMIT");
-      return Number(result.changes ?? 0) > 0;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    this.prepareNotebookDeletion(notebookId, now);
+    return this.finalizeNotebookDeletion(notebookId, now);
   }
 
   /**
@@ -297,6 +535,9 @@ export class NotebookStore {
 
     const notebook = this.findById(invite.notebook_id);
     if (!notebook) throw new NotebookError("not-found", "笔记本不存在");
+    if (notebook.deleting_at !== null) {
+      throw new NotebookError("deletion-in-progress", "笔记本正在删除，暂时不能加入");
+    }
     if (notebook.crypto_mode !== CRYPTO_MODE_SHAREABLE) {
       throw new NotebookError("crypto-mode-not-shareable", "端到端加密的笔记本在 v1 里不可共享");
     }
@@ -313,6 +554,9 @@ export class NotebookStore {
 
       const freshNotebook = this.findById(fresh.notebook_id);
       if (!freshNotebook) throw new NotebookError("not-found", "笔记本不存在");
+      if (freshNotebook.deleting_at !== null) {
+        throw new NotebookError("deletion-in-progress", "笔记本正在删除，暂时不能加入");
+      }
       if (freshNotebook.crypto_mode !== CRYPTO_MODE_SHAREABLE) {
         throw new NotebookError("crypto-mode-not-shareable", "端到端加密的笔记本在 v1 里不可共享");
       }
@@ -356,18 +600,28 @@ export class NotebookStore {
     maxUses?: number;
     now?: number;
   }): void {
-    const notebook = this.findById(input.notebookId);
-    if (!notebook) throw new NotebookError("not-found", "笔记本不存在");
-    if (notebook.crypto_mode !== CRYPTO_MODE_SHAREABLE) {
-      throw new NotebookError("crypto-mode-not-shareable", "端到端加密的笔记本在 v1 里不可共享");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const notebook = this.findById(input.notebookId);
+      if (!notebook) throw new NotebookError("not-found", "笔记本不存在");
+      if (notebook.deleting_at !== null) {
+        throw new NotebookError("deletion-in-progress", "笔记本正在删除，暂时不能创建邀请");
+      }
+      if (notebook.crypto_mode !== CRYPTO_MODE_SHAREABLE) {
+        throw new NotebookError("crypto-mode-not-shareable", "端到端加密的笔记本在 v1 里不可共享");
+      }
+      if (input.role === "owner") throw new NotebookError("forbidden", "owner 不能通过邀请码分发");
+      const maxUses = input.maxUses ?? 1;
+      this.db
+        .prepare(
+          "INSERT INTO notebook_invites (code_hash, notebook_id, role, created_by, created_at, expires_at, used_at, max_uses, uses) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0)",
+        )
+        .run(input.codeHash, input.notebookId, input.role, input.createdBy, input.now ?? Date.now(), input.expiresAt ?? null, maxUses);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
-    if (input.role === "owner") throw new NotebookError("forbidden", "owner 不能通过邀请码分发");
-    const maxUses = input.maxUses ?? 1;
-    this.db
-      .prepare(
-        "INSERT INTO notebook_invites (code_hash, notebook_id, role, created_by, created_at, expires_at, used_at, max_uses, uses) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0)",
-      )
-      .run(input.codeHash, input.notebookId, input.role, input.createdBy, input.now ?? Date.now(), input.expiresAt ?? null, maxUses);
   }
 
   /* ---------------------------------------------------------------- 配额 */
@@ -751,47 +1005,16 @@ export class NotebookStore {
    * @returns `{ exclusiveNotebooks, transferredNotebooks }` —— 前者需要调用方去删库。
    */
   deleteAccountCascade(accountId: string, now = Date.now()): { exclusiveNotebooks: string[]; transferredNotebooks: string[] } {
-    const exclusiveNotebooks: string[] = [];
-    const transferredNotebooks: string[] = [];
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const owned = this.listForAccount(accountId).filter((item) => item.role === "owner");
-      for (const { notebook } of owned) {
-        /*
-         * `markDeleted` **只对独占库软删**（共享库不动）—— 那一条已在它的实现里，
-         * 这里只需要按 `exclusive` 分桶。
-         */
-        const result = this.markDeleted(notebook.id, now);
-        if (result.exclusive) {
-          exclusiveNotebooks.push(notebook.id);
-        } else if (result.otherMembers.length > 0) {
-          /*
-           * ⚠️ **不能调 `transferOwnership()`** —— 它自己会 `BEGIN IMMEDIATE`，
-           * 而 SQLite **不支持嵌套事务**（`cannot start a transaction within a transaction`）。
-           * 所以这里把它的两条语句直接写在本事务里：语义完全一样，只是不另开事务。
-           */
-          const next = result.otherMembers[0]!;
-          this.db.prepare("UPDATE notebooks SET owner_id = ? WHERE id = ?").run(next, notebook.id);
-          this.db
-            .prepare("INSERT OR REPLACE INTO memberships (notebook_id, account_id, role, created_at) VALUES (?, ?, 'owner', ?)")
-            .run(notebook.id, next, now);
-          transferredNotebooks.push(notebook.id);
-        }
-      }
-      this.removeMembershipsOf(accountId);
-      // 独占库的行**物理删掉**（库由调用方删；行留着会挡住 accounts 的外键）。
-      for (const id of exclusiveNotebooks) this.deleteNotebookRow(id);
-      this.deleteDevicesOf(accountId);
-      this.db.prepare("DELETE FROM notebook_invites WHERE created_by = ?").run(accountId);
-      this.db.prepare("DELETE FROM invites WHERE created_by = ?").run(accountId);
-      this.db.prepare("DELETE FROM sync_activity WHERE account_id = ?").run(accountId);
-      this.db.prepare("DELETE FROM client_stats WHERE account_id = ?").run(accountId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return { exclusiveNotebooks, transferredNotebooks };
+    /*
+     * 直接调用（测试 / 旧调用方）时把「保留 → 最终化」串起来。此时假定独占库
+     * 已经由调用方删掉，所以把它们全部当作已删除传给最终化；真正的路由会先
+     * `prepareAccountDeletion()`、await 删库、再 `finalizeAccountDeletion()`。
+     */
+    const plan = this.prepareAccountDeletion(accountId, now);
+    return this.finalizeAccountDeletion(accountId, {
+      deletedNotebookIds: plan.deleteDatabases.map((item) => item.notebookId),
+      now,
+    });
   }
 
   /** 物理删掉**一个**笔记本的全部子行（不含 CouchDB 库）。 */

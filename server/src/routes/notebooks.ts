@@ -65,9 +65,11 @@ function notebookErrorResponse(error: NotebookError): Response {
           ? 400
           : error.code === "already-member"
             ? 409
-            : error.code === "quota"
-              ? 403
-              : 400;
+            : error.code === "deletion-in-progress"
+              ? 409
+              : error.code === "quota"
+                ? 403
+                : 400;
   return Response.json({ error: error.message, code: error.code }, { status });
 }
 
@@ -207,19 +209,31 @@ export function createNotebookRoutes(deps: NotebookRoutesDeps): Hono {
     if (membership.role !== "owner") return json({ error: "需要 owner 权限", code: "forbidden" }, 403);
 
     /*
-     * 删笔记本：**逻辑删行 + 物理删库**。
+     * 删笔记本：**先持久化保留、再物理删库、最后落控制面**。
      *
-     * 与「删账号」不同，这里是用户明确的「这个笔记本我不要了」，所以库要真删
-     * （否则磁盘只增不减）。两个资源的顺序是「先删库、再标记行」：
-     * 库删成功而标记失败，最坏是留下一个指向空库的行（可重试）；
-     * 反过来则是「行说没了、库还在」—— 那会一直占着磁盘且没人知道。
+     * CouchDB 删库不可逆，而 await 期间成员仍可能凭邀请码加入。只在删库前后
+     * 各查一次成员解决不了 TOCTOU；所以先把 `deleting_at` 写进 SQLite（一个事务），
+     * 加入 / 发邀请看到它必须拒绝。删库失败就清除保留状态、控制面原样保留；
+     * 删库成功才删行。删账号与这里共用同一套状态机和最终化逻辑。
      */
+    try {
+      deps.notebooks.prepareNotebookDeletion(notebook.id);
+    } catch (error) {
+      if (error instanceof NotebookError) return notebookErrorResponse(error);
+      throw error;
+    }
     try {
       await deps.couchAdmin.deleteDatabase(notebook.db_name);
     } catch (error) {
+      deps.notebooks.cancelNotebookDeletion(notebook.id);
       return json({ error: `删除库失败：${String(error)}`, code: "server" }, 500);
     }
-    deps.notebooks.deleteNotebookCascade(notebook.id);
+    try {
+      deps.notebooks.finalizeNotebookDeletion(notebook.id);
+    } catch (error) {
+      if (error instanceof NotebookError) return notebookErrorResponse(error);
+      throw error;
+    }
     deps.notebooks.recomputeNotebookCount(notebook.owner_id);
     deps.notebooks.audit({ actorId: auth.id, action: "delete_notebook", target: notebook.id, ip: null, detail: null });
     return new Response(null, { status: 204 });

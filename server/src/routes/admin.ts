@@ -30,7 +30,7 @@ import { Hono } from "hono";
 import { adminServerInfoSchema, emailSchema, parseContract } from "../../../shared/contract";
 import { AccountError, AccountStore, accountLabel } from "../auth/accounts";
 import type { CouchClient } from "../couch/client";
-import type { NotebookStore } from "../notebooks";
+import { NotebookError, type NotebookStore } from "../notebooks";
 import type { ServerConfig } from "../config";
 import type { SettingsStore } from "../settings";
 import type { ShareStore } from "../shares";
@@ -177,34 +177,52 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
     if (!target) return json({ error: "账号不存在", code: "not-found" }, 404);
 
     /*
-     * ★ **先删库、再清控制面** —— 顺序和「删单个笔记本」一致。
+     * ★ **先持久化保留、再删库、最后清控制面** —— 顺序和「删单个笔记本」一致。
      *
      * 库（CouchDB）与控制面（SQLite）跨两个系统、没有共同事务。删库用
      * **admin 客户端**：CouchDB 3.x 只允许 server admin `DELETE /{db}`，
      * 运行时 sync 账号会拿到 403。
      *
-     * 只要有一个库没删掉就**不碰控制面**：账号、笔记本行、成员关系全部保留，
-     * 控制台会看到错误，点一次「删除账号」就能重试。反过来（先清控制面）
-     * 会让独占库失去所有引用，永远留在 CouchDB 里。
+     * `prepareAccountDeletion()` 在**任何 await 之前**用一个事务把该账号拥有的
+     * 全部笔记本置成 `deletion_state = 'account'`：独占的待删、共享的待移交。
+     * 加入 / 发邀请 / 并发删账号都会看到这个状态并拒绝，所以 await 期间成员
+     * 快照不会变化 —— 这堵住了「预检时共享、最终化时独占」留下无引用库的 TOCTOU。
      *
-     * 编排在 `deleteAccountCascade()`（与控制台走同一条），这里只负责删库。
+     * 只要有一个库没删掉就不做最终化：没删掉的库清除保留状态；已经删掉的库先
+     * 逻辑删行（不能再被加入），成员关系与账号行保留。控制台会看到错误，点一次
+     * 「删除账号」就能重试。反过来（先清控制面）会让独占库失去所有引用，
+     * 永远留在 CouchDB 里。
      */
-    const owned = deps.notebooks.listForAccount(accountId).filter((item) => item.role === "owner");
-    const exclusive = owned.filter((item) => deps.notebooks.otherMembersOf(item.notebook.id).length === 0);
+    let plan: ReturnType<NotebookStore["prepareAccountDeletion"]>;
+    try {
+      plan = deps.notebooks.prepareAccountDeletion(accountId);
+    } catch (error) {
+      if (error instanceof NotebookError) {
+        const status = error.code === "not-found" ? 404 : error.code === "deletion-in-progress" ? 409 : 400;
+        return json({ error: error.message, code: error.code }, status);
+      }
+      throw error;
+    }
+
     let databasesDeleted = 0;
+    const deletedNotebookIds: string[] = [];
     const failed: { notebookId: string; dbName: string; error: string }[] = [];
-    for (const { notebook } of exclusive) {
+    for (const { notebookId, dbName } of plan.deleteDatabases) {
       try {
         // `false` = 库已经不存在；从「这个账号独占的库」的角度看同样算删掉了（重试时会遇到）。
-        await deps.couchAdmin.deleteDatabase(notebook.db_name);
+        await deps.couchAdmin.deleteDatabase(dbName);
         databasesDeleted += 1;
+        // 已经不可逆地删掉了：先逻辑删行，避免部分失败后有人再加入一个空库。
+        deps.notebooks.markDatabaseDeleted(notebookId);
+        deletedNotebookIds.push(notebookId);
       } catch (error) {
-        failed.push({ notebookId: notebook.id, dbName: notebook.db_name, error: String(error) });
-        deps.audit?.({ actorId: admin.id, action: "delete_database_failed", target: notebook.id, ip: null, detail: String(error) });
+        failed.push({ notebookId, dbName, error: String(error) });
+        deps.audit?.({ actorId: admin.id, action: "delete_database_failed", target: notebookId, ip: null, detail: String(error) });
       }
     }
 
     if (failed.length > 0) {
+      deps.notebooks.cancelAccountDeletion(accountId);
       deps.audit?.({
         actorId: admin.id,
         action: "delete_account_failed",
@@ -218,7 +236,7 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
        */
       return json(
         {
-          error: `有 ${failed.length} 个独占库没能删除；账号和笔记本数据已保留，可以重试（本次已删掉 ${databasesDeleted} 个库）`,
+          error: `有 ${failed.length} 个独占库没能删除；账号与控制面已保留，可以重试（本次已删掉 ${databasesDeleted} 个库，已删的库不可恢复）`,
           code: "couch-delete-failed",
           databasesDeleted,
           failedDatabases: failed,
@@ -227,7 +245,23 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
       );
     }
 
-    const cascade = deps.notebooks.deleteAccountCascade(accountId);
+    let cascade: ReturnType<NotebookStore["finalizeAccountDeletion"]>;
+    try {
+      cascade = deps.notebooks.finalizeAccountDeletion(accountId, { deletedNotebookIds });
+    } catch (error) {
+      deps.notebooks.cancelAccountDeletion(accountId);
+      if (error instanceof NotebookError) {
+        deps.audit?.({
+          actorId: admin.id,
+          action: "delete_account_failed",
+          target: accountId,
+          ip: null,
+          detail: `deletionConflict=${error.code},label=${accountLabel(target).replace(/[,=]/g, " ")}`,
+        });
+        return json({ error: error.message, code: "deletion-conflict" }, 409);
+      }
+      throw error;
+    }
     const notebooksTransferred = cascade.transferredNotebooks.length;
     const deleted = deps.accounts.delete(accountId, () => {
       deps.shares.enqueueSnapshotCleanup(accountId, deps.shares.listIdsForAccount(accountId), now());

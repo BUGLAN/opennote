@@ -27,7 +27,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 interface Migration {
   version: number;
@@ -468,6 +468,30 @@ const MIGRATIONS: readonly Migration[] = [
           last_error      TEXT
         );
         CREATE INDEX idx_share_cleanup_queued ON share_cleanup(queued_at);
+      `);
+    },
+  },
+  {
+    version: 10,
+    description: "笔记本删除状态机：deleting_at / deletion_state",
+    up: (db) => {
+      /*
+       * CouchDB 删库不可逆，而 SQLite 与 CouchDB 没有共同事务。删库 await 期间
+       * 成员关系仍可变化，事后再按「最新成员」决定移交或删行，就会出现
+       * 「Bob 拥有一个库已被删掉的笔记本」或「行删了、库还在」。
+       *
+       * 所以把「删除意图」先落成 SQLite 里的持久状态：
+       * - `deleting_at` 非空 = 这个笔记本已经被某次删除操作保留；
+       * - `deletion_state` 区分是单本删除（`notebook`）还是删账号（`account`）。
+       *
+       * 加入、发邀请、并发删账号在事务里看到非空状态就必须拒绝/延后。
+       * 状态落库（不是进程内互斥），多实例也看得到；删除失败时由调用方清除，
+       * 账号与全部控制面数据原样保留，可以直接重试。
+       */
+      db.exec(`
+        ALTER TABLE notebooks ADD COLUMN deleting_at INTEGER;
+        ALTER TABLE notebooks ADD COLUMN deletion_state TEXT;
+        CREATE INDEX idx_notebooks_deleting ON notebooks(deleting_at) WHERE deleting_at IS NOT NULL;
       `);
     },
   },

@@ -21,6 +21,11 @@ export interface FakeCouchOptions {
    * 其它账号（运行时 `sync` 账号）得到 403。不设时不做账号区分（大多数用例不需要）。
    */
   deleteRequiresUser?: string;
+  /**
+   * `DELETE /{db}` 真正生效之前的钩子。用例用它把删库卡在中途，制造
+   * 「删库 await 期间并发加入 / 并发删账号」的确定性窗口。
+   */
+  beforeDeleteDatabase?: (dbName: string) => Promise<void> | void;
 }
 
 export class FakeCouch {
@@ -44,11 +49,14 @@ export class FakeCouch {
   readonly revsLimits = new Map<string, number>();
   /** 设成真时下一次请求抛网络错误（测回滚）。 */
   failNext: string | null = null;
+  /** 删库真正生效前的钩子（见 `FakeCouchOptions`）。 */
+  beforeDeleteDatabase: ((dbName: string) => Promise<void> | void) | null;
   private counter = 0;
   private readonly deleteRequiresUser: string | null;
 
   constructor(options: FakeCouchOptions = {}) {
     this.deleteRequiresUser = options.deleteRequiresUser ?? null;
+    this.beforeDeleteDatabase = options.beforeDeleteDatabase ?? null;
   }
 
   private rev(): string {
@@ -101,6 +109,7 @@ export class FakeCouch {
           return json(403, { error: "forbidden", reason: "Only server admins can delete databases" });
         }
         if (!docs) return json(404, { error: "not_found" });
+        if (this.beforeDeleteDatabase) await this.beforeDeleteDatabase(dbName);
         this.databases.delete(dbName);
         return json(200, { ok: true });
       }
@@ -302,6 +311,27 @@ export function couchClient(fake: FakeCouch): CouchClient {
 /** 和 `couchClient` 同一个假 CouchDB，但用 server admin 凭据（删库用）。 */
 export function couchAdminClient(fake: FakeCouch): CouchClient {
   return new CouchClient({ baseUrl: "http://couchdb:5984", user: "admin", password: "apw", fetchImpl: fake.fetchImpl });
+}
+
+/**
+ * 把一个库的 `DELETE /{db}` 卡在真正生效之前，供并发回归用例使用。
+ * `entered` 在请求已经进入删库窗口后 resolve；`release()` 放行。
+ */
+export function blockDeleteDatabase(fake: FakeCouch, dbName: string): { entered: Promise<void>; release: () => void } {
+  let release!: () => void;
+  let entered!: () => void;
+  const enteredPromise = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  fake.beforeDeleteDatabase = async (name) => {
+    if (name !== dbName) return;
+    entered();
+    await released;
+  };
+  return { entered: enteredPromise, release: () => release() };
 }
 
 /** Basic 认证里的用户名（夹具只看用户名，不校验密码）。 */
