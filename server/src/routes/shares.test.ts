@@ -96,6 +96,27 @@ describe("创建", () => {
     expect(second.status).toBe(413);
     expect(second.body.code).toBe("quota");
   });
+
+  it("两个并发请求共用剩余配额：只有一个 201，失败方不留下行或快照", async () => {
+    const world = makeWorld();
+    const { id, token } = seedAccount(world.accounts);
+    world.db.prepare("UPDATE accounts SET quota_bytes = 12 WHERE id = ?").run(id);
+
+    const results = await Promise.all([world.share(token, "a.txt", "12345678"), world.share(token, "b.txt", "12345678")]);
+    expect(results.map((result) => result.status).sort()).toEqual([201, 413]);
+    expect(results.find((result) => result.status === 413)?.body.code).toBe("quota");
+
+    const rows = world.db.prepare("SELECT id, size, revoked_at FROM shares").all() as unknown as {
+      id: string;
+      size: number;
+      revoked_at: number | null;
+    }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ size: 8, revoked_at: null });
+    expect(world.shares.activeBytesOf(id)).toBe(8);
+    expect(world.fake.databases.get(SHARE_DATABASE)?.size).toBe(1);
+    expect(world.fake.attachments.size).toBe(1);
+  });
 });
 
 describe("公开页", () => {

@@ -112,25 +112,30 @@ export function createShareRoutes(deps: ShareRoutesDeps): Hono {
 
     /* 快照算进作者的空间配额（与笔记本同一个上限；≤ 0 视为不限）。 */
     const limit = account.quota_bytes ?? deps.settings?.get("defaultQuotaBytes") ?? deps.config.defaultAccountQuotaBytes;
-    if (limit > 0) {
-      const used = deps.notebooks.bytesOwnedBy(account.id) + deps.shares.activeBytesOf(account.id);
-      if (used + bytes.byteLength > limit) {
-        return json(
-          { error: `空间已满：已用 ${formatBytes(used)}，配额 ${formatBytes(limit)}，这份快照还要 ${formatBytes(bytes.byteLength)}`, code: "quota", bytesUsed: used, bytesLimit: limit },
-          413,
-        );
-      }
-    }
-
     await ensureDatabase();
-    const share = deps.shares.create({
-      accountId: account.id,
-      name,
-      contentType: contentTypeFor(name),
-      size: bytes.byteLength,
-      sha256: sha256Hex(bytes),
-      now: now(),
-    });
+    const reserved = deps.shares.createWithinQuota(
+      {
+        accountId: account.id,
+        name,
+        contentType: contentTypeFor(name),
+        size: bytes.byteLength,
+        sha256: sha256Hex(bytes),
+        now: now(),
+      },
+      { limit, usedBytes: () => deps.notebooks.bytesOwnedBy(account.id) },
+    );
+    if ("quotaExceeded" in reserved) {
+      return json(
+        {
+          error: `空间已满：已用 ${formatBytes(reserved.bytesUsed)}，配额 ${formatBytes(limit)}，这份快照还要 ${formatBytes(bytes.byteLength)}`,
+          code: "quota",
+          bytesUsed: reserved.bytesUsed,
+          bytesLimit: limit,
+        },
+        413,
+      );
+    }
+    const share = reserved.share;
     /* 正文与元数据一次写进同一个 revision（与 `PUT /v1/file` 同一做法）。写失败就把行撤掉，不留一个打不开的链接。 */
     try {
       const written = await deps.couch.putDoc(SHARE_DATABASE, {

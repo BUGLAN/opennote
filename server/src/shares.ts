@@ -41,6 +41,17 @@ export interface ShareRow {
   revoked_at: number | null;
 }
 
+export interface ShareReservationInput {
+  accountId: string;
+  name: string;
+  contentType: string;
+  size: number;
+  sha256: string;
+  now: number;
+}
+
+export type ShareReservationResult = { share: ShareRow } | { quotaExceeded: true; bytesUsed: number };
+
 export interface ShareSnapshotCleanupResult {
   deleted: number;
   failed: number;
@@ -126,7 +137,43 @@ export async function deleteShareSnapshot(couch: CouchClient, shareId: string): 
 export class ShareStore {
   constructor(private readonly db: DatabaseSync) {}
 
-  create(input: { accountId: string; name: string; contentType: string; size: number; sha256: string; now: number }): ShareRow {
+  create(input: ShareReservationInput): ShareRow {
+    const row = this.makeRow(input);
+    this.insert(row);
+    return row;
+  }
+
+  /**
+   * 在同一写事务里重算配额并插入占位行。
+   *
+   * 事务外的「先读用量、再插入」会在两个并发请求之间留下窗口：两边都读到同一份
+   * 剩余额度，最后都插入成功。`BEGIN IMMEDIATE` 让本实例和多实例部署共用同一把
+   * SQLite 写锁，后到者一定看见先到者提交的占位行。
+   *
+   * `usedBytes` 在拿锁后执行；路由用它把笔记本占用与分享占用合在一起算。
+   * `limit <= 0` 表示不限，仍走同一插入路径。
+   */
+  createWithinQuota(input: ShareReservationInput, options: { limit: number; usedBytes: () => number }): ShareReservationResult {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (options.limit > 0) {
+        const bytesUsed = options.usedBytes() + this.activeBytesOf(input.accountId);
+        if (bytesUsed + input.size > options.limit) {
+          this.db.exec("ROLLBACK");
+          return { quotaExceeded: true, bytesUsed };
+        }
+      }
+      const row = this.makeRow(input);
+      this.insert(row);
+      this.db.exec("COMMIT");
+      return { share: row };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private makeRow(input: ShareReservationInput): ShareRow {
     const row: ShareRow = {
       id: newShareId(),
       account_id: input.accountId,
@@ -137,10 +184,13 @@ export class ShareStore {
       created_at: input.now,
       revoked_at: null,
     };
+    return row;
+  }
+
+  private insert(row: ShareRow): void {
     this.db
       .prepare("INSERT INTO shares (id, account_id, name, content_type, size, sha256, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)")
       .run(row.id, row.account_id, row.name, row.content_type, row.size, row.sha256, row.created_at);
-    return row;
   }
 
   /** 读一条（含已撤销的；调用方自己判 `revoked_at`）。 */
