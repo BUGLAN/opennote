@@ -334,18 +334,31 @@ describe("装饰器基线：未改动的形态保持原样", () => {
     expect(keysContaining(onFence, "md-hide-line")).toHaveLength(0);
   });
 
-  it("setext 标题：光标在标题文字里时下划线仍隐藏；打开开关并移到下划线行才露", () => {
+  it("setext 标题：光标在标题文字里时下划线仍隐藏；移到下划线行或打开开关才露", () => {
     const doc = "标题\n===\n";
     const inTitle = currentKeys(stateFor(doc, { anchor: 1 }));
     expect(inTitle).toContain("0-0|md-h1");
     expect(inTitle).toContain("3-3|md-hide-line");
 
-    // 默认不露标记：即使光标就在下划线行上，也不露（块高恒定）
+    // 光标真的停在下划线行上：这一行必须可见可编辑
     const onUnderlineDefault = currentKeys(stateFor(doc, { anchor: 4 }));
-    expect(onUnderlineDefault).toContain("3-3|md-hide-line");
+    expect(onUnderlineDefault).toContain("0-0|md-h1");
+    expect(keysContaining(onUnderlineDefault, "md-hide-line")).toHaveLength(0);
+    expect(onUnderlineDefault).not.toContain("3-6");
 
     const onUnderlineShown = currentKeys(stateFor(doc, { anchor: 4, settings: { showMarks: true } }));
     expect(keysContaining(onUnderlineShown, "md-hide-line")).toHaveLength(0);
+  });
+
+  it("回归：Setext 下划线行随光标进出恢复显示 / 隐藏", () => {
+    const doc = "标题\n===\n正文\n";
+    const onUnderline = currentKeys(stateFor(doc, { anchor: 4 }));
+    expect(keysContaining(onUnderline, "md-hide-line")).toHaveLength(0);
+    expect(onUnderline).not.toContain("3-6");
+
+    const away = currentKeys(stateFor(doc, { anchor: doc.length }));
+    expect(away).toContain("3-3|md-hide-line");
+    expect(away).toContain("3-6");
   });
 
   it("mermaid：非激活态换成块级 MermaidWidget", () => {
@@ -704,6 +717,26 @@ describe("块还没成立就显示源码", () => {
   it("空引用露出 `>`，有文字就藏起来", () => {
     expect(keysContaining(currentKeys(stateFor("> \n", { anchor: 2 })), "md-src")).toHaveLength(1);
     expect(keysContaining(currentKeys(stateFor("> 引用\n", { anchor: 4 })), "md-src")).toHaveLength(0);
+  });
+
+  it("回归：空引用 `> ` 不被整行替换盖住；多行、嵌套引用照旧隐藏", () => {
+    const empty = currentKeys(stateFor("> \n", { anchor: 2 }));
+    expect(empty).toContain("0-2|md-src");
+    expect(empty).not.toContain("0-2");
+
+    const withText = currentKeys(stateFor("> 引用\n", { anchor: 4 }));
+    expect(withText).toContain("0-2");
+    expect(withText).not.toContain("0-2|md-src");
+
+    const multi = currentKeys(stateFor("> 一\n> 二\n", { anchor: 7 }));
+    expect(multi).toContain("0-2");
+    expect(multi).toContain("4-6");
+    expect(keysContaining(multi, "md-src")).toHaveLength(0);
+
+    const nested = currentKeys(stateFor("> > x\n", { anchor: 6 }));
+    expect(nested).toContain("0-2");
+    expect(nested).toContain("2-4");
+    expect(keysContaining(nested, "md-src")).toHaveLength(0);
   });
 
   it("空列表项露出 `-`，有文字才换成圆点 widget", () => {

@@ -448,9 +448,9 @@ function decorate(
           const markNode = node.getChild("HeaderMark");
           if (markNode) {
             const line = doc.lineAt(markNode.from);
-            // 只有光标**停在下划线那一行**、而且开关允许露标记时才把它露出来
+            // 光标**停在下划线那一行**、或开关要求一直露标记时才把它露出来
             // （原来只要在标题块内就露，光标从标题文字移开/移入都会让块高变化 29px）。
-            if (!(revealMarks && activeLines.has(line.number))) {
+            if (!(revealMarks || activeLines.has(line.number))) {
               hide(line.from, line.to);
               lineDeco(line.from, "md-hide-line");
             }
@@ -663,13 +663,6 @@ function decorate(
           const endLine = doc.lineAt(to);
           for (let n = startLine.number; n <= endLine.number; n += 1) {
             lineDeco(doc.line(n).from, `md-quote md-quote-${Math.min(depth, 3)}`);
-          }
-          if (!showsSource(from, to)) {
-            for (let child = node.firstChild; child; child = child.nextSibling) {
-              if (child.name === "QuoteMark") {
-                hide(child.from, Math.min(child.to + 1, doc.lineAt(child.from).to));
-              }
-            }
           }
           return;
         }
