@@ -36,6 +36,7 @@ import {
   MIN_SUPPORTED_PROTOCOL_VERSION,
   changesResponseSchema,
   clientStatsRequestSchema,
+  contentIdSchema,
   didSchema,
   filesBatchRequestSchema,
   filesBatchResponseSchema,
@@ -126,6 +127,12 @@ function contentIdOf(doc: CouchDocument): string | null {
   return null;
 }
 
+/** 内容标识的线上形状：64 位小写十六进制（明文 `hash` 与 E2EE `ehash` 共用）。 */
+function contentIdProblem(value: unknown): string | null {
+  const checked = contentIdSchema.safeParse(value);
+  return checked.success ? null : (checked.error.issues[0]?.message ?? "内容标识形状不对");
+}
+
 /**
  * 把文档投影成树条目，**不合格的返回 `null`**（而不是让整个响应炸掉）。
  *
@@ -139,7 +146,7 @@ function contentIdOf(doc: CouchDocument): string | null {
  */
 function validTreeEntry(entry: { did: string; hash?: string; ehash?: string }): boolean {
   const id = entry.hash ?? entry.ehash;
-  return typeof id === "string" && /^[0-9a-f]{64}$/.test(id);
+  return contentIdProblem(id) === null;
 }
 
 /**
@@ -497,10 +504,17 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
               entry.path = row.doc.path;
             }
             const contentId = contentIdOf(row.doc);
-            if (contentId) {
-              if (cryptoMode === "none") entry.hash = contentId;
-              else entry.ehash = contentId;
+            if (contentId === null) {
+              console.warn(`[opennote-server] 跳过内容标识缺失的变更 ${row.id}`);
+              return null;
             }
+            const contentIdIssue = contentIdProblem(contentId);
+            if (contentIdIssue !== null) {
+              console.warn(`[opennote-server] 跳过内容标识不合法的变更 ${row.id}：${contentIdIssue}`);
+              return null;
+            }
+            if (cryptoMode === "none") entry.hash = contentId;
+            else entry.ehash = contentId;
           }
           return entry;
         })
@@ -666,12 +680,25 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     // 一次写 = 一次**推送**（哪怕随后冲突，客户端也确实推了）。
     record(account.id, notebook.id, "push");
 
+    const cryptoMode = cryptoModeOf(notebook);
+    /*
+     * 内容标识的**形状**先于正文校验：坏客户端、旧实现或手写脚本写进来的非法值
+     * 会让 tree 过滤掉文档、changes 过不了契约，最终成为「写入成功但从树里消失」的孤儿。
+     * 这里只校验线上格式，不重算、也不比较 E2EE 的摘要内容（红线 3）。
+     */
+    const declaredHash = c.req.header("x-opennote-hash") ?? null;
+    if (declaredHash !== null) {
+      const declaredHashProblem = contentIdProblem(declaredHash);
+      if (declaredHashProblem !== null) {
+        return json({ error: `X-Opennote-Hash 不合法：${declaredHashProblem}`, code: "bad-request" }, 400);
+      }
+    }
+
     const bytes = new Uint8Array(await c.req.arrayBuffer());
     if (bytes.byteLength > deps.config.maxFileBytes) {
       return json({ error: `文件超过上限（${deps.config.maxFileBytes} 字节）`, code: "too-large" }, 413);
     }
     const ifMatch = c.req.header("if-match") ?? null;
-    const cryptoMode = cryptoModeOf(notebook);
     // 模式 A 的明文路径由客户端给；模式 B **忽略**它（红线 3：服务端看不到明文路径）。
     const pathFromQuery = cryptoMode === "none" ? (c.req.query("path") ?? null) : null;
     if (pathFromQuery !== null) {
@@ -701,7 +728,6 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
      * 模式 B 下**必须**给 —— 服务端算不出 `ehash`（那是 `HMAC(nk.mac, …)`，红线 3），
      * 也不能用明文 hash 校验或改写客户端给的标识。
      */
-    const declaredHash = c.req.header("x-opennote-hash") ?? null;
     const actualHash = cryptoMode === "none" ? sha256Hex(bytes) : null;
     if (actualHash !== null && declaredHash !== null && declaredHash !== actualHash) {
       return json({ error: "X-Opennote-Hash 与请求体的 sha256 不一致", code: "bad-request" }, 400);

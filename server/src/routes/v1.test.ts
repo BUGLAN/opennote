@@ -469,6 +469,30 @@ describe("★ 单条文件接口与批量接口同强度校验（保留 id / 坏
     expect(body.cursor).toBeTruthy();
     expect(body.changes).toEqual([{ did: "f:ok", op: "update", path: "notes/ok.md", hash: HASH }]);
   });
+
+  it("已存在的坏 ehash 文档被跳过，`/v1/changes` 仍然 200、游标正常返回，删除仍放行", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id, "加密", "user-key");
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    const validDid = `h:${"a".repeat(32)}`;
+    const validEhash = "b".repeat(64);
+    docs.set(`h:${"c".repeat(32)}`, { _id: `h:${"c".repeat(32)}`, _rev: "1-a", ehash: "f".repeat(63), esize: 1 });
+    docs.set(validDid, { _id: validDid, _rev: "1-b", ehash: validEhash, esize: 2 });
+    docs.set(`h:${"d".repeat(32)}`, { _id: `h:${"d".repeat(32)}`, _rev: "1-c", ehash: "not-a-content-id", _deleted: true, esize: 3 });
+
+    const response = await call(world, `/v1/changes?nb=${notebook.id}`, { headers: auth(alice.token) });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      cursor: string;
+      changes: { did: string; op: string; ehash?: string }[];
+    };
+    expect(body.cursor).toBeTruthy();
+    expect(body.changes).toEqual([
+      { did: validDid, op: "update", ehash: validEhash },
+      { did: `h:${"d".repeat(32)}`, op: "delete" },
+    ]);
+  });
 });
 
 describe("§6.4 规则 1 · `truncated` 如实上报（「禁止推断删除」的开关）", () => {
@@ -788,6 +812,53 @@ describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有�
     expect(body.error).toContain("X-Opennote-Hash");
     // 而且**没有**写进去（否则会留下一条没有标识的坏文档）。
     expect(world.fake.databases.get(notebook.dbName)!.size).toBe(0);
+  });
+
+  it("★ 模式 B（E2EE）的 ehash 不是 64 位小写十六进制 → 400，且不产生新 revision", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id, "加密", "user-key");
+    const did = `h:${"a".repeat(32)}`;
+    const oldEhash = "c".repeat(64);
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    docs.set(did, { _id: did, _rev: "1-a", ehash: oldEhash, esize: 10 });
+
+    const response = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "if-match": oldEhash, "x-opennote-hash": "C".repeat(64) },
+      body: "ciphertext",
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string; code: string };
+    expect(body.code).toBe("bad-request");
+    expect(body.error).toContain("64 位小写十六进制");
+    expect(docs.get(did)).toMatchObject({ _rev: "1-a", ehash: oldEhash, esize: 10 });
+  });
+
+  it("★ 合法的 ehash 加密写入仍能在 tree 与 changes 中读出", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id, "加密", "user-key");
+    const did = `h:${"a".repeat(32)}`;
+    const ehash = "c".repeat(64);
+    const created = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "x-opennote-hash": ehash },
+      body: "ciphertext",
+    });
+    expect(created.status).toBe(201);
+
+    const tree = await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) });
+    expect(tree.status).toBe(200);
+    const treeBody = (await tree.json()) as { files: { did: string; ehash?: string }[] };
+    expect(treeBody.files).toHaveLength(1);
+    expect(treeBody.files[0]).toMatchObject({ did, ehash });
+
+    const changes = await call(world, `/v1/changes?nb=${notebook.id}`, { headers: auth(alice.token) });
+    expect(changes.status).toBe(200);
+    expect(((await changes.json()) as { changes: { did: string; op: string; ehash?: string }[] }).changes).toEqual([
+      { did, op: "update", ehash },
+    ]);
   });
 
   it("改一条：`If-Match` = 我以为的当前值；对得上就 200，且新标识被写进去", async () => {
