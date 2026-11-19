@@ -141,8 +141,23 @@ export function insertBlock(text: string, cursorOffset?: number, selectLength = 
     const range = state.selection.main;
     const line = state.doc.lineAt(range.from);
     const atLineStart = line.from === range.from;
-    const before = atLineStart ? "" : "\n";
-    const insert = `${before}${text}`;
+    const previousLine = atLineStart && line.number > 1 ? state.doc.line(line.number - 1) : null;
+    const before = !atLineStart ? "\n\n" : previousLine?.text.trim() ? "\n" : "";
+    const endLine = state.doc.lineAt(range.to);
+    const hasTextAfter = range.to < endLine.to && state.sliceDoc(range.to, endLine.to).trim().length > 0;
+    const nextLine =
+      !hasTextAfter && endLine.number < state.doc.lines ? state.doc.line(endLine.number + 1) : null;
+    const textEndsWithBreak = /\r?\n$/.test(text);
+    const after = hasTextAfter
+      ? textEndsWithBreak
+        ? "\n"
+        : "\n\n"
+      : nextLine?.text.trim()
+        ? textEndsWithBreak
+          ? ""
+          : "\n"
+        : "";
+    const insert = `${before}${text}${after}`;
     const cursor = range.from + before.length + (cursorOffset ?? text.length);
     view.dispatch({
       changes: { from: range.from, to: range.to, insert },
@@ -169,6 +184,22 @@ export const insertTable = insertBlock(
 export const insertHorizontalRule = insertBlock("---\n");
 export const insertTaskItem = insertBlock("- [ ] ");
 
+function insertInline(text: string, cursorOffset?: number, selectLength = 0): Command {
+  return (view) => {
+    const { state } = view;
+    const range = state.selection.main;
+    const cursor = range.from + (cursorOffset ?? text.length);
+    view.dispatch({
+      changes: { from: range.from, to: range.to, insert: text },
+      selection: { anchor: cursor, head: cursor + selectLength },
+      userEvent: "input.format",
+      scrollIntoView: true,
+    });
+    view.focus();
+    return true;
+  };
+}
+
 export function insertLink(): Command {
   return (view) => {
     const { state } = view;
@@ -193,7 +224,7 @@ export function insertLink(): Command {
 }
 
 export function insertWikiLink(): Command {
-  return insertBlock("[[]]", 2, 0);
+  return insertInline("[[]]", 2, 0);
 }
 
 /** Strip markdown syntax from the selection — handy when pasting formatted text. */
