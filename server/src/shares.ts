@@ -211,6 +211,28 @@ export class ShareStore {
     return Number(result.changes) > 0;
   }
 
+  /**
+   * 撤销分享，并在**同一个 SQLite 事务**里把「快照字节可能还在」记进清理队列。
+   *
+   * 队列行必须先于删除落库：进程若在「撤销已提交、字节还没删掉」之间退出，
+   * 这一行还在，`cleanupQueuedSnapshots()` 会接着把字节删掉。
+   * 返回 false 表示这张分享本来就已撤销；队列行仍会补上（旧版本撤销失败留下的孤儿也能恢复）。
+   */
+  revokeAndQueueSnapshotCleanup(share: Pick<ShareRow, "id" | "account_id">, now: number): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db.prepare("UPDATE shares SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(now, share.id);
+      this.db
+        .prepare("INSERT OR IGNORE INTO share_cleanup (share_id, account_id, queued_at) VALUES (?, ?, ?)")
+        .run(share.id, share.account_id, now);
+      this.db.exec("COMMIT");
+      return Number(result.changes) > 0;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   /** 一个账号仍然有效的分享占了多少字节（算进空间配额）。 */
   activeBytesOf(accountId: string): number {
     const row = this.db.prepare("SELECT COALESCE(SUM(size), 0) AS total FROM shares WHERE account_id = ? AND revoked_at IS NULL").get(accountId) as unknown as {
@@ -237,6 +259,22 @@ export class ShareStore {
     return Number(row.n);
   }
 
+  /**
+   * 试删队列里的一条快照：成功 → 移除队列行；失败 → 记下次数与错误并抛出。
+   * 撤销接口的「立即删一次」和 `cleanupQueuedSnapshots()` 共用这一条幂等路径。
+   */
+  async cleanupQueuedSnapshot(couch: CouchClient, shareId: string, now = Date.now()): Promise<void> {
+    try {
+      await deleteShareSnapshot(couch, shareId);
+    } catch (error) {
+      this.db
+        .prepare("UPDATE share_cleanup SET attempts = attempts + 1, last_attempt_at = ?, last_error = ? WHERE share_id = ?")
+        .run(now, String(error).slice(0, 1000), shareId);
+      throw error;
+    }
+    this.db.prepare("DELETE FROM share_cleanup WHERE share_id = ?").run(shareId);
+  }
+
   /** 依次清理队列里的 CouchDB 文档；失败的留在队列里，下一次调用继续重试。 */
   async cleanupQueuedSnapshots(couch: CouchClient, now = Date.now()): Promise<ShareSnapshotCleanupResult> {
     const rows = this.db.prepare("SELECT share_id FROM share_cleanup ORDER BY queued_at ASC, share_id ASC").all() as unknown as { share_id: string }[];
@@ -244,14 +282,10 @@ export class ShareStore {
     let failed = 0;
     for (const row of rows) {
       try {
-        await deleteShareSnapshot(couch, row.share_id);
-        this.db.prepare("DELETE FROM share_cleanup WHERE share_id = ?").run(row.share_id);
+        await this.cleanupQueuedSnapshot(couch, row.share_id, now);
         deleted += 1;
-      } catch (error) {
+      } catch {
         failed += 1;
-        this.db
-          .prepare("UPDATE share_cleanup SET attempts = attempts + 1, last_attempt_at = ?, last_error = ? WHERE share_id = ?")
-          .run(now, String(error).slice(0, 1000), row.share_id);
       }
     }
     return { deleted, failed, pending: this.pendingSnapshotCleanupCount() };

@@ -188,6 +188,8 @@ export function describeAudit(event: AuditEvent, labels: ActivityLabels): Activi
     case "delete_account_snapshot_cleanup_failed":
     case "share_snapshot_cleanup_failed":
       return entry("error", `公开分享快照还有 ${fields.pending ?? "?"} 份没删掉，已留在清理队列里，可以重试`);
+    case "share_revoke_snapshot_cleanup_failed":
+      return entry("error", `撤销分享后没能立即删掉快照字节，已留在清理队列里（还有 ${fields.pending ?? "?"} 份待清理）`);
     case "create_notebook_failed":
       return entry("error", `新建笔记本「${target ? labels.notebook(target) : "?"}」失败`);
 

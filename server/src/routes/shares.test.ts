@@ -221,6 +221,54 @@ describe("撤销", () => {
     expect(world.fake.attachments.has(`${SHARE_DATABASE}/${body.id}/blob`)).toBe(false);
     // 撤销后配额不再算它。
     expect(world.shares.activeBytesOf(owner.id)).toBe(0);
+    // 删除成功就不留无意义的队列行。
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(0);
+  });
+
+  it("撤销时删快照失败：链接仍立刻 404，id 留在清理队列；清扫成功后才删字节", async () => {
+    const world = makeWorld();
+    const owner = seedAccount(world.accounts);
+    const { body } = await world.share(owner.token, "a.md", "secret");
+    world.fake.failNext = `PUT /${SHARE_DATABASE}`;
+
+    const revoke = await world.request(`/v1/shares/${body.id}`, { method: "DELETE", headers: { authorization: `Bearer ${owner.token}` } });
+    expect(revoke.status).toBe(204);
+    expect((await world.request(`/s/${body.id}`)).status).toBe(404);
+    expect((await world.request(`/s/${body.id}/raw`)).status).toBe(404);
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${body.id}/blob`)).toBe(true);
+    expect(world.shares.find(body.id)?.revoked_at).not.toBeNull();
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(1);
+
+    // 失败记录留在队列里（下次清扫会继续重试），待清理数也进了审计。
+    const row = world.db.prepare("SELECT attempts, last_error FROM share_cleanup WHERE share_id = ?").get(body.id) as {
+      attempts: number;
+      last_error: string;
+    };
+    expect(row.attempts).toBe(1);
+    expect(row.last_error).toContain("ECONNREFUSED");
+    expect(world.db.prepare("SELECT action, target, detail FROM audit WHERE action = ?").get("share_revoke_snapshot_cleanup_failed")).toMatchObject({
+      action: "share_revoke_snapshot_cleanup_failed",
+      target: body.id,
+      detail: "pending=1",
+    });
+
+    world.fake.failNext = `PUT /${SHARE_DATABASE}`;
+    const failed = await world.request("/v1/admin/share-snapshots/cleanup", {
+      method: "POST",
+      headers: { authorization: `Bearer ${world.admin.token}` },
+    });
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({ code: "couch-delete-failed", pending: 1 });
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(1);
+
+    const retried = await world.request("/v1/admin/share-snapshots/cleanup", {
+      method: "POST",
+      headers: { authorization: `Bearer ${world.admin.token}` },
+    });
+    expect(retried.status).toBe(200);
+    expect(await retried.json()).toEqual({ deleted: 1, pending: 0 });
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${body.id}/blob`)).toBe(false);
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(0);
   });
 
   it("删账号会清理活跃与已撤销分享的快照字节，公开链接立即 404", async () => {

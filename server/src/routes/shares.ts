@@ -28,7 +28,6 @@ import {
   SHARE_DATABASE,
   cleanShareName,
   contentTypeFor,
-  deleteShareSnapshot,
   sha256Hex,
   shareDatabaseProvisioner,
   type ShareRow,
@@ -169,14 +168,24 @@ export function createShareRoutes(deps: ShareRoutesDeps): Hono {
     const share = shareIdSchema.safeParse(id).success ? deps.shares.find(id) : null;
     // 别人的分享与不存在的分享不可区分。
     if (!share || share.account_id !== account.id) return json({ error: "没有这个分享", code: "not-found" }, 404);
-    if (deps.shares.revoke(share.id, now())) {
-      deps.audit?.({ actorId: account.id, action: "share_revoke", target: share.id, ip: clientIpFrom(c.req.raw.headers, deps.config), detail: null });
+    const ip = clientIpFrom(c.req.raw.headers, deps.config);
+    /* 撤销与入队一起提交：链接先失效，字节能不能立刻删掉不影响撤销本身。 */
+    if (deps.shares.revokeAndQueueSnapshotCleanup(share, now())) {
+      deps.audit?.({ actorId: account.id, action: "share_revoke", target: share.id, ip, detail: null });
     }
-    /* 字节一并删掉；失败不影响撤销（公开页以 SQLite 为准，链接已经失效）。 */
+    /* 提交后再尽力立即删一次；失败不影响撤销（公开页以 SQLite 为准，链接已经失效）。 */
     try {
-      await deleteShareSnapshot(deps.couch, share.id);
+      await deps.shares.cleanupQueuedSnapshot(deps.couch, share.id, now());
     } catch (error) {
-      console.warn("[opennote-server] 撤销分享时删快照字节失败（链接已失效）", error);
+      /* 队列行还在，管理端清扫会继续删；计数进审计，别让孤儿字节静默堆积。 */
+      deps.audit?.({
+        actorId: account.id,
+        action: "share_revoke_snapshot_cleanup_failed",
+        target: share.id,
+        ip,
+        detail: `pending=${deps.shares.pendingSnapshotCleanupCount()}`,
+      });
+      console.warn("[opennote-server] 撤销分享时删快照字节失败（链接已失效，已留在清理队列）", error);
     }
     return json(null, 204);
   });
