@@ -11,7 +11,14 @@
       content="Opennote —— 纯前端、开源、Typora 风格的 Markdown 笔记应用。笔记只存在你的浏览器里。"
     />
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="./favicon.svg" />
+    <!-- iOS 主屏：图标必须是 PNG（SVG 的 apple-touch-icon iOS 不认，会退回成页面截图），
+         180×180 不透明满幅，圆角由 iOS 自己裁。status-bar-style=default：状态栏占自己的
+         一条，不浮在页面上，正文不会钻到刘海下面。 -->
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" sizes="180x180" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Opennote" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="mask-icon" href="./favicon.svg" color="#b23a2e" />
     <script>
       // Two jobs, both of which must run before the app module:

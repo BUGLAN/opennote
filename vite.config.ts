@@ -255,7 +255,7 @@ export default defineConfig({
     VitePWA({
       disable: isDesktop || isMobile,
       registerType: "autoUpdate",
-      includeAssets: ["favicon.svg", "icon-192.png", "icon-512.png"],
+      includeAssets: ["favicon.svg", "icon-192.png", "icon-512.png", "apple-touch-icon.png"],
       manifest: {
         name: "Opennote · 开源笔记",
         short_name: "Opennote",

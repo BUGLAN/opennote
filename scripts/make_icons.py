@@ -5,7 +5,7 @@
   public/favicon.svg          站点图标（浏览器标签页）
   public/icon-192.png         PWA 图标
   public/icon-512.png         PWA 图标（含 maskable）
-  public/apple-touch-icon.png iOS 主屏图标
+  public/apple-touch-icon.png iOS 主屏图标（不透明满幅，圆角由 iOS 裁，见 opaque_on_seal）
   build/icon.ico              Windows 打包与窗口图标（多尺寸；满幅美术）
   build/icon.icns             macOS 打包图标（多尺寸；Apple 图标网格，见 write_icns）
   build/icon-mac.png          macOS 运行时 Dock 图标（Electron app.dock.setIcon；
@@ -139,6 +139,15 @@ def draw_seal(size: int) -> Image.Image:
     y = (size - (box[3] - box[1])) / 2 - box[1] - size * 0.015
     draw.text((x, y), "記", font=font, fill=PAPER)
     return image
+
+
+def opaque_on_seal(image: Image.Image) -> Image.Image:
+    """把透明的圆角外沿铺成朱砂底色：iOS 主屏图标不认透明，透明像素会被填成**黑色**，
+    而它自己的圆角遮罩（连续曲率）与印章的圆角并不重合，角上就会露出黑边。
+    交出满幅不透明的方块，圆角由 iOS 自己裁。"""
+    base = Image.new("RGBA", image.size, SEAL)
+    base.alpha_composite(image)
+    return base.convert("RGB")
 
 
 def hex_to_rgba(value: str) -> tuple[int, int, int, int]:
@@ -370,7 +379,7 @@ def main() -> None:
 
     draw_seal(192).save(PUBLIC / "icon-192.png")
     draw_seal(512).save(PUBLIC / "icon-512.png")
-    draw_seal(180).save(PUBLIC / "apple-touch-icon.png")
+    opaque_on_seal(draw_seal(180)).save(PUBLIC / "apple-touch-icon.png")
     write_favicon_svg(PUBLIC / "favicon.svg")
 
     # Windows 需要多尺寸 ICO：任务栏/资源管理器/Alt-Tab 各取所需
