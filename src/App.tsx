@@ -742,6 +742,23 @@ export default function App(): ReactNode {
         createNote({ folderId: currentFolderId(scope), content: `# ${title}\n\n`, title });
         notify(`已创建《${title}》`);
       },
+      openExternal: (url) => {
+        const shell = desktopBridge()?.shell;
+        if (!shell) {
+          window.open(url, "_blank", "noopener,noreferrer");
+          return;
+        }
+        void shell.openExternal(url).catch((error) => {
+          notify(error instanceof Error ? error.message : "打开链接失败", { kind: "danger" });
+        });
+      },
+      openLocalLink: (path) => {
+        if (library.notes[path]) {
+          openNote(path);
+          return;
+        }
+        notify(`找不到 ${path}`);
+      },
       notify: (message) => notify(message),
       hasNote: (title) => Object.values(library.notes).some((note) => note.title === title),
       imageMode: () => ui.imageMode,

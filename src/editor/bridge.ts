@@ -6,8 +6,10 @@
 export interface EditorBridge {
   /** Follow a `[[wiki link]]`; create the note when it does not exist yet. */
   openWikiLink(title: string): void;
-  /** Open an external http(s) link. */
+  /** Open an external link through the host. */
   openExternal(url: string): void;
+  /** Open a workspace-relative note path in the app. */
+  openLocalLink(path: string): void;
   /** Show a transient message (toast). */
   notify(message: string): void;
   /** Ask the host where an image should live after a paste. */
@@ -34,6 +36,7 @@ export interface EditorBridge {
 export const bridge: EditorBridge = {
   openWikiLink: () => {},
   openExternal: (url) => window.open(url, "_blank", "noopener,noreferrer"),
+  openLocalLink: () => {},
   notify: () => {},
   imageMode: () => "asset",
   hasNote: () => false,

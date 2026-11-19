@@ -4,7 +4,10 @@ import { EditorView } from "@codemirror/view";
 import type { EditorState, Extension } from "@codemirror/state";
 import { imageNameForPaste } from "../data/assets";
 import { saveImage } from "../data/library";
+import { parentPath } from "../fs/paths";
+import { resolveWorkspacePath } from "../fs/workspaceRef";
 import { blobToDataUrl } from "../lib/utils";
+import { bridge } from "./bridge";
 import { rememberSourceSize } from "./imagePool";
 import { editorSettingsField } from "./settings";
 
@@ -176,6 +179,10 @@ export function mediaHandlers(options: {
   });
 }
 
+export type LinkTarget =
+  | { kind: "external"; url: string }
+  | { kind: "local"; path: string };
+
 /** Cmd/Ctrl-click follows a link without leaving the writing surface. */
 export function linkClickHandler(): Extension {
   return EditorView.domEventHandlers({
@@ -185,10 +192,11 @@ export function linkClickHandler(): Extension {
       if (target?.closest(".md-wikilink, a")) return false;
       const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
       if (pos == null) return false;
-      const url = findLinkAt(view.state, pos);
-      if (!url) return false;
+      const link = findLinkAt(view.state, pos);
+      if (!link) return false;
       event.preventDefault();
-      window.open(url, "_blank", "noopener,noreferrer");
+      if (link.kind === "local") bridge.openLocalLink(link.path);
+      else bridge.openExternal(link.url);
       return true;
     },
   });
@@ -197,17 +205,31 @@ export function linkClickHandler(): Extension {
 /** Blocks whose text is code, not prose — URLs inside them are not links. */
 const CODE_NODES = /^(?:InlineCode|FencedCode|CodeBlock)$/;
 
-function normalizeUrl(raw: string): string {
-  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+function classifyLink(raw: string, notePath: string): LinkTarget | null {
+  const value = raw.trim().replace(/^<|>$/g, "");
+  if (!value || value.startsWith("#")) return null;
+  if (/^https?:\/\//i.test(value) || URL_SCHEME.test(value)) {
+    return { kind: "external", url: value };
+  }
+  if (/^www\./i.test(value)) return { kind: "external", url: `https://${value}` };
+  let decoded = value;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {}
+  const path = resolveWorkspacePath(decoded, parentPath(notePath));
+  return path ? { kind: "local", path } : null;
 }
 
 /**
- * The URL under `pos`, or null when there is nothing to open there. The syntax
- * tree decides first — it knows a link's own URL, and it knows that a URL inside
- * inline code or a fenced block is just text. A scan of the line covers raw
- * autolinks and bare URLs the tree does not mark up.
+ * The typed link target under `pos`, or null when there is nothing to open
+ * there. The syntax tree decides first — it knows a link's own URL, and it
+ * knows that a URL inside inline code or a fenced block is just text. A scan of
+ * the line covers raw autolinks and bare URLs the tree does not mark up.
  */
-export function findLinkAt(state: EditorState, pos: number): string | null {
+export function findLinkAt(state: EditorState, pos: number): LinkTarget | null {
+  const notePath = state.field(editorSettingsField, false)?.notePath ?? "";
   const tree = syntaxTree(state);
   const inner = tree.resolveInner(pos, 1);
   for (let node: SyntaxNode | null = inner; node; node = node.parent) {
@@ -218,20 +240,25 @@ export function findLinkAt(state: EditorState, pos: number): string | null {
     const url = node.getChild("URL");
     if (!url) continue;
     const raw = state.sliceDoc(url.from, url.to);
-    if (raw) return normalizeUrl(raw);
+    if (raw) return classifyLink(raw, notePath);
   }
 
   const line = state.doc.lineAt(pos);
   const text = state.sliceDoc(line.from, line.to);
   const offset = pos - line.from;
-  const patterns = [/\[[^\]]*\]\(([^)\s]+)[^)]*\)/g, /<(https?:\/\/[^>\s]+)>/g, /(https?:\/\/[^\s)]+)/g];
+  const patterns = [
+    /\[[^\]]*\]\(([^)\s]+)[^)]*\)/g,
+    /<([a-z][a-z0-9+.-]*:[^>\s]+)>/gi,
+    /([a-z][a-z0-9+.-]*:[^\s)]+)/gi,
+    /(www\.[^\s)]+)/gi,
+  ];
   for (const pattern of patterns) {
     for (const match of text.matchAll(pattern)) {
       const start = match.index ?? 0;
       const end = start + match[0].length;
       if (offset >= start && offset <= end) {
         const url = match[1] ?? match[0];
-        return normalizeUrl(url);
+        return classifyLink(url, notePath);
       }
     }
   }

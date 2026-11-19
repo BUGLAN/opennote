@@ -482,11 +482,11 @@ function isMissingPathError(error) {
   return code === 'ENOENT' || code === 'ENOTDIR'
 }
 
-function parseHttpUrl(value) {
+function parseExternalUrl(value) {
   if (typeof value !== 'string' || value.trim() === '') return null
   try {
     const parsed = new URL(value)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed : null
+    return ['http:', 'https:', 'mailto:', 'tel:'].includes(parsed.protocol) ? parsed : null
   } catch {
     return null
   }
@@ -1101,8 +1101,8 @@ function registerShellHandlers() {
   handle(
     'opennote:shell:openExternal',
     async (url) => {
-      const parsed = parseHttpUrl(url)
-      if (!parsed) throw new Error('打开链接失败：仅支持 http/https 链接')
+      const parsed = parseExternalUrl(url)
+      if (!parsed) throw new Error('打开链接失败：仅支持 http/https、mailto/tel 链接')
       await shell.openExternal(parsed.toString())
     },
     '打开链接失败',
@@ -2809,7 +2809,7 @@ function isAppUrl(url) {
 }
 
 function openExternalSafely(url) {
-  const parsed = parseHttpUrl(url)
+  const parsed = parseExternalUrl(url)
   if (!parsed) return
   shell.openExternal(parsed.toString()).catch(() => {
     /* 忽略：外链打开失败不影响应用 */
@@ -2817,7 +2817,7 @@ function openExternalSafely(url) {
 }
 
 function hardenWebContents(window) {
-  // 新窗口一律拒绝，http(s) 交给系统浏览器，其它协议（file://、自定义协议等）直接丢弃。
+  // 新窗口一律拒绝，http(s)、mailto、tel 交给系统，其它协议直接丢弃。
   window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalSafely(url)
     return { action: 'deny' }

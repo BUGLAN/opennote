@@ -6,7 +6,7 @@ import { parentPath } from "../fs";
 import { MemoryBackend } from "../lib/clip/testing/memoryBackend";
 import { assetFinalName } from "../lib/clip/landing";
 import { renderMarkdown } from "../lib/markdown";
-import { findLinkAt } from "./media";
+import { findLinkAt, type LinkTarget } from "./media";
 import { markdownSupport } from "./markdown";
 import { editorSettings, editorSettingsField } from "./settings";
 
@@ -20,15 +20,15 @@ vi.mock("../data/workspaces", () => ({
 import { flushAll, openWorkspace, saveImage } from "../data/library";
 import { insertFileSnippets } from "./media";
 
-function stateFor(doc: string): EditorState {
-  return EditorState.create({ doc, extensions: [markdownSupport] });
+function stateFor(doc: string, notePath = ""): EditorState {
+  return EditorState.create({ doc, extensions: [markdownSupport, editorSettings({ notePath })] });
 }
 
-/** Find the URL under the first occurrence of `needle`. */
-function linkAt(doc: string, needle: string, offset = 0): string | null {
+/** Find the link target under the first occurrence of `needle`. */
+function linkAt(doc: string, needle: string, offset = 0, notePath = ""): LinkTarget | null {
   const at = doc.indexOf(needle);
   expect(at, `needle ${needle} not found`).toBeGreaterThanOrEqual(0);
-  return findLinkAt(stateFor(doc), at + offset);
+  return findLinkAt(stateFor(doc, notePath), at + offset);
 }
 
 describe("D27 findLinkAt 跳过代码里的 URL", () => {
@@ -56,23 +56,64 @@ describe("D27 findLinkAt 跳过代码里的 URL", () => {
 describe("D27 findLinkAt 仍然能打开正常链接", () => {
   it("opens a markdown link from its label, brackets and url", () => {
     const doc = "看 [站点](https://example.com/page) 吧";
-    expect(linkAt(doc, "站点", 1)).toBe("https://example.com/page");
-    expect(linkAt(doc, "https://example.com/page", 3)).toBe("https://example.com/page");
+    expect(linkAt(doc, "站点", 1)).toEqual({ kind: "external", url: "https://example.com/page" });
+    expect(linkAt(doc, "https://example.com/page", 3)).toEqual({ kind: "external", url: "https://example.com/page" });
   });
 
   it("opens a bare url in prose", () => {
     const doc = "访问 https://a.example/b?x=1 结束";
-    expect(linkAt(doc, "https://a.example/b", 5)).toBe("https://a.example/b?x=1");
+    expect(linkAt(doc, "https://a.example/b", 5)).toEqual({ kind: "external", url: "https://a.example/b?x=1" });
   });
 
   it("opens an autolink", () => {
     const doc = "见 <https://auto.example/x> 一节";
-    expect(linkAt(doc, "https://auto.example/x", 4)).toBe("https://auto.example/x");
+    expect(linkAt(doc, "https://auto.example/x", 4)).toEqual({ kind: "external", url: "https://auto.example/x" });
   });
 
   it("opens an image url", () => {
     const doc = "前 ![图](https://img.example/p.png) 后";
-    expect(linkAt(doc, "https://img.example/p.png", 4)).toBe("https://img.example/p.png");
+    expect(linkAt(doc, "https://img.example/p.png", 4)).toEqual({ kind: "external", url: "https://img.example/p.png" });
+  });
+
+  it("passes mailto and tel through without changing them", () => {
+    expect(linkAt("[邮件](mailto:a@b.com)", "邮件", 1)).toEqual({ kind: "external", url: "mailto:a@b.com" });
+    expect(linkAt("[电话](tel:+8612345)", "电话", 1)).toEqual({ kind: "external", url: "tel:+8612345" });
+    expect(linkAt("[打开](obsidian://open?vault=x)", "打开", 1)).toEqual({
+      kind: "external",
+      url: "obsidian://open?vault=x",
+    });
+  });
+
+  it("adds https to a bare www host", () => {
+    expect(linkAt("[站点](www.example.com/a)", "站点", 1)).toEqual({
+      kind: "external",
+      url: "https://www.example.com/a",
+    });
+    expect(linkAt("访问 www.example.com/b 结束", "www.example.com/b", 3)).toEqual({
+      kind: "external",
+      url: "https://www.example.com/b",
+    });
+  });
+
+  it("resolves relative markdown links against the current note", () => {
+    const notePath = "目录/子目录/当前笔记.md";
+    expect(linkAt("[其他](./其他笔记.md)", "其他", 1, notePath)).toEqual({
+      kind: "local",
+      path: "目录/子目录/其他笔记.md",
+    });
+    expect(linkAt("[上级](../笔记.md)", "上级", 1, notePath)).toEqual({ kind: "local", path: "目录/笔记.md" });
+    expect(linkAt("[同级](笔记.md)", "同级", 1, notePath)).toEqual({ kind: "local", path: "目录/子目录/笔记.md" });
+  });
+
+  it("decodes percent-encoded relative paths", () => {
+    expect(linkAt("[其他](./%E5%85%B6%E4%BB%96%E7%AC%94%E8%AE%B0.md)", "其他", 1, "目录/当前.md")).toEqual({
+      kind: "local",
+      path: "目录/其他笔记.md",
+    });
+  });
+
+  it("does not open a pure anchor", () => {
+    expect(linkAt("[跳转](#小节)", "跳转", 1, "目录/当前.md")).toBeNull();
   });
 
   it("returns null on ordinary text", () => {
