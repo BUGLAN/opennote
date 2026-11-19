@@ -341,12 +341,14 @@ describe("§3.4 / §4.7 设计点 2 · `path` 只在明文模式出现", () => {
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id, "明文", "none");
-    world.fake.databases.get(notebook.dbName)!.set("f:abc", { _id: "f:abc", _rev: "1-a", path: "notes/a.md", hash: "a".repeat(64), size: 3 });
+    const did = idForPath("notes/a.md");
+    world.fake.databases.get(notebook.dbName)!.set(did, { _id: did, _rev: "1-a", path: "notes/a.md", hash: "a".repeat(64), size: 3 });
 
     const body = (await (await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) })).json()) as {
       files: { did: string; path?: string; hash?: string }[];
     };
     expect(body.files).toHaveLength(1);
+    expect(body.files[0]!.did).toBe(did);
     expect(body.files[0]!.path).toBe("notes/a.md");
     expect(body.files[0]!.hash).toBe("a".repeat(64));
   });
@@ -380,10 +382,11 @@ describe("§3.4 / §4.7 设计点 2 · `path` 只在明文模式出现", () => {
     docs.set("_design/opennote", { _id: "_design/opennote", _rev: "1-d" });
     docs.set("_local/device-abc", { _id: "_local/device-abc", _rev: "1-l" });
     docs.set("syncinfo", { _id: "syncinfo", _rev: "1-s", protocolVersion: 1, cryptoMode: "none" });
-    docs.set("f:real", { _id: "f:real", _rev: "1-r", path: "a.md", hash: "a".repeat(64) });
+    const realDid = idForPath("a.md");
+    docs.set(realDid, { _id: realDid, _rev: "1-r", path: "a.md", hash: "a".repeat(64) });
 
     const body = (await (await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) })).json()) as { files: { did: string }[] };
-    expect(body.files.map((entry) => entry.did)).toEqual(["f:real"]);
+    expect(body.files.map((entry) => entry.did)).toEqual([realDid]);
   });
 });
 
@@ -442,12 +445,13 @@ describe("★ 单条文件接口与批量接口同强度校验（保留 id / 坏
     docs.set("f:long", { _id: "f:long", _rev: "1-a", path: "a".repeat(MAX_DOC_PATH_LENGTH + 1), hash: HASH });
     docs.set("f:ctrl", { _id: "f:ctrl", _rev: "1-b", path: `a${String.fromCharCode(1)}b.md`, hash: HASH });
     docs.set("f:dotdot", { _id: "f:dotdot", _rev: "1-c", path: "../x.md", hash: HASH });
-    docs.set("f:ok", { _id: "f:ok", _rev: "1-d", path: "notes/ok.md", hash: HASH });
+    const okDid = idForPath("notes/ok.md");
+    docs.set(okDid, { _id: okDid, _rev: "1-d", path: "notes/ok.md", hash: HASH });
 
     const response = await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) });
     expect(response.status).toBe(200);
     const body = (await response.json()) as { files: { did: string; path?: string }[] };
-    expect(body.files.map((entry) => entry.did)).toEqual(["f:ok"]);
+    expect(body.files.map((entry) => entry.did)).toEqual([okDid]);
     expect(body.files[0]!.path).toBe("notes/ok.md");
   });
 
@@ -458,7 +462,8 @@ describe("★ 单条文件接口与批量接口同强度校验（保留 id / 坏
     const docs = world.fake.databases.get(notebook.dbName)!;
     docs.set("f:long", { _id: "f:long", _rev: "1-a", path: "a".repeat(MAX_DOC_PATH_LENGTH + 1), hash: HASH });
     docs.set("f:ctrl", { _id: "f:ctrl", _rev: "1-b", path: `a${String.fromCharCode(1)}b.md`, hash: HASH });
-    docs.set("f:ok", { _id: "f:ok", _rev: "1-d", path: "notes/ok.md", hash: HASH });
+    const okDid = idForPath("notes/ok.md");
+    docs.set(okDid, { _id: okDid, _rev: "1-d", path: "notes/ok.md", hash: HASH });
 
     const response = await call(world, `/v1/changes?nb=${notebook.id}`, { headers: auth(alice.token) });
     expect(response.status).toBe(200);
@@ -467,7 +472,7 @@ describe("★ 单条文件接口与批量接口同强度校验（保留 id / 坏
       changes: { did: string; op: string; path?: string; hash?: string }[];
     };
     expect(body.cursor).toBeTruthy();
-    expect(body.changes).toEqual([{ did: "f:ok", op: "update", path: "notes/ok.md", hash: HASH }]);
+    expect(body.changes).toEqual([{ did: okDid, op: "update", path: "notes/ok.md", hash: HASH }]);
   });
 
   it("已存在的坏 ehash 文档被跳过，`/v1/changes` 仍然 200、游标正常返回，删除仍放行", async () => {
@@ -495,6 +500,123 @@ describe("★ 单条文件接口与批量接口同强度校验（保留 id / 坏
   });
 });
 
+describe("★ 投影历史文档：did 必须与 path 对应", () => {
+  const HASH = "a".repeat(64);
+
+  it("`/v1/tree` 跳过不对应条目，合法明文与 NFC/NFD 等价条目仍返回", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    const mismatchDid = idForPath("notes/a.md");
+    const validPath = "notes/ok.md";
+    const validDid = idForPath(validPath);
+    const nfc = "notes/\u00e9.md";
+    const nfd = "notes/e\u0301.md";
+    const normalizedDid = idForPath(nfc);
+    expect(nfd).not.toBe(nfc);
+    expect(idForPath(nfd)).toBe(normalizedDid);
+
+    docs.set(mismatchDid, { _id: mismatchDid, _rev: "1-a", path: "notes/b.md", hash: HASH });
+    docs.set(validDid, { _id: validDid, _rev: "1-b", path: validPath, hash: HASH });
+    docs.set(normalizedDid, { _id: normalizedDid, _rev: "1-c", path: nfd, hash: HASH });
+
+    const response = await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { files: { did: string; path?: string }[] };
+    expect(body.files.map((entry) => entry.did).sort()).toEqual([validDid, normalizedDid].sort());
+    expect(body.files.find((entry) => entry.did === normalizedDid)?.path).toBe(nfd);
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("did 与 path 不对应"),
+      expect.objectContaining({ did: mismatchDid, path: "notes/b.md", rev: "1-a" }),
+    );
+  });
+
+  it("`/v1/tree` 第一页全被过滤时，`nextStartKey` 仍按原始行推进", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const docs = world.fake.databases.get(notebook.dbName)!;
+    const mismatchDid = idForPath("a.md");
+    const validPath = "b.md";
+    const validDid = idForPath(validPath);
+    docs.set(mismatchDid, { _id: mismatchDid, _rev: "1-a", path: "z.md", hash: HASH });
+    docs.set(validDid, { _id: validDid, _rev: "1-b", path: validPath, hash: HASH });
+
+    const first = await call(world, `/v1/tree?nb=${notebook.id}&limit=1`, { headers: auth(alice.token) });
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as { files: { did: string }[]; truncated: boolean; nextStartKey?: string };
+    expect(firstBody.files).toEqual([]);
+    expect(firstBody.truncated).toBe(true);
+    expect(firstBody.nextStartKey).toBe(mismatchDid);
+
+    const second = await call(
+      world,
+      `/v1/tree?nb=${notebook.id}&limit=10&startkey=${encodeURIComponent(mismatchDid)}`,
+      { headers: auth(alice.token) },
+    );
+    expect(second.status).toBe(200);
+    const secondBody = (await second.json()) as { files: { did: string }[]; truncated: boolean };
+    expect(secondBody.files.map((entry) => entry.did)).toEqual([validDid]);
+    expect(secondBody.truncated).toBe(false);
+  });
+
+  it("`/v1/changes` 不返回不对应条目，过滤后游标继续前进", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const firstPath = "notes/a.md";
+    const firstDid = idForPath(firstPath);
+    const secondPath = "notes/b.md";
+    const secondDid = idForPath(secondPath);
+    const mismatchDid = idForPath("notes/c.md");
+
+    expect(
+      (
+        await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(firstDid)}&path=${encodeURIComponent(firstPath)}`, {
+          method: "PUT",
+          headers: { ...auth(alice.token), "x-opennote-hash": hashOf("a") },
+          body: "a",
+        })
+      ).status,
+    ).toBe(201);
+    world.fake.databases.get(notebook.dbName)!.set(mismatchDid, {
+      _id: mismatchDid,
+      _rev: "mismatch-rev",
+      path: "notes/wrong.md",
+      hash: HASH,
+    });
+
+    const first = await call(world, `/v1/changes?nb=${notebook.id}`, { headers: auth(alice.token) });
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as {
+      cursor: string;
+      changes: { did: string; op: string; path?: string; hash?: string }[];
+    };
+    expect(firstBody.cursor).toBeTruthy();
+    expect(firstBody.changes).toEqual([{ did: firstDid, op: "update", path: firstPath, hash: hashOf("a") }]);
+
+    expect(
+      (
+        await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(secondDid)}&path=${encodeURIComponent(secondPath)}`, {
+          method: "PUT",
+          headers: { ...auth(alice.token), "x-opennote-hash": hashOf("b") },
+          body: "b",
+        })
+      ).status,
+    ).toBe(201);
+    const second = await call(world, `/v1/changes?nb=${notebook.id}`, { headers: auth(alice.token) });
+    expect(second.status).toBe(200);
+    const secondBody = (await second.json()) as {
+      cursor: string;
+      changes: { did: string; op: string; path?: string; hash?: string }[];
+    };
+    expect(secondBody.cursor).not.toBe(firstBody.cursor);
+    expect(secondBody.changes.map((entry) => entry.did).sort()).toEqual([firstDid, secondDid].sort());
+    expect(secondBody.changes.some((entry) => entry.did === mismatchDid)).toBe(false);
+  });
+});
+
 describe("§6.4 规则 1 · `truncated` 如实上报（「禁止推断删除」的开关）", () => {
   it("取满一页时 `truncated` 为真", async () => {
     const world = makeWorld();
@@ -502,7 +624,9 @@ describe("§6.4 规则 1 · `truncated` 如实上报（「禁止推断删除」�
     const notebook = world.notebook(alice.id);
     const docs = world.fake.databases.get(notebook.dbName)!;
     for (let index = 0; index < 3; index += 1) {
-      docs.set(`f:${index}`, { _id: `f:${index}`, _rev: `${index + 1}-a`, path: `n${index}.md`, hash: "a".repeat(64) });
+      const path = `n${index}.md`;
+      const did = idForPath(path);
+      docs.set(did, { _id: did, _rev: `${index + 1}-a`, path, hash: "a".repeat(64) });
     }
     const body = (await (await call(world, `/v1/tree?nb=${notebook.id}&limit=2`, { headers: auth(alice.token) })).json()) as {
       truncated: boolean;
@@ -516,7 +640,8 @@ describe("§6.4 规则 1 · `truncated` 如实上报（「禁止推断删除」�
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    world.fake.databases.get(notebook.dbName)!.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
+    const did = idForPath("a.md");
+    world.fake.databases.get(notebook.dbName)!.set(did, { _id: did, _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
     const body = (await (await call(world, `/v1/tree?nb=${notebook.id}&limit=50`, { headers: auth(alice.token) })).json()) as { truncated: boolean };
     expect(body.truncated).toBe(false);
   });
@@ -539,7 +664,9 @@ describe("§6.4 规则 1 · `truncated` 如实上报（「禁止推断删除」�
     const notebook = world.notebook(alice.id);
     const docs = world.fake.databases.get(notebook.dbName)!;
     for (let index = 0; index < 5; index += 1) {
-      docs.set(`f:${index}`, { _id: `f:${index}`, _rev: `${index + 1}-a`, path: `n${index}.md`, hash: "a".repeat(64) });
+      const path = `n${index}.md`;
+      const did = idForPath(path);
+      docs.set(did, { _id: did, _rev: `${index + 1}-a`, path, hash: "a".repeat(64) });
     }
 
     const first = (await (await call(world, `/v1/tree?nb=${notebook.id}&limit=2`, { headers: auth(alice.token) })).json()) as {
@@ -557,7 +684,7 @@ describe("§6.4 规则 1 · `truncated` 如实上报（「禁止推断删除」�
     // ★ 关键：第二页的第一条绝不能是上一页的最后一条（否则就是原地打转）。
     expect(second.files[0]!.did).not.toBe(cursor);
     // 服务端靠 skip=1 把边界那一行排掉，所以这里应当正好从**下一条**开始。
-    expect(second.files[0]!.did).toBe("f:2");
+    expect(second.files[0]!.did).toBe(idForPath("n2.md"));
     expect(second.files.map((entry) => entry.did)).not.toEqual(first.files.map((entry) => entry.did));
 
     // 三页拼起来正好是全部 5 条，不重不漏。
@@ -961,16 +1088,18 @@ describe("★ 写一条笔记：内容标识必须**落库**（这里曾经有�
     const notebook = world.notebook(alice.id);
     // 塞几条形状不同的：明文、密文、以及一条坏的（既无 hash 也无 ehash）。
     const docs = world.fake.databases.get(notebook.dbName)!;
-    docs.set("f:ok1", { _id: "f:ok1", _rev: "1-a", path: "a.md", hash: hashOf("a"), size: 1 });
+    const okDid = idForPath("a.md");
+    const badDid = idForPath("bad.md");
+    docs.set(okDid, { _id: okDid, _rev: "1-a", path: "a.md", hash: hashOf("a"), size: 1 });
     docs.set(`h:${"a".repeat(32)}`, { _id: `h:${"a".repeat(32)}`, _rev: "1-b", ehash: "e".repeat(64), esize: 2 });
-    docs.set("f:bad", { _id: "f:bad", _rev: "1-c", path: "bad.md" });
+    docs.set(badDid, { _id: badDid, _rev: "1-c", path: "bad.md" });
     docs.set("syncinfo", { _id: "syncinfo", _rev: "1-d", protocolVersion: 1 });
 
     const response = await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) });
     // 一条坏的**不该让整个列树 500** —— 那样一个损坏的文档就会让这个笔记本再也同步不了。
     expect(response.status).toBe(200);
     const listed = (await response.json()) as { files: { did: string }[] };
-    expect(listed.files.map((entry) => entry.did).sort()).toEqual(["f:ok1", `h:${"a".repeat(32)}`].sort());
+    expect(listed.files.map((entry) => entry.did).sort()).toEqual([okDid, `h:${"a".repeat(32)}`].sort());
   });
 });
 
@@ -1404,7 +1533,8 @@ describe("列树的游标 · 增量同步的起点", () => {
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    world.fake.databases.get(notebook.dbName)!.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
+    const did = idForPath("a.md");
+    world.fake.databases.get(notebook.dbName)!.set(did, { _id: did, _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
 
     const body = (await (await call(world, `/v1/tree?nb=${notebook.id}`, { headers: auth(alice.token) })).json()) as {
       cursor: string | null;
@@ -1481,8 +1611,9 @@ describe("★ M2 · /v1/tree 的翻页锚点是**原始行**的最后一条", ()
     const alice = world.account();
     const notebook = world.notebook(alice.id);
     const docs = world.fake.databases.get(notebook.dbName)!;
-    // 两条原始行：f:a 正常；f:b 是墓碑（会被过滤掉）。
-    docs.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
+    // 两条原始行：一条正常；另一条是墓碑（会被过滤掉）。
+    const aDid = idForPath("a.md");
+    docs.set(aDid, { _id: aDid, _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
     docs.set("f:b", { _id: "f:b", _rev: "1-b", _deleted: true });
 
     const response = await call(world, `/v1/tree?nb=${notebook.id}&limit=2`, { headers: auth(alice.token) });
@@ -1490,8 +1621,8 @@ describe("★ M2 · /v1/tree 的翻页锚点是**原始行**的最后一条", ()
     const body = (await response.json()) as { truncated: boolean; nextStartKey?: string; files: { did: string }[] };
 
     expect(body.truncated).toBe(true);
-    expect(body.files.map((file) => file.did)).toEqual(["f:a"]);
-    // ★ 锚点是 f:b（原始行最后一条）。取「可见条目的最后一条」会得到 f:a —— 下一页就重叠了。
+    expect(body.files.map((file) => file.did)).toEqual([aDid]);
+    // ★ 锚点是 f:b（原始行最后一条）。取「可见条目的最后一条」会得到上一条 —— 下一页就重叠了。
     expect(body.nextStartKey).toBe("f:b");
   });
 
@@ -1499,7 +1630,8 @@ describe("★ M2 · /v1/tree 的翻页锚点是**原始行**的最后一条", ()
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    world.fake.databases.get(notebook.dbName)!.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
+    const did = idForPath("a.md");
+    world.fake.databases.get(notebook.dbName)!.set(did, { _id: did, _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
 
     const response = await call(world, `/v1/tree?nb=${notebook.id}&limit=5`, { headers: auth(alice.token) });
     const body = (await response.json()) as { truncated: boolean; nextStartKey?: string };
@@ -1514,13 +1646,15 @@ describe("★ N4 · CouchDB 的墓碑标记是 `_deleted`", () => {
     const alice = world.account();
     const notebook = world.notebook(alice.id);
     const docs = world.fake.databases.get(notebook.dbName)!;
-    docs.set("f:a", { _id: "f:a", _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
+    const aDid = idForPath("a.md");
+    const bDid = idForPath("b.md");
+    docs.set(aDid, { _id: aDid, _rev: "1-a", path: "a.md", hash: "a".repeat(64) });
     // 一条「带 hash 的墓碑」——真实 CouchDB 不会这样，但判据不该依赖这种巧合。
-    docs.set("f:b", { _id: "f:b", _rev: "1-b", path: "b.md", hash: "b".repeat(64), _deleted: true });
+    docs.set(bDid, { _id: bDid, _rev: "1-b", path: "b.md", hash: "b".repeat(64), _deleted: true });
 
     const response = await call(world, `/v1/tree?nb=${notebook.id}&limit=10`, { headers: auth(alice.token) });
     const body = (await response.json()) as { files: { did: string }[] };
-    expect(body.files.map((file) => file.did)).toEqual(["f:a"]);
+    expect(body.files.map((file) => file.did)).toEqual([aDid]);
   });
 });
 

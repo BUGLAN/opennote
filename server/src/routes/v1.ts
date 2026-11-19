@@ -183,12 +183,22 @@ function pathProblem(path: string): string | null {
 /**
  * 投影到 tree / changes 时，坏 `path` 只跳过这一条并记日志 —— 与
  * `validTreeEntry` 跳过坏 hash 同理：一条历史坏数据不该让整本笔记本列不了树。
+ *
+ * 除了 path 本身的形状，还要校验它与 `did` 的对应关系：修复前写入的历史文档可能
+ * `did != idForPath(path)`。继续投影这种文档会让新设备把内容落到错误路径，并与
+ * 后续按 `idForPath()` 生成的新 did 分叉。`idForPath` 自带 NFC 归一，所以合法的
+ * NFC/NFD 等价路径不受影响。
  */
-function validProjectedPath(did: string, path: string | undefined): boolean {
+function validProjectedPath(did: string, path: string | undefined, rev: string): boolean {
   if (path === undefined) return true;
-  const problem = pathProblem(path);
-  if (problem === null) return true;
-  console.warn(`[opennote-server] 跳过 path 不合法的文档 ${did}：${problem}`);
+  const pathIssue = pathProblem(path);
+  if (pathIssue !== null) {
+    console.warn(`[opennote-server] 跳过 path 不合法的文档 ${did}：${pathIssue}`, { did, path, rev, reason: pathIssue });
+    return false;
+  }
+  const expectedDid = idForPath(path);
+  if (expectedDid === did) return true;
+  console.warn(`[opennote-server] 跳过 did 与 path 不对应的文档 ${did}`, { did, path, rev, expectedDid, reason: "did 与 path 不对应" });
   return false;
 }
 
@@ -410,7 +420,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
           .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
           .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
           .filter((entry) => entry.deleted !== true)
-          .filter((entry) => validTreeEntry(entry) && validProjectedPath(entry.did, entry.path));
+          .filter((entry) => validTreeEntry(entry) && validProjectedPath(entry.did, entry.path, entry.rev));
         const truncated = page.rows.length >= limit;
         /*
          * ★ 翻页锚点取**原始行**的最后一条（`page.rows` 是过滤之前的）。
@@ -438,7 +448,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         .filter((row) => !row.id.startsWith("_design/") && !row.id.startsWith("_local/") && row.id !== "syncinfo")
         .map((row) => treeEntryFromDoc(row.doc ?? { _id: row.id, _rev: row.value.rev }, cryptoMode))
         .filter((entry) => entry.deleted !== true)
-        .filter((entry) => validTreeEntry(entry) && validProjectedPath(entry.did, entry.path));
+        .filter((entry) => validTreeEntry(entry) && validProjectedPath(entry.did, entry.path, entry.rev));
       const truncated = page.rows.length >= limit;
       const nextStartKey = truncated ? page.rows.at(-1)?.id : undefined;
       return json(
@@ -500,7 +510,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
             // 明文模式下 `path` 是可以带回去的（服务端本来就看得见，见 `treeEntryFromDoc`）。
             if (cryptoMode === "none" && typeof row.doc.path === "string") {
               // 坏 path 只跳过这一条（契约要求 ≤ 1024 且无控制字符），否则整页会 500。
-              if (!validProjectedPath(row.id, row.doc.path)) return null;
+              if (!validProjectedPath(row.id, row.doc.path, String(row.doc._rev ?? ""))) return null;
               entry.path = row.doc.path;
             }
             const contentId = contentIdOf(row.doc);
