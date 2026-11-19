@@ -38,6 +38,7 @@ import { createRemoteNotebook, currentCredentials, currentEncRoot, devicePlatfor
 import { announceLocalWrite, onRemoteTabLocalWrite, syncLockKey, tryAcquireSyncLock, waitForSyncLock, type HeldSyncLock } from "./tabLock";
 import type { NotebookSummary } from "../../shared/contract";
 import { createSyncLedger, isSameRemote, readSyncLedger, writeSyncLedger, type SyncLedger } from "./state";
+import { createLedgerWriteQueue, type LedgerWriteQueue } from "./ledgerWriter";
 import { PROTOCOL_VERSION } from "./contract";
 import { entryFromResult, failureEntry, recordSyncHistory } from "./history";
 import { createHashCache, readHashCache, writeHashCache, type HashCache } from "./hashCache";
@@ -136,6 +137,10 @@ let currentRecord: WorkspaceRecord | null = null;
 let currentBackend: FileSystemBackend | null = null;
 /** 当前接上的会话（冲突裁决与「保存后去抖」都要用它）。 */
 let activeSession: SyncSession | null = null;
+/** 当前会话的账本写盘链；关闭 / 换工作区时封口并 flush，避免旧写覆盖新账本。 */
+let activeLedgerWrites: LedgerWriteQueue | null = null;
+/** 上一次关闭时还没结束的账本写盘；下一次 attach 先等它落完。 */
+let pendingLedgerFlush: Promise<void> = Promise.resolve();
 /** 每次 attach（与关工作区）+1：只有最新那次 attach 的结果才能接管 `activeSession`。 */
 let attachToken = 0;
 /** 「有字节落盘」的订阅退订句柄（见 `subscribeWorkspaceWrites`）。 */
@@ -256,13 +261,12 @@ function recordFailure(status: SyncStatus): void {
 /** 每一轮成功同步：账本 + 哈希缓存落盘 + 概要进 UI（含冲突列表 —— 对话框从这里取）。 */
 function handleSynced(
   backend: FileSystemBackend,
+  ledgerWrites: LedgerWriteQueue,
   ledger: SyncLedger,
   result: SyncOnceResult,
   hashCache: HashCache | null,
 ): void {
-  void writeSyncLedger(backend, ledger).catch((error: unknown) => {
-    syncUiStore.set((prev) => ({ ...prev, error: `账本落盘失败：${error instanceof Error ? error.message : String(error)}` }));
-  });
+  ledgerWrites.enqueue(ledger);
   /*
    * 哈希缓存与账本同一次落盘。少了它，下次启动的全部文件都要重算一遍哈希
    * （500 篇 ≈ 几秒的纯 CPU/IO，而且是在「打开笔记本」这个最不该慢的时刻）。
@@ -383,6 +387,15 @@ async function attachCurrent(): Promise<AttachResult> {
 
 /** attach 的真身：读密钥 → 标签页互斥 → （E2EE）解锁 → 账本 → attach。可预期的跳过返回 ok:false。 */
 async function attachCurrentInner(): Promise<AttachResult> {
+  const previousLedgerWrites = activeLedgerWrites;
+  activeLedgerWrites = null;
+  if (previousLedgerWrites !== null) pendingLedgerFlush = pendingLedgerFlush.then(() => previousLedgerWrites.seal());
+  // 同一个工作区重连 / 换工作区时，先把上一份账本写完；否则旧写可能晚于
+  // 新一轮的写完成，把刚建立的基线覆盖回旧快照。
+  const flushing = pendingLedgerFlush;
+  pendingLedgerFlush = Promise.resolve();
+  await flushing;
+
   const record = currentRecord;
   const backend = currentBackend;
   const token = ++attachToken;
@@ -417,6 +430,16 @@ async function attachCurrentInner(): Promise<AttachResult> {
   }
 
   const ledger = await loadLedger(backend, boundRecord);
+  const ledgerWrites = createLedgerWriteQueue((snapshot) => writeSyncLedger(backend, snapshot), {
+    onError: (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      onBindingLog(`[sync] 账本落盘失败：${message}`);
+      syncUiStore.set((prev) => ({ ...prev, error: `账本落盘失败：${message}` }));
+    },
+    onCoalesced: (stats) => {
+      onBindingLog(`[sync] 账本写盘忙，已合并为最新版（累计合并 ${stats.coalesced} 次）`);
+    },
+  });
   /*
    * 本地哈希缓存：读不到（第一次同步 / 文件坏了 / 换了加密模式）就新建一份空的。
    * 空缓存 = 这一轮把每个文件读一遍（正确），之后就是增量的。
@@ -435,7 +458,7 @@ async function attachCurrentInner(): Promise<AttachResult> {
     const at = Date.now();
     if (at - lastLedgerWriteAt < LEDGER_HEARTBEAT_MS) return;
     lastLedgerWriteAt = at;
-    void writeSyncLedger(backend, ledger).catch(() => undefined);
+    ledgerWrites.enqueue(ledger);
   };
   const gitignoreText = await backend.readText(".gitignore").catch(() => "");
   /*
@@ -471,7 +494,7 @@ async function attachCurrentInner(): Promise<AttachResult> {
     },
     // 文件名对照表（`m:pathmap`）的密钥：全新设备靠它认出别的设备建的加密文件。
     ...(encRoot === null ? {} : { pathMapKey: derivePathMapKey(encRoot) }),
-    onSynced: (synced) => handleSynced(backend, ledger, synced, hashCache),
+    onSynced: (synced) => handleSynced(backend, ledgerWrites, ledger, synced, hashCache),
     /**
      * ★ **拉取落地后按路径刷新界面**。
      *
@@ -525,9 +548,13 @@ async function attachCurrentInner(): Promise<AttachResult> {
    * **已被停掉**的会话 —— 之后每次保存都排进一个 dispose 过的 runner，再也不推送；
    * 关掉工作区之后才回来的那次还会把「同步开着」重新打开。
    */
-  if (token !== attachToken) return result;
+  if (token !== attachToken) {
+    void ledgerWrites.seal();
+    return result;
+  }
   if (result.ok) {
     activeSession = result.session;
+    activeLedgerWrites = ledgerWrites;
     // 库层的「外部改动」处置要看这个开关（开着同步 ⇒ 两边都改是冲突，不是磁盘赢）。
     setSyncActive(true);
   }
@@ -552,8 +579,18 @@ export async function openWorkspaceSync(record: WorkspaceRecord, backend: FileSy
   await binding.start();
 }
 
-/** 工作区关闭时调用：停掉绑定、清掉会话、退出「同步开着」的库层语义。 */
-export function closeWorkspaceSync(): void {
+/**
+ * 工作区关闭时调用：停掉绑定、清掉会话、退出「同步开着」的库层语义。
+ *
+ * 返回的 Promise 在已经排队的账本落盘结束后 resolve。React 的 effect cleanup
+ * 不能 await，但下一次 open 会经 attach 等它；浏览器真正卸载页面时受生命周期
+ * 限制，无法保证异步写完成（与普通笔记落盘的丢失窗口相同）。
+ */
+export function closeWorkspaceSync(): Promise<void> {
+  const ledgerWrites = activeLedgerWrites;
+  activeLedgerWrites = null;
+  if (ledgerWrites !== null) pendingLedgerFlush = pendingLedgerFlush.then(() => ledgerWrites.seal());
+  const flushed = pendingLedgerFlush;
   currentRecord = null;
   currentBackend = null;
   activeSession = null;
@@ -569,6 +606,7 @@ export function closeWorkspaceSync(): void {
    * 对话框里一串不属于它的冲突），用户可能据此做错误操作。
    */
   syncUiStore.set((prev) => ({ ...prev, status: null, last: null }));
+  return flushed;
 }
 
 /**
