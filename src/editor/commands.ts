@@ -1,5 +1,36 @@
-import { EditorSelection, type ChangeSpec } from "@codemirror/state";
+import { EditorSelection, type ChangeSpec, type EditorState } from "@codemirror/state";
 import type { Command, EditorView } from "@codemirror/view";
+
+function delimiterRunBefore(state: EditorState, position: number, delimiter: string): number {
+  const text = state.doc.sliceString(0, position);
+  let count = 0;
+  while (count < text.length && text[text.length - count - 1] === delimiter) count += 1;
+  return count;
+}
+
+function delimiterRunAfter(state: EditorState, position: number, delimiter: string): number {
+  const text = state.doc.sliceString(position);
+  let count = 0;
+  while (count < text.length && text[count] === delimiter) count += 1;
+  return count;
+}
+
+function leadingDelimiterRun(text: string, delimiter: string): number {
+  let count = 0;
+  while (count < text.length && text[count] === delimiter) count += 1;
+  return count;
+}
+
+function trailingDelimiterRun(text: string, delimiter: string): number {
+  let count = 0;
+  while (count < text.length && text[text.length - count - 1] === delimiter) count += 1;
+  return count;
+}
+
+function hasDelimiterLayer(left: number, right: number, width: number): boolean {
+  if (left !== right || left < width) return false;
+  return width === 1 ? left % 2 === 1 : left === width || left === width + 1;
+}
 
 /** Wrap (or unwrap) the selection with markdown delimiters. */
 export function toggleWrap(before: string, after = before, placeholder = "文本"): Command {
@@ -8,13 +39,59 @@ export function toggleWrap(before: string, after = before, placeholder = "文本
     const { state } = view;
     const spec = state.changeByRange((range) => {
       const text = state.sliceDoc(range.from, range.to);
+      const repeated = before === after && [...before].every((char) => char === before[0]);
+
+      if (repeated) {
+        const delimiter = before[0];
+        const width = before.length;
+        const outsideLeft = delimiterRunBefore(state, range.from, delimiter);
+        const outsideRight = delimiterRunAfter(state, range.to, delimiter);
+
+        if (outsideLeft > 0 && outsideRight > 0) {
+          if (hasDelimiterLayer(outsideLeft, outsideRight, width)) {
+            return {
+              changes: [
+                { from: range.from - width, to: range.from, insert: "" },
+                { from: range.to, to: range.to + width, insert: "" },
+              ],
+              range: EditorSelection.range(range.from - width, range.to - width),
+            };
+          }
+          return {
+            changes: [
+              { from: range.from, insert: before },
+              { from: range.to, insert: after },
+            ],
+            range: EditorSelection.range(range.from + width, range.to + width),
+          };
+        }
+
+        const insideLeft = leadingDelimiterRun(text, delimiter);
+        const insideRight = trailingDelimiterRun(text, delimiter);
+        if (insideLeft > 0 && insideRight > 0 && text.length > insideLeft + insideRight) {
+          if (hasDelimiterLayer(insideLeft, insideRight, width)) {
+            const inner = text.slice(width, text.length - width);
+            return {
+              changes: { from: range.from, to: range.to, insert: inner },
+              range: EditorSelection.range(range.from, range.from + inner.length),
+            };
+          }
+          return {
+            changes: { from: range.from, to: range.to, insert: before + text + after },
+            range: EditorSelection.range(range.from + width, range.to + width),
+          };
+        }
+      }
+
       const outerFrom = range.from - before.length;
       const outerTo = range.to + after.length;
       const wrappedOutside =
         outerFrom >= 0 &&
         outerTo <= state.doc.length &&
         state.sliceDoc(outerFrom, range.from) === before &&
-        state.sliceDoc(range.to, outerTo) === after;
+        state.sliceDoc(range.to, outerTo) === after &&
+        state.sliceDoc(outerFrom - 1, outerFrom) !== before.slice(-1) &&
+        state.sliceDoc(outerTo, outerTo + 1) !== after[0];
 
       if (wrappedOutside) {
         return {
@@ -78,46 +155,61 @@ export function setHeading(level: number): Command {
 
 type PrefixKind = "bullet" | "ordered" | "task" | "quote";
 
-const PREFIX_PATTERNS: Record<PrefixKind, RegExp> = {
-  bullet: /^([ \t]*)[-*+][ \t]+/,
-  ordered: /^([ \t]*)\d+[.)][ \t]+/,
-  task: /^([ \t]*)[-*+][ \t]+\[[ xX]\][ \t]+/,
-  quote: /^([ \t]*)>[ \t]?/,
-};
+const QUOTE_PATTERN = /^([ \t]*)>[ \t]?/;
+const LIST_PREFIX = /^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\](?:[ \t]+|$))?/;
+
+type ListPrefixInfo = { kind: Exclude<PrefixKind, "quote">; indent: number; length: number };
+
+function parseListPrefix(text: string): ListPrefixInfo | null {
+  const match = LIST_PREFIX.exec(text);
+  if (!match) return null;
+  const marker = match[0].slice(match[1].length);
+  const kind = /^\d/.test(marker) ? "ordered" : /\[[ xX]\]/.test(marker) ? "task" : "bullet";
+  return { kind, indent: match[1].length, length: match[0].length };
+}
 
 export function toggleLinePrefix(kind: PrefixKind): Command {
   return (view) => {
     if (view.state.readOnly) return false;
     const { state } = view;
     const lines = selectedLines(state.doc, state.selection.main.from, state.selection.main.to);
-    const pattern = PREFIX_PATTERNS[kind];
-    const allPrefixed = lines.every((line) => pattern.test(line.text));
     const changes: ChangeSpec[] = [];
-    let counter = 1;
 
-    for (const line of lines) {
-      const match = pattern.exec(line.text);
-      if (allPrefixed) {
-        if (match) changes.push({ from: line.from, to: line.from + match[0].length, insert: "" });
-        continue;
+    if (kind === "quote") {
+      const allQuoted = lines.every((line) => QUOTE_PATTERN.test(line.text));
+      for (const line of lines) {
+        const match = QUOTE_PATTERN.exec(line.text);
+        if (allQuoted) {
+          if (match) changes.push({ from: line.from, to: line.from + match[0].length, insert: "" });
+          continue;
+        }
+        const indent = /^[ \t]*/.exec(line.text)?.[0] ?? "";
+        changes.push({ from: line.from, to: line.from + indent.length, insert: indent + "> " });
       }
-      const indent = /^[ \t]*/.exec(line.text)?.[0] ?? "";
-      const rest = match ? line.text.slice(match[0].length) : line.text.slice(indent.length);
-      const body = match ? rest : line.text.slice(indent.length);
-      const prefix =
-        kind === "bullet"
-          ? "- "
-          : kind === "ordered"
-            ? `${counter++}. `
-            : kind === "task"
-              ? "- [ ] "
-              : "> ";
-      changes.push({
-        from: line.from,
-        to: line.from + (match ? match[0].length : indent.length),
-        insert: indent + prefix,
-      });
-      void body;
+    } else {
+      const prefixes = lines.map((line) => parseListPrefix(line.text));
+      const allPrefixed = prefixes.every((prefix) => prefix?.kind === kind);
+      let counter = 1;
+
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        const existing = prefixes[index];
+        if (allPrefixed) {
+          if (existing) {
+            changes.push({ from: line.from + existing.indent, to: line.from + existing.length, insert: "" });
+          }
+          continue;
+        }
+        const indent = existing
+          ? line.text.slice(0, existing.indent)
+          : (/^[ \t]*/.exec(line.text)?.[0] ?? "");
+        const prefix = kind === "bullet" ? "- " : kind === "ordered" ? `${counter++}. ` : "- [ ] ";
+        changes.push({
+          from: line.from,
+          to: line.from + (existing?.length ?? indent.length),
+          insert: indent + prefix,
+        });
+      }
     }
 
     if (!changes.length) return false;

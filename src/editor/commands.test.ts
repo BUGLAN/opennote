@@ -9,6 +9,9 @@ import {
   insertTable,
   insertWikiLink,
   markdownCommands,
+  toggleBold,
+  toggleItalic,
+  toggleLinePrefix,
 } from "./commands";
 import { opennoteParser } from "./mdExtensions";
 
@@ -51,6 +54,77 @@ function nodeNames(source: string): string[] {
   });
   return names;
 }
+
+describe("toggleWrap：按定界符层次切换格式", () => {
+  it("粗体里按斜体得到粗斜体", () => {
+    const { state } = run(toggleItalic, "**粗体**", 2, 4);
+    expect(state.doc.toString()).toBe("***粗体***");
+    expect(state.sliceDoc(state.selection.main.from, state.selection.main.to)).toBe("粗体");
+  });
+
+  it("粗斜体里按斜体或粗体会去掉对应的一层", () => {
+    expect(run(toggleItalic, "***粗体***", 3, 5).state.doc.toString()).toBe("**粗体**");
+    expect(run(toggleBold, "***粗体***", 3, 5).state.doc.toString()).toBe("*粗体*");
+  });
+
+  it("斜体里按粗体得到粗斜体", () => {
+    expect(run(toggleBold, "*斜体*", 1, 3).state.doc.toString()).toBe("***斜体***");
+  });
+
+  it("选区包含定界符时首尾同样判断", () => {
+    expect(run(toggleItalic, "**粗体**", 0, 6).state.doc.toString()).toBe("***粗体***");
+    expect(run(toggleItalic, "*粗体*", 0, 4).state.doc.toString()).toBe("粗体");
+    expect(run(toggleBold, "***粗体***", 0, 8).state.doc.toString()).toBe("*粗体*");
+  });
+
+  it("普通文本加粗、取消加粗行为不变", () => {
+    expect(run(toggleBold, "普通文字", 0, 4).state.doc.toString()).toBe("**普通文字**");
+    expect(run(toggleBold, "**普通文字**", 2, 6).state.doc.toString()).toBe("普通文字");
+  });
+});
+
+describe("toggleLinePrefix：列表类型互转", () => {
+  it("无序、有序、任务任意互转只保留目标前缀", () => {
+    const cases: Array<[Command, string, string]> = [
+      [toggleLinePrefix("task"), "- 买牛奶", "- [ ] 买牛奶"],
+      [toggleLinePrefix("ordered"), "- 买牛奶", "1. 买牛奶"],
+      [toggleLinePrefix("bullet"), "- [ ] 买牛奶", "- 买牛奶"],
+      [toggleLinePrefix("ordered"), "- [ ] 买牛奶", "1. 买牛奶"],
+      [toggleLinePrefix("task"), "1. 买牛奶", "- [ ] 买牛奶"],
+      [toggleLinePrefix("bullet"), "1. 买牛奶", "- 买牛奶"],
+    ];
+
+    for (const [command, source, expected] of cases) {
+      expect(run(command, source, 0, source.length).state.doc.toString()).toBe(expected);
+    }
+  });
+
+  it("多行转有序列表时编号连续并保留缩进", () => {
+    const source = "  - 买牛奶\n* 鸡蛋\n+ 面包";
+    expect(run(toggleLinePrefix("ordered"), source, 0, source.length).state.doc.toString()).toBe(
+      "  1. 买牛奶\n2. 鸡蛋\n3. 面包",
+    );
+  });
+
+  it("所选行全部是目标类型时取消，任务框不残留", () => {
+    const cases: Array<[Command, string, string]> = [
+      [toggleLinePrefix("task"), "  - [x] 买牛奶", "  买牛奶"],
+      [toggleLinePrefix("bullet"), "* 买牛奶", "买牛奶"],
+      [toggleLinePrefix("ordered"), "12) 买牛奶", "买牛奶"],
+    ];
+
+    for (const [command, source, expected] of cases) {
+      expect(run(command, source, 0, source.length).state.doc.toString()).toBe(expected);
+    }
+  });
+
+  it("混合列表统一转成目标类型", () => {
+    const source = "- 买牛奶\n1. 鸡蛋";
+    expect(run(toggleLinePrefix("task"), source, 0, source.length).state.doc.toString()).toBe(
+      "- [ ] 买牛奶\n- [ ] 鸡蛋",
+    );
+  });
+});
 
 const BLOCKS = [
   { name: "代码块", command: insertCodeBlock, marker: "```", node: "FencedCode" },
