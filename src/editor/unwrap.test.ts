@@ -46,6 +46,17 @@ describe("unwrap：光标停在边界按删除，先拆开这一段", () => {
     expect(effect.value).toEqual({ from: BOLD_START, to: BOLD_END });
   });
 
+  it("粗体后面隔着空格 ⇒ 空格照常删，拆开标记不提前出现", () => {
+    let state = stateAt("**粗体**".length + 2, "**粗体**  \n");
+    while (state.doc.sliceString(state.selection.main.head - 1, state.selection.main.head) === " ") {
+      const head = state.selection.main.head;
+      expect(unwrapBackspace(viewOf(state).view)).toBe(false);
+      state = state.update({ changes: { from: head - 1, to: head }, selection: { anchor: head - 1 } }).state;
+    }
+    expect(state.doc.toString()).toBe("**粗体**\n");
+    expect(unwrapBackspace(viewOf(stateAt("**粗体**".length, "**粗体**\n")).view)).toBe(true);
+  });
+
   it("Delete 在 `**粗体**` 的开头 ⇒ 拆开", () => {
     const { view, specs } = viewOf(stateAt(BOLD_START));
     expect(unwrapDelete(view)).toBe(true);
@@ -81,6 +92,24 @@ describe("unwrap：光标停在边界按删除，先拆开这一段", () => {
       from: 0,
       to: end,
     });
+  });
+
+  it("块级图片行尾有空格 ⇒ 跨空格拆开图片，且不挪光标", () => {
+    const image = "![图](./a.png)";
+    const doc = `${image}  \n`;
+    const { view, specs } = viewOf(stateAt(image.length + 2, doc));
+    expect(unwrapBackspace(view)).toBe(true);
+    expect((specs[0] as { effects: { value: { from: number; to: number } } }).effects.value).toEqual({
+      from: 0,
+      to: image.length,
+    });
+    expect(specs[0]).not.toHaveProperty("selection");
+  });
+
+  it("行内图片后面的空格照常删，不跨空格拆图片", () => {
+    const doc = "前 ![图](./a.png)  后\n";
+    const head = doc.indexOf("  后") + 2;
+    expect(unwrapBackspace(viewOf(stateAt(head, doc)).view)).toBe(false);
   });
 
   it("行内代码与链接同样可拆", () => {
@@ -137,21 +166,37 @@ describe("unwrap：表格（唯一的块级例外）", () => {
     expect(unwrapDelete(viewOf(stateAt(3, doc)).view)).toBe(false);
   });
 
-  it("表格下面那一行的行首按 Backspace ⇒ 也先拆表格（否则那行会被并进表格）", () => {
-    const withPara = `${table}\n\n正文\n`;
-    const paraStart = withPara.indexOf("正文");
+  it("段落紧挨表格下一行 ⇒ 行首 Backspace 先拆表格（否则那行会被并进表格）", () => {
+    const withPara = `${table}\n正文\n`;
+    const paraStart = table.length + 1;
     const { view, specs } = viewOf(stateAt(paraStart, withPara));
     expect(unwrapBackspace(view)).toBe(true);
+    // 解析器已把这一行吞成 TableRow，所以露源码的范围也包含它。
     expect((specs[0] as { effects: { value: { from: number; to: number } } }).effects.value).toEqual({
       from: 0,
-      to: table.length,
+      to: withPara.indexOf("正文") + "正文".length,
     });
   });
 
-  it("隔一个空行也算 —— 空行不影响「上面是表格」这个判定", () => {
+  it("表格与段落之间有空行 ⇒ 行首 Backspace 只删空行，不拆表格", () => {
+    const withGap = `${table}\n\n正文\n`;
+    const paraStart = withGap.indexOf("正文");
+    const state = stateAt(paraStart, withGap);
+    expect(unwrapBackspace(viewOf(state).view)).toBe(false);
+
+    // 走默认删除：删掉空行后段落紧挨表格，下一次退格才需要拆表。
+    const afterGap = state.update({
+      changes: { from: paraStart - 1, to: paraStart },
+      selection: { anchor: paraStart - 1 },
+    }).state;
+    expect(afterGap.doc.toString()).toBe(`${table}\n正文\n`);
+    expect(unwrapBackspace(viewOf(afterGap).view)).toBe(true);
+  });
+
+  it("隔多个空行同样不拆表格", () => {
     const withGap = `${table}\n\n\n正文\n`;
     const paraStart = withGap.indexOf("正文");
-    expect(unwrapBackspace(viewOf(stateAt(paraStart, withGap)).view)).toBe(true);
+    expect(unwrapBackspace(viewOf(stateAt(paraStart, withGap)).view)).toBe(false);
   });
 
   it("Delete 在表格最后一行的末尾 ⇒ 拆开（否则删掉换行会把下一行并进表格）", () => {

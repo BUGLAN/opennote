@@ -70,15 +70,22 @@ function unwrappableStartingAt(state: EditorState, pos: number): SyntaxNode | nu
   return null;
 }
 
-/**
- * 光标与元素之间可能只隔空白（块级图片独占一行时行尾常有空格）。
- * 往回跳过空白再判定边界。
- */
+/** 块级图片独占一行时行尾常有空格；往回跳过这些空格再判定图片边界。 */
 function skipSpaceBackwards(state: EditorState, pos: number): number {
   const line = state.doc.lineAt(pos);
   let p = pos;
   while (p > line.from && /\s/.test(state.doc.sliceString(p - 1, p))) p -= 1;
   return p;
+}
+
+/** 图片所在的这一行除图片本身外只剩空白。 */
+function isBlockImage(state: EditorState, node: SyntaxNode): boolean {
+  if (node.name !== "Image") return false;
+  const line = state.doc.lineAt(node.from);
+  return (
+    state.doc.sliceString(line.from, node.from).trim().length === 0 &&
+    state.doc.sliceString(node.to, line.to).trim().length === 0
+  );
 }
 
 /**
@@ -90,21 +97,13 @@ function skipSpaceBackwards(state: EditorState, pos: number): number {
 function unwrap(view: EditorView, node: SyntaxNode): boolean {
   const current = view.state.field(livePreviewField, false)?.unwrapped;
   if (current && current.from === node.from && current.to === node.to) return false;
-  const head = view.state.selection.main.head;
-  // 光标本来就在这个元素边界上（行内元素、表格自己的末尾）⇒ 位置不动。
-  // 光标在**表格下面那一行的行首**时离得远，露出的源码会被「光标一离开就收起来」
-  // 立刻收掉 —— 所以把光标一起挪到表格末尾：这一下本来就等于「我开始拆这张表了」。
-  const atEdge = head >= node.from - 1 && head <= node.to + 1;
-  view.dispatch({
-    effects: unwrapSource.of({ from: node.from, to: node.to }),
-    ...(atEdge ? {} : { selection: { anchor: node.to } }),
-  });
+  view.dispatch({ effects: unwrapSource.of({ from: node.from, to: node.to }) });
   return true;
 }
 
 
 /**
- * 光标在表格**后面**的行首（中间只隔着空行）时按 Backspace：先拆表格。
+ * 光标紧挨着表格**后面那一行**的行首时按 Backspace：先拆表格。
  *
  * 为什么需要：表格的下一行按 Backspace 会删掉那个换行，markdown 于是把下面
  * 那一整段并进表格的最后一行 —— 结构当场被改写（用户实测：一段话被灌进一个
@@ -114,19 +113,20 @@ function tableEndingBeforeLineStart(state: EditorState, pos: number): SyntaxNode
   const doc = state.doc;
   const line = doc.lineAt(pos);
   if (pos !== line.from) return null;
+  if (line.number <= 1) return null;
+  const prev = doc.line(line.number - 1);
+  if (prev.text.trim().length === 0) return null;
   const tree = syntaxTree(state);
-  let n = line.number - 1;
-  while (n >= 1) {
-    const prev = doc.line(n);
-    if (prev.text.trim().length === 0) {
-      n -= 1;
-      continue;
-    }
-    let node: SyntaxNode | null = tree.resolveInner(prev.to, -1);
-    while (node && node.parent && node.parent.name !== "Document") node = node.parent;
-    return node && node.name === "Table" && node.to === prev.to ? node : null;
-  }
-  return null;
+  let node: SyntaxNode | null = tree.resolveInner(prev.to, -1);
+  while (node && node.parent && node.parent.name !== "Document") node = node.parent;
+  if (!node || node.name !== "Table") return null;
+  if (node.to === prev.to) return node;
+
+  // 表格后紧跟普通文字时，解析器会先把这一行吞成只有 TableCell、没有竖线的 TableRow。
+  // 它并不是真正的表格行；在它的行首退格仍要先拆表，否则这一段会被继续并进表格。
+  let row: SyntaxNode | null = tree.resolveInner(pos, 1);
+  while (row && row.name !== "TableRow" && row.name !== "Table") row = row.parent;
+  return row?.name === "TableRow" && row.from === pos && !row.getChild("TableDelimiter") ? node : null;
 }
 
 /** 光标正好停在这张表格最后一行的末尾（按 Delete 会把下一行并进表格）。 */
@@ -144,9 +144,13 @@ function tableEndingAt(state: EditorState, pos: number): SyntaxNode | null {
 export const unwrapBackspace: Command = (view) => {
   const selection = view.state.selection.main;
   if (!selection.empty) return false;
-  const pos = skipSpaceBackwards(view.state, selection.head);
-  const node = unwrappableEndingAt(view.state, pos);
-  if (node) return unwrap(view, node);
+  const direct = unwrappableEndingAt(view.state, selection.head);
+  if (direct) return unwrap(view, direct);
+  const spaced = skipSpaceBackwards(view.state, selection.head);
+  if (spaced !== selection.head) {
+    const image = unwrappableEndingAt(view.state, spaced);
+    if (image && isBlockImage(view.state, image)) return unwrap(view, image);
+  }
   const table = tableEndingBeforeLineStart(view.state, selection.head);
   return table ? unwrap(view, table) : false;
 };
