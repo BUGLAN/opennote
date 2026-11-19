@@ -48,12 +48,6 @@ export interface ReplaceChange {
   insert: string;
 }
 
-export interface MinimalReplace {
-  changes: ReplaceChange;
-  /** 按索引夹进新文档的选区 —— 与旧的「整篇替换 + 夹光标」行为一致。 */
-  selection: { anchor: number; head: number };
-}
-
 /** 代理对的高位（`0xD800-0xDBFF`）—— 用来避免把改动边界切在字符中间。 */
 function isLowSurrogate(code: number): boolean {
   return code >= 0xdc00 && code <= 0xdfff;
@@ -62,15 +56,14 @@ function isLowSurrogate(code: number): boolean {
 /**
  * 把「旧文本 → 新文本」表示成**一段**最小改动。
  *
- * 返回的 `changes` 落在公共前缀之后、公共后缀之前，保证
+ * 返回的改动落在公共前缀之后、公共后缀之前，保证
  * `oldText.slice(0, from) + insert + oldText.slice(to) === nextText`。
  * 两段文本相同时返回一段空改动（`from === to`、`insert === ""`）。
  */
 export function minimalReplace(
   oldText: string,
   nextText: string,
-  selection: { anchor: number; head: number },
-): MinimalReplace {
+): ReplaceChange {
   const max = Math.min(oldText.length, nextText.length);
   let head = 0;
   while (head < max && oldText.charCodeAt(head) === nextText.charCodeAt(head)) head += 1;
@@ -87,11 +80,5 @@ export function minimalReplace(
 
   const to = oldText.length - tail;
   const insertEnd = nextText.length - tail;
-  return {
-    changes: { from: head, to, insert: nextText.slice(head, insertEnd) },
-    selection: {
-      anchor: Math.min(selection.anchor, nextText.length),
-      head: Math.min(selection.head, nextText.length),
-    },
-  };
+  return { from: head, to, insert: nextText.slice(head, insertEnd) };
 }
