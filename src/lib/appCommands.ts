@@ -107,10 +107,13 @@ export function buildAppCommands(ctx: CommandContext): AppCommand[] {
     group,
     icon,
     shortcut,
-    enabled: () => ctx.view() !== null,
+    enabled: () => {
+      const view = ctx.view();
+      return view !== null && !view.state.readOnly;
+    },
     run: () => {
       const view = ctx.view();
-      if (!view) return;
+      if (!view || view.state.readOnly) return;
       run(view);
       view.focus();
     },

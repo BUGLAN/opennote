@@ -8,11 +8,16 @@ import {
   insertMermaidBlock,
   insertTable,
   insertWikiLink,
+  markdownCommands,
 } from "./commands";
 import { opennoteParser } from "./mdExtensions";
 
-function run(command: Command, doc: string, from: number, to = from) {
-  let state = EditorState.create({ doc, selection: { anchor: from, head: to } });
+function run(command: Command, doc: string, from: number, to = from, readOnly = false) {
+  let state = EditorState.create({
+    doc,
+    selection: { anchor: from, head: to },
+    extensions: readOnly ? EditorState.readOnly.of(true) : [],
+  });
   const view = {
     get state() {
       return state;
@@ -142,4 +147,16 @@ describe("insertBlock：块级内容与相邻文字隔开", () => {
     expect(state.doc.toString()).toBe("看 [[]]后");
     expect(state.selection.main.anchor).toBe(4);
   });
+});
+
+describe("markdownCommands：只读时拒绝改动", () => {
+  const doc = "**锁住的笔记**\n\n- 列表\n\n[链接](https://example.com)";
+
+  for (const [id, command] of Object.entries(markdownCommands)) {
+    it(id, () => {
+      const { handled, state } = run(command, doc, 0, doc.length, true);
+      expect(handled).toBe(false);
+      expect(state.doc.toString()).toBe(doc);
+    });
+  }
 });

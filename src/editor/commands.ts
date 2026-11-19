@@ -4,6 +4,7 @@ import type { Command, EditorView } from "@codemirror/view";
 /** Wrap (or unwrap) the selection with markdown delimiters. */
 export function toggleWrap(before: string, after = before, placeholder = "文本"): Command {
   return (view) => {
+    if (view.state.readOnly) return false;
     const { state } = view;
     const spec = state.changeByRange((range) => {
       const text = state.sliceDoc(range.from, range.to);
@@ -53,6 +54,7 @@ export const toggleInlineCode = toggleWrap("`", "`", "code");
 
 export function setHeading(level: number): Command {
   return (view) => {
+    if (view.state.readOnly) return false;
     const { state } = view;
     const spec = state.changeByRange((range) => {
       const line = state.doc.lineAt(range.from);
@@ -85,6 +87,7 @@ const PREFIX_PATTERNS: Record<PrefixKind, RegExp> = {
 
 export function toggleLinePrefix(kind: PrefixKind): Command {
   return (view) => {
+    if (view.state.readOnly) return false;
     const { state } = view;
     const lines = selectedLines(state.doc, state.selection.main.from, state.selection.main.to);
     const pattern = PREFIX_PATTERNS[kind];
@@ -137,6 +140,7 @@ function selectedLines(doc: EditorView["state"]["doc"], from: number, to: number
 /** Insert a block of markdown, keeping a blank line around it when needed. */
 export function insertBlock(text: string, cursorOffset?: number, selectLength = 0): Command {
   return (view) => {
+    if (view.state.readOnly) return false;
     const { state } = view;
     const range = state.selection.main;
     const line = state.doc.lineAt(range.from);
@@ -186,6 +190,7 @@ export const insertTaskItem = insertBlock("- [ ] ");
 
 function insertInline(text: string, cursorOffset?: number, selectLength = 0): Command {
   return (view) => {
+    if (view.state.readOnly) return false;
     const { state } = view;
     const range = state.selection.main;
     const cursor = range.from + (cursorOffset ?? text.length);
@@ -202,6 +207,7 @@ function insertInline(text: string, cursorOffset?: number, selectLength = 0): Co
 
 export function insertLink(): Command {
   return (view) => {
+    if (view.state.readOnly) return false;
     const { state } = view;
     const range = state.selection.main;
     const text = state.sliceDoc(range.from, range.to);
@@ -230,6 +236,7 @@ export function insertWikiLink(): Command {
 /** Strip markdown syntax from the selection — handy when pasting formatted text. */
 export function clearFormatting(): Command {
   return (view) => {
+    if (view.state.readOnly) return false;
     const { state } = view;
     const spec = state.changeByRange((range) => {
       if (range.empty) return { range };
