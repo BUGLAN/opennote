@@ -24,6 +24,13 @@ export function useIsMobile(): boolean {
   return useMediaQuery(MOBILE_QUERY);
 }
 
+/** 窄屏：侧栏变抽屉的那条线（app.css 的 `@media (max-width: 820px)`），只看宽度。 */
+export const NARROW_QUERY = "(max-width: 820px)";
+
+export function useIsNarrow(): boolean {
+  return useMediaQuery(NARROW_QUERY);
+}
+
 /**
  * 当前 Markdown 笔记显示成什么：
  * - `locked`：用户手动锁定（`ui.lockedNotes`，持久化）—— 阅读视图，移动端的「编辑」也绕不过去；

@@ -82,7 +82,7 @@ import { copyPathToClipboard, noteAbsolutePath } from "./lib/notePath";
 import { notify } from "./lib/toast";
 import { useUpdateController } from "./lib/update";
 import { cn } from "./lib/utils";
-import { noteViewMode, useIsMobile } from "./lib/mobile";
+import { noteViewMode, useIsMobile, useIsNarrow } from "./lib/mobile";
 /* GitHub 仓库笔记本（网页版）：导入 → 本地编辑 → 双向同步。模块注释见各自文件头。 */
 import { createGithubApi, type GithubApi } from "./lib/github/api";
 import {
@@ -229,6 +229,20 @@ export default function App(): ReactNode {
    * 手动锁定的笔记仍然只读，移动端的「编辑」绕不过去（判定见 `noteViewMode`）。
    */
   const isMobile = useIsMobile();
+  /*
+   * 窄屏的侧栏是抽屉：开合是**会话级**状态，首次进入恒为收起 —— 不读也不写 `ui.sidebarOpen`
+   * （那是桌面端落盘的偏好，默认展开；手机上照搬就是一进来抽屉盖住正文）。
+   * 用户本次手动展开后保持展开，直到点遮罩 / 收起按钮，或从抽屉里打开了笔记。
+   */
+  const narrow = useIsNarrow();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const sidebarOpen = narrow ? drawerOpen : ui.sidebarOpen;
+  const setSidebarOpen = (open: boolean) => {
+    if (narrow) setDrawerOpen(open);
+    else patchUi({ sidebarOpen: open });
+  };
+  /** 给 Sidebar 的 ui：只把 `sidebarOpen` 换成生效值（窄屏是抽屉状态）。 */
+  const sidebarUi = useMemo(() => (ui.sidebarOpen === sidebarOpen ? ui : { ...ui, sidebarOpen }), [ui, sidebarOpen]);
   const [mobileEditing, setMobileEditing] = useState<ReadonlySet<Id>>(() => new Set());
   const markMobileEditing = (id: Id, editing: boolean) =>
     setMobileEditing((prev) => {
@@ -1269,7 +1283,7 @@ export default function App(): ReactNode {
         openPalette: (mode) => setPalette(mode),
         openSearch: () => {
           // 搜索框常驻侧栏顶部（不再是单独一页）：回到文件页、把焦点放进去。
-          patchUi({ sidebarOpen: true });
+          setSidebarOpen(true);
           setTab("files");
           focusSidebarSearch();
         },
@@ -1282,7 +1296,7 @@ export default function App(): ReactNode {
           if (activeId) closeTab(activeId);
         },
         cycleTab,
-        toggleSidebar: () => patchUi({ sidebarOpen: !ui.sidebarOpen }),
+        toggleSidebar: () => setSidebarOpen(!sidebarOpen),
         toggleOutline: () => patchUi({ outlineOpen: !ui.outlineOpen }),
         toggleAppearance,
         toggleTypewriter: () => patchUi({ typewriter: !ui.typewriter }),
@@ -1350,7 +1364,7 @@ export default function App(): ReactNode {
         notify: (message) => notify(message),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeId, activeNote, scope, hasWorkspace, ui.sidebarOpen, ui.outlineOpen, ui.typewriter, ui.focus, ui.showWordCount, entries],
+    [activeId, activeNote, scope, hasWorkspace, sidebarOpen, narrow, ui.outlineOpen, ui.typewriter, ui.focus, ui.showWordCount, entries],
   );
 
   const commandsRef = useRef(commands);
@@ -1477,7 +1491,7 @@ export default function App(): ReactNode {
       sub: `${count} 篇笔记`,
       icon: "hash",
       run: () => {
-        patchUi({ sidebarOpen: true });
+        setSidebarOpen(true);
         setTab("tags");
         // 跳进来先把祖先链展开（revealNoteInTree 的标签版），不然记号落在收着的分支里。
         revealTag(tag);
@@ -1502,14 +1516,15 @@ export default function App(): ReactNode {
       className={cn(
         "app",
         bridge && "app--desktop",
+        isMobile && "app--touch",
         dropping && "is-dropping",
-        ui.sidebarOpen && "is-sidebar-open",
+        sidebarOpen && "is-sidebar-open",
       )}
     >
       <StoragePersistenceNotice workspace={library.workspace} />
       <Sidebar
         library={library}
-        ui={ui}
+        ui={sidebarUi}
         scope={scope}
         tab={tab}
         activeId={activeId}
@@ -1519,11 +1534,21 @@ export default function App(): ReactNode {
         onSwitcherOpen={setSwitcherOpen}
         onScope={setScope}
         onTab={setTab}
-        onOpenNote={(id) => openNote(id)}
-        onNewNote={(folderId) => newNote(folderId)}
-        onNewCanvas={(folderId) => newCanvas(folderId)}
+        onOpenNote={(id) => {
+          openNote(id);
+          // 抽屉里点开笔记 = 要读它：收起抽屉，正文立刻露出来。
+          if (narrow) setDrawerOpen(false);
+        }}
+        onNewNote={(folderId) => {
+          newNote(folderId);
+          if (narrow) setDrawerOpen(false);
+        }}
+        onNewCanvas={(folderId) => {
+          newCanvas(folderId);
+          if (narrow) setDrawerOpen(false);
+        }}
         onNewFolder={(parentId) => void newFolder(parentId)}
-        onToggleSidebar={() => patchUi({ sidebarOpen: !ui.sidebarOpen })}
+        onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         onOpenWorkspace={(record) => void openRecord(record)}
         onAddLocalFolder={() => void openLocalFolder()}
         onNewBrowserWorkspace={() => void newBrowserWorkspace()}
@@ -1543,7 +1568,7 @@ export default function App(): ReactNode {
         type="button"
         className="scrim--menu scrim--drawer"
         aria-label="收起侧栏"
-        onClick={() => patchUi({ sidebarOpen: false })}
+        onClick={() => setSidebarOpen(false)}
       />
 
       {/* 侧栏宽度的拖拽把手。它是 `.app` 栅格里的**独立一列**（0 宽，骑在侧栏右边框上），
@@ -1551,7 +1576,7 @@ export default function App(): ReactNode {
           滚动条，滚动条就抓不住了。 */}
       <SidebarResizer
         width={ui.sidebarWidth}
-        disabled={!ui.sidebarOpen}
+        disabled={!sidebarOpen}
         onCommit={(sidebarWidth) => patchUi({ sidebarWidth })}
       />
 

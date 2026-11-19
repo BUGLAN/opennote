@@ -302,7 +302,7 @@ export function Sidebar(rawProps: SidebarProps): ReactNode {
             <Icon name="folder" />
           </button>
           <button
-            className="icon-btn"
+            className="icon-btn sidebar__toggle"
             title={ui.sidebarOpen ? "收起侧栏 (Ctrl/⌘ + \\)" : "展开侧栏 (Ctrl/⌘ + \\)"}
             aria-expanded={ui.sidebarOpen}
             onClick={props.onToggleSidebar}
