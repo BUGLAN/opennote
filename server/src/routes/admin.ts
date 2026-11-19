@@ -183,10 +183,12 @@ export function createAdminRoutes(deps: AdminRoutesDeps): Hono {
      * **admin 客户端**：CouchDB 3.x 只允许 server admin `DELETE /{db}`，
      * 运行时 sync 账号会拿到 403。
      *
-     * `prepareAccountDeletion()` 在**任何 await 之前**用一个事务把该账号拥有的
-     * 全部笔记本置成 `deletion_state = 'account'`：独占的待删、共享的待移交。
-     * 加入 / 发邀请 / 并发删账号都会看到这个状态并拒绝，所以 await 期间成员
-     * 快照不会变化 —— 这堵住了「预检时共享、最终化时独占」留下无引用库的 TOCTOU。
+     * `prepareAccountDeletion()` 在**任何 await 之前**用一个事务写账号级删除标记，
+     * 并把该账号拥有的全部笔记本置成 `deletion_state = 'account'`：独占的待删、
+     * 共享的待移交。新建笔记本会在自己的插入事务里看到账号标记并拒绝；加入、
+     * 发邀请、并发删账号会看到笔记本状态并拒绝。所以 await 期间成员快照与
+     * 自有笔记本集合都不会变化，既堵住了「预检时共享、最终化时独占」留下无引用库，
+     * 也堵住了删库后才冒出的新行让最终化回滚。
      *
      * 只要有一个库没删掉就不做最终化：没删掉的库清除保留状态；已经删掉的库先
      * 逻辑删行（不能再被加入），成员关系与账号行保留。控制台会看到错误，点一次

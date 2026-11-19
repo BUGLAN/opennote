@@ -27,7 +27,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 interface Migration {
   version: number;
@@ -493,6 +493,23 @@ const MIGRATIONS: readonly Migration[] = [
         ALTER TABLE notebooks ADD COLUMN deletion_state TEXT;
         CREATE INDEX idx_notebooks_deleting ON notebooks(deleting_at) WHERE deleting_at IS NOT NULL;
       `);
+    },
+  },
+  {
+    version: 11,
+    description: "账号删除状态：accounts.deletion_started_at",
+    up: (db) => {
+      /*
+       * 删账号只保留「当时已有」的笔记本；新建笔记本仍可能在删库 await 窗口内
+       * 先插行、再置备，最终化会因为这行没被保留而回滚 —— 此时可能已有库被
+       * 不可逆地删掉。账号级标记与新建行的插入都在 `BEGIN IMMEDIATE` 里读写，
+       * 因而多实例也只会得到两种顺序：新建先提交（随后被删账号计划纳入），
+       * 或删账号先提交（新建看到标记后拒绝）。
+       *
+       * 非空 = 删账号正在跑。删库失败/取消时由调用方清除；账号删除成功时
+       * 这个标记随账号行一起消失。
+       */
+      db.exec("ALTER TABLE accounts ADD COLUMN deletion_started_at INTEGER");
     },
   },
 ];

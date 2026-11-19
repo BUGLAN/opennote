@@ -80,6 +80,8 @@ export interface AccountRow {
   password_hash: string | null;
   is_admin: number;
   status: string;
+  /** 非空 = 账号删除流程正在等待删库；新建笔记本与重入删除都要看它。 */
+  deletion_started_at: number | null;
   quota_bytes: number | null;
   wrapped_enc_root: string | null;
   enc_params: string | null;

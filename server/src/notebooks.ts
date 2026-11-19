@@ -108,6 +108,16 @@ export class NotebookStore {
     const dbName = databaseNameFor(id);
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      /*
+       * 删账号先写账号级标记，再 await 删库。这里必须在同一个写事务里读它：
+       * 事务外的预检会在「读完 → 插入」之间留下窗口，最终化仍可能撞上新行。
+       */
+      const owner = this.db.prepare("SELECT deletion_started_at FROM accounts WHERE id = ?").get(input.ownerId) as
+        | { deletion_started_at: number | null }
+        | undefined;
+      if (!owner) throw new NotebookError("not-found", "账号不存在");
+      if (owner.deletion_started_at !== null) throw new NotebookError("deletion-in-progress", "账号正在删除，暂时不能新建笔记本");
+
       this.db
         .prepare("INSERT INTO notebooks (id, owner_id, name, db_name, crypto_mode, created_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, NULL)")
         .run(id, input.ownerId, input.name, dbName, input.cryptoMode, now);
@@ -293,6 +303,9 @@ export class NotebookStore {
    * 会删掉行却留下没人引用的 CouchDB 库。加入、发邀请、并发删账号看到这个状态
    * 会拒绝/延后，所以最终化时重读到的成员快照仍然可信。
    *
+   * 另外在同一事务里写账号级 `deletion_started_at`：新建笔记本的事务会读它，
+   * 因而等待删库期间不会插入计划外的新行。
+   *
    * 该方法只做控制面保留，不碰 CouchDB；调用方随后 await 删库，成功后调
    * `finalizeAccountDeletion()`，失败则调 `cancelAccountDeletion()`。
    */
@@ -302,6 +315,18 @@ export class NotebookStore {
   } {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const account = this.db.prepare("SELECT deletion_started_at FROM accounts WHERE id = ?").get(accountId) as
+        | { deletion_started_at: number | null }
+        | undefined;
+      if (!account) throw new NotebookError("not-found", "账号不存在");
+      /*
+       * 已经存在标记时保留首次开始时间：上次进程中断后，管理员重试要能接着处理，
+       * 而不是被自己的标记永久挡住。失败/取消路径会显式清除它。
+       */
+      if (account.deletion_started_at === null) {
+        this.db.prepare("UPDATE accounts SET deletion_started_at = ? WHERE id = ?").run(now, accountId);
+      }
+
       /*
        * 并发删另一个账号时，如果这个人还是某个「正在删账号」的笔记本成员，
        * 先拒绝：那个笔记本的移交/删行还没决定，此时移除成员会让快照失真。
@@ -355,9 +380,17 @@ export class NotebookStore {
 
   /** 删账号失败时清除该账号拥有的全部保留状态；账号与控制面数据原样保留。 */
   cancelAccountDeletion(accountId: string): void {
-    this.db
-      .prepare("UPDATE notebooks SET deleting_at = NULL, deletion_state = NULL WHERE owner_id = ? AND deletion_state = 'account'")
-      .run(accountId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare("UPDATE notebooks SET deleting_at = NULL, deletion_state = NULL WHERE owner_id = ? AND deletion_state = 'account'")
+        .run(accountId);
+      this.db.prepare("UPDATE accounts SET deletion_started_at = NULL WHERE id = ?").run(accountId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /**

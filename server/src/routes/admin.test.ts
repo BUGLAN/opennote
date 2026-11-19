@@ -325,6 +325,33 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
     expect(world.notebooks.resolveMembership(exclusive.id, bob.id)).toBeNull();
   });
 
+  it("删库 await 期间：新建笔记本被 409 拒绝，SQLite 与 CouchDB 都不新增", async () => {
+    const world = makeWorld();
+    const admin = world.admin();
+    const alice = world.member();
+    const exclusive = world.notebooks.create({ ownerId: alice.id, name: "独占", cryptoMode: "none" });
+    world.fake.databases.set(exclusive.db_name, new Map());
+    const databasesBefore = [...world.fake.databases.keys()].sort();
+
+    const gate = blockDeleteDatabase(world.fake, exclusive.db_name);
+    const deleting = call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
+    await gate.entered;
+
+    expect(world.accounts.findById(alice.id)?.deletion_started_at).toEqual(expect.any(Number));
+    const created = await call(world, "/v1/notebooks", {
+      method: "POST",
+      headers: jsonAuth(alice.token),
+      body: JSON.stringify({ name: "删号期间新建", cryptoMode: "none" }),
+    });
+    expect(created.status).toBe(409);
+    expect(await created.json()).toMatchObject({ code: "deletion-in-progress" });
+    expect(world.notebooks.listForAccount(alice.id)).toHaveLength(1);
+    expect([...world.fake.databases.keys()].sort()).toEqual(databasesBefore);
+
+    gate.release();
+    expect((await deleting).status).toBe(200);
+  });
+
   it("删库 await 期间：另一个成员的删账号被 409 延后，不会改变待移交库的成员快照", async () => {
     const world = makeWorld();
     const admin = world.admin();
@@ -462,7 +489,7 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
     expect(finalAudit?.detail).toContain("databasesDeleted=1");
   });
 
-  it("删账号的删库失败后：保留状态被清除，邀请仍可正常加入", async () => {
+  it("删账号的删库失败后：保留状态被清除，邀请仍可正常加入且可新建笔记本", async () => {
     const world = makeWorld();
     const admin = world.admin();
     const alice = world.member();
@@ -476,6 +503,14 @@ describe("§7.1 · 删账号：独占的库真删、共享的**移交**", () => 
     const failed = await call(world, `/v1/admin/accounts/${alice.id}`, { method: "DELETE", headers: { authorization: `Bearer ${admin.token}` } });
     expect(failed.status).toBe(503);
     expect(world.notebooks.findById(exclusive.id)).toMatchObject({ deleting_at: null, deletion_state: null });
+    expect(world.accounts.findById(alice.id)?.deletion_started_at).toBeNull();
+
+    const created = await call(world, "/v1/notebooks", {
+      method: "POST",
+      headers: jsonAuth(alice.token),
+      body: JSON.stringify({ name: "失败后新建", cryptoMode: "none" }),
+    });
+    expect(created.status).toBe(201);
 
     const join = await call(world, "/v1/notebooks/join", {
       method: "POST",
