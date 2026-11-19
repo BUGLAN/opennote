@@ -21,11 +21,16 @@ interface TabBarProps {
   onClose(id: Id): void;
   /** 切换当前笔记的只读锁定。0.4.0 起新建笔记走命令面板（⌘）与 Ctrl/⌘ + N，这颗位置让给锁。 */
   onToggleLock(): void;
+  /**
+   * 移动端的「编辑 / 阅读」切换（会话级，不碰只读锁）；null = 不显示（桌面端、锁着的笔记、非 Markdown）。
+   * `reading` 为 true 时按钮写「编辑」，否则写「阅读」。
+   */
+  mobileView?: { reading: boolean; onToggle(): void } | null;
   onPalette(): void;
   onContextMenu(event: React.MouseEvent, id: Id): void;
 }
 
-export function TabBar({ tabs, notes, activeId, dirty, locked, lockDisabled, lockHint, onSelect, onClose, onToggleLock, onPalette, onContextMenu }: TabBarProps): ReactNode {
+export function TabBar({ tabs, notes, activeId, dirty, locked, lockDisabled, lockHint, onSelect, onClose, onToggleLock, mobileView, onPalette, onContextMenu }: TabBarProps): ReactNode {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   return (
@@ -83,6 +88,17 @@ export function TabBar({ tabs, notes, activeId, dirty, locked, lockDisabled, loc
         })}
       </div>
       <div className="tabbar__actions">
+        {mobileView ? (
+          <button
+            type="button"
+            className="tabbar__mode"
+            title={mobileView.reading ? "切换到编辑器" : "切换到阅读视图"}
+            onClick={mobileView.onToggle}
+          >
+            <Icon name={mobileView.reading ? "edit" : "note"} size={14} />
+            <span>{mobileView.reading ? "编辑" : "阅读"}</span>
+          </button>
+        ) : null}
         <button
           type="button"
           className={cn(

@@ -4423,3 +4423,59 @@ mark.hit {
     grid-template-columns: 1fr;
   }
 }
+
+/* ------------------------------ 移动端阅读模式 ------------------------------ */
+/*
+ * 标签栏右侧的「编辑 / 阅读」切换：只在移动端、没锁的 Markdown 笔记上出现（App 决定挂不挂）。
+ * 带文字而不是只放图标 —— 手机上第一次打开笔记是阅读视图，「怎么改」要一眼看得到。
+ */
+.tabbar__mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.tabbar__mode:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* 阅读视图里的图表 / 公式在 KaTeX、Mermaid 载好之前先显示原文，保留换行。 */
+.reading .mermaid-block.is-loading {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  text-align: left;
+  white-space: pre-wrap;
+  color: var(--ink-3);
+}
+
+/*
+ * 窄屏 / 触屏的阅读视图：整页不许横向滚动。宽表格、代码块、公式、图表各自在块内横向滚，
+ * 正文栏外的溢出直接裁掉（长链接、长单词已由 .prose 的 overflow-wrap 折行）。
+ */
+@media (max-width: 820px), (pointer: coarse) {
+  .reading-scroll {
+    overflow-x: hidden;
+  }
+
+  .reading {
+    padding-inline: 16px;
+  }
+
+  .reading table {
+    display: block;
+    overflow-x: auto;
+  }
+
+  .reading :is(pre, .math-block, .mermaid-block) {
+    max-width: 100%;
+  }
+}

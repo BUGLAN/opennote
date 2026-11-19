@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { resolveImageSrc } from "../data/assets";
 import { splitFrontMatter } from "../lib/utils";
-import { decodeMarkdownHref, renderMarkdown } from "../lib/markdown";
+import { decodeMarkdownHref } from "../lib/markdown";
+import { renderReadingMarkdown } from "../lib/readingMarkdown";
+import { useUi } from "../data/ui";
+import { renderMath } from "../editor/math";
+import { renderMermaid } from "../editor/mermaid";
 import type { Note } from "../data/types";
 
 /**
@@ -12,10 +16,14 @@ import type { Note } from "../data/types";
  * 图片：正文里的**相对引用**（`<笔记名>.assets/x.png`）经 `resolveImageSrc` 解析成
  * 可显示的 blob URL（data/assets 的同一份缓存）；远程 http(s) 引用桌面 CSP 不放行，
  * 本来就该在导入时落盘 —— 这里不替历史数据兜底。
+ *
+ * 公式与图表：`renderReadingMarkdown` 只留占位（原文），挂载后交给编辑器同一套
+ * `renderMath` / `renderMermaid`（同一份缓存、同一套主题），读写两边看到的版式一致。
  */
 export function ReadingView({ note }: { note: Note }): ReactNode {
   const ref = useRef<HTMLElement | null>(null);
-  const html = useMemo(() => renderMarkdown(splitFrontMatter(note.content).body), [note.content]);
+  const { theme, appearance } = useUi();
+  const html = useMemo(() => renderReadingMarkdown(splitFrontMatter(note.content).body), [note.content]);
 
   useEffect(() => {
     const host = ref.current;
@@ -36,6 +44,40 @@ export function ReadingView({ note }: { note: Note }): ReactNode {
       cancelled = true;
     };
   }, [html, note.folderId]);
+
+  useEffect(() => {
+    const host = ref.current;
+    if (!host) return;
+    let cancelled = false;
+    for (const el of Array.from(host.querySelectorAll<HTMLElement>(".md-math[data-tex]"))) {
+      const tex = el.dataset.tex ?? "";
+      void renderMath(tex, el.classList.contains("math-block")).then((out) => {
+        if (!cancelled) el.innerHTML = out;
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [html]);
+
+  useEffect(() => {
+    const host = ref.current;
+    if (!host) return;
+    let cancelled = false;
+    for (const el of Array.from(host.querySelectorAll<HTMLElement>(".mermaid-block[data-mermaid]"))) {
+      // 原文先存下来：主题切换时这个 effect 重跑，元素里已经是上一次的 SVG。
+      const code = (el.dataset.mermaid ||= el.textContent ?? "");
+      el.classList.add("is-loading");
+      void renderMermaid(code, theme, appearance).then(({ html: out }) => {
+        if (cancelled) return;
+        el.innerHTML = out;
+        el.classList.remove("is-loading");
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [html, theme, appearance]);
 
   /*
    * 滚动容器是**外层**，正文是内层 —— 与编辑器同一套结构（`.cm-scroller` 满宽负责滚动、

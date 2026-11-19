@@ -82,6 +82,7 @@ import { copyPathToClipboard, noteAbsolutePath } from "./lib/notePath";
 import { notify } from "./lib/toast";
 import { useUpdateController } from "./lib/update";
 import { cn } from "./lib/utils";
+import { noteViewMode, useIsMobile } from "./lib/mobile";
 /* GitHub 仓库笔记本（网页版）：导入 → 本地编辑 → 双向同步。模块注释见各自文件头。 */
 import { createGithubApi, type GithubApi } from "./lib/github/api";
 import {
@@ -222,6 +223,34 @@ export default function App(): ReactNode {
 
   // 大纲只对 Markdown 笔记有意义：画布是 JSON、HTML 页面是标记，按 md 抽标题只会抽出噪声。
   const activeIsNote = activeNote !== null && noteKind(activeNote) === "note";
+  /*
+   * 移动端「打开即阅读」：手机没有物理键盘，展示场景以读为主。默认阅读只是会话级 UI 状态 ——
+   * 点过「编辑」的笔记记在这里，不写回 `ui.lockedNotes`（否则回到桌面端会被意外锁住）；
+   * 手动锁定的笔记仍然只读，移动端的「编辑」绕不过去（判定见 `noteViewMode`）。
+   */
+  const isMobile = useIsMobile();
+  const [mobileEditing, setMobileEditing] = useState<ReadonlySet<Id>>(() => new Set());
+  const markMobileEditing = (id: Id, editing: boolean) =>
+    setMobileEditing((prev) => {
+      if (prev.has(id) === editing) return prev;
+      const next = new Set(prev);
+      if (editing) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  const viewMode = noteViewMode({
+    isNote: activeIsNote,
+    isMobile,
+    locked: activeLocked,
+    mobileEditing: activeId !== null && mobileEditing.has(activeId),
+  });
+  /** 阅读视图盖在编辑器上（手动锁定，或移动端默认阅读）。 */
+  const showReading = viewMode !== "editing";
+  /** 交给 EditorPane 的只读集合：移动端默认阅读时把活跃笔记临时并进去（编辑器隐藏、不收输入）。 */
+  const editorLockedIds = useMemo(
+    () => (viewMode === "mobile-reading" && activeId ? [...ui.lockedNotes, activeId] : ui.lockedNotes),
+    [viewMode, activeId, ui.lockedNotes],
+  );
   /*
    * 结构没变（级别 / 文字 / 行号都一样）就沿用上一份数组：打字时标题的字符偏移一直在变，
    * 每键换一个新数组会让大纲整列重渲染 —— 实测 1500 个标题的长文每键 ~170ms（dev），
@@ -1132,6 +1161,8 @@ export default function App(): ReactNode {
   const newNote = (folderId?: Id | null) => {
     if (!hasWorkspace) return;
     const note = createNote({ folderId: folderId === undefined ? currentFolderId(scope) : folderId, content: "" });
+    // 新建的空白笔记就是要写：移动端直接进编辑器，不先给一页空的阅读视图。
+    markMobileEditing(note.id, true);
     notify("已新建笔记", { action: { label: "移到回收站", run: () => trashNote(note.id) } });
     // 焦点由 EditorPane 的「成为活跃标签」effect 接管：新标签的实例挂载后它自己会
     // requestMeasure + focus —— 这里再抢一次 rAF 反而会扑在旧的（已隐藏的）实例上。
@@ -1544,12 +1575,20 @@ export default function App(): ReactNode {
               // 只读锁：锁定的笔记编辑器不收输入（EditorPane 里用 Compartment 切），
               // 状态随 `ui.lockedNotes` 落盘 —— 重启后还锁着，删掉的笔记残留 id 无副作用。
               const locked = ui.lockedNotes.includes(activeId);
+              // 移动端解锁 = 想改：直接进编辑器，而不是落回默认阅读。
+              if (locked && isMobile) markMobileEditing(activeId, true);
               patchUi({
                 lockedNotes: locked
                   ? ui.lockedNotes.filter((id) => id !== activeId)
                   : [...ui.lockedNotes, activeId],
               });
             }}
+            /* 移动端的「编辑 / 阅读」切换：只给没锁的 Markdown 笔记（锁着的只能经锁按钮解锁）。 */
+            mobileView={
+              isMobile && activeId && viewMode !== "locked" && activeIsNote
+                ? { reading: viewMode === "mobile-reading", onToggle: () => markMobileEditing(activeId, viewMode === "mobile-reading") }
+                : null
+            }
             onPalette={() => setPalette("all")}
             onContextMenu={(event, id) => {
               event.preventDefault();
@@ -1663,7 +1702,7 @@ export default function App(): ReactNode {
           tabs={editorTabIds}
           activeId={activeId}
           getNote={(id) => library.notes[id] ?? library.trash[id] ?? null}
-          lockedIds={ui.lockedNotes}
+          lockedIds={editorLockedIds}
           settings={ui}
           getTitles={() => Object.values(library.notes).map((note) => note.title)}
           getTags={() => tags.map((entry) => entry.tag)}
@@ -1720,7 +1759,7 @@ export default function App(): ReactNode {
 
         {/* 只读锁 = 阅读视图（0.4.0 用户反馈）：锁上时编辑器留在挂载状态（undo/光标都在），
             上面整篇渲染成文章排版 —— 读笔记就该是读文章，不是盯着一个不能打字的光标。 */}
-        {hasWorkspace && activeNote && activeLocked && activeIsNote ? <ReadingView note={activeNote} /> : null}
+        {hasWorkspace && activeNote && showReading ? <ReadingView note={activeNote} /> : null}
 
         {/* HTML 页面标签：直接渲染页面（沙箱 iframe），右上角悬浮全屏按钮。key=id —— 换页面 =
             卸载重建（全屏状态、iframe 里的页面状态都不该串到另一页）。 */}
@@ -1735,11 +1774,11 @@ export default function App(): ReactNode {
           enabled={Boolean(hasWorkspace && activeNote && !activeIsHtml)}
           preset={ui.width}
           activeId={activeId}
-          locked={activeLocked}
-          // 只读锁时活跃编辑器是隐藏的（display:none），对它 requestMeasure 会把行高表
+          locked={showReading}
+          // 只读锁（含移动端默认阅读）时活跃编辑器是隐藏的（display:none），对它 requestMeasure 会把行高表
           // 量成 0（EditorPane 的注册表注释里记过这个坑）；阅读视图不需要 CM 重新排版。
           onWidthChange={() => {
-            if (!activeLocked) viewRef.current?.requestMeasure();
+            if (!showReading) viewRef.current?.requestMeasure();
           }}
         />
 
