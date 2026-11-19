@@ -6,7 +6,14 @@ import { parentPath } from "../fs";
 import { MemoryBackend } from "../lib/clip/testing/memoryBackend";
 import { assetFinalName } from "../lib/clip/landing";
 import { renderMarkdown } from "../lib/markdown";
-import { findLinkAt, type LinkTarget } from "./media";
+import {
+  attachmentInsertion,
+  findLinkAt,
+  pendingAttachmentInsertions,
+  shouldUseNativeTextPaste,
+  trackAttachmentInsertion,
+  type LinkTarget,
+} from "./media";
 import { markdownSupport } from "./markdown";
 import { editorSettings, editorSettingsField } from "./settings";
 
@@ -304,5 +311,71 @@ describe("粘贴/拖拽的图片：落共享 .assets/，引用能解析回它", 
     expect(both).toContain("./备注 2.assets/b.png");
     // 远程图仍然不进本地预载队列（它不需要 blob URL）。
     expect(both.some((path) => path.startsWith("https:"))).toBe(false);
+  });
+});
+
+describe("附件插入位置跟随文档变化", () => {
+  it("落盘期间前面被编辑过：附件仍插在粘贴时对应字符的位置", () => {
+    let state = EditorState.create({
+      doc: "前面的字\n后面",
+      selection: { anchor: 5 },
+      extensions: [pendingAttachmentInsertions],
+    });
+    state = state.update({ effects: trackAttachmentInsertion.of({ id: 1, from: 5, to: 5 }) }).state;
+    state = state.update({ changes: { from: 0, insert: "新加的" } }).state;
+    expect(state.field(pendingAttachmentInsertions).get(1)).toEqual({ from: 8, to: 8 });
+
+    const insertion = attachmentInsertion(state, 1, ["![图](a.png)"]);
+    expect(insertion).not.toBeNull();
+    const next = state.update(insertion!).state;
+    expect(next.doc.toString()).toBe("新加的前面的字\n![图](a.png)\n后面");
+    expect(next.selection.main.head).toBe(8 + "![图](a.png)\n".length);
+    expect(next.field(pendingAttachmentInsertions).size).toBe(0);
+  });
+
+  it("等待期间用户在原位置继续打字：图片不吞掉新字，光标也不被拽到附件后面", () => {
+    let state = EditorState.create({
+      doc: "ab",
+      selection: { anchor: 1 },
+      extensions: [pendingAttachmentInsertions],
+    });
+    state = state.update({ effects: trackAttachmentInsertion.of({ id: 2, from: 1, to: 1 }) }).state;
+    state = state.update({ changes: { from: 1, insert: "XY" }, selection: { anchor: 3 } }).state;
+    expect(state.field(pendingAttachmentInsertions).get(2)).toEqual({ from: 1, to: 1 });
+    expect(state.selection.main.head).toBe(3);
+
+    const insertion = attachmentInsertion(state, 2, ["![图](a.png)"]);
+    const next = state.update(insertion!).state;
+    expect(next.doc.toString()).toBe("a![图](a.png)\nXYb");
+    // 用户当前光标在 XY 后；附件插在它前面不能让光标跟到附件后。
+    expect(next.selection.main.head).toBe(3 + "![图](a.png)\n".length);
+  });
+
+  it("粘贴时有选区：附件替换选中文字，光标落在附件后", () => {
+    let state = EditorState.create({
+      doc: "替换我\n下一行",
+      selection: { anchor: 0, head: 3 },
+      extensions: [pendingAttachmentInsertions],
+    });
+    state = state.update({ effects: trackAttachmentInsertion.of({ id: 3, from: 0, to: 3 }) }).state;
+
+    const insertion = attachmentInsertion(state, 3, ["![图](a.png)"]);
+    const next = state.update(insertion!).state;
+    expect(next.doc.toString()).toBe("![图](a.png)\n\n下一行");
+    expect(next.selection.main.head).toBe("![图](a.png)\n".length);
+  });
+});
+
+describe("粘贴文字优先判据", () => {
+  it("有纯文字且没有 Files：交还默认文字粘贴", () => {
+    expect(shouldUseNativeTextPaste(["text/plain", "text/html"], "Word 里的一段字")).toBe(true);
+  });
+
+  it("剪贴板带 Files：即使同时有纯文字，也维持附件处理", () => {
+    expect(shouldUseNativeTextPaste(["Files", "text/plain"], "一段字")).toBe(false);
+  });
+
+  it("没有纯文字：维持附件处理", () => {
+    expect(shouldUseNativeTextPaste(["image/png"], "")).toBe(false);
   });
 });

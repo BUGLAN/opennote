@@ -1,7 +1,7 @@
 import { syntaxTree } from "@codemirror/language";
 import type { SyntaxNode } from "@lezer/common";
 import { EditorView } from "@codemirror/view";
-import type { EditorState, Extension } from "@codemirror/state";
+import { StateEffect, StateField, type EditorState, type Extension, type TransactionSpec } from "@codemirror/state";
 import { imageNameForPaste } from "../data/assets";
 import { saveImage } from "../data/library";
 import { parentPath } from "../fs/paths";
@@ -118,65 +118,150 @@ async function readImageSize(file: File): Promise<{ width: number; height: numbe
   }
 }
 
+/* ------------------------------------------------------------ 插入位置跟踪 */
+
+interface AttachmentInsertRange {
+  from: number;
+  to: number;
+}
+
+/**
+ * 附件落盘是异步的：读文件、写盘、量尺寸都可能耗时。用户在这段时间里继续编辑时，原先记下的
+ * 绝对位置早已失效。这里把待插入的 `[from, to)` 登记进文档状态，让 CodeMirror 每次改动都替
+ * 我们映射它；附件回来后再从这个映射后的区间插入（有选区就替换选区）。
+ */
+export const trackAttachmentInsertion = StateEffect.define<{ id: number; from: number; to: number }>();
+const untrackAttachmentInsertion = StateEffect.define<number>();
+
+export const pendingAttachmentInsertions = StateField.define<ReadonlyMap<number, AttachmentInsertRange>>({
+  create: () => new Map(),
+  update(value, tr) {
+    let next = value;
+    if (tr.docChanged && value.size) {
+      const mapped = new Map<number, AttachmentInsertRange>();
+      for (const [id, range] of value) {
+        // 两端都用 -1：用户在插入点或选区边缘继续输入时，新输入的字属于用户，不能被稍后回来的
+        // 附件吞掉。这也是「光标没动」判据能区分「还在原位」与「刚在这里打了字」的关键。
+        const from = tr.changes.mapPos(range.from, -1);
+        mapped.set(id, { from, to: Math.max(from, tr.changes.mapPos(range.to, -1)) });
+      }
+      next = mapped;
+    }
+    for (const effect of tr.effects) {
+      if (effect.is(trackAttachmentInsertion)) {
+        const tracked = new Map(next);
+        tracked.set(effect.value.id, {
+          from: effect.value.from,
+          to: effect.value.to,
+        });
+        next = tracked;
+      } else if (effect.is(untrackAttachmentInsertion) && next.has(effect.value)) {
+        next = new Map(next);
+        (next as Map<number, AttachmentInsertRange>).delete(effect.value);
+      }
+    }
+    return next;
+  },
+});
+
+let nextAttachmentInsertionId = 1;
+
+/**
+ * 附件落盘完成后的插入事务。区间来自 `pendingAttachmentInsertions`，已经跟随等待期间的编辑
+ * 移动过；这里只负责替换它并移除登记。
+ *
+ * 只有当前主选区仍等于映射后的原选区，才把光标放到附件后面。用户已经移动光标或继续输入时
+ * 不传 `selection`，交给 CodeMirror 映射当前选区，避免把光标拽走。
+ */
+export function attachmentInsertion(
+  state: EditorState,
+  id: number,
+  snippets: string[],
+): TransactionSpec | null {
+  const pending = state.field(pendingAttachmentInsertions, false)?.get(id);
+  if (!pending || !snippets.length) return null;
+  const start = Math.min(pending.from, state.doc.length);
+  const end = Math.min(Math.max(start, pending.to), state.doc.length);
+  const text = `${snippets.join("\n")}\n`;
+  const main = state.selection.main;
+  const cursorUntouched = main.from === start && main.to === end;
+  return {
+    changes: { from: start, to: end, insert: text },
+    ...(cursorUntouched ? { selection: { anchor: start + text.length } } : {}),
+    effects: untrackAttachmentInsertion.of(id),
+  };
+}
+
+/**
+ * 剪贴板同时给了纯文字和文件时，Office/WPS 常把选中的文字另做一张 PNG 放进来。纯文字且
+ * 没有 `Files` 类型时交还默认文字粘贴；有 `Files` 时仍按附件处理。
+ */
+export function shouldUseNativeTextPaste(types: readonly string[], plainText: string): boolean {
+  return plainText.length > 0 && !types.includes("Files");
+}
+
 export function mediaHandlers(options: {
   imageMode: () => "asset" | "inline";
   notify: (message: string) => void;
 }): Extension {
-  const insertFiles = async (view: EditorView, files: File[], at: number) => {
+  const insertFiles = async (view: EditorView, files: File[], from: number, to: number) => {
     const notePath = view.state.field(editorSettingsField, false)?.notePath ?? "";
+    const id = nextAttachmentInsertionId++;
+    view.dispatch({ effects: trackAttachmentInsertion.of({ id, from, to }) });
     const snippets = await insertFileSnippets(files, {
       notePath,
       imageMode: options.imageMode(),
       notify: options.notify,
     });
-    if (!snippets.length) return;
-    // 光标落到附件**下面新起的一行**：附件所在行不「活跃」，粘贴完当场就是渲染态。
-    // 停在附件行上会让它先显示 `![…](…)` 源码，等回车或移开才换成渲染态 ——
-    // 那一下的高度突变正是用户 2026-10-10 报的跳动。
-    const text = `${snippets.join("\n")}\n`;
-    const pos = Math.min(at, view.state.doc.length);
-    view.dispatch({
-      changes: { from: pos, insert: text },
-      selection: { anchor: pos + text.length },
-      userEvent: "input.paste",
-      scrollIntoView: true,
-    });
+    // 视图可能在落盘期间被销毁（关标签）：状态随之消失，什么都不插。
+    if (!view.dom.isConnected) return;
+    if (!snippets.length) {
+      view.dispatch({ effects: untrackAttachmentInsertion.of(id) });
+      return;
+    }
+    const insertion = attachmentInsertion(view.state, id, snippets);
+    if (!insertion) return;
+    view.dispatch({ ...insertion, userEvent: "input.paste", scrollIntoView: true });
     options.notify(files.length > 1 ? `已插入 ${files.length} 个附件` : "已插入附件");
   };
 
-  return EditorView.domEventHandlers({
-    paste: (event, view) => {
-      const data = event.clipboardData;
-      if (!data) return false;
-      const files: File[] = [];
-      for (const item of Array.from(data.items)) {
-        if (item.kind !== "file") continue;
-        const file = item.getAsFile();
-        if (file) files.push(file);
-      }
-      if (!files.length) {
-        const dropped = Array.from(data.files ?? []);
-        files.push(...dropped);
-      }
-      if (!files.length) return false;
-      event.preventDefault();
-      const at = view.state.selection.main.from;
-      void insertFiles(view, files, at);
-      return true;
-    },
-    drop: (event, view) => {
-      const data = event.dataTransfer;
-      if (!data?.files?.length) return false;
-      event.preventDefault();
-      const position = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.from;
-      void insertFiles(view, Array.from(data.files), position);
-      return true;
-    },
-    dragover: (event) => {
-      if (event.dataTransfer?.types?.includes("Files")) event.preventDefault();
-      return false;
-    },
-  });
+  return [
+    pendingAttachmentInsertions,
+    EditorView.domEventHandlers({
+      paste: (event, view) => {
+        const data = event.clipboardData;
+        if (!data) return false;
+        if (shouldUseNativeTextPaste(Array.from(data.types), data.getData("text/plain"))) return false;
+        const files: File[] = [];
+        for (const item of Array.from(data.items)) {
+          if (item.kind !== "file") continue;
+          const file = item.getAsFile();
+          if (file) files.push(file);
+        }
+        if (!files.length) {
+          const dropped = Array.from(data.files ?? []);
+          files.push(...dropped);
+        }
+        if (!files.length) return false;
+        event.preventDefault();
+        const { from, to } = view.state.selection.main;
+        void insertFiles(view, files, from, to);
+        return true;
+      },
+      drop: (event, view) => {
+        const data = event.dataTransfer;
+        if (!data?.files?.length) return false;
+        event.preventDefault();
+        const position = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.from;
+        void insertFiles(view, Array.from(data.files), position, position);
+        return true;
+      },
+      dragover: (event) => {
+        if (event.dataTransfer?.types?.includes("Files")) event.preventDefault();
+        return false;
+      },
+    }),
+  ];
 }
 
 export type LinkTarget =
