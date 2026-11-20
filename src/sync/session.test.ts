@@ -111,6 +111,74 @@ describe("★ 端到端：本地改了推上去，另一台设备拉下来", () 
     // 只有 notes/a.md 上去了。
     expect((await provider.tree()).entries).toHaveLength(1);
   });
+
+  it("运行中修改 .gitignore：下一轮同步重新读取并生效", async () => {
+    const provider = createMemoryProvider();
+    const backend = memoryBackend({ "notes/a.md": "# A", "build/out.js": "x" });
+    let gitignore = "build/\n";
+    const session = sessionFor(backend, provider, {
+      gitignoreText: gitignore,
+      loadIgnoreRules: async () => gitignore,
+    });
+    await session.syncNow();
+    expect((await provider.tree()).entries).toHaveLength(1);
+
+    // 用户删掉了忽略行：下一次同步应该把 build/out.js 也推上去。
+    gitignore = "";
+    const result = await session.syncNow();
+    expect(result!.pushed).toBe(1);
+    expect((await provider.tree()).entries).toHaveLength(2);
+  });
+
+  it("读取 .gitignore 失败：本轮暂停，旧规则继续生效", async () => {
+    const provider = createMemoryProvider();
+    const backend = memoryBackend({ "notes/a.md": "# A", "build/out.js": "x" });
+    let fail = false;
+    const session = sessionFor(backend, provider, {
+      gitignoreText: "build/\n",
+      loadIgnoreRules: async () => {
+        if (fail) throw new Error("读取根目录 .gitignore 失败：EACCES");
+        return "build/\n";
+      },
+    });
+    await session.syncNow();
+    await backend.write("build/out2.js", new TextEncoder().encode("y"));
+    fail = true;
+
+    // runner 把失败折成状态（syncNow 返回 null）；错误必须在状态里可见。
+    expect(await session.syncNow()).toBeNull();
+    const failed = session.status();
+    expect(failed.phase).toBe("error");
+    if (failed.phase === "error") expect(failed.error).toMatch(/读取根目录 \.gitignore 失败/);
+    // 失败的一轮没有换规则：新建的 build/out2.js 仍被旧规则挡住。
+    expect(session.deps.isIgnored?.("build/out2.js")).toBe(true);
+    expect((await provider.tree()).entries).toHaveLength(1);
+  });
+
+  it("解析 .gitignore 失败：本轮暂停并保留旧规则", async () => {
+    const provider = createMemoryProvider();
+    const backend = memoryBackend({ "notes/a.md": "# A", "build/out.js": "x" });
+    let bad = false;
+    const session = sessionFor(backend, provider, {
+      gitignoreText: "build/\n",
+      loadIgnoreRules: async () =>
+        bad
+          ? ({
+              toString() {
+                throw new Error("坏行");
+              },
+            } as unknown as string)
+          : "build/\n",
+    });
+    await session.syncNow();
+    bad = true;
+
+    expect(await session.syncNow()).toBeNull();
+    const failed = session.status();
+    expect(failed.phase).toBe("error");
+    if (failed.phase === "error") expect(failed.error).toMatch(/\.gitignore 解析失败/);
+    expect(session.deps.isIgnored?.("build/out.js")).toBe(true);
+  });
 });
 
 /* ============================================================================

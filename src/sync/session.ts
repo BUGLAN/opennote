@@ -34,7 +34,7 @@
 import type { CryptoMode } from "../../shared/contract";
 import { hasPendingLocalChanges, syncOnce, syncOnceIncremental, type RejectedPush, type SyncEngineDeps, type SyncOnceInput, type SyncOnceResult } from "./engine";
 import { createPathMapSync, type PathMapSync } from "./pathMap";
-import { createIgnoreRules, type IgnoreRules } from "./ignore";
+import { createIgnoreRules, type IgnoreRuleError, type IgnoreRules } from "./ignore";
 import { createSyncRunner, type SyncProgress, type SyncRunner, type SyncStatus } from "./runner";
 import type { SyncProvider } from "./provider-types";
 import type { SyncLedger } from "./state";
@@ -53,6 +53,17 @@ export interface SyncSessionOptions {
   backend: SyncFileBackend;
   /** 工作区根目录的 `.gitignore` 文本（没有就传 `""`）。 */
   gitignoreText?: string;
+  /**
+   * 已经建好的忽略规则。给了它之后，`gitignoreText` 被忽略；
+   * `reloadIgnoreRules()` 与扫描/watcher 会共享同一个对象（运行中刷新）。
+   */
+  rules?: IgnoreRules;
+  /**
+   * 每一轮同步开始前重新读取 `.gitignore`（返回 `""` = 文件不存在）。
+   *
+   * 读取 / 解析失败会抛出 —— 这一轮同步暂停，旧规则继续生效；绝不静默退回空规则。
+   */
+  loadIgnoreRules?: () => Promise<string>;
   /** E2EE 时必须给。 */
   notebookKey?: Uint8Array;
   /**
@@ -111,6 +122,8 @@ export interface SyncSession {
   syncNow(): Promise<SyncOnceResult | null>;
   /** 本地有没有还没推上去的改动（只扫本地，不发请求；`enabled: false` 时恒为 false）。 */
   hasLocalChanges(): Promise<boolean>;
+  /** 用新文本刷新 `.gitignore`（解析失败时保留旧规则并返回结构化错误）。 */
+  reloadIgnoreRules(gitignoreText: string): IgnoreRuleError | null;
   status(): SyncStatus;
   dispose(): void;
 }
@@ -127,7 +140,7 @@ export function knownPathsOf(ledger: SyncLedger): string[] {
 }
 
 export function createSyncSession(options: SyncSessionOptions): SyncSession {
-  const rules: IgnoreRules = createIgnoreRules(options.gitignoreText ?? "");
+  const rules: IgnoreRules = options.rules ?? createIgnoreRules(options.gitignoreText ?? "");
   /** 加密笔记本的文件名对照表（明文笔记本 / 没给密钥时为 null）。在 `deps` 之后才建，因为它要用 `deps.didOf`。 */
   let pathMap: PathMapSync | null = null;
 
@@ -225,6 +238,20 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
       if (!options.config.enabled) {
         throw new Error("同步是关闭的");
       }
+      if (options.loadIgnoreRules !== undefined) {
+        /*
+         * 每一轮都重新读：用户在运行中改了 `.gitignore`，下一次同步就生效。
+         * 读取失败直接抛出（runner 会显示这条错误）；解析失败保留旧规则并暂停本轮 ——
+         * 这两种情况都不能退化成「没有 .gitignore」，否则同步范围会被静默放大。
+         */
+        const text = await options.loadIgnoreRules();
+        const parseError = rules.replace(text);
+        if (parseError !== null) {
+          throw new Error(
+            `.gitignore 解析失败：${parseError.message}；本轮同步已暂停，继续使用上一次的有效规则`,
+          );
+        }
+      }
       /*
        * ★ 走**增量**：先问远端「自上轮以来变了吗」。
        *
@@ -294,6 +321,7 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
       if (!options.config.enabled) return false;
       return hasPendingLocalChanges(options.ledger, deps);
     },
+    reloadIgnoreRules: (gitignoreText) => rules.replace(gitignoreText),
     status: () => runner.status(),
     dispose: () => runner.dispose(),
   };

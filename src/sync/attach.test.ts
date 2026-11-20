@@ -53,6 +53,23 @@ function ledger() {
   return createSyncLedger({ baseUrl: "https://notes.example.com", notebookId: NOTEBOOK, cryptoMode: "none", protocolVersion: 1 });
 }
 
+describe("根 .gitignore 解析失败", () => {
+  it("不接上同步（宁可停下，也不猜一套更宽的范围）", async () => {
+    const bad = {
+      toString() {
+        throw new Error("坏行");
+      },
+    } as unknown as string;
+    const result = await attach({ gitignoreText: bad });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("gitignore-invalid");
+      expect(result.message).toContain("解析失败");
+      expect(result.message).toContain("坏行");
+    }
+  });
+});
+
 /** 一个不会真的发请求的 provider 桩。 */
 function stubProvider() {
   return {

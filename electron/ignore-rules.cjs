@@ -55,12 +55,39 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GITIGNORE_FILE = void 0;
+exports.isMissingFileError = isMissingFileError;
+exports.readGitignoreText = readGitignoreText;
 exports.createIgnoreRules = createIgnoreRules;
 exports.createDefaultIgnoreRules = createDefaultIgnoreRules;
 exports.shouldSkipEntry = shouldSkipEntry;
 const ignore_1 = __importDefault(require("ignore"));
 /** `.gitignore` 在工作区里的固定位置。 */
 exports.GITIGNORE_FILE = ".gitignore";
+/**
+ * 文件后端的错误统一是中文「找不到：<path>」；不同平台 / 桥接层还可能漏出
+ * `ENOENT`、`no such file`。**只有这些才算「没有 .gitignore」**。
+ */
+function isMissingFileError(error) {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    return message.startsWith("找不到：") || /ENOENT|no such file|does not exist|not found/i.test(message);
+}
+/**
+ * 读根目录 `.gitignore`：**只有「不存在」才返回空串**。
+ *
+ * 权限 / 目录 / IO 错误必须抛出 —— 调用方据此暂停同步；把它们当成「没有 .gitignore」
+ * 会让同步范围静默变大（构建产物、日志、缓存都可能被推上去）。
+ */
+async function readGitignoreText(readText) {
+    try {
+        return await readText(exports.GITIGNORE_FILE);
+    }
+    catch (error) {
+        if (isMissingFileError(error))
+            return "";
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`读取根目录 .gitignore 失败：${detail}；为避免同步范围被意外放大，同步已暂停`);
+    }
+}
 /**
  * 内置忽略集：**目录名**（整棵子树都排除）。
  * 命中即排除，**不受 `.gitignore` 的 `!` 影响**。
@@ -142,16 +169,37 @@ function builtInIgnored(relPath, isDir) {
  */
 function createIgnoreRules(gitignoreText = "") {
     let matcher = null;
-    const source = String(gitignoreText ?? "");
-    if (source.trim().length > 0) {
+    let source = "";
+    let lastError = null;
+    /**
+     * 解析并**原子替换**：只有整份文本解析成功才更新 matcher/source。
+     * 失败时旧规则原样保留，调用方拿到错误后可以暂停这一轮同步。
+     */
+    const apply = (text) => {
         try {
+            const nextSource = String(text ?? "");
+            if (nextSource.trim().length === 0) {
+                matcher = null;
+                source = nextSource;
+                lastError = null;
+                return null;
+            }
             // `ignore()` 默认就是 gitignore 语义；显式传空 base 表示「相对工作区根」。
-            matcher = (0, ignore_1.default)().add(source);
+            matcher = (0, ignore_1.default)().add(nextSource);
+            source = nextSource;
+            lastError = null;
+            return null;
         }
-        catch {
-            matcher = null;
+        catch (error) {
+            const parseError = {
+                code: "parse",
+                message: error instanceof Error ? error.message : String(error),
+            };
+            lastError = parseError;
+            return parseError;
         }
-    }
+    };
+    apply(gitignoreText);
     const shouldIgnore = (relPath, isDir = false) => {
         const raw = String(relPath ?? "");
         const dirish = isDir || raw.replace(/\\/g, "/").endsWith("/");
@@ -171,6 +219,8 @@ function createIgnoreRules(gitignoreText = "") {
         shouldIgnore,
         isBuiltInIgnored: builtInIgnored,
         gitignoreSource: () => source,
+        replace: apply,
+        lastError: () => lastError,
     };
 }
 /**

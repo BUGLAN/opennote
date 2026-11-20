@@ -35,7 +35,7 @@ import { createSyncSession, type SyncSession } from "./session";
 import type { SyncOnceResult } from "./engine";
 import { createSyncStream, type EventStreamLike } from "./stream";
 import { createBackendSyncFiles } from "./backendFiles";
-import { createIgnoreRules, shouldSkipEntry } from "./ignore";
+import { createIgnoreRules, shouldSkipEntry, type IgnoreRules } from "./ignore";
 import { getDeviceId } from "./device";
 import type { SyncLedger } from "./state";
 import type { HashCache } from "./hashCache";
@@ -75,7 +75,11 @@ export type AttachSkipReason =
   /** 这个笔记本绑的是另一台服务器（不是这台设备登录的那台）。 */
   | "other-server"
   /** 网页端：同一个笔记本正在另一个标签页里同步（issue #3，`tabLock.ts`）；那边关掉后自动接手。 */
-  | "other-tab";
+  | "other-tab"
+  /** 根 `.gitignore` 存在但读不出来（权限 / 目录 / IO）。 */
+  | "gitignore-unreadable"
+  /** 根 `.gitignore` 解析失败；旧规则不存在，不能猜一套更宽的范围。 */
+  | "gitignore-invalid";
 
 export type AttachResult =
   | { ok: true; controller: SyncController; /** 建好的会话（provider/ledger 供冲突裁决用）。 */
@@ -90,6 +94,10 @@ export interface AttachWorkspaceSyncOptions {
   authToken: string | null;
   /** 工作区根目录的 `.gitignore` 文本。 */
   gitignoreText?: string;
+  /** 已建好的忽略规则（与扫描 / watcher 共享；给了就不再重复解析 gitignoreText）。 */
+  rules?: IgnoreRules;
+  /** 每一轮同步前重新读取 `.gitignore`；失败时暂停本轮并保留旧规则。 */
+  loadIgnoreRules?: () => Promise<string>;
   /**
    * 本地哈希缓存（见 `hashCache.ts`）。给了之后「没变的文件」不再重读重算哈希。
    * 传入同一个对象，引擎原地更新它，由调用方负责落盘。
@@ -202,7 +210,15 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
   const cursorStore = options.cursorStore;
   const cursorKey = `${config.notebookId}|${options.record.location}`;
   const knownCursor = knownCursorFor(options.ledger, cursorStore, cursorKey);
-  const scanRules = createIgnoreRules(options.gitignoreText ?? "");
+  const scanRules = options.rules ?? createIgnoreRules(options.gitignoreText ?? "");
+  const gitignoreError = scanRules.lastError();
+  if (gitignoreError !== null) {
+    return {
+      ok: false,
+      reason: "gitignore-invalid",
+      message: `根目录 .gitignore 解析失败：${gitignoreError.message}；为避免同步范围被意外放大，这个笔记本暂时不同步`,
+    };
+  }
   const session = createSyncSession({
     config,
     ledger: options.ledger,
@@ -213,7 +229,8 @@ export async function attachWorkspaceSync(options: AttachWorkspaceSyncOptions): 
       skipDir: (path) => shouldSkipEntry(scanRules, path, true),
     }),
     notebookId: config.notebookId,
-    ...(options.gitignoreText === undefined ? {} : { gitignoreText: options.gitignoreText }),
+    rules: scanRules,
+    ...(options.loadIgnoreRules === undefined ? {} : { loadIgnoreRules: options.loadIgnoreRules }),
     ...(options.hashCache === undefined ? {} : { hashCache: options.hashCache }),
     ...(options.cursorStore === undefined ? {} : { cursorStore: options.cursorStore }),
     cursorKey,

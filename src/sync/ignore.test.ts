@@ -10,7 +10,7 @@
  *   3. **误伤**不许发生（G6 `a..b.md`、G7 `notes/.opennote.md`）。
  */
 import { describe, expect, it } from "vitest";
-import { createIgnoreRules } from "./ignore";
+import { createIgnoreRules, readGitignoreText } from "./ignore";
 
 /** 断言「这条路径被忽略」。`isDir` 缺省时按文件判（目录要显式说，或写尾斜杠）。 */
 function ignored(gitignore: string, path: string, isDir = false): boolean {
@@ -197,5 +197,42 @@ describe("G12 · 扫描与 watcher 判定一致性", () => {
     const verdicts = cases.map(([path, isDir]) => scanSide.shouldIgnore(path, isDir));
     expect(verdicts).toContain(true);
     expect(verdicts).toContain(false);
+  });
+});
+
+describe("读取与热更新 .gitignore", () => {
+  it("只有「不存在」才当空规则；权限 / IO 错误必须抛出", async () => {
+    await expect(readGitignoreText(async () => { throw new Error("找不到：.gitignore"); })).resolves.toBe("");
+    await expect(
+      readGitignoreText(async () => {
+        throw new Error("读取失败：.gitignore（EACCES）");
+      }),
+    ).rejects.toThrow(/读取根目录 \.gitignore 失败.*EACCES/);
+    await expect(readGitignoreText(async () => "*.log\n")).resolves.toBe("*.log\n");
+  });
+
+  it("replace 成功才替换；解析失败保留旧规则并返回结构化错误", () => {
+    const rules = createIgnoreRules("*.log\n");
+    expect(rules.replace("*.bak\n")).toBeNull();
+    expect(rules.shouldIgnore("x.log")).toBe(false);
+    expect(rules.shouldIgnore("x.bak")).toBe(true);
+
+    // 用「转字符串就抛」的坏输入模拟解析失败：真实解析器出错时走同一条 catch。
+    const bad = {
+      toString() {
+        throw new Error("坏行");
+      },
+    } as unknown as string;
+    const error = rules.replace(bad);
+    expect(error).toMatchObject({ code: "parse" });
+    expect(error?.message).toContain("坏行");
+    // ★ 旧规则必须原样保留，不能被一次坏文件清空。
+    expect(rules.shouldIgnore("x.bak")).toBe(true);
+    expect(rules.shouldIgnore("x.log")).toBe(false);
+    expect(rules.lastError()).toEqual(error);
+
+    expect(rules.replace("")).toBeNull();
+    expect(rules.lastError()).toBeNull();
+    expect(rules.shouldIgnore("x.bak")).toBe(false);
   });
 });

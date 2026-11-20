@@ -103,6 +103,17 @@ describe("状态栏同步位", () => {
     expect(info?.title).toContain("自动接手");
   });
 
+  it("根 .gitignore 读取 / 解析失败 ⇒ error（不能把同步范围静默放大）", () => {
+    expect(syncStatusBarInfo(state({ reason: "gitignore-unreadable" }), true)).toMatchObject({
+      tone: "error",
+      label: "忽略规则不可读",
+    });
+    expect(syncStatusBarInfo(state({ reason: "gitignore-invalid" }), true)).toMatchObject({
+      tone: "error",
+      label: "忽略规则无效",
+    });
+  });
+
   it("加密笔记本还没解锁 ⇒ warn「待解锁」", () => {
     expect(syncStatusBarInfo(state({ reason: "locked" }), true)).toMatchObject({ tone: "warn", label: "待解锁" });
   });

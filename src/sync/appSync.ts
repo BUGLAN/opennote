@@ -46,7 +46,7 @@ import { resolveCursorStore } from "./cursor";
 import { createDesktopEventStream, supportsDesktopStream } from "./desktopStream";
 import type { EventStreamLike } from "./stream";
 import { createWorkspaceSyncBinding, type BindingPhase } from "./binding";
-import { createDefaultIgnoreRules, shouldSkipEntry } from "./ignore";
+import { createDefaultIgnoreRules, GITIGNORE_FILE, readGitignoreText, shouldSkipEntry } from "./ignore";
 import { onWorkspaceWrite } from "../fs/writeLog";
 import { normalizePath } from "../fs/paths";
 import { setSyncActive } from "./mode";
@@ -460,7 +460,16 @@ async function attachCurrentInner(): Promise<AttachResult> {
     lastLedgerWriteAt = at;
     ledgerWrites.enqueue(ledger);
   };
-  const gitignoreText = await backend.readText(".gitignore").catch(() => "");
+  let gitignoreText: string;
+  try {
+    gitignoreText = await readGitignoreText((path) => backend.readText(path));
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "gitignore-unreadable",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
   /*
    * 实时推送：网页/移动用 `EventSource`；桌面端由主进程建流、经 IPC 推事件
    * （桌面 CSP 不放 https，渲染层里 `new EventSource(远端)` 会被静默拦掉）。
@@ -481,6 +490,7 @@ async function attachCurrentInner(): Promise<AttachResult> {
     backend,
     authToken: credentials.token,
     gitignoreText,
+    loadIgnoreRules: () => readGitignoreText((path) => backend.readText(path)),
     hashCache,
     cursorStore,
     notebookKeyForNotebook: (notebookId) => {
@@ -643,6 +653,15 @@ function subscribeWorkspaceWrites(): void {
     if (write.pathsUnknown) {
       if (!activeSession && lockWait) announceLocalWrite(lockWait.key);
       else void checkLocalChangesAndSchedule();
+      return;
+    }
+    /*
+     * `.gitignore` 自己不同步，但它改变的是同步范围：运行中改了之后必须重新扫描。
+     * 具体重读发生在下一轮 `syncOnce` 开头（`loadIgnoreRules`），这里只负责触发。
+     */
+    if (write.paths.some((path) => normalizePath(path) === GITIGNORE_FILE)) {
+      if (activeSession) activeSession.runner.scheduleAfterLocalWrite();
+      else if (lockWait) announceLocalWrite(lockWait.key);
       return;
     }
     // 全是忽略路径（账本 / 元数据 / 收件箱暂存）⇒ 这一批与同步范围无关。

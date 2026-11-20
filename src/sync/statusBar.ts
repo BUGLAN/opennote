@@ -85,6 +85,20 @@ export function syncStatusBarInfo(state: SyncUiState, hasWorkspace: boolean, acc
   if (state.reason === "other-tab") {
     return { tone: "warn", label: "在另一个标签页同步", title: "这个笔记本正在另一个标签页里同步；这里的改动会交给那边上传，关掉那个标签页后这里自动接手" };
   }
+  if (state.reason === "gitignore-unreadable") {
+    return {
+      tone: "error",
+      label: "忽略规则不可读",
+      title: "根目录 .gitignore 读取失败；同步已暂停，避免把本应忽略的文件推上去",
+    };
+  }
+  if (state.reason === "gitignore-invalid") {
+    return {
+      tone: "error",
+      label: "忽略规则无效",
+      title: "根目录 .gitignore 解析失败；同步已暂停，避免同步范围被意外放大",
+    };
+  }
   // ② 没开同步：不是异常，别常驻。
   if (state.reason === "disabled") return null;
 
