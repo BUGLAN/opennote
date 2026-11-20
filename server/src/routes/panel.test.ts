@@ -24,6 +24,7 @@ import { createAuthRoutes, LoginThrottle } from "./auth";
 import { createAdminRoutes } from "./admin";
 import { createAdminViewRoutes } from "./adminView";
 import { createPanelRoutes } from "./panel";
+import { holdAccountLogins, waitUntil } from "./loginConcurrency.test-helper";
 
 const ENV: Record<string, string> = {
   EXTERNAL_BASE_URL: "https://notes.example.com",
@@ -36,7 +37,7 @@ const ENV: Record<string, string> = {
 const PASSWORD = "long-enough-pw";
 const CSRF = { "x-requested-with": "opennote-panel" };
 
-function makeWorld(env: Record<string, string> = ENV, options: { now?: () => number } = {}) {
+function makeWorld(env: Record<string, string> = ENV, options: { now?: () => number; throttle?: LoginThrottle } = {}) {
   const db = openDatabase({ path: ":memory:" });
   const config = loadConfig(env);
   const accounts = testAccountStore(db);
@@ -45,7 +46,7 @@ function makeWorld(env: Record<string, string> = ENV, options: { now?: () => num
   const settings = new SettingsStore(db, config);
   const couch = couchClient(new FakeCouch());
   const audit = (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event);
-  const throttle = new LoginThrottle();
+  const throttle = options.throttle ?? new LoginThrottle();
   const now = options.now ? { now: options.now } : {};
   const app = new Hono();
   app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, throttle, ...now }));
@@ -75,7 +76,7 @@ function makeWorld(env: Record<string, string> = ENV, options: { now?: () => num
     expect(response.status).toBe(200);
     return response.headers.get("set-cookie")!.split(";")[0]!;
   };
-  return { db, accounts, notebooks, settings, call, panelLogin };
+  return { db, accounts, notebooks, settings, throttle, call, panelLogin };
 }
 
 describe("页面与静态资源", () => {
@@ -191,6 +192,27 @@ describe("登录与退出", () => {
     expect((await world.call("/v1/panel/login", { body: { email: "admin@example.com", password: PASSWORD }, headers: CSRF })).status).toBe(429);
     const device = { deviceId: "a".repeat(32), name: "Mac", platform: "desktop" };
     expect((await world.call("/v1/auth/login", { body: { email: "admin@example.com", password: PASSWORD, device } })).status).toBe(429);
+  });
+
+  it("控制台并发错密码同样先占在途名额，超出的请求不进入账号校验", async () => {
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 2, 10);
+    const world = makeWorld(ENV, { throttle });
+    await world.accounts.create({ email: "admin@example.com", password: PASSWORD, isAdmin: true });
+    const held = holdAccountLogins(world.accounts);
+    try {
+      const requests = Array.from({ length: 6 }, () =>
+        world.call("/v1/panel/login", { body: { email: "admin@example.com", password: "wrong-password!" }, headers: CSRF }),
+      );
+      await waitUntil(() => held.entered() >= 2, "两个控制台登录请求进入账号校验");
+      held.release();
+      const results = await Promise.all(requests);
+
+      expect(held.entered()).toBe(2);
+      expect(results.filter((result) => result.status === 401)).toHaveLength(2);
+      expect(results.filter((result) => result.status === 429 && result.body?.code === "busy")).toHaveLength(4);
+    } finally {
+      held.restore();
+    }
   });
 
   it("控制台会话 8 小时后过期：session 回 me=null 并清 cookie", async () => {

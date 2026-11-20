@@ -153,21 +153,42 @@ export function accountErrorResponse(error: AccountError): Response {
   });
 }
 
+export interface LoginAttempt {
+  /** 密码正确：释放名额并清掉这个邮箱的失败记录。 */
+  succeed(): void;
+  /** 密码错误：释放名额并结算成一次失败。 */
+  fail(now?: number): void;
+  /** 非密码错误（停用、异常等）：只释放名额，不改变失败记录。 */
+  release(): void;
+}
+
+export type LoginAdmission =
+  | { admitted: true; attempt: LoginAttempt }
+  | { admitted: false; reason: "locked" | "busy"; retryAfterSeconds: number };
+
 /**
- * 登录失败计数：同一邮箱 15 分钟内失败 5 次就锁到窗口结束。
+ * 登录失败计数 + 在途预占：同一邮箱 15 分钟内失败 5 次就锁到窗口结束。
+ *
+ * 密码校验是慢 KDF，不能等算完才记账：请求进入 KDF 前先同步 `reserve()` 一个名额，
+ * 失败时把名额结算成失败，成功时释放并清零。这样并发请求也无法一起越过失败上限。
+ * 单邮箱和全局的在途数量都有上限，避免大量并发 KDF 同时吃掉内存。
  *
  * 只在内存里：服务重启会清零，这对「挡在线爆破」足够了（攻击者拿不到重启开关），
  * 也免得为一张临时表加迁移。按邮箱而不是按 IP 计，是因为爆破一个账号可以换 IP，换不了邮箱。
  *
- * 邮箱来自请求体，攻击者可以每次换一个随机邮箱，所以这张表必须有界：全局清理过期条目，
+ * 邮箱来自请求体，攻击者可以每次换一个随机邮箱，所以失败表必须有界：全局清理过期条目，
  * 并限制 key 的数量（超过时淘汰最久没有新失败的）。
  */
 export class LoginThrottle {
   private readonly failures = new Map<string, number[]>();
+  private readonly inFlightByKey = new Map<string, number>();
+  private inFlightTotal = 0;
   constructor(
     private readonly maxFailures = 5,
     private readonly windowMs = 15 * 60_000,
     private readonly maxKeys = 100_000,
+    private readonly maxInFlightPerKey = maxFailures,
+    private readonly maxInFlight = 16,
   ) {}
 
   /** 当前记着的邮箱数（测试与排障用）。 */
@@ -178,7 +199,7 @@ export class LoginThrottle {
   /**
    * 全局清理过期邮箱：不会有人再访问的随机邮箱也在这里被删掉。
    *
-   * 这张表的顺序就是「最后一次失败的时间」顺序（`fail` 总是把 key 移到末尾），
+   * 这张表的顺序就是「最后一次失败的时间」顺序（记账时总是把 key 移到末尾），
    * 所以过期的只会排在前面，删到第一个还没过期的就停，不用每次扫全表。
    */
   private sweep(now: number): void {
@@ -204,7 +225,54 @@ export class LoginThrottle {
     return Math.ceil((recent[0]! + this.windowMs - now) / 1000);
   }
 
-  fail(key: string, now = Date.now()): void {
+  /**
+   * 进入密码校验前同步占一个名额。调用方必须在 `await` KDF 之前调用；
+   * 返回的 attempt 只结算一次，其余调用会被忽略，避免重复增减计数。
+   */
+  reserve(key: string, now = Date.now()): LoginAdmission {
+    const locked = this.lockedFor(key, now);
+    if (locked !== null) return { admitted: false, reason: "locked", retryAfterSeconds: locked };
+
+    const recent = this.recent(key, now).length;
+    const inFlightForKey = this.inFlightByKey.get(key) ?? 0;
+    if (
+      inFlightForKey >= this.maxInFlightPerKey ||
+      this.inFlightTotal >= this.maxInFlight ||
+      recent + inFlightForKey >= this.maxFailures
+    ) {
+      return { admitted: false, reason: "busy", retryAfterSeconds: 1 };
+    }
+
+    this.inFlightByKey.set(key, inFlightForKey + 1);
+    this.inFlightTotal += 1;
+    let settled = false;
+    const release = (): boolean => {
+      if (settled) return false;
+      settled = true;
+      const current = this.inFlightByKey.get(key) ?? 1;
+      if (current <= 1) this.inFlightByKey.delete(key);
+      else this.inFlightByKey.set(key, current - 1);
+      this.inFlightTotal = Math.max(0, this.inFlightTotal - 1);
+      return true;
+    };
+
+    return {
+      admitted: true,
+      attempt: {
+        succeed: () => {
+          if (release()) this.succeed(key);
+        },
+        fail: (at = Date.now()) => {
+          if (release()) this.fail(key, at);
+        },
+        release: () => {
+          release();
+        },
+      },
+    };
+  }
+
+  private recordFailure(key: string, now: number): void {
     this.sweep(now);
     const kept = [...this.recent(key, now), now];
     // 每个邮箱只需要记最近 maxFailures 次；Map 的顺序同时用作淘汰顺序。
@@ -217,8 +285,62 @@ export class LoginThrottle {
     }
   }
 
+  fail(key: string, now = Date.now()): void {
+    this.recordFailure(key, now);
+  }
+
   succeed(key: string): void {
     this.failures.delete(key);
+  }
+}
+
+function loginThrottleResponse(admission: Extract<LoginAdmission, { admitted: false }>): Response {
+  const locked = admission.reason === "locked";
+  return new Response(
+    JSON.stringify({
+      error: locked
+        ? `登录失败次数太多，请 ${Math.ceil(admission.retryAfterSeconds / 60)} 分钟后再试`
+        : "登录尝试过多，请稍后再试",
+      code: admission.reason,
+      retryAfterSeconds: admission.retryAfterSeconds,
+    }),
+    { status: 429, headers: { "content-type": "application/json; charset=utf-8" } },
+  );
+}
+
+/**
+ * 客户端密码登录和控制台密码登录共用的限流流程。
+ *
+ * 路由只负责传入账号校验函数、组装成功响应，以及告诉这里「这次失败刚好触发了锁定」。
+ * 不要在路由里再各写一份 `lockedFor` / `reserve` / `fail`，否则两个入口迟早会分叉。
+ */
+export async function attemptPasswordLogin<T>(input: {
+  throttle: LoginThrottle;
+  key: string;
+  now: () => number;
+  login: () => Promise<T>;
+  onLocked?: () => void;
+}): Promise<{ ok: true; value: T } | { ok: false; response: Response }> {
+  const admission = input.throttle.reserve(input.key, input.now());
+  if (!admission.admitted) return { ok: false, response: loginThrottleResponse(admission) };
+
+  try {
+    const value = await input.login();
+    admission.attempt.succeed();
+    return { ok: true, value };
+  } catch (error) {
+    if (error instanceof AccountError) {
+      if (error.rejection === "bad-credentials") {
+        const at = input.now();
+        admission.attempt.fail(at);
+        if (input.throttle.lockedFor(input.key, at) !== null) input.onLocked?.();
+      } else {
+        admission.attempt.release();
+      }
+      return { ok: false, response: accountErrorResponse(error) };
+    }
+    admission.attempt.release();
+    throw error;
   }
 }
 
@@ -287,27 +409,17 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     const body = await readBody(c, loginRequestSchema);
     if (body instanceof Response) return body;
     const key = body.email.trim().toLowerCase();
-    const locked = throttle.lockedFor(key, now());
-    if (locked !== null) {
-      return json({ error: `登录失败次数太多，请 ${Math.ceil(locked / 60)} 分钟后再试`, code: "locked", retryAfterSeconds: locked }, 429);
-    }
-    try {
-      const account = await deps.accounts.login(body.email, body.password);
-      throttle.succeed(key);
-      deps.audit?.({ actorId: account.id, action: "login", target: body.device.deviceId, ip: ipOf(c), detail: body.device.name });
-      return openDeviceSession(account, body.device, ipOf(c));
-    } catch (error) {
-      if (error instanceof AccountError) {
-        if (error.rejection === "bad-credentials") {
-          throttle.fail(key, now());
-          if (throttle.lockedFor(key, now()) !== null) {
-            deps.audit?.({ actorId: deps.accounts.findByEmail(key)?.id ?? null, action: "login_locked", target: key, ip: ipOf(c), detail: null });
-          }
-        }
-        return accountErrorResponse(error);
-      }
-      throw error;
-    }
+    const outcome = await attemptPasswordLogin({
+      throttle,
+      key,
+      now,
+      login: () => deps.accounts.login(body.email, body.password),
+      onLocked: () => deps.audit?.({ actorId: deps.accounts.findByEmail(key)?.id ?? null, action: "login_locked", target: key, ip: ipOf(c), detail: null }),
+    });
+    if (!outcome.ok) return outcome.response;
+    const account = outcome.value;
+    deps.audit?.({ actorId: account.id, action: "login", target: body.device.deviceId, ip: ipOf(c), detail: body.device.name });
+    return openDeviceSession(account, body.device, ipOf(c));
   });
 
   /** 开放注册（服务设置里「谁可以注册 = 开放」时才可用）。 */

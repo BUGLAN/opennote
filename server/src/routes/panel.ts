@@ -49,7 +49,7 @@ import {
 } from "../panelSecurity";
 import type { SettingsStore } from "../settings";
 import { authenticateAdminRequest } from "./adminGate";
-import { accountErrorResponse, LoginThrottle, meOf } from "./auth";
+import { accountErrorResponse, attemptPasswordLogin, LoginThrottle, meOf } from "./auth";
 
 export interface PanelRoutesDeps {
   accounts: AccountStore;
@@ -145,30 +145,20 @@ export function createPanelRoutes(deps: PanelRoutesDeps): Hono {
     if (!parsed.success) return json({ error: "请填写邮箱和密码", code: "bad-request" }, 400);
     const { email, password } = parsed.data;
     const key = email.trim().toLowerCase();
-    const locked = deps.throttle.lockedFor(key, now());
-    if (locked !== null) {
-      return json({ error: `登录失败次数太多，请 ${Math.ceil(locked / 60)} 分钟后再试`, code: "locked", retryAfterSeconds: locked }, 429);
-    }
-    try {
-      const account = await deps.accounts.login(email, password);
-      deps.throttle.succeed(key);
-      if (account.is_admin !== 1) return json({ error: "这个账号不是管理员，控制台只给管理员用", code: "forbidden" }, 403);
-      const { token } = deps.accounts.createSession({ accountId: account.id, kind: "panel", ip: ipOf(c), now: now() });
-      deps.accounts.touch(account.id, now());
-      deps.audit?.({ actorId: account.id, action: "panel_login", target: null, ip: ipOf(c), detail: null });
-      return json({ me: meOf(deps, account, null) }, 200, { "set-cookie": sessionCookie(token) });
-    } catch (error) {
-      if (error instanceof AccountError) {
-        if (error.rejection === "bad-credentials") {
-          deps.throttle.fail(key, now());
-          if (deps.throttle.lockedFor(key, now()) !== null) {
-            deps.audit?.({ actorId: deps.accounts.findByEmail(key)?.id ?? null, action: "login_locked", target: key, ip: ipOf(c), detail: null });
-          }
-        }
-        return accountErrorResponse(error);
-      }
-      throw error;
-    }
+    const outcome = await attemptPasswordLogin({
+      throttle: deps.throttle,
+      key,
+      now,
+      login: () => deps.accounts.login(email, password),
+      onLocked: () => deps.audit?.({ actorId: deps.accounts.findByEmail(key)?.id ?? null, action: "login_locked", target: key, ip: ipOf(c), detail: null }),
+    });
+    if (!outcome.ok) return outcome.response;
+    const account = outcome.value;
+    if (account.is_admin !== 1) return json({ error: "这个账号不是管理员，控制台只给管理员用", code: "forbidden" }, 403);
+    const { token } = deps.accounts.createSession({ accountId: account.id, kind: "panel", ip: ipOf(c), now: now() });
+    deps.accounts.touch(account.id, now());
+    deps.audit?.({ actorId: account.id, action: "panel_login", target: null, ip: ipOf(c), detail: null });
+    return json({ me: meOf(deps, account, null) }, 200, { "set-cookie": sessionCookie(token) });
   });
 
   routes.post("/v1/panel/logout", (c) => {

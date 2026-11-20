@@ -15,6 +15,7 @@ import { testAccountStore } from "../auth/testAccounts.test-helper";
 import { createAuthRoutes, LoginThrottle } from "./auth";
 import { createAdminRoutes } from "./admin";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
+import { holdAccountLogins, waitUntil } from "./loginConcurrency.test-helper";
 
 const ENV: Record<string, string> = {
   EXTERNAL_BASE_URL: "https://notes.example.com",
@@ -29,7 +30,7 @@ const DEVICE_A = { deviceId: "a".repeat(32), name: "Lan 的 MacBook Pro", platfo
 const DEVICE_B = { deviceId: "b".repeat(32), name: "公司 ThinkPad", platform: "desktop", os: "windows" } as const;
 const PASSWORD = "long-enough-pw";
 
-function makeWorld() {
+function makeWorld(options: { throttle?: LoginThrottle } = {}) {
   const db = openDatabase({ path: ":memory:" });
   const config = loadConfig(ENV);
   const accounts = testAccountStore(db);
@@ -37,8 +38,9 @@ function makeWorld() {
   const shares = new ShareStore(db);
   const settings = new SettingsStore(db, config);
   const audit = (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event);
+  const throttle = options.throttle ?? new LoginThrottle();
   const app = new Hono();
-  app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit }));
+  app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, throttle }));
   app.route(
     "/v1/admin",
     createAdminRoutes({ accounts, notebooks, shares, config, settings, couch: couchClient(new FakeCouch()), couchAdmin: couchClient(new FakeCouch()), audit }),
@@ -55,7 +57,7 @@ function makeWorld() {
     return { status: response.status, text, body: text ? (JSON.parse(text) as Record<string, any>) : null };
   };
   const login = (email: string, password = PASSWORD, device: object = DEVICE_A) => call("/v1/auth/login", { body: { email, password, device } });
-  return { db, accounts, notebooks, settings, call, login };
+  return { db, accounts, notebooks, settings, throttle, call, login };
 }
 
 describe("初始化", () => {
@@ -143,6 +145,83 @@ describe("登录", () => {
     expect(locked.body?.code).toBe("locked");
   });
 
+  it("同一邮箱并发 10 次错密码：只有在途名额进入校验，其余直接 429", async () => {
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 2, 10);
+    const world = makeWorld({ throttle });
+    await world.accounts.create({ email: "lan@example.com", password: PASSWORD });
+    const held = holdAccountLogins(world.accounts);
+    try {
+      const requests = Array.from({ length: 10 }, (_, index) =>
+        world.login("lan@example.com", "wrong-password", {
+          ...DEVICE_A,
+          deviceId: index.toString(16).padStart(32, "0"),
+        }),
+      );
+      await waitUntil(() => held.entered() >= 2, "两个登录请求进入账号校验");
+      held.release();
+      const results = await Promise.all(requests);
+
+      expect(held.entered()).toBe(2);
+      expect(results.filter((result) => result.status === 401)).toHaveLength(2);
+      expect(results.filter((result) => result.status === 429 && result.body?.code === "busy")).toHaveLength(8);
+    } finally {
+      held.restore();
+    }
+  });
+
+  it("并发正确密码都成功，不占失败额度；之后仍能连续失败 4 次", async () => {
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, 10);
+    const world = makeWorld({ throttle });
+    await world.accounts.create({ email: "lan@example.com", password: PASSWORD });
+    const held = holdAccountLogins(world.accounts);
+    try {
+      const requests = Array.from({ length: 5 }, (_, index) =>
+        world.login("lan@example.com", PASSWORD, {
+          ...DEVICE_A,
+          deviceId: (index + 16).toString(16).padStart(32, "0"),
+        }),
+      );
+      await waitUntil(() => held.entered() >= 5, "五个正确密码同时进入账号校验");
+      held.release();
+      const results = await Promise.all(requests);
+
+      expect(results.map((result) => result.status)).toEqual([200, 200, 200, 200, 200]);
+      expect(throttle.lockedFor("lan@example.com")).toBeNull();
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        expect((await world.login("lan@example.com", "wrong-password")).status).toBe(401);
+      }
+      expect(throttle.lockedFor("lan@example.com")).toBeNull();
+    } finally {
+      held.restore();
+    }
+  });
+
+  it("成功与失败并发时各自结算，成功会清掉已记下的失败", async () => {
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, 10);
+    const world = makeWorld({ throttle });
+    await world.accounts.create({ email: "lan@example.com", password: PASSWORD });
+    const held = holdAccountLogins(world.accounts);
+    try {
+      const batch = [
+        world.login("lan@example.com", PASSWORD),
+        world.login("lan@example.com", "wrong-password"),
+        world.login("lan@example.com", PASSWORD),
+        world.login("lan@example.com", "wrong-password"),
+        world.login("lan@example.com", "wrong-password"),
+      ];
+      await waitUntil(() => held.entered() >= 5, "五个混合登录请求进入账号校验");
+      held.release();
+      const results = await Promise.all(batch);
+
+      expect(results.map((result) => result.status)).toEqual([200, 401, 200, 401, 401]);
+      expect(throttle.lockedFor("lan@example.com")).toBeNull();
+      expect((await world.login("lan@example.com", PASSWORD)).status).toBe(200);
+      expect(throttle.lockedFor("lan@example.com")).toBeNull();
+    } finally {
+      held.restore();
+    }
+  });
+
   it("同一台设备重新登录：旧令牌作废", async () => {
     const world = makeWorld();
     await world.accounts.create({ email: "lan@example.com", password: PASSWORD });
@@ -183,6 +262,37 @@ describe("登录", () => {
 });
 
 describe("LoginThrottle", () => {
+  it("在途名额是同步预占的：同一邮箱超限、全局超限都直接拒绝", () => {
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 2, 2);
+    const now = 1_000_000;
+
+    const first = throttle.reserve("lan@example.com", now);
+    const second = throttle.reserve("lan@example.com", now);
+    expect(first.admitted).toBe(true);
+    expect(second.admitted).toBe(true);
+    if (!first.admitted || !second.admitted) throw new Error("前两个请求应当拿到在途名额");
+    expect(throttle.reserve("lan@example.com", now)).toMatchObject({ admitted: false, reason: "busy" });
+    expect(throttle.reserve("other@example.com", now)).toMatchObject({ admitted: false, reason: "busy" });
+
+    first.attempt.release();
+    const third = throttle.reserve("other@example.com", now);
+    expect(third.admitted).toBe(true);
+    second.attempt.release();
+    expect(throttle.reserve("lan@example.com", now).admitted).toBe(true);
+  });
+
+  it("失败结算后才回到窗口计数；窗口过期后可重新进入", () => {
+    const throttle = new LoginThrottle(2, 60_000, 100);
+    const now = 1_000_000;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const admission = throttle.reserve("lan@example.com", now + attempt);
+      expect(admission.admitted).toBe(true);
+      if (admission.admitted) admission.attempt.fail(now + attempt);
+    }
+    expect(throttle.reserve("lan@example.com", now + 2)).toMatchObject({ admitted: false, reason: "locked" });
+    expect(throttle.reserve("lan@example.com", now + 60_001).admitted).toBe(true);
+  });
+
   it("大量随机邮箱不会无界增长：超过上限时淘汰最久没失败的", () => {
     const throttle = new LoginThrottle(5, 15 * 60_000, 100);
     const now = 1_000_000;
