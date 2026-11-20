@@ -35,6 +35,7 @@ import {
   MAX_DOC_PATH_LENGTH,
   MIN_SUPPORTED_PROTOCOL_VERSION,
   changesResponseSchema,
+  checkpointRequestSchema,
   clientStatsRequestSchema,
   contentIdSchema,
   didSchema,
@@ -45,7 +46,7 @@ import {
   type CryptoMode,
 } from "../../../shared/contract";
 import { assertSafeRelative, idForPath } from "../../../shared/paths";
-import type { AccountRow } from "../auth/accounts";
+import type { AccountRow, SessionRow } from "../auth/accounts";
 import { AccountError, AccountStore } from "../auth/accounts";
 import { CouchError, type CouchClient, type CouchDocument } from "../couch/client";
 import { DESIGN_DOC_ID } from "../couch/design";
@@ -238,13 +239,15 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     return couchVersionProbe;
   };
 
-  /** 认证（与 account 路由同一条链路，只有这一条）。 */
-  const authenticate = (c: { req: { header: (name: string) => string | undefined } }): AccountRow | Response => {
+  /** 认证（与 account 路由同一条链路，只有这一条）。需要设备身份时用这个入口。 */
+  const authenticateSession = (c: {
+    req: { header: (name: string) => string | undefined };
+  }): { account: AccountRow; session: SessionRow } | Response => {
     const account = (() => {
       const token = bearerToken(c.req.header("authorization"));
       if (!token) return null;
       try {
-        return deps.accounts.authenticate(token);
+        return deps.accounts.authenticateSession(token);
       } catch (error) {
         if (error instanceof AccountError) return error;
         throw error;
@@ -254,8 +257,14 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     if (account instanceof AccountError) {
       return json({ error: account.message, code: account.rejection === "disabled" ? "disabled" : "unauthorized" }, account.rejection === "disabled" ? 403 : 401);
     }
-    deps.accounts.touch(account.id);
+    deps.accounts.touch(account.account.id);
     return account;
+  };
+
+  /** 只要账号的调用点（绝大多数路由）用这个。 */
+  const authenticate = (c: { req: { header: (name: string) => string | undefined } }): AccountRow | Response => {
+    const authenticated = authenticateSession(c);
+    return authenticated instanceof Response ? authenticated : authenticated.account;
   };
 
   /**
@@ -264,18 +273,16 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
    * 返回 `Response` 表示已经可以提前返回（401/404）；返回对象表示通过。
    * **越权与不存在都返回 404**，且文案完全相同 —— 不泄露「这个笔记本存在」（§4.4 纪律 2）。
    */
-  const resolveNotebook = (
+  const resolveNotebookForAccount = (
     c: { req: { header: (name: string) => string | undefined; query: (name: string) => string | undefined } },
+    account: AccountRow,
     requiredRole: "read" | "write" | "owner",
   ): { account: AccountRow; notebook: NotebookRow } | Response => {
-    const auth = authenticate(c);
-    if (auth instanceof Response) return auth;
-
     const notebookId = c.req.query("nb");
     if (!notebookId) return json({ error: "缺少 nb 参数", code: "bad-request" }, 400);
 
     const notebook = deps.notebooks.findById(notebookId);
-    const membership = notebook ? deps.notebooks.resolveMembership(notebook.id, auth.id) : null;
+    const membership = notebook ? deps.notebooks.resolveMembership(notebook.id, account.id) : null;
     // ★ 「不存在」与「无权」走同一条返回（404 + 同一句文案）。
     if (!notebook || !membership) return json({ error: "笔记本不存在", code: "not-found" }, 404);
 
@@ -286,7 +293,16 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     if (requiredRole === "owner" && membership.role !== "owner") {
       return json({ error: "需要 owner 权限", code: "bad-request" }, 403);
     }
-    return { account: auth, notebook };
+    return { account, notebook };
+  };
+
+  const resolveNotebook = (
+    c: { req: { header: (name: string) => string | undefined; query: (name: string) => string | undefined } },
+    requiredRole: "read" | "write" | "owner",
+  ): { account: AccountRow; notebook: NotebookRow } | Response => {
+    const account = authenticate(c);
+    if (account instanceof Response) return account;
+    return resolveNotebookForAccount(c, account, requiredRole);
   };
 
   /** 账号的空间配额：账号自己设的，否则服务默认值；≤ 0 视为不限。 */
@@ -926,13 +942,25 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
    * 它**不是**本地基线：本地账本记的是「我改没改」，两者职责不同。
    */
   routes.put("/checkpoint", async (c) => {
-    const resolved = resolveNotebook(c, "read");
+    const authenticated = authenticateSession(c);
+    if (authenticated instanceof Response) return authenticated;
+    const resolved = resolveNotebookForAccount(c, authenticated.account, "read");
     if (resolved instanceof Response) return resolved;
     const { notebook, account } = resolved;
-    const body = (await c.req.json().catch(() => null)) as { cursor?: unknown; deviceId?: unknown; name?: unknown; platform?: unknown } | null;
-    const deviceId = typeof body?.deviceId === "string" ? body.deviceId : null;
-    const cursor = typeof body?.cursor === "string" ? body.cursor : null;
-    if (!deviceId || !/^[0-9a-f]{32}$/.test(deviceId)) return json({ error: "deviceId 形状不对", code: "bad-request" }, 400);
+    const raw = await c.req.json().catch(() => null);
+    let input;
+    try {
+      input = parseContract(checkpointRequestSchema, raw, "PUT /v1/checkpoint");
+    } catch {
+      return json({ error: "检查点载荷形状不对", code: "bad-request" }, 400);
+    }
+    const { deviceId, cursor } = input;
+    if (authenticated.session.device_id === null) {
+      return json({ error: "当前会话没有设备标识，不能写检查点", code: "bad-request" }, 403);
+    }
+    if (authenticated.session.device_id !== deviceId) {
+      return json({ error: "不能为其他设备写检查点", code: "bad-request" }, 403);
+    }
 
     /*
      * ★ **检查点顺带登记设备**（`devices` 是只读账本，但不是「只能手工填」的账本）。
@@ -948,8 +976,8 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     deps.notebooks.upsertDevice({
       deviceId,
       accountId: account.id,
-      name: typeof body?.name === "string" ? body.name.slice(0, 120) : null,
-      platform: body?.platform === "desktop" || body?.platform === "android" || body?.platform === "web" ? body.platform : null,
+      name: input.name ?? null,
+      platform: input.platform ?? null,
     });
 
     const id = `_local/device-${deviceId}`;

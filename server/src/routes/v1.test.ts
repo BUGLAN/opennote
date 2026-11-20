@@ -49,7 +49,7 @@ interface World {
   app: Hono;
   couch: ReturnType<typeof couchClient>;
   /** 造一个账号并返回它的令牌。 */
-  account(): { id: string; token: string };
+  account(): { id: string; token: string; deviceId: string };
   /** 造一个笔记本（直接建行，跳过置备 —— 置备另有用例）。 */
   notebook(ownerId: string, name?: string, cryptoMode?: "none" | "user-key"): { id: string; dbName: string };
 }
@@ -86,8 +86,8 @@ function makeWorld(options: WorldOptions = {}): World {
     app,
     couch,
     account() {
-      const { id, token } = seedAccount(accounts);
-      return { id, token };
+      const { id, token, deviceId } = seedAccount(accounts);
+      return { id, token, deviceId };
     },
     notebook(ownerId, name = "笔记本", cryptoMode = "none") {
       const row = notebooks.create({ ownerId, name, cryptoMode });
@@ -1205,7 +1205,7 @@ describe("§3.7 · 检查点写进 `_local/device-<deviceId>`", () => {
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    const deviceId = "a".repeat(32);
+    const deviceId = alice.deviceId;
 
     const response = await call(world, `/v1/checkpoint?nb=${notebook.id}`, {
       method: "PUT",
@@ -1227,6 +1227,115 @@ describe("§3.7 · 检查点写进 `_local/device-<deviceId>`", () => {
       body: JSON.stringify({ deviceId: "../evil", cursor: "1" }),
     });
     expect(response.status).toBe(400);
+  });
+
+  it("viewer 可以用自己会话的 deviceId 写检查点", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const bob = world.account();
+    const notebook = world.notebook(alice.id);
+    world.notebooks.createInvite({ codeHash: "viewer-checkpoint", notebookId: notebook.id, role: "viewer", createdBy: alice.id });
+    world.notebooks.joinByInvite("viewer-checkpoint", bob.id);
+
+    const response = await call(world, `/v1/checkpoint?nb=${notebook.id}`, {
+      method: "PUT",
+      headers: { ...auth(bob.token), "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: bob.deviceId, cursor: "9-viewer" }),
+    });
+    expect(response.status).toBe(204);
+    expect(world.fake.databases.get(notebook.dbName)!.get(`_local/device-${bob.deviceId}`)).toMatchObject({
+      cursor: "9-viewer",
+      deviceId: bob.deviceId,
+    });
+    expect(world.notebooks.listDevices(bob.id)).toMatchObject([{ deviceId: bob.deviceId }]);
+    expect(world.notebooks.listDevices(alice.id)).toEqual([]);
+  });
+
+  it("viewer 不能冒用别人的 deviceId，也不能覆盖对方的检查点", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const bob = world.account();
+    const notebook = world.notebook(alice.id);
+    world.notebooks.createInvite({ codeHash: "viewer-spoof", notebookId: notebook.id, role: "viewer", createdBy: alice.id });
+    world.notebooks.joinByInvite("viewer-spoof", bob.id);
+
+    const ownerWrite = await call(world, `/v1/checkpoint?nb=${notebook.id}`, {
+      method: "PUT",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: alice.deviceId, cursor: "4-owner" }),
+    });
+    expect(ownerWrite.status).toBe(204);
+
+    const spoof = await call(world, `/v1/checkpoint?nb=${notebook.id}`, {
+      method: "PUT",
+      headers: { ...auth(bob.token), "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: alice.deviceId, cursor: "9-spoofed" }),
+    });
+    expect(spoof.status).toBe(403);
+    expect(world.fake.databases.get(notebook.dbName)!.get(`_local/device-${alice.deviceId}`)).toMatchObject({
+      cursor: "4-owner",
+      deviceId: alice.deviceId,
+    });
+    expect(world.notebooks.listDevices(bob.id)).toEqual([]);
+  });
+
+  it("没有 deviceId 的会话不能写检查点", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const panel = world.accounts.createSession({ accountId: alice.id, kind: "panel" });
+
+    const response = await call(world, `/v1/checkpoint?nb=${notebook.id}`, {
+      method: "PUT",
+      headers: { ...auth(panel.token), "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: alice.deviceId, cursor: "3-panel" }),
+    });
+    expect(response.status).toBe(403);
+    expect(world.fake.databases.get(notebook.dbName)!.has(`_local/device-${alice.deviceId}`)).toBe(false);
+  });
+
+  it("cursor 不是字符串或超过 1024 字符 → 400，且不写 CouchDB", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const docs = world.fake.databases.get(notebook.dbName)!;
+
+    const bodies = [
+      { deviceId: alice.deviceId, cursor: 42 },
+      { deviceId: alice.deviceId, cursor: null },
+      { deviceId: alice.deviceId },
+      { deviceId: alice.deviceId, cursor: "x".repeat(1025) },
+    ];
+    for (const body of bodies) {
+      const response = await call(world, `/v1/checkpoint?nb=${notebook.id}`, {
+        method: "PUT",
+        headers: { ...auth(alice.token), "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(docs.has(`_local/device-${alice.deviceId}`)).toBe(false);
+    expect(world.notebooks.listDevices(alice.id)).toEqual([]);
+  });
+
+  it("未知字段或超长字段 → 400，且不写 CouchDB", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+
+    const bodies = [
+      { deviceId: alice.deviceId, cursor: "2-extra", extra: "not-allowed" },
+      { deviceId: alice.deviceId, cursor: "2-long-name", name: "x".repeat(121) },
+    ];
+    for (const body of bodies) {
+      const response = await call(world, `/v1/checkpoint?nb=${notebook.id}`, {
+        method: "PUT",
+        headers: { ...auth(alice.token), "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(world.fake.databases.get(notebook.dbName)!.has(`_local/device-${alice.deviceId}`)).toBe(false);
   });
 });
 
@@ -1748,7 +1857,7 @@ describe("控制台取数 · 服务端在数据面上**自己数**（不依赖�
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    const deviceId = "d".repeat(32);
+    const deviceId = alice.deviceId;
 
     // 先确认之前是空的（否则下面那条可能只是碰巧）。
     expect(world.notebooks.listDevices(alice.id)).toEqual([]);
@@ -1772,7 +1881,7 @@ describe("控制台取数 · 服务端在数据面上**自己数**（不依赖�
     const world = makeWorld();
     const alice = world.account();
     const notebook = world.notebook(alice.id);
-    const deviceId = "e".repeat(32);
+    const deviceId = alice.deviceId;
     for (const cursor of ["1-a", "2-b"]) {
       await call(world, `/v1/checkpoint?nb=${notebook.id}`, {
         method: "PUT",

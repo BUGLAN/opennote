@@ -130,6 +130,23 @@ export const deviceIdSchema = z.string().regex(/^[0-9a-f]{32}$/, "deviceId 必�
  */
 export const cursorSchema = z.string().min(1).max(1024);
 
+/**
+ * `PUT /v1/checkpoint` 的请求体。
+ *
+ * `deviceId` 必须与当前设备会话的 `sessions.device_id` 相同；服务端不能相信
+ * 请求体里的设备身份，否则只读成员也能覆盖其他设备的检查点。`strict()` 同时
+ * 拒绝未知字段，避免将来悄悄扩大 `_local` 文档的写入面。
+ */
+export const checkpointRequestSchema = z
+  .object({
+    deviceId: deviceIdSchema,
+    cursor: cursorSchema,
+    name: z.string().max(120).optional(),
+    platform: platformSchema.optional(),
+  })
+  .strict();
+export type CheckpointRequest = z.infer<typeof checkpointRequestSchema>;
+
 /** `sha256(...)` 或 `ehash` 的十六进制形态。 */
 export const contentIdSchema = z.string().regex(/^[0-9a-f]{64}$/, "内容标识必须是 64 位小写十六进制");
 
