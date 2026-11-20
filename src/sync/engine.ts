@@ -48,6 +48,11 @@ export interface EngineLocalFile {
   bytes: number;
 }
 
+interface LocalScan {
+  files: EngineLocalFile[];
+  unreadable: { path: string; message: string }[];
+}
+
 /**
  * 引擎的外部依赖。**就这么几个回调** —— 引擎不 import `library.ts`，也不 import 任何后端。
  *
@@ -78,16 +83,19 @@ export interface SyncEngineDeps {
   /** `path → did`。明文模式 = `idForPath`；E2EE = 用 `idKey` 算 HMAC。**引擎不反解 did。** */
   didOf: (path: string) => string;
   /**
-   * **已知路径**（= 本地扫描结果 ∪ 账本里记着的路径）。
+   * **已知路径**（= 本轮本地扫描结果 ∪ 账本里记着的路径 ∪ pathMap）。
    *
    * 引擎靠它把「远端树里的 did」翻回本机路径。**为什么必须由调用方给**：
    * 只有调用方知道本地文件系统与账本里有什么；而 E2EE 下 did **不可逆**（HMAC），
    * 所以「反查」只能靠「把所有已知路径各算一次 did」。
    *
+   * `localPaths` 是本轮**已经扫描过**的本地路径。引擎把它传进来，是为了让调用方
+   * 直接并入账本与 pathMap，而**不要再为 knownPaths 列一次目录**。
+   *
    * ⚠️ 这个回调的**存在本身**是一条纪律：引擎绝不会凭一个陌生的 did 去**猜**路径，
    * 更不会因此把文件写到盘上 —— 认不出来的 did 只如实报进 `unknownDids`，交给上层处置。
    */
-  knownPaths: () => Promise<string[]>;
+  knownPaths: (localPaths: readonly string[]) => Promise<string[]>;
   /**
    * 这条路径是不是被忽略（`.gitignore` / 内置集；判定在 `ignore.ts`，引擎不重复实现）。
    *
@@ -269,6 +277,15 @@ export interface SyncOnceInput {
   skipPush?: (path: string, hash: string) => { reason: RejectedPush["reason"]; message: string } | null;
 }
 
+/** 扫描一次本地工作区；忽略过滤与 `listLocal` 的契约一致。 */
+async function scanLocal(deps: SyncEngineDeps): Promise<LocalScan> {
+  const scan = deps.listLocalDetailed === undefined
+    ? { files: await deps.listLocal(), unreadable: [] as { path: string; message: string }[] }
+    : await deps.listLocalDetailed();
+  const isIgnored = deps.isIgnored ?? (() => false);
+  return { files: scan.files.filter((file) => !isIgnored(file.path)), unreadable: scan.unreadable };
+}
+
 /**
  * 跑**一次**同步。
  *
@@ -283,6 +300,10 @@ export interface SyncOnceInput {
  * leaf 不算丢数据，§6.1 L1）。这一点如实记下：引擎不假装自己有事务。
  */
 export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
+  return syncOnceWithScan(input, await scanLocal(input.deps));
+}
+
+async function syncOnceWithScan(input: SyncOnceInput, scan: LocalScan): Promise<SyncOnceResult> {
   const { provider, deps } = input;
   const now = input.now ?? (() => Date.now());
   const ledger = input.ledger;
@@ -303,12 +324,9 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
     }
     return value;
   };
-  const scan = deps.listLocalDetailed === undefined
-    ? { files: await deps.listLocal(), unreadable: [] as { path: string; message: string }[] }
-    : await deps.listLocalDetailed();
   /** 这一轮**没扫全**（有目录读不到）⇒ 禁止推断删除（H3）。 */
   const scanIncomplete = scan.unreadable.length > 0;
-  const localFiles = scan.files.filter((file) => !ignored(file.path));
+  const localFiles = scan.files;
   const localByPath = new Map(localFiles.map((file) => [file.path, file]));
 
   /*
@@ -372,11 +390,11 @@ export async function syncOnce(input: SyncOnceInput): Promise<SyncOnceResult> {
    * 是空的，于是远端树里每一个 did 都反查不到 → 退化成「远端全是新增、本地也全是新增」
    * → 两边各写一份、互不可见。测试当场抓到了（`pulled` 期望 1 实得 0）。
    *
-   * 正确的来源是**调用方知道的全部路径**（`deps.knownPaths()`，它自己会并上账本）
-   * 加上**本次本地扫描结果**。E2EE 下 did 不可逆（HMAC），所以「反查」本质上就是
-   * 「把所有已知路径各算一次 did」—— 没有别的办法，也不该有别的东西。
+   * 正确的来源是**本轮已扫描的本地路径**加上**调用方并进来的账本 / pathMap**。
+   * E2EE 下 did 不可逆（HMAC），所以「反查」本质上就是「把所有已知路径各算一次 did」——
+   * 没有别的办法，也不该有别的东西。
    */
-  const knownPaths = await deps.knownPaths();
+  const knownPaths = await deps.knownPaths(localFiles.map((file) => file.path));
   const didIndex = new Map<string, string>();
   for (const path of knownPaths) {
     const did = deps.didOf(path);
@@ -1237,9 +1255,12 @@ export async function syncOnceIncremental(input: SyncOnceInput & { since?: strin
   }
   log("changes", { count: changes.changes.length, resync: changes.resync === true });
 
+  /** 这一轮后面的 partial 反查与 syncOnce 共用同一份本地清单。 */
+  const scan = await scanLocal(deps);
+
   if (changes.resync === true) {
     // 游标过期（远端流水被裁剪）⇒ 退化成全树比对（§6.4 规则 2）。
-    const result = await syncOnce(input);
+    const result = await syncOnceWithScan(input, scan);
     return { ...result, resynced: true };
   }
 
@@ -1255,7 +1276,7 @@ export async function syncOnceIncremental(input: SyncOnceInput & { since?: strin
      * 注意这里**不能**顺手跳过同步：本地改动仍然要推（否则「离线编辑 30 分钟 →
      * 恢复」这条场景里，本地改动会一直上不去）。
      */
-    const result = await syncOnce({ ...input, remoteUnchanged: true, cursorHint: changes.cursor });
+    const result = await syncOnceWithScan({ ...input, remoteUnchanged: true, cursorHint: changes.cursor }, scan);
     return { ...result, resynced: false };
   }
 
@@ -1270,9 +1291,9 @@ export async function syncOnceIncremental(input: SyncOnceInput & { since?: strin
    * 方向永远是「宁可多拉一遍，不可漏拉一条」。
    */
   if (changes.truncated !== true) {
-    const partial = await resolveChangedPaths(fileChanges, deps);
+    const partial = await resolveChangedPaths(fileChanges, deps, scan.files.map((file) => file.path));
     if (partial !== null) {
-      const result = await syncOnce({ ...input, partialRemote: partial, cursorHint: changes.cursor });
+      const result = await syncOnceWithScan({ ...input, partialRemote: partial, cursorHint: changes.cursor }, scan);
       return { ...result, resynced: false };
     }
     log("changes", { partialUnavailable: true });
@@ -1280,7 +1301,7 @@ export async function syncOnceIncremental(input: SyncOnceInput & { since?: strin
     log("changes", { truncated: true });
   }
 
-  return syncOnce(input);
+  return syncOnceWithScan(input, scan);
 }
 
 /* ============================================================================
@@ -1409,8 +1430,9 @@ export const PARTIAL_CHANGE_LIMIT = 200;
 export async function resolveChangedPaths(
   changes: { did: string; op: "add" | "update" | "delete"; path?: string; hash?: string }[],
   deps: SyncEngineDeps,
+  localPaths: readonly string[],
 ): Promise<{ path: string; hash: string | null }[] | null> {
-  const knownPaths = await deps.knownPaths();
+  const knownPaths = await deps.knownPaths(localPaths);
   const byDid = new Map<string, string>();
   for (const path of knownPaths) {
     const did = deps.didOf(path);

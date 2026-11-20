@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { idForPath, pathFromLegacyId } from "../../shared/paths";
-import { buildPartialTree, PARTIAL_CHANGE_LIMIT, syncOnceIncremental, type EngineLocalFile, type SyncEngineDeps } from "./engine";
+import { buildPartialTree, PARTIAL_CHANGE_LIMIT, syncOnce, syncOnceIncremental, type EngineLocalFile, type SyncEngineDeps } from "./engine";
 import { createSyncLedger, type SyncLedger } from "./state";
 import { createMemoryProvider } from "./providers/memory";
 import { createWorkspaceEngineDeps, type LocalEntry } from "./workspaceFiles";
@@ -191,13 +191,14 @@ describe("哈希缓存：没变的文件不重读，变了的才重算", () => {
    ② changes 快路径：远端没变就**不列树**
    ============================================================================ */
 
-function makeDeps(local: Map<string, Uint8Array>): SyncEngineDeps {
+function makeDeps(local: Map<string, Uint8Array>, counts?: { listLocal: number }): SyncEngineDeps {
   const hashOf = async (bytes: Uint8Array) => {
     const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
     return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   };
   return {
     async listLocal(): Promise<EngineLocalFile[]> {
+      if (counts !== undefined) counts.listLocal += 1;
       const out: EngineLocalFile[] = [];
       for (const [path, bytes] of local) out.push({ path, hash: await hashOf(bytes), bytes: bytes.byteLength });
       return out;
@@ -209,8 +210,8 @@ function makeDeps(local: Map<string, Uint8Array>): SyncEngineDeps {
       return hashOf(bytes);
     },
     didOf: (path) => idForPath(path),
-    async knownPaths() {
-      return [...local.keys()];
+    async knownPaths(localPaths) {
+      return [...new Set([...local.keys(), ...localPaths])];
     },
     async readLocal(path) {
       const bytes = local.get(path);
@@ -311,6 +312,48 @@ describe("changes 快路径：远端没变就不列树，本地改动照样推�
     });
     await syncOnceIncremental({ provider, ledger, deps: makeDeps(new Map()), since: null });
     expect(provider.treeCalls()).toBeGreaterThan(0);
+  });
+});
+
+describe("每轮同步只扫描一次本地工作区", () => {
+  it("普通全树 syncOnce ⇒ 只列一次目录", async () => {
+    const provider = createMemoryProvider();
+    const ledger = createSyncLedger({
+      baseUrl: "https://example.com",
+      notebookId: "nb",
+      cryptoMode: "none",
+      protocolVersion: 1,
+    });
+    const local = new Map([
+      ["notes/a.md", enc("# a")],
+      ["notes/b.md", enc("# b")],
+    ]);
+    const counts = { listLocal: 0 };
+
+    const result = await syncOnce({ provider, ledger, deps: makeDeps(local, counts) });
+    expect(result.pushed).toBe(2);
+    expect(counts.listLocal).toBe(1);
+  });
+
+  it("远端无变更 ⇒ 只列一次目录", async () => {
+    const provider = createMemoryProvider();
+    const ledger = createSyncLedger({
+      baseUrl: "https://example.com",
+      notebookId: "nb",
+      cryptoMode: "none",
+      protocolVersion: 1,
+    });
+    const local = new Map([["notes/a.md", enc("# a")]]);
+    const counts = { listLocal: 0 };
+
+    const result = await syncOnceIncremental({
+      provider,
+      ledger,
+      deps: makeDeps(local, counts),
+      since: provider.currentCursor(),
+    });
+    expect(result.pushed).toBe(1);
+    expect(counts.listLocal).toBe(1);
   });
 });
 
@@ -619,6 +662,38 @@ describe("变更驱动：只按 changes 干活，不列整树", () => {
     expect(provider.treeCalls()).toBe(before);
     expect(result.pulled).toBe(1);
     expect(new TextDecoder().decode(local.get("notes/a.md")!)).toBe("# 改过了");
+  });
+
+  it("远端少量变更走 partial ⇒ 本地也只扫描一次", async () => {
+    const remote = createMemoryProvider();
+    const provider = liveShapeProvider(remote);
+    const ledger = createSyncLedger({
+      baseUrl: "https://example.com",
+      notebookId: "nb",
+      cryptoMode: "none",
+      protocolVersion: 1,
+    });
+    const local = new Map([["notes/a.md", enc("# v1")]]);
+
+    await syncOnceIncremental({ provider, ledger, deps: makeDeps(local), since: null });
+    const cursor = remote.currentCursor();
+    const beforeTree = provider.treeCalls();
+
+    const bytes = enc("# v2");
+    const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
+    const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    remote.seed(idForPath("notes/a.md"), hash, bytes);
+
+    const counts = { listLocal: 0 };
+    const result = await syncOnceIncremental({
+      provider,
+      ledger,
+      deps: makeDeps(local, counts),
+      since: cursor,
+    });
+    expect(result.pulled).toBe(1);
+    expect(provider.treeCalls()).toBe(beforeTree);
+    expect(counts.listLocal).toBe(1);
   });
 
   it("远端删了一篇 ⇒ 本地跟着删，而且**不列树**", async () => {

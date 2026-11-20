@@ -188,7 +188,7 @@ describe("§3.9 · 明文与 E2EE 的差别**只在这一层**", () => {
 describe("透传与路径规范化", () => {
   it("`knownPaths` 直接透传（引擎靠它把远端 did 翻回本机路径）", async () => {
     const { deps } = depsFor({});
-    expect(await deps.knownPaths()).toEqual(["notes/a.md"]);
+    expect(await deps.knownPaths([])).toEqual(["notes/a.md"]);
   });
 
   it("`readLocal` / `writeLocal` / `removeLocal` 都先规范化路径", async () => {

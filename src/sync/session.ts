@@ -41,7 +41,7 @@ import type { SyncLedger } from "./state";
 import type { WorkspaceSyncConfig } from "../data/workspaces";
 import type { HashCache } from "./hashCache";
 import type { CursorStore } from "./cursor";
-import { createWorkspaceEngineDeps, openRemoteBytes, selectSyncableEntries, type SyncFileBackend } from "./workspaceFiles";
+import { createWorkspaceEngineDeps, openRemoteBytes, type SyncFileBackend } from "./workspaceFiles";
 import type { EngineLocalFile } from "./engine";
 
 export interface SyncSessionOptions {
@@ -147,13 +147,12 @@ export function createSyncSession(options: SyncSessionOptions): SyncSession {
      * 于是远端树里的 did **一个都翻不回路径** ⇒ 引擎把它们当成「远端新增」，
      * 于是**把本地已有的同名文件当成需要拉取的**（覆盖掉本地内容）。
      *
-     * 本地那一半走 `selectSyncableEntries`，与 `listLocal` 用**同一套**忽略规则 ——
-     * 否则被忽略的路径会混进来，而「忽略 = 该路径在引擎里双向不存在」（红线 8）。
+     * 本地那一半由引擎传入本轮**已经扫描、已经过滤**的路径 —— 这里只做并集，
+     * 不再为了 knownPaths 重新列一次目录。
      */
-    knownPaths: async () => {
-      const local = selectSyncableEntries(await options.backend.list(), rules).map((entry) => entry.path);
+    knownPaths: async (localPaths) => {
       // 再并上对照表里的路径：全新设备靠它把别的设备建的加密文件认出来（`pathMap.ts`）。
-      return Array.from(new Set([...local, ...knownPathsOf(options.ledger), ...(pathMap?.paths() ?? [])]));
+      return Array.from(new Set([...localPaths, ...knownPathsOf(options.ledger), ...(pathMap?.paths() ?? [])]));
     },
     ...(options.log === undefined
       ? {}

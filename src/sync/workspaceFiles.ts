@@ -94,8 +94,8 @@ export interface WorkspaceEngineOptions {
    * 少了它就没法加密/解密（而不是「可以先不绑」）。
    */
   notebookId: string;
-  /** 账本里记着的路径（引擎靠它把远端 did 翻回本机路径）。 */
-  knownPaths: () => Promise<string[]>;
+  /** 本轮扫描到的本地路径，交给调用方与账本、pathMap 合并；不要为此再列目录。 */
+  knownPaths: (localPaths: readonly string[]) => Promise<string[]>;
   /**
    * 本地内容哈希缓存（**可选**，见 `hashCache.ts`）。
    *

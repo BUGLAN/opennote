@@ -190,8 +190,8 @@ describe("★ §5.1 · 同步是**旁路**：关掉就一次请求都不发", ()
    ★ knownPaths 必须带账本里的路径
    ============================================================================ */
 
-describe("★ `knownPaths` 必须来自**账本**，不能只用本地扫描结果", () => {
-  it("账本里记着的路径会出现在 `knownPaths()` 里", async () => {
+describe("★ `knownPaths` 必须并入**账本**与本轮扫描，且不再列目录", () => {
+  it("账本路径与本轮扫描路径都在，knownPaths 不重复扫描", async () => {
     /*
      * 引擎靠它把远端树里的 did 翻回本机路径（E2EE 下 did 不可逆，
      * 只能「把所有已知路径各算一次 did」）。
@@ -202,6 +202,7 @@ describe("★ `knownPaths` 必须来自**账本**，不能只用本地扫描结�
     const shared = ledger();
     shared.files["notes/已被删掉的.md"] = { bid: 1, hash: "x", syncedAt: 0, size: 0 } as never;
     const backend = memoryBackend({ "notes/还在的.md": "# A" });
+    const listSpy = vi.spyOn(backend, "list");
     const provider = createMemoryProvider();
     const session = createSyncSession({
       config: { enabled: true, baseUrl: "memory://", notebookId: NOTEBOOK, cryptoMode: "none", accountRef: "a" },
@@ -211,11 +212,16 @@ describe("★ `knownPaths` 必须来自**账本**，不能只用本地扫描结�
       notebookId: NOTEBOOK,
     });
 
-    const paths = await session.deps.knownPaths();
+    // 而 `listLocal` 只看本地**当前**存在的。
+    const scanned = (await session.deps.listLocal()).map((item) => item.path);
+    expect(scanned).toEqual(["notes/还在的.md"]);
+    expect(listSpy).toHaveBeenCalledTimes(1);
+
+    // 引擎把本轮扫描结果传进来；knownPaths 只做并集，不能再列一次目录。
+    const paths = await session.deps.knownPaths(scanned);
     expect(paths).toContain("notes/已被删掉的.md");
     expect(paths).toContain("notes/还在的.md");
-    // 而 `listLocal` 只看本地**当前**存在的。
-    expect((await session.deps.listLocal()).map((item) => item.path)).toEqual(["notes/还在的.md"]);
+    expect(listSpy).toHaveBeenCalledTimes(1);
     expect(knownPathsOf(shared)).toContain("notes/已被删掉的.md");
   });
 });
