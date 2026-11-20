@@ -1117,35 +1117,27 @@ describe("③ 剪藏配图兜底下载（0.4.0：主进程代下，桌面 CSP �
   /** 最小 PNG 头（魔数校验只看开头）。 */
   const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0]);
 
-  it("真回环 + 真下载器 + 真入库：图片落进共享 `.assets/`，引用指得对", async () => {
-    // 这一条不 mock 下载器：起一个真 127.0.0.1 服务端，用主进程那个**真的**下载器
-    // （`electron/fetch-images.cjs`）取字节，再走真的落盘管线 —— ① 在应用侧的
-    // 「网络 → 字节 → 落盘 → 正文改写」整条链一次跑通。
-    const { createServer } = await import("node:http");
+  it("真回环 + 真下载器：私网地址被拒绝，正文保留原 URL 且不落盘", async () => {
+    // 这一条不 mock 下载器：127.0.0.1 必须被主进程下载器在发请求前拒绝。
+    // 失败要沿真实入库管线如实降级：正文保留原网址、不写 `.assets/`、给出 warning。
     const require = (await import("node:module")).createRequire(import.meta.url);
     const { downloadImages } = require("../../../electron/fetch-images.cjs") as {
-      downloadImages: (options: { urls: string[] }) => Promise<Array<{ url: string; ok: boolean; base64?: string }>>;
+      downloadImages: (options: { urls: string[] }) => Promise<Array<{ url: string; ok: boolean; base64?: string; error?: string }>>;
     };
-    const server = createServer((_request, response) => {
-      response.writeHead(200, { "content-type": "image/png" });
-      response.end(Buffer.from(PNG));
-    });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-    const port = (server.address() as { port: number }).port;
-    const remote = `http://127.0.0.1:${port}/photo.png`;
-    try {
-      setRemoteImageSource((urls) => downloadImages({ urls }));
-      const receipt = await receiveEnvelope(raw({ body: `看图：\n\n![图](${remote})` }));
-      expect(receipt.status).toBe("created");
-      const text = testBackend.text(receipt.path!)!;
-      expect(text).not.toContain(remote);
-      const refs = [...text.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map((match) => match[1]);
-      expect(refs).toHaveLength(1);
-      expect(testBackend.files.has(resolveRef(receipt.path!, refs[0]))).toBe(true);
-      expect(Buffer.from(testBackend.bytes(resolveRef(receipt.path!, refs[0]))!).equals(Buffer.from(PNG))).toBe(true);
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+    const remote = "http://127.0.0.1/photo.png";
+    const direct = await downloadImages({ urls: [remote] });
+    expect(direct[0]).toMatchObject({ ok: false });
+    expect(direct[0].error).toContain("公网");
+    expect(direct[0].base64).toBeUndefined();
+
+    setRemoteImageSource((urls) => downloadImages({ urls }));
+    const receipt = await receiveEnvelope(raw({ body: `看图：\n\n![图](${remote})` }));
+    expect(receipt.status).toBe("created");
+    const text = testBackend.text(receipt.path!)!;
+    expect(text).toContain(remote);
+    expect([...text.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)]).toHaveLength(1);
+    expect(receipt.assets).toEqual([]);
+    expect(receipt.warnings.some((item) => item.includes("没能下载到本地"))).toBe(true);
   });
 
   it("正文里的远程图片：装上下载器 → 落盘到共享 `.assets/` + 引用改写", async () => {
