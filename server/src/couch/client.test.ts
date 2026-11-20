@@ -8,6 +8,7 @@
  * 所以每条用例都在问一个问题：**「Node 有没有越界去决定什么」** —— 答案必须是「没有」。
  */
 import { describe, expect, it } from "vitest";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { CouchClient, CouchError } from "./client";
 
 interface Call {
@@ -57,6 +58,20 @@ function stubFetch(responses: { status?: number; body?: unknown; raw?: Uint8Arra
 function client(responses: Parameters<typeof stubFetch>[0]): { couch: CouchClient; calls: Call[] } {
   const { fetchImpl, calls } = stubFetch(responses);
   return { couch: new CouchClient({ baseUrl: "http://couchdb:5984/", user: "sync-service", password: "pw", fetchImpl }), calls };
+}
+
+/** 本地 HTTP 服务：用例可以在 writeHead 后故意不 end，模拟「响应头后停住」。 */
+async function stallingServer(handler: (request: IncomingMessage, response: ServerResponse) => void): Promise<{ port: number; close: () => Promise<void> }> {
+  const server = createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const port = (server.address() as { port: number }).port;
+  return {
+    port,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }
 
 describe("传输层：URL、认证、状态码映射", () => {
@@ -294,6 +309,68 @@ describe("重试策略：**只重试幂等请求**（写请求一次都不重试
     const couch = new CouchClient({ baseUrl: "http://c", user: "u", password: "p", fetchImpl, readTimeoutMs: 20 });
     await expect(couch.version()).rejects.toMatchObject({ code: "timeout" });
     expect(attempts).toBe(1);
+  });
+});
+
+describe("超时覆盖响应体：响应头之后停住也要结束", () => {
+  it("JSON 响应头后停住 → timeout，且幂等 GET 也不重试", async () => {
+    let requests = 0;
+    const server = await stallingServer((_request, response) => {
+      requests += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"version":');
+    });
+    try {
+      const couch = new CouchClient({
+        baseUrl: `http://127.0.0.1:${server.port}`,
+        user: "u",
+        password: "p",
+        readTimeoutMs: 50,
+      });
+      await expect(couch.version()).rejects.toMatchObject({ code: "timeout" });
+      expect(requests).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("附件响应头后停住 → timeout，不永久挂起", async () => {
+    const server = await stallingServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/octet-stream" });
+      response.write(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    });
+    try {
+      const couch = new CouchClient({
+        baseUrl: `http://127.0.0.1:${server.port}`,
+        user: "u",
+        password: "p",
+        readTimeoutMs: 50,
+      });
+      await expect(couch.getAttachment("nb-x", "f:abc")).rejects.toMatchObject({ code: "timeout" });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("非幂等写响应头后停住 → timeout，且只发一次", async () => {
+    let requests = 0;
+    const server = await stallingServer((_request, response) => {
+      requests += 1;
+      response.writeHead(201, { "content-type": "application/json" });
+      response.write('{"rev":');
+    });
+    try {
+      const couch = new CouchClient({
+        baseUrl: `http://127.0.0.1:${server.port}`,
+        user: "u",
+        password: "p",
+        writeTimeoutMs: 50,
+      });
+      await expect(couch.putDoc("nb-x", { _id: "f:abc" })).rejects.toMatchObject({ code: "timeout" });
+      expect(requests).toBe(1);
+    } finally {
+      await server.close();
+    }
   });
 });
 

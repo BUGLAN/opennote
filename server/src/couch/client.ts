@@ -359,14 +359,16 @@ export class CouchClient {
    */
   async getAttachment(db: string, id: string, name = "blob", options: { rev?: string } = {}): Promise<Uint8Array | null> {
     const query = options.rev === undefined ? "" : `?${new URLSearchParams({ rev: options.rev })}`;
-    const response = await this.rawRequest(
+    return this.exchange(
       "GET",
       `/${encodeURIComponent(db)}/${encodeDocId(id)}/${encodeURIComponent(name)}${query}`,
       { idempotent: true },
+      async (response) => {
+        if (response.status === 404) return null;
+        if (!response.ok) throw await this.toError(response);
+        return new Uint8Array(await response.arrayBuffer());
+      },
     );
-    if (response.status === 404) return null;
-    if (!response.ok) throw await this.toError(response);
-    return new Uint8Array(await response.arrayBuffer());
   }
 
   /**
@@ -427,24 +429,33 @@ export class CouchClient {
     path: string,
     options: { body?: string | Uint8Array; idempotent?: boolean; contentType?: string; timeoutMs?: number },
   ): Promise<T> {
-    const response = await this.rawRequest(method, path, options);
-    if (!response.ok) throw await this.toError(response);
-    // `HEAD` 没有响应体。
-    if (method === "HEAD" || response.status === 204) return undefined as T;
-    const text = await response.text();
-    if (!text) return undefined as T;
-    try {
-      return JSON.parse(text) as T;
-    } catch {
-      throw new CouchError("server", `CouchDB 返回了非 JSON 响应（${path}）`, response.status, text.slice(0, 200));
-    }
+    return this.exchange(method, path, options, async (response) => {
+      if (!response.ok) throw await this.toError(response);
+      // `HEAD` 没有响应体。
+      if (method === "HEAD" || response.status === 204) return undefined as T;
+      const text = await response.text();
+      if (!text) return undefined as T;
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        throw new CouchError("server", `CouchDB 返回了非 JSON 响应（${path}）`, response.status, text.slice(0, 200));
+      }
+    });
   }
 
-  private async rawRequest(
+  /**
+   * 一次完整交换：**响应头 + 响应体**都在超时生命周期内。
+   *
+   * 之前 `fetch` 一拿到响应头就清掉计时器，调用方再读 `.text()` / `.arrayBuffer()`；
+   * CouchDB 或代理只发响应头、不结束正文时，请求会永久挂住。现在把「消费响应」也
+   * 放进这里，计时器只在 `consume()` 返回或失败后才清。
+   */
+  private async exchange<T>(
     method: string,
     path: string,
     options: { body?: string | Uint8Array; idempotent?: boolean; contentType?: string; timeoutMs?: number },
-  ): Promise<Response> {
+    consume: (response: Response) => Promise<T>,
+  ): Promise<T> {
     const timeoutMs = options.timeoutMs ?? (options.body === undefined ? this.readTimeoutMs : this.writeTimeoutMs);
     // 只重试**幂等**请求（见模块头 ②）。写请求一次都不重试。
     const attempts = options.idempotent === true ? 2 : 1;
@@ -452,7 +463,11 @@ export class CouchClient {
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
       try {
         const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
           method,
@@ -464,11 +479,12 @@ export class CouchClient {
           ...(options.body === undefined ? {} : { body: options.body }),
           signal: controller.signal,
         });
-        return response;
+        return await consume(response);
       } catch (error) {
+        // 状态码 / JSON 解析等业务错误已经定型，不能被当成网络错误重试。
+        if (error instanceof CouchError) throw error;
         lastError = error;
-        const aborted = error instanceof Error && error.name === "AbortError";
-        if (aborted) {
+        if (timedOut || (error instanceof Error && error.name === "AbortError")) {
           // 超时：**不重试**（同一台机器上再来一次几乎必然又超时，只是把延迟翻倍）。
           throw new CouchError("timeout", `CouchDB 请求超时（${timeoutMs}ms）：${method} ${path}`);
         }
