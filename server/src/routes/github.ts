@@ -27,7 +27,7 @@
 
 import { Hono, type Context } from "hono";
 import { AccountError, PANEL_SESSION_TTL_MS, type AccountRow, type AccountStore } from "../auth/accounts";
-import { verifiedEmailsOf, type GithubApi, type GithubUser, type OAuthFlows, type OAuthStart } from "../auth/github";
+import { OAuthFlowError, verifiedEmailsOf, type GithubApi, type GithubUser, type OAuthFlows, type OAuthStart } from "../auth/github";
 import { clientIpFrom, type ServerConfig } from "../config";
 import { buildSessionCookie, isHttps } from "../panelSecurity";
 import type { SettingsStore } from "../settings";
@@ -57,6 +57,13 @@ export function createGithubRoutes(deps: GithubRoutesDeps): Hono {
 
   const redirect = (location: string, headers: Record<string, string> = {}): Response =>
     new Response(null, { status: 302, headers: { location, "cache-control": "no-store", ...headers } });
+
+  /** 内存里的待处理授权已到硬上限：不是用户操作错误，返回 429 让客户端/浏览器稍后再试。 */
+  const tooMany = (message: string): Response =>
+    new Response(JSON.stringify({ error: message, code: "too-many" }), {
+      status: 429,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "retry-after": "60" },
+    });
 
   /** 网页上的结果页（`/auth/result`，由控制台外壳画）。 */
   const resultPage = (params: Record<string, string>): Response => redirect(`/auth/result?${new URLSearchParams(params).toString()}`);
@@ -108,7 +115,13 @@ export function createGithubRoutes(deps: GithubRoutesDeps): Hono {
       return resultPage({ error: "bad-request", message: "不认识的登录方式" });
     }
 
-    const state = deps.oauth.begin(start, now());
+    let state: string;
+    try {
+      state = deps.oauth.begin(start, ipOf(c) ?? "unknown", now());
+    } catch (error) {
+      if (error instanceof OAuthFlowError) return tooMany(error.message);
+      throw error;
+    }
     const scope = deps.settings.get("githubPolicy") === "org" ? "read:user user:email read:org" : "read:user user:email";
     const authorize = new URL("https://github.com/login/oauth/authorize");
     authorize.searchParams.set("client_id", deps.settings.get("githubClientId"));
@@ -175,6 +188,7 @@ export function createGithubRoutes(deps: GithubRoutesDeps): Hono {
       const code = deps.oauth.issueLoginCode(account.id, start.challenge!, now());
       return backToApp(start, { code, github: login });
     } catch (error) {
+      if (error instanceof OAuthFlowError) return tooMany(error.message);
       if (error instanceof AccountError) {
         if (start.mode === "app") return fail(start, error.rejection === "email-taken" ? "email-taken" : "github-failed", error.message);
         return resultPage({ error: error.rejection, message: error.message });

@@ -15,7 +15,7 @@ import { openDatabase } from "../db";
 import { loadConfig } from "../config";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
 import { seedAccount } from "../auth/testAccounts.test-helper";
-import type { GithubApi } from "../auth/github";
+import { OAuthFlows, type GithubApi } from "../auth/github";
 
 const ENV: Record<string, string> = {
   EXTERNAL_BASE_URL: "https://notes.example.com",
@@ -37,7 +37,7 @@ interface FakeUser {
   orgs?: string[];
 }
 
-function makeWorld() {
+function makeWorld(options: { oauth?: OAuthFlows } = {}) {
   const fake = new FakeCouch();
   const users = new Map<string, FakeUser>();
   const github: GithubApi = {
@@ -55,7 +55,14 @@ function makeWorld() {
     },
     orgs: async (token) => users.get(token.slice(4))!.orgs ?? [],
   };
-  const built = createApp({ config: loadConfig(ENV), db: openDatabase({ path: ":memory:" }), couch: couchClient(fake), couchAdmin: couchClient(fake), github });
+  const built = createApp({
+    config: loadConfig(ENV),
+    db: openDatabase({ path: ":memory:" }),
+    couch: couchClient(fake),
+    couchAdmin: couchClient(fake),
+    github,
+    ...(options.oauth === undefined ? {} : { oauth: options.oauth }),
+  });
   const { app, accounts, settings } = built;
   const configure = (extra: Record<string, unknown> = {}) =>
     settings.set({ githubEnabled: true, githubClientId: "Ov23li", githubClientSecret: "s3cret", ...extra });
@@ -123,6 +130,35 @@ describe("开关", () => {
     // 留空 = 不修改。
     await world.call("/v1/admin/settings", { method: "PATCH", body: { githubClientSecret: "" }, headers: auth });
     expect(world.settings.get("githubClientSecret")).toBe("s3cret");
+  });
+});
+
+describe("待处理授权上限", () => {
+  it("同一来源的 state 达到上限 ⇒ 429，不再分配", async () => {
+    const oauth = new OAuthFlows({ limits: { statesPerSource: 2, statesGlobal: 10 } });
+    const world = makeWorld({ oauth });
+    world.configure();
+
+    expect((await world.call(`/auth/github?${world.appStart}`)).status).toBe(302);
+    expect((await world.call(`/auth/github?${world.appStart}`)).status).toBe(302);
+    const limited = await world.call(`/auth/github?${world.appStart}`);
+    expect(limited.status).toBe(429);
+    expect(limited.body).toMatchObject({ code: "too-many" });
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(oauth.stats().states).toBe(2);
+  });
+
+  it("同一账号的绑定票达到上限 ⇒ /v1/me/github/link 返回 429", async () => {
+    const oauth = new OAuthFlows({ limits: { linkTicketsPerAccount: 1, linkTicketsGlobal: 10 } });
+    const world = makeWorld({ oauth });
+    world.configure();
+    const lan = seedAccount(world.accounts);
+    const auth = { authorization: `Bearer ${lan.token}` };
+
+    expect((await world.call("/v1/me/github/link", { body: {}, headers: auth })).status).toBe(200);
+    const limited = await world.call("/v1/me/github/link", { body: {}, headers: auth });
+    expect(limited.status).toBe(429);
+    expect(limited.body).toMatchObject({ code: "too-many" });
   });
 });
 

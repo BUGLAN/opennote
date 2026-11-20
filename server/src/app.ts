@@ -67,6 +67,8 @@ export interface AppOptions {
   startedAt?: number;
   /** 覆盖 GitHub 接口（测试注入假实现）。 */
   github?: GithubApi;
+  /** 覆盖 OAuth 内存状态（测试可以调低上限，不必发一千次请求）。 */
+  oauth?: OAuthFlows;
   now?: () => number;
   /**
    * 网页版产物目录（issue #1）。`undefined` = 按 `WEB_ROOT` / 默认的 `web/` 找；
@@ -198,7 +200,7 @@ export function createApp(options: AppOptions): BuiltApp {
   // 客户端登录与控制台登录共用一份失败计数：换个入口不该换来五次新机会。
   const throttle = new LoginThrottle();
   // 进行中的 GitHub 授权与一次性登录码（只在内存）：回调路由发码，`/v1/auth/github/exchange` 收码。
-  const oauth = new OAuthFlows();
+  const oauth = options.oauth ?? new OAuthFlows();
 
   app.route("/v1", createAuthRoutes({ accounts, notebooks, config, settings, audit, throttle, oauth, ...nowOption }));
   app.route("/v1", createPairingRoutes({ accounts, notebooks, config, settings, pairings: new PairingStore(), audit, ...nowOption }));

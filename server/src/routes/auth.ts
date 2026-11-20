@@ -35,7 +35,7 @@ import {
   type Quota,
 } from "../../../shared/contract";
 import { AccountError, accountLabel, type AccountRow, type AccountStore, type SessionRow } from "../auth/accounts";
-import type { OAuthFlows } from "../auth/github";
+import { OAuthFlowError, type OAuthFlows } from "../auth/github";
 import { clientIpFrom, type ServerConfig } from "../config";
 import type { NotebookStore } from "../notebooks";
 import type { SettingsStore } from "../settings";
@@ -472,7 +472,18 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     const auth = authenticate(c);
     if (auth instanceof Response) return auth;
     if (!deps.oauth || !deps.settings.githubAvailable()) return json({ error: "这台服务器没有开启 GitHub 登录", code: "github-disabled" }, 403);
-    const ticket = deps.oauth.issueLinkTicket(auth.account.id, now());
+    let ticket: string;
+    try {
+      ticket = deps.oauth.issueLinkTicket(auth.account.id, now());
+    } catch (error) {
+      if (error instanceof OAuthFlowError) {
+        return new Response(JSON.stringify({ error: error.message, code: "too-many" }), {
+          status: 429,
+          headers: { "content-type": "application/json; charset=utf-8", "retry-after": "60" },
+        });
+      }
+      throw error;
+    }
     return json({ url: `${deps.config.externalBaseUrl}/auth/github?mode=link&ticket=${encodeURIComponent(ticket)}` }, 200);
   });
 

@@ -120,25 +120,111 @@ interface Expiring<T> {
   expiresAt: number;
 }
 
+interface PendingState extends Expiring<OAuthStart> {
+  /** 发起授权的可信来源（IP 或 `unknown`），用来做单来源上限。 */
+  source: string;
+}
+
 export const OAUTH_TTL_MS = 10 * 60_000;
 export const LOGIN_CODE_TTL_MS = 5 * 60_000;
 
+export interface OAuthFlowLimits {
+  statesPerSource: number;
+  statesGlobal: number;
+  loginCodesPerAccount: number;
+  loginCodesGlobal: number;
+  linkTicketsPerAccount: number;
+  linkTicketsGlobal: number;
+}
+
+/**
+ * 上限不是「防正常用户」：一次登录只需要一两个窗口。它防的是未认证请求把
+ * 内存 Map 当成免费存储，以及每次清扫都扫一张无限长的表。
+ */
+const DEFAULT_OAUTH_FLOW_LIMITS: OAuthFlowLimits = {
+  statesPerSource: 10,
+  statesGlobal: 1_000,
+  loginCodesPerAccount: 3,
+  loginCodesGlobal: 500,
+  linkTicketsPerAccount: 3,
+  linkTicketsGlobal: 500,
+};
+
+export class OAuthFlowError extends Error {
+  constructor(
+    readonly reason: "too-many",
+    message: string,
+  ) {
+    super(message);
+    this.name = "OAuthFlowError";
+  }
+}
+
 export class OAuthFlows {
-  private readonly states = new Map<string, Expiring<OAuthStart>>();
+  private readonly states = new Map<string, PendingState>();
   private readonly codes = new Map<string, Expiring<{ accountId: string; challenge: string }>>();
   private readonly tickets = new Map<string, Expiring<{ accountId: string }>>();
+  private readonly statesBySource = new Map<string, number>();
+  private readonly codesByAccount = new Map<string, number>();
+  private readonly ticketsByAccount = new Map<string, number>();
+  private readonly limits: OAuthFlowLimits;
+
+  constructor(options: { limits?: Partial<OAuthFlowLimits> } = {}) {
+    this.limits = { ...DEFAULT_OAUTH_FLOW_LIMITS, ...options.limits };
+  }
+
+  private bump(counter: Map<string, number>, key: string, delta: number): void {
+    const next = (counter.get(key) ?? 0) + delta;
+    if (next > 0) counter.set(key, next);
+    else counter.delete(key);
+  }
+
+  private dropState(key: string): void {
+    const item = this.states.get(key);
+    if (!item) return;
+    this.states.delete(key);
+    this.bump(this.statesBySource, item.source, -1);
+  }
+
+  private dropCode(key: string): void {
+    const item = this.codes.get(key);
+    if (!item) return;
+    this.codes.delete(key);
+    this.bump(this.codesByAccount, item.value.accountId, -1);
+  }
+
+  private dropTicket(key: string): void {
+    const item = this.tickets.get(key);
+    if (!item) return;
+    this.tickets.delete(key);
+    this.bump(this.ticketsByAccount, item.value.accountId, -1);
+  }
 
   private sweep(now: number): void {
-    for (const map of [this.states, this.codes, this.tickets] as Map<string, Expiring<unknown>>[]) {
-      for (const [key, item] of map) if (item.expiresAt <= now) map.delete(key);
-    }
+    for (const [key, item] of this.states) if (item.expiresAt <= now) this.dropState(key);
+    for (const [key, item] of this.codes) if (item.expiresAt <= now) this.dropCode(key);
+    for (const [key, item] of this.tickets) if (item.expiresAt <= now) this.dropTicket(key);
+  }
+
+  /** 诊断用：当前仍有效的待处理数量（会先清理过期项）。 */
+  stats(now = Date.now()): { states: number; codes: number; tickets: number } {
+    this.sweep(now);
+    return { states: this.states.size, codes: this.codes.size, tickets: this.tickets.size };
   }
 
   /** 开一次授权：返回发给 GitHub 的 `state`。 */
-  begin(start: OAuthStart, now = Date.now()): string {
+  begin(start: OAuthStart, source = "unknown", now = Date.now()): string {
     this.sweep(now);
+    const sourceKey = source.trim().slice(0, 64) || "unknown";
+    if (
+      this.states.size >= this.limits.statesGlobal ||
+      (this.statesBySource.get(sourceKey) ?? 0) >= this.limits.statesPerSource
+    ) {
+      throw new OAuthFlowError("too-many", "待处理的 GitHub 登录太多了，请稍后再试");
+    }
     const state = randomBytes(24).toString("base64url");
-    this.states.set(hashCode(state), { value: start, expiresAt: now + OAUTH_TTL_MS });
+    this.states.set(hashCode(state), { value: start, source: sourceKey, expiresAt: now + OAUTH_TTL_MS });
+    this.bump(this.statesBySource, sourceKey, 1);
     return state;
   }
 
@@ -146,15 +232,22 @@ export class OAuthFlows {
   finish(state: string, now = Date.now()): OAuthStart | null {
     const key = hashCode(state);
     const item = this.states.get(key);
-    this.states.delete(key);
+    this.dropState(key);
     return item && item.expiresAt > now ? item.value : null;
   }
 
   /** 给客户端发一次性登录码（绑 challenge）。 */
   issueLoginCode(accountId: string, challenge: string, now = Date.now()): string {
     this.sweep(now);
+    if (
+      this.codes.size >= this.limits.loginCodesGlobal ||
+      (this.codesByAccount.get(accountId) ?? 0) >= this.limits.loginCodesPerAccount
+    ) {
+      throw new OAuthFlowError("too-many", "这个账号待换取的 GitHub 登录码太多了，请稍后再试");
+    }
     const code = `ghc_${randomBytes(24).toString("base64url")}`;
     this.codes.set(hashCode(code), { value: { accountId, challenge }, expiresAt: now + LOGIN_CODE_TTL_MS });
+    this.bump(this.codesByAccount, accountId, 1);
     return code;
   }
 
@@ -162,7 +255,7 @@ export class OAuthFlows {
   redeemLoginCode(code: string, verifier: string, now = Date.now()): string | null {
     const key = hashCode(code);
     const item = this.codes.get(key);
-    this.codes.delete(key);
+    this.dropCode(key);
     if (!item || item.expiresAt <= now) return null;
     return pkceChallenge(verifier) === item.value.challenge ? item.value.accountId : null;
   }
@@ -170,15 +263,22 @@ export class OAuthFlows {
   /** 已登录的客户端要绑定 GitHub：先换一张一次性票，再拿它在浏览器里走授权。 */
   issueLinkTicket(accountId: string, now = Date.now()): string {
     this.sweep(now);
+    if (
+      this.tickets.size >= this.limits.linkTicketsGlobal ||
+      (this.ticketsByAccount.get(accountId) ?? 0) >= this.limits.linkTicketsPerAccount
+    ) {
+      throw new OAuthFlowError("too-many", "这个账号待处理的 GitHub 绑定请求太多了，请稍后再试");
+    }
     const ticket = `ghl_${randomBytes(24).toString("base64url")}`;
     this.tickets.set(hashCode(ticket), { value: { accountId }, expiresAt: now + OAUTH_TTL_MS });
+    this.bump(this.ticketsByAccount, accountId, 1);
     return ticket;
   }
 
   redeemLinkTicket(ticket: string, now = Date.now()): string | null {
     const key = hashCode(ticket);
     const item = this.tickets.get(key);
-    this.tickets.delete(key);
+    this.dropTicket(key);
     return item && item.expiresAt > now ? item.value.accountId : null;
   }
 }
