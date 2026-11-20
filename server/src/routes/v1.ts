@@ -646,38 +646,77 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     }
     const parsed = checked.data;
 
-    const files: { did: string; hash: string; rev: string; data: string }[] = [];
+    /*
+     * 有界并发取正文：一次最多 200 个 did，串行时最坏是 400 次 CouchDB 往返。
+     * 这里用固定数量的 worker（默认 8）并发取，结果按**输入下标**写回，顺序稳定；
+     * 不用 `Promise.all(dids.map(...))`，否则 200 个文件会同时压向 CouchDB。
+     */
+    type BatchFile = { did: string; hash: string; rev: string; data: string };
+    const files: (BatchFile | undefined)[] = new Array(parsed.dids.length);
     let batchBytes = 0;
-    try {
-      for (const did of parsed.dids) {
-        const doc = await deps.couch.getDoc(notebook.db_name, did);
-        if (!doc) continue;
-        const hash = contentIdOf(doc);
-        if (!hash) continue;
-        const rev = typeof doc._rev === "string" ? doc._rev : "";
-        if (!rev) continue;
-        const bytes = await deps.couch.getAttachment(notebook.db_name, did, "blob", { rev });
-        if (bytes === null) continue;
-        if (bytes.byteLength > deps.config.maxFileBytes) {
-          return json({ error: `文件超过上限（${deps.config.maxFileBytes} 字节）`, code: "too-large" }, 413);
+    let nextIndex = 0;
+    let limitError: "file" | "batch" | null = null;
+    let failure: unknown = null;
+    const concurrency = Math.max(1, Math.min(deps.config.filesBatchConcurrency, parsed.dids.length));
+
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        // 已经超限 / 已经失败：不再领新条目；在途的那一条会自然结束。
+        if (limitError !== null || failure !== null) return;
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= parsed.dids.length) return;
+        const did = parsed.dids[index]!;
+        try {
+          const doc = await deps.couch.getDoc(notebook.db_name, did);
+          if (limitError !== null || failure !== null) return;
+          if (!doc) continue;
+          const hash = contentIdOf(doc);
+          if (!hash) continue;
+          const rev = typeof doc._rev === "string" ? doc._rev : "";
+          if (!rev) continue;
+          const bytes = await deps.couch.getAttachment(notebook.db_name, did, "blob", { rev });
+          if (limitError !== null || failure !== null) return;
+          if (bytes === null) continue;
+
+          if (bytes.byteLength > deps.config.maxFileBytes) {
+            limitError = "file";
+            return;
+          }
+          /*
+           * ★ 整批上限：单条合规不等于一批合规。必须在 `Buffer.from(...).toString("base64")`
+           * **之前**判，否则超限的那一条已经被编码进内存，上限就只挡住了响应、没挡住分配。
+           */
+          if (batchBytes + bytes.byteLength > deps.config.filesBatchMaxBytes) {
+            limitError = "batch";
+            return;
+          }
+          batchBytes += bytes.byteLength;
+          files[index] = { did, hash, rev, data: Buffer.from(bytes).toString("base64") };
+        } catch (error) {
+          failure = failure ?? error;
+          return;
         }
-        /*
-         * ★ 整批上限：单条合规不等于一批合规。必须在 `Buffer.from(...).toString("base64")`
-         * **之前**判，否则超限的那一条已经被编码进内存，上限就只挡住了响应、没挡住分配。
-         */
-        if (batchBytes + bytes.byteLength > deps.config.filesBatchMaxBytes) {
-          return json(
-            {
-              error: `这一批正文超过上限（${deps.config.filesBatchMaxBytes} 字节）；请减少 dids 后分批取`,
-              code: "too-large",
-            },
-            413,
-          );
-        }
-        batchBytes += bytes.byteLength;
-        files.push({ did, hash, rev, data: Buffer.from(bytes).toString("base64") });
       }
-      return json(parseContract(filesBatchResponseSchema, { files }, "POST /v1/files"), 200);
+    };
+
+    try {
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+      if (failure !== null) throw failure;
+      if (limitError === "file") {
+        return json({ error: `文件超过上限（${deps.config.maxFileBytes} 字节）`, code: "too-large" }, 413);
+      }
+      if (limitError === "batch") {
+        return json(
+          {
+            error: `这一批正文超过上限（${deps.config.filesBatchMaxBytes} 字节）；请减少 dids 后分批取`,
+            code: "too-large",
+          },
+          413,
+        );
+      }
+      const ordered = files.filter((file): file is BatchFile => file !== undefined);
+      return json(parseContract(filesBatchResponseSchema, { files: ordered }, "POST /v1/files"), 200);
     } catch (error) {
       return couchError(error, { accountId: account.id, notebookId: notebook.id });
     }

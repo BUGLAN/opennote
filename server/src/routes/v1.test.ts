@@ -1635,6 +1635,97 @@ describe("批量取 · `POST /v1/files`（把请求数从「= 文件数」压到
     });
     expect(over.status).toBe(413);
   });
+
+  it("★ 200 个 did 有界并发，结果顺序与输入一致", async () => {
+    const world = makeWorld({ env: { FILES_BATCH_CONCURRENCY: "4" } });
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const entries = Array.from({ length: 200 }, (_, index) => ({
+      did: `f:${index.toString(16).padStart(4, "0")}`,
+      path: `bulk/${index}.md`,
+      text: `#${index}`,
+      hash: index.toString(16).padStart(64, "0"),
+    }));
+    seedDocs(world, notebook.dbName, entries);
+
+    let active = 0;
+    let peak = 0;
+    world.fake.beforeAttachmentGet = async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+    };
+
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: entries.map((entry) => entry.did) }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { files: { did: string; data: string }[] };
+    // 输入顺序 = 输出顺序；并发只影响完成顺序，不影响组装顺序。
+    expect(body.files.map((file) => file.did)).toEqual(entries.map((entry) => entry.did));
+    expect(Buffer.from(body.files[137]!.data, "base64").toString("utf8")).toBe("#137");
+    expect(peak).toBeGreaterThanOrEqual(2);
+    expect(peak).toBeLessThanOrEqual(4);
+  });
+
+  it("整批超限后不再领新条目（并发不会把剩余 200 个都拉下来）", async () => {
+    const world = makeWorld({ env: { FILES_BATCH_MAX_BYTES: "100", FILES_BATCH_CONCURRENCY: "4" } });
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const entries = Array.from({ length: 200 }, (_, index) => ({
+      did: `f:${index.toString(16).padStart(4, "0")}`,
+      path: `bulk/${index}.md`,
+      text: "x".repeat(10),
+      hash: index.toString(16).padStart(64, "0"),
+    }));
+    seedDocs(world, notebook.dbName, entries);
+
+    let requested = 0;
+    world.fake.beforeAttachmentGet = async () => {
+      requested += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    };
+
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: entries.map((entry) => entry.did) }),
+    });
+    expect(response.status).toBe(413);
+    // 100 B 上限 / 10 B 一条 = 10 条，再加最多次并发数的在途请求。
+    expect(requested).toBeLessThanOrEqual(20);
+    expect(requested).toBeLessThan(entries.length);
+  });
+
+  it("单条超限也停止继续下载剩余条目", async () => {
+    const world = makeWorld({ env: { MAX_FILE_BYTES: "5", FILES_BATCH_CONCURRENCY: "4" } });
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    const entries = Array.from({ length: 40 }, (_, index) => ({
+      did: `f:${index.toString(16).padStart(4, "0")}`,
+      path: `bulk/${index}.md`,
+      text: "x".repeat(10),
+      hash: index.toString(16).padStart(64, "0"),
+    }));
+    seedDocs(world, notebook.dbName, entries);
+
+    let requested = 0;
+    world.fake.beforeAttachmentGet = async () => {
+      requested += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    };
+
+    const response = await call(world, `/v1/files?nb=${notebook.id}`, {
+      method: "POST",
+      headers: { ...auth(alice.token), "content-type": "application/json" },
+      body: JSON.stringify({ dids: entries.map((entry) => entry.did) }),
+    });
+    expect(response.status).toBe(413);
+    expect(requested).toBeLessThanOrEqual(8);
+  });
 });
 
 describe("列树的游标 · 增量同步的起点", () => {

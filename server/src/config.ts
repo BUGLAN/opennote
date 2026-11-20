@@ -56,6 +56,8 @@ export interface ServerConfig {
    * 内存再 base64 + `JSON.stringify`。这个上限把单个请求的驻留内存钉住。
    */
   filesBatchMaxBytes: number;
+  /** `POST /v1/files` 服务端取正文的并发上限（有界 worker，不按 did 数放大）。 */
+  filesBatchConcurrency: number;
   /** 每账号配额。 */
   defaultAccountQuotaBytes: number;
   defaultAccountQuotaNotebooks: number;
@@ -106,6 +108,7 @@ const DEFAULTS = {
   MAX_JSON_BODY_BYTES: "1048576",
   /** 8 MiB：正常客户端一批 ≤ 512 KiB，有 16 倍余量；最坏情况单请求内存不再随 did 数膨胀。 */
   FILES_BATCH_MAX_BYTES: String(FILES_BATCH_MAX_BYTES),
+  FILES_BATCH_CONCURRENCY: "8",
   DEFAULT_ACCOUNT_QUOTA_BYTES: "2147483648",
   DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS: "100",
   SSE_HEARTBEAT_MS: "25000",
@@ -224,6 +227,7 @@ export function loadConfig(env: Env = process.env): ServerConfig {
   const maxFileBytes = readPositiveInt(env, "MAX_FILE_BYTES", DEFAULTS.MAX_FILE_BYTES, problems);
   const maxJsonBodyBytes = readPositiveInt(env, "MAX_JSON_BODY_BYTES", DEFAULTS.MAX_JSON_BODY_BYTES, problems);
   const filesBatchMaxBytes = readPositiveInt(env, "FILES_BATCH_MAX_BYTES", DEFAULTS.FILES_BATCH_MAX_BYTES, problems);
+  const filesBatchConcurrency = readPositiveInt(env, "FILES_BATCH_CONCURRENCY", DEFAULTS.FILES_BATCH_CONCURRENCY, problems);
   const defaultAccountQuotaBytes = readPositiveInt(env, "DEFAULT_ACCOUNT_QUOTA_BYTES", DEFAULTS.DEFAULT_ACCOUNT_QUOTA_BYTES, problems);
   const defaultAccountQuotaNotebooks = readPositiveInt(env, "DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS", DEFAULTS.DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS, problems);
   const accountRequestsPerMinute = readPositiveInt(env, "ACCOUNT_REQUESTS_PER_MINUTE", DEFAULTS.ACCOUNT_REQUESTS_PER_MINUTE, problems);
@@ -268,6 +272,7 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     maxFileBytes,
     maxJsonBodyBytes,
     filesBatchMaxBytes,
+    filesBatchConcurrency,
     defaultAccountQuotaBytes,
     defaultAccountQuotaNotebooks,
     sseHeartbeatMs,
@@ -313,6 +318,7 @@ export function describeConfig(config: ServerConfig): Record<string, string | nu
     maxFileBytes: config.maxFileBytes,
     maxJsonBodyBytes: config.maxJsonBodyBytes,
     filesBatchMaxBytes: config.filesBatchMaxBytes,
+    filesBatchConcurrency: config.filesBatchConcurrency,
     sseHeartbeatMs: config.sseHeartbeatMs,
     trustedProxyHeaders: config.trustedProxyHeaders,
     accountRequestsPerMinute: config.accountRequestsPerMinute,
