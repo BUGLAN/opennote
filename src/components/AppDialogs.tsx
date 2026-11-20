@@ -1,9 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
 /* 画布快照摘要需要解析 JSON Canvas：`canvas/types` 无三方依赖，静态 import 不破坏懒加载分包。 */
 import { parseCanvas } from "../canvas/types";
-import { ACCENTS, FONTS, THEMES, WIDTHS, isReadOnlyKind, noteKind, type Id, type Snapshot, type UiSettings } from "../data/types";
+import { ACCENTS, FONTS, THEMES, WIDTHS, isReadOnlyKind, noteKind, type Id, type Snapshot, type SnapshotMeta, type UiSettings } from "../data/types";
 import { hasLegacyData } from "../data/legacy";
-import { getLibrary, listSnapshots, restoreSnapshot, takeManualSnapshot } from "../data/library";
+import { getLibrary, listSnapshotMeta, readSnapshotContent, restoreSnapshot, takeManualSnapshot } from "../data/library";
 import type { WorkspaceRecord } from "../data/workspaces";
 import type { UpdateStatus } from "../desktop/bridge";
 import { patchUi, setTheme, toggleAppearance } from "../data/ui";
@@ -729,8 +729,9 @@ function persistenceHint(status: StoragePersistenceStatus | null): string {
 /* ================================= history ============================== */
 
 export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void }): ReactNode {
-  const [snapshots, setSnapshots] = useState<Snapshot[] | null>(null);
+  const [snapshots, setSnapshots] = useState<SnapshotMeta[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [previewState, setPreviewState] = useState<{ id: string; content: string | null } | null>(null);
   /*
    * 画布的快照是 JSON Canvas，整篇摊开是噪声：预览改摘要、原文折叠。
    * kind 从数据层现取（快照本身不带 kind）；它由路径扩展名决定，对话框开着的
@@ -742,7 +743,7 @@ export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void
   const readOnlyHistory = note !== null && isReadOnlyKind(note);
 
   const load = () => {
-    void listSnapshots(noteId).then((list) => {
+    void listSnapshotMeta(noteId).then((list) => {
       setSnapshots(list);
       setSelected(list[0]?.id ?? null);
     });
@@ -750,7 +751,27 @@ export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void
 
   useEffect(load, [noteId]);
 
-  const current = snapshots?.find((snapshot) => snapshot.id === selected) ?? null;
+  const selectedSnapshot = snapshots?.find((snapshot) => snapshot.id === selected) ?? null;
+  useEffect(() => {
+    if (selectedSnapshot === null) return;
+    let cancelled = false;
+    void readSnapshotContent(selectedSnapshot)
+      .then((content) => {
+        if (!cancelled) setPreviewState({ id: selectedSnapshot.id, content });
+      })
+      .catch(() => {
+        if (!cancelled) setPreviewState({ id: selectedSnapshot.id, content: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSnapshot]);
+
+  const selectedPreview = selectedSnapshot !== null && previewState?.id === selectedSnapshot.id ? previewState : null;
+  const preview = selectedPreview?.content ?? null;
+  const previewFailed = selectedPreview !== null && preview === null;
+  const current: Snapshot | null =
+    selectedSnapshot !== null && preview !== null && !previewFailed ? { ...selectedSnapshot, content: preview } : null;
 
   return (
     <Modal
@@ -823,21 +844,25 @@ export function HistoryDialog({ noteId, onClose }: { noteId: Id; onClose(): void
                       : snapshot.reason === "before-disk"
                         ? "被磁盘版本覆盖前的改动"
                         : "恢复前的备份"} ·{" "}
-                  {snapshot.content.length} 字符
+                  {formatBytes(snapshot.size)}
                 </time>
               </button>
             ))}
           </div>
-          {canvasHistory ? (
+          {previewFailed ? (
+            <p className="dialog__message">这个历史版本读取失败。</p>
+          ) : preview === null ? (
+            <p className="dialog__note">正在读取这个版本…</p>
+          ) : canvasHistory ? (
             <div>
-              <p className="dialog__message">{canvasSnapshotSummary(current?.content ?? "")}</p>
+              <p className="dialog__message">{canvasSnapshotSummary(preview)}</p>
               <details>
                 <summary>查看画布原文</summary>
-                <pre className="history__preview">{current?.content ?? ""}</pre>
+                <pre className="history__preview">{preview}</pre>
               </details>
             </div>
           ) : (
-            <pre className="history__preview">{current?.content ?? ""}</pre>
+            <pre className="history__preview">{preview}</pre>
           )}
         </div>
       )}

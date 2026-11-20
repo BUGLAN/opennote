@@ -82,13 +82,18 @@ export type SnapshotReason = "auto" | "manual" | "restore" | "before-disk";
 /** 自动保存模式（VSCode 式三档，无 off——本产品默认永远自动保存）。 */
 export type AutoSaveMode = "afterDelay" | "onFocusChange" | "onWindowChange";
 
-export interface Snapshot {
+export interface SnapshotMeta {
   id: Id;
   noteId: Id;
   title: string;
-  content: string;
   createdAt: number;
   reason: SnapshotReason;
+  /** Snapshot file size in bytes; available from the directory listing without reading the body. */
+  size: number;
+}
+
+export interface Snapshot extends SnapshotMeta {
+  content: string;
 }
 
 export interface Asset {

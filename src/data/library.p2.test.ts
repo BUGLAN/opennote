@@ -29,6 +29,7 @@ class MockBackend implements FileSystemBackend {
   dirs: string[] = [""];
   readonly files = new Map<string, MockEntry>();
   readonly calls: string[] = [];
+  readonly reads: string[] = [];
   caseInsensitive = false;
   failMove = false;
   readonly failWrites = new Set<string>();
@@ -135,6 +136,7 @@ class MockBackend implements FileSystemBackend {
   }
 
   async readText(path: string): Promise<string> {
+    this.reads.push(path);
     await this.io();
     if (this.failReads.has(path)) throw new Error(`EACCES ${path}`);
     const entry = this.fileAt(path);
@@ -244,8 +246,9 @@ import {
   folderStats,
   getLibrary,
   isWorkspaceOpen,
-  listSnapshots,
+  listSnapshotMeta,
   moveNote,
+  readSnapshotContent,
   notesInFolder,
   openWorkspace,
   renameFolder,
@@ -315,7 +318,40 @@ describe("D14 同一分钟内的两次手动快照都会留下", () => {
     const backend = await openSingle((b) => b.seed("a.md", "# 内容"));
     await Promise.all([takeManualSnapshot("a.md"), takeManualSnapshot("a.md"), takeManualSnapshot("a.md")]);
     expect(backend.historyPaths("a.md")).toHaveLength(3);
-    expect(await listSnapshots("a.md")).toHaveLength(3);
+    expect(await listSnapshotMeta("a.md")).toHaveLength(3);
+  });
+});
+
+describe("快照列表只读元数据，正文按需读取", () => {
+  it("列出快照时不读取任何正文，排序、时间、reason 与大小仍可用", async () => {
+    const backend = await openSingle((b) => {
+      b.seed("a.md", "# A");
+      b.seed("b.md", "# B");
+      b.seed(".opennote/history/a.md/2026-01-01-00-00-00.000-auto.md", "# 自动留档正文");
+      b.seed(".opennote/history/a.md/2026-01-01-00-01-00.000-manual.md", "# 手动留档正文");
+      b.seed(".opennote/history/b.md/2026-01-01-00-02-00.000-auto.md", "# 另一篇的正文");
+    });
+
+    const meta = await listSnapshotMeta("a.md");
+    expect(meta).toHaveLength(2);
+    expect(meta.map((snapshot) => snapshot.reason)).toEqual(["manual", "auto"]);
+    expect(meta[0]!.createdAt).toBeGreaterThan(meta[1]!.createdAt);
+    expect(meta[0]!.size).toBe("# 手动留档正文".length);
+    expect(meta[0]).not.toHaveProperty("content");
+    expect(backend.reads.filter((path) => path.startsWith(".opennote/history/"))).toEqual([]);
+  });
+
+  it("选中一条时只读取那一条正文", async () => {
+    const backend = await openSingle((b) => {
+      b.seed("a.md", "# A");
+      b.seed(".opennote/history/a.md/2026-01-01-00-00-00.000-auto.md", "# 自动留档正文");
+      b.seed(".opennote/history/a.md/2026-01-01-00-01-00.000-manual.md", "# 手动留档正文");
+    });
+    const meta = await listSnapshotMeta("a.md");
+
+    backend.reads.length = 0;
+    expect(await readSnapshotContent(meta[0]!)).toBe("# 手动留档正文");
+    expect(backend.reads).toEqual([meta[0]!.id]);
   });
 });
 
@@ -328,13 +364,14 @@ describe("D15 历史快照跟随重命名 / 移动", () => {
     await renameNote("旧名.md", "新名");
     expect(backend.historyPaths("旧名.md")).toHaveLength(0);
     expect(backend.has(joinPath(".opennote/history", "旧名.md"))).toBe(false);
-    const moved = await listSnapshots("新名.md");
-    expect(moved.map((snapshot) => snapshot.content)).toEqual(["# 旧内容"]);
+    const moved = await listSnapshotMeta("新名.md");
+    expect(moved).toHaveLength(1);
+    expect(await readSnapshotContent(moved[0]!)).toBe("# 旧内容");
 
     // 审计报告 [12] 的复现路径：新建同名笔记继承旧历史（甚至能「恢复」到别人的内容）。
     const fresh = createNote({ title: "旧名", content: "# 全新内容" });
     await flushAll();
-    expect(await listSnapshots(fresh.id)).toEqual([]);
+    expect(await listSnapshotMeta(fresh.id)).toEqual([]);
   });
 
   it("移动笔记到别的文件夹时历史跟着走", async () => {
@@ -345,7 +382,7 @@ describe("D15 历史快照跟随重命名 / 移动", () => {
     await takeManualSnapshot("资料/笔记.md");
     await moveNote("资料/笔记.md", "归档");
     expect(backend.historyPaths("资料/笔记.md")).toHaveLength(0);
-    expect(await listSnapshots("归档/笔记.md")).toHaveLength(1);
+    expect(await listSnapshotMeta("归档/笔记.md")).toHaveLength(1);
   });
 
   it("只改大小写的重命名也把历史带上（与 D07 的两步 move 兼容）", async () => {
@@ -354,7 +391,7 @@ describe("D15 历史快照跟随重命名 / 移动", () => {
     await renameNote("故事/Note.md", "note");
     expect(backend.historyPaths("故事/note.md")).toHaveLength(1);
     expect(backend.text("故事/note.md")).toBe("# 内容");
-    expect(await listSnapshots("故事/note.md")).toHaveLength(1);
+    expect(await listSnapshotMeta("故事/note.md")).toHaveLength(1);
   });
 
   it("重命名文件夹时子笔记的历史一并移动", async () => {
@@ -366,8 +403,8 @@ describe("D15 历史快照跟随重命名 / 移动", () => {
     await takeManualSnapshot("故事/子目录/第二章.md");
     await renameFolder("故事", "篇章");
     expect(backend.historyPaths("故事")).toHaveLength(0);
-    expect(await listSnapshots("篇章/第一章.md")).toHaveLength(1);
-    expect(await listSnapshots("篇章/子目录/第二章.md")).toHaveLength(1);
+    expect(await listSnapshotMeta("篇章/第一章.md")).toHaveLength(1);
+    expect(await listSnapshotMeta("篇章/子目录/第二章.md")).toHaveLength(1);
   });
 
   it("移入回收站 / 恢复时历史跟着当前 id 走", async () => {
@@ -376,14 +413,14 @@ describe("D15 历史快照跟随重命名 / 移动", () => {
     await trashNote("笔记.md");
     // 历史跟着进回收站：原路径下不再留一份给同名新笔记继承。
     expect(backend.historyPaths("笔记.md")).toHaveLength(0);
-    expect(await listSnapshots(".opennote/trash/笔记.md")).toHaveLength(1);
+    expect(await listSnapshotMeta(".opennote/trash/笔记.md")).toHaveLength(1);
     const fresh = createNote({ title: "笔记", content: "# 全新" });
     await flushAll();
-    expect(await listSnapshots(fresh.id)).toEqual([]);
+    expect(await listSnapshotMeta(fresh.id)).toEqual([]);
 
     await restoreNote(".opennote/trash/笔记.md");
     expect(backend.historyPaths("笔记.md")).toHaveLength(0);
-    expect(await listSnapshots("笔记 2.md")).toHaveLength(1);
+    expect(await listSnapshotMeta("笔记 2.md")).toHaveLength(1);
   });
 });
 

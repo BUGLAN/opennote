@@ -68,6 +68,7 @@ import {
   type NoteKind,
   type SidebarTab,
   type Snapshot,
+  type SnapshotMeta,
   type SnapshotReason,
   type SortKey,
 } from "./types";
@@ -3610,7 +3611,22 @@ async function pruneSnapshots(noteId: Id): Promise<void> {
   }
 }
 
-export async function listSnapshots(noteId: Id): Promise<Snapshot[]> {
+/** 快照文件名里带着写入原因；列表和正文读取共用这一份判定。 */
+function snapshotReason(name: string): SnapshotReason {
+  if (name.includes("-manual")) return "manual";
+  if (name.includes("-restore")) return "restore";
+  if (name.includes("-before-disk")) return "before-disk";
+  return "auto";
+}
+
+/**
+ * 只读快照目录元数据，**不读取任何正文**。
+ *
+ * 状态栏和切换笔记只需要数量和列表；正文由用户选中某一项时再读（见
+ * `readSnapshotContent`）。一篇 1 MB 的笔记最多 60 份历史，旧实现会在每次切换
+ * 笔记时把几十 MB 正文全部读进内存。
+ */
+export async function listSnapshotMeta(noteId: Id): Promise<SnapshotMeta[]> {
   const target = backend;
   if (!target) return [];
   const dir = joinPath(HISTORY_DIR, noteId);
@@ -3621,26 +3637,27 @@ export async function listSnapshots(noteId: Id): Promise<Snapshot[]> {
     reportError(error, "读取历史版本失败");
     return [];
   }
-  const snapshots: Snapshot[] = [];
+  const snapshots: SnapshotMeta[] = [];
   for (const entry of entries) {
     if (entry.kind !== "file") continue;
     const path = joinPath(dir, entry.name);
-    let content = "";
-    try {
-      content = await target.readText(path);
-    } catch {
-      continue;
-    }
-    const reason: SnapshotReason = entry.name.includes("-manual")
-      ? "manual"
-      : entry.name.includes("-restore")
-        ? "restore"
-        : entry.name.includes("-before-disk")
-          ? "before-disk"
-          : "auto";
-    snapshots.push({ id: path, noteId, title: "", content, createdAt: entry.mtimeMs || Date.now(), reason });
+    snapshots.push({
+      id: path,
+      noteId,
+      title: "",
+      createdAt: entry.mtimeMs || Date.now(),
+      reason: snapshotReason(entry.name),
+      size: entry.size,
+    });
   }
   return snapshots.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/** 读取单份快照正文；文件已不存在时返回 `null`，后端错误照常向上抛。 */
+export async function readSnapshotContent(snapshot: SnapshotMeta): Promise<string | null> {
+  const target = backend;
+  if (!target) return null;
+  return (await readOptionalText(target, snapshot.id)) ?? null;
 }
 
 export async function takeManualSnapshot(noteId: Id): Promise<void> {

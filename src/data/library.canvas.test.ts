@@ -30,11 +30,12 @@ import {
   getCanvasViewport,
   getLibrary,
   hasPendingAutoRename,
-  listSnapshots,
+  listSnapshotMeta,
   moveFolder,
   moveNote,
   openWorkspace,
   purgeNote,
+  readSnapshotContent,
   renameFolder,
   renameNote,
   restoreNote,
@@ -470,15 +471,15 @@ describe("回收站与快照", () => {
     updateNoteContent("史.canvas", v2, { immediate: true });
     await flushAll();
     await takeManualSnapshot("史.canvas");
-    const snapshots = await listSnapshots("史.canvas");
+    const snapshots = await listSnapshotMeta("史.canvas");
     expect(snapshots.length).toBe(2);
     expect(snapshots.every((s) => s.id.endsWith(".canvas"))).toBe(true);
     const manual = snapshots.find((s) => s.reason === "manual");
-    expect(manual?.content).toBe(v2);
+    expect(manual && (await readSnapshotContent(manual))).toBe(v2);
     // 后端 mtimeMs 全是 1，列表顺序不可依赖 —— 按 reason 找自动快照（v1）来恢复。
     const auto = snapshots.find((s) => s.reason === "auto");
-    expect(auto?.content).toBe(v1);
-    await restoreSnapshot(auto!);
+    expect(auto && (await readSnapshotContent(auto))).toBe(v1);
+    await restoreSnapshot({ ...auto!, content: v1 });
     await flushAll();
     expect(testBackend.files.get("史.canvas")).toBe(v1);
     expect(getLibrary().notes["史.canvas"]?.content).toBe(v1);

@@ -15,7 +15,7 @@ import {
   flushMeta,
   folderPathLabel,
   initLibrary,
-  listSnapshots,
+  listSnapshotMeta,
   libraryStore,
   openNote,
   openWorkspace,
@@ -70,7 +70,7 @@ import {
 import { baseName, importFilesIntoOpfs, isCapacitorNative, pickFiles, stripExtension, supportsFileSystemAccess, supportsOpfs } from "./fs";
 import { desktopBridge, type ImportOutcome } from "./desktop/bridge";
 import { getUi, patchUi, setTheme as applyTheme, toggleAppearance, useUi } from "./data/ui";
-import { noteKind, type Id, type Snapshot, type ThemeId, type UiSettings } from "./data/types";
+import { noteKind, type Id, type SnapshotMeta, type ThemeId, type UiSettings } from "./data/types";
 import { buildAppCommands, isEditableTarget, matchesShortcut } from "./lib/appCommands";
 import { useStore, useStoreSelector } from "./lib/store";
 import { askConfirm, askText } from "./lib/dialogs";
@@ -162,7 +162,7 @@ export default function App(): ReactNode {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [snapshots, setSnapshots] = useState<SnapshotMeta[]>([]);
   const [dropping, setDropping] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [needsPermission, setNeedsPermission] = useState<WorkspaceRecord | null>(null);
@@ -700,14 +700,15 @@ export default function App(): ReactNode {
       setSnapshots([]);
       return;
     }
+    // 状态栏只取元数据；正文只在历史面板里由用户选中时读取，切换笔记不能扫全部快照正文。
     let cancelled = false;
-    void listSnapshots(activeId).then((list) => {
+    void listSnapshotMeta(activeId).then((list) => {
       if (!cancelled) setSnapshots(list);
     });
     return () => {
       cancelled = true;
     };
-  }, [activeId, historyOpen]);
+  }, [activeId]);
 
   /* offer a one-time migration of notes written by the IndexedDB version */
   const migrationOffered = useRef(false);
@@ -1924,7 +1925,7 @@ export default function App(): ReactNode {
             noteId={activeId}
             onClose={() => {
               setHistoryOpen(false);
-              void listSnapshots(activeId).then(setSnapshots);
+              void listSnapshotMeta(activeId).then(setSnapshots);
             }}
           />
         ) : null}
