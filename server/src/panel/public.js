@@ -223,6 +223,7 @@ export async function renderJoin(root, code) {
   const submit = h("button", { type: "submit", class: "btn btn--primary btn--tall", text: "创建账号" });
   const who = info.invitedBy ? info.invitedBy + " 邀请你" : "你被邀请";
   const intro = who + "使用这台服务器同步 Opennote 笔记。你会有 " + bytes(info.quotaBytes) + " 空间" + (info.grantAdmin ? "，并且是这台服务器的管理员。" : "。");
+  const githubHint = info.email ? h("p", { class: "note", text: "必须使用邀请绑定的 GitHub 邮箱（" + info.email + "）接受邀请。" }) : null;
 
   const form = h(
     "form",
@@ -267,7 +268,7 @@ export async function renderJoin(root, code) {
     card(
       "加入 " + host(),
       h("p", { class: "message", text: intro }),
-      github ? h("div", { class: "stack mt-lg" }, githubButton("用 GitHub 接受邀请", "/auth/github?mode=join&invite=" + encodeURIComponent(code)), passwordLogin ? h("div", { class: "divider", text: "或设置一个密码" }) : null) : null,
+      github ? h("div", { class: "stack mt-lg" }, githubButton("用 GitHub 接受邀请", "/auth/github?mode=join&invite=" + encodeURIComponent(code)), githubHint, passwordLogin ? h("div", { class: "divider", text: "或设置一个密码" }) : null) : null,
       passwordLogin ? form : h("p", { class: "note mt-lg", text: github ? "这台服务器关闭了邮箱和密码登录，请用 GitHub 接受邀请。" : "这台服务器关闭了邮箱和密码登录，GitHub 登录也不可用，请联系管理员。" }),
     ),
   );

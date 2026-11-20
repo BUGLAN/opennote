@@ -27,7 +27,7 @@
 
 import { Hono, type Context } from "hono";
 import { AccountError, PANEL_SESSION_TTL_MS, type AccountRow, type AccountStore } from "../auth/accounts";
-import { verifiedEmailOf, type GithubApi, type GithubUser, type OAuthFlows, type OAuthStart } from "../auth/github";
+import { verifiedEmailsOf, type GithubApi, type GithubUser, type OAuthFlows, type OAuthStart } from "../auth/github";
 import { clientIpFrom, type ServerConfig } from "../config";
 import { buildSessionCookie, isHttps } from "../panelSecurity";
 import type { SettingsStore } from "../settings";
@@ -128,7 +128,7 @@ export function createGithubRoutes(deps: GithubRoutesDeps): Hono {
     if (!deps.settings.githubAvailable()) return fail(start, "github-failed", "这台服务器刚刚关闭了 GitHub 登录");
 
     let user: GithubUser;
-    let email: string | null;
+    let verifiedEmails: string[];
     let orgs: string[] | null = null;
     try {
       const token = await deps.github.exchangeCode({
@@ -138,7 +138,7 @@ export function createGithubRoutes(deps: GithubRoutesDeps): Hono {
         redirectUri: callbackUrl,
       });
       user = await deps.github.user(token);
-      email = verifiedEmailOf(await deps.github.emails(token));
+      verifiedEmails = verifiedEmailsOf(await deps.github.emails(token));
       if (deps.settings.get("githubPolicy") === "org") orgs = await deps.github.orgs(token);
     } catch (error) {
       console.warn("[opennote-server] GitHub 授权失败", error);
@@ -146,10 +146,11 @@ export function createGithubRoutes(deps: GithubRoutesDeps): Hono {
     }
     const subject = String(user.id);
     const login = user.login;
+    const email = verifiedEmails[0] ?? null;
 
     try {
       if (start.mode === "join") {
-        const account = deps.accounts.acceptInviteWithIdentity(start.invite!, { githubEmail: email, displayName: user.name, provider: "github", subject, login }, now());
+        const account = deps.accounts.acceptInviteWithIdentity(start.invite!, { githubEmails: verifiedEmails, displayName: user.name, provider: "github", subject, login }, now());
         deps.audit?.({ actorId: account.id, action: "accept_invite", target: account.id, ip: ipOf(c), detail: `github:${login}` });
         return resultPage({ done: "joined", email: account.email ?? "", github: login });
       }

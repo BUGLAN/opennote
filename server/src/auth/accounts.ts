@@ -565,16 +565,21 @@ export class AccountStore {
 
   /**
    * 用 GitHub 接受邀请：建号（没有密码）+ 绑身份 + 记一次使用，同一事务。
-   * 邮箱：邀请绑了邮箱就用邀请的，否则用 GitHub 上已验证的那个。
+   * 邮箱：邀请绑了邮箱时，它必须出现在 GitHub 的已验证邮箱里；未绑定时用主邮箱（列表第一个）。
    */
   acceptInviteWithIdentity(
     code: string,
-    input: { githubEmail: string | null; displayName: string | null; provider: "github"; subject: string; login: string | null },
+    input: { githubEmails: string[]; displayName: string | null; provider: "github"; subject: string; login: string | null },
     now = Date.now(),
   ): AccountRow {
     const id = this.transaction(() => {
       const invite = this.usableInvite(code, now);
-      const email = invite.email ?? input.githubEmail;
+      const githubEmails = input.githubEmails.map(normalizeEmail).filter(Boolean);
+      const invitedEmail = invite.email === null ? null : normalizeEmail(invite.email);
+      const email = invitedEmail ?? githubEmails[0] ?? null;
+      if (invitedEmail !== null && !githubEmails.includes(invitedEmail)) {
+        throw new AccountError("invite-email-mismatch", "这个邀请是发给另一个邮箱的");
+      }
       if (!email) throw new AccountError("bad-email", "GitHub 上没有已验证的邮箱，请改用「设置一个密码」接受邀请");
       const taken = this.db.prepare("SELECT account_id FROM identities WHERE provider = ? AND subject = ?").get(input.provider, input.subject) as { account_id: string } | undefined;
       if (taken) throw new AccountError("identity-taken", "这个 GitHub 账号已经绑定了另一个账号，直接用它登录即可");

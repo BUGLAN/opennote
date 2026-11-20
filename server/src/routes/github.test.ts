@@ -33,6 +33,7 @@ interface FakeUser {
   id: number;
   login: string;
   email: string | null;
+  verifiedEmails?: { email: string; primary: boolean; verified: boolean }[];
   orgs?: string[];
 }
 
@@ -50,7 +51,7 @@ function makeWorld() {
     },
     emails: async (token) => {
       const user = users.get(token.slice(4))!;
-      return user.email ? [{ email: user.email, primary: true, verified: true }] : [];
+      return user.verifiedEmails ?? (user.email ? [{ email: user.email, primary: true, verified: true }] : []);
     },
     orgs: async (token) => users.get(token.slice(4))!.orgs ?? [],
   };
@@ -193,12 +194,20 @@ describe("客户端登录（mode=app）", () => {
 });
 
 describe("用 GitHub 接受邀请（mode=join）", () => {
-  it("绑定邮箱的邀请：账号用邀请上的邮箱，身份绑好，邀请用掉", async () => {
+  it("绑定邮箱的邀请：邀请邮箱是次要已验证邮箱也可接受，身份绑好，邀请用掉", async () => {
     const world = makeWorld();
     world.configure();
     const admin = seedAccount(world.accounts, { isAdmin: true });
     const { code } = world.accounts.createInvite({ createdBy: admin.id, email: "chen@example.com" });
-    world.users.set("gh3", { id: 3, login: "chen-gh", email: "chen.personal@example.com" });
+    world.users.set("gh3", {
+      id: 3,
+      login: "chen-gh",
+      email: null,
+      verifiedEmails: [
+        { email: "chen.personal@example.com", primary: true, verified: true },
+        { email: "chen@example.com", primary: false, verified: true },
+      ],
+    });
     const { location } = await world.authorize(`mode=join&invite=${code}`, "gh3");
     expect(location).toBe("/auth/result?done=joined&email=chen%40example.com&github=chen-gh");
     const account = world.accounts.findByIdentity("github", "3");
@@ -207,11 +216,75 @@ describe("用 GitHub 接受邀请（mode=join）", () => {
     expect((await world.call(`/v1/auth/invites/${code}`)).status).toBe(410);
   });
 
+  it("邀请邮箱与 GitHub 已验证邮箱不一致：拒绝，不建管理员、不消费邀请", async () => {
+    const world = makeWorld();
+    world.configure();
+    const admin = seedAccount(world.accounts, { isAdmin: true });
+    const { code } = world.accounts.createInvite({ createdBy: admin.id, email: "chen@example.com", grantAdmin: true });
+    world.users.set("gh4", {
+      id: 4,
+      login: "attacker",
+      email: null,
+      verifiedEmails: [{ email: "attacker@example.com", primary: true, verified: true }],
+    });
+    const { location } = await world.authorize(`mode=join&invite=${code}`, "gh4");
+    expect(new URL(location, "https://notes.example.com").searchParams.get("error")).toBe("invite-email-mismatch");
+    expect(world.accounts.count()).toBe(1);
+    expect(world.accounts.findByIdentity("github", "4")).toBeNull();
+    expect(world.accounts.findByEmail("chen@example.com")).toBeNull();
+    expect(world.accounts.inviteInfo(code).email).toBe("chen@example.com");
+  });
+
+  it("没有已验证邮箱：不建号、不消费邀请", async () => {
+    const world = makeWorld();
+    world.configure();
+    const admin = seedAccount(world.accounts, { isAdmin: true });
+    const { code } = world.accounts.createInvite({ createdBy: admin.id });
+    world.users.set("gh6", {
+      id: 6,
+      login: "no-verified-email",
+      email: null,
+      verifiedEmails: [{ email: "unverified@example.com", primary: true, verified: false }],
+    });
+    const { location } = await world.authorize(`mode=join&invite=${code}`, "gh6");
+    expect(new URL(location, "https://notes.example.com").searchParams.get("error")).toBe("bad-email");
+    expect(world.accounts.count()).toBe(1);
+    expect(world.accounts.findByIdentity("github", "6")).toBeNull();
+    expect(world.accounts.inviteInfo(code).email).toBeNull();
+  });
+
+  it("邀请未绑定邮箱：用已验证主邮箱建号，忽略未验证邮箱", async () => {
+    const world = makeWorld();
+    world.configure();
+    const admin = seedAccount(world.accounts, { isAdmin: true });
+    const { code } = world.accounts.createInvite({ createdBy: admin.id });
+    world.users.set("gh7", {
+      id: 7,
+      login: "primary-email",
+      email: null,
+      verifiedEmails: [
+        { email: "secondary@example.com", primary: false, verified: true },
+        { email: "unverified@example.com", primary: true, verified: false },
+        { email: "primary@example.com", primary: true, verified: true },
+      ],
+    });
+    const { location } = await world.authorize(`mode=join&invite=${code}`, "gh7");
+    expect(location).toBe("/auth/result?done=joined&email=primary%40example.com&github=primary-email");
+    expect(world.accounts.findByIdentity("github", "7")?.email).toBe("primary@example.com");
+  });
+
   it("用过的邀请在起点就拦下", async () => {
     const world = makeWorld();
     world.configure();
     const start = await world.call("/auth/github?mode=join&invite=join_nope");
     expect(start.location).toMatch(/^\/auth\/result\?error=bad-invite/);
+
+    const admin = seedAccount(world.accounts, { isAdmin: true });
+    const used = world.accounts.createInvite({ createdBy: admin.id, email: "used@example.com" });
+    world.users.set("gh8", { id: 8, login: "used", email: "used@example.com" });
+    expect((await world.authorize(`mode=join&invite=${used.code}`, "gh8")).location).toMatch(/^\/auth\/result\?done=joined/);
+    const replay = await world.call(`/auth/github?mode=join&invite=${used.code}`);
+    expect(replay.location).toMatch(/^\/auth\/result\?error=invite-exhausted/);
   });
 });
 

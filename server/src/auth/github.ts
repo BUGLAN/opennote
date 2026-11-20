@@ -85,10 +85,12 @@ export function createGithubApi(fetchImpl: typeof fetch = fetch): GithubApi {
   };
 }
 
-/** 主邮箱（已验证）优先，其次任一已验证邮箱。 */
-export function verifiedEmailOf(emails: GithubEmail[]): string | null {
+/** 全部已验证邮箱，主邮箱排在最前面；其他邮箱保持 GitHub 返回的顺序。 */
+export function verifiedEmailsOf(emails: GithubEmail[]): string[] {
   const verified = emails.filter((item) => item.verified);
-  return (verified.find((item) => item.primary) ?? verified[0])?.email.toLowerCase() ?? null;
+  const primary = verified.find((item) => item.primary);
+  const ordered = primary ? [primary, ...verified.filter((item) => item !== primary)] : verified;
+  return ordered.map((item) => item.email.toLowerCase());
 }
 
 /** PKCE：`challenge = base64url(sha256(verifier))`。 */
