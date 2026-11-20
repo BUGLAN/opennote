@@ -12,7 +12,8 @@
 #   SHA256SUMS                      GNU coreutils 格式校验和
 #
 # 两个构建 job：
-#   release        windows-latest  出 Windows zip + 扩展 zip，然后建/更新 Release
+#   release        windows-latest  出 win-unpacked → 真启动冒烟 → 只归档这份目录成 zip
+#                                  → 扩展 zip → 建/更新 Release
 #   release-mac    macos-15 (arm64) 出 macOS dmg + zip，再把它们追加进同一个 Release
 #                  （`needs: release` 保证顺序；它**不改动** Windows 那条链路，
 #                    所以 macOS 打包出问题最多是「这个版本没有 mac 产物」，
@@ -94,11 +95,25 @@ jobs:
       - name: 构建桌面资源（相对路径 + 关掉 Service Worker）
         run: pnpm build:desktop
 
-      - name: 打包 Windows 免安装 zip
+      - name: 组装 Windows 免安装目录（不产出 zip）
         # 若这里报 TypeError: Cannot read properties of undefined (reading 'ReadWrite')，
         # 说明有人把 pnpm-workspace.yaml 里那条 app-builder-lib>@electron/get override 删了
         # （上游 electron-builder 26.15.3 的 bug，详见该文件注释）。
-        run: pnpm exec electron-builder --config electron-builder.yml
+        #
+        # 刻意先只出 `release/win-unpacked/`：下一步要启动它，失败时 zip 还不存在。
+        run: pnpm exec electron-builder --config electron-builder.yml --win --x64 --dir
+
+      - name: 冒烟测试 Windows 免安装包（真启动 + CDP）
+        # scripts/smoke-desktop.mjs 会使用独立 user-data-dir / 调试端口，断言：
+        # `desktop ready`、#root 已渲染、window.opennote 与一次真实 IPC 可用、
+        # 启动日志没有主进程致命错误。失败会直接让 job 停下，后面的 zip / Release 不执行。
+        run: node scripts/smoke-desktop.mjs --executable release/win-unpacked/Opennote.exe
+
+      - name: 打包 Windows 免安装 zip（只归档刚冒烟过的目录）
+        # --prepackaged 不再组装/改写应用，只把已验证的同一份 win-unpacked 压成 zip。
+        # 不要改成重新跑一次全量 electron-builder：那样 zip 里的内容会换掉，冒烟就不再
+        # 证明“即将发布的这份字节能启动”。
+        run: pnpm exec electron-builder --config electron-builder.yml --win zip --x64 --prepackaged release/win-unpacked
 
       - name: 打包扩展 zip
         run: node scripts/pack-extension.mjs

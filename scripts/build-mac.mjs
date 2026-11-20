@@ -35,10 +35,10 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { smokePackagedApp } from "./smoke-desktop.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
@@ -54,7 +54,6 @@ const APPLICATIONS_LINK = join(APP_DIR, "Applications");
 
 const TOTAL_STEPS = 7;
 const step = (n, text) => console.log(`\n[opennote] (${n}/${TOTAL_STEPS}) ${text}`);
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** 跑一个命令并把它的输出原样透到终端；非 0 退出即抛错。 */
 function run(command, args, options = {}) {
@@ -144,82 +143,6 @@ async function bundleSize(path) {
 
 const EXECUTABLE = join(APP, "Contents", "MacOS", "Opennote");
 
-/**
- * 冒烟测试：真启动一次打包产物，确认渲染进程起来了、界面真渲染了。
- *
- * 只验签名是不够的：签名「有效」但动态库加载失败的产物一样打不开（本项目就踩过
- * hardened runtime + ad-hoc 导致 Electron Framework 加载被拒）。所以这里必须真跑。
- *
- * 两个坑：
- *   · 必须给独立的 `--user-data-dir`：打包版有单实例锁，本机只要已经有 Opennote 在跑，
- *     新进程会在 0.5 秒内以**退出码 0** 静默退出，看起来就像「打包坏了」。
- *   · 必须摘掉 `ELECTRON_RUN_AS_NODE`：它会让 Electron 二进制退化成纯 Node，
- *     连 `--user-data-dir` 都不认（报 `bad option`）。
- */
-async function smokeTest(appPath) {
-  const port = 9300 + Math.floor(Math.random() * 400);
-  const userData = await mkdtemp(join(tmpdir(), "opennote-smoke-"));
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-
-  const child = spawn(join(appPath, "Contents", "MacOS", "Opennote"), [`--user-data-dir=${userData}`, `--remote-debugging-port=${port}`], {
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let log = "";
-  child.stdout.on("data", (chunk) => (log += chunk));
-  child.stderr.on("data", (chunk) => (log += chunk));
-
-  try {
-    const deadline = Date.now() + 60_000;
-    let pageSeen = false;
-    while (Date.now() < deadline) {
-      if (child.exitCode !== null) {
-        throw new Error(`应用启动后立刻退出（exitCode=${child.exitCode}）。日志尾部：\n${log.slice(-2000)}`);
-      }
-      if (!pageSeen) {
-        try {
-          const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-          pageSeen = targets.some((target) => target.type === "page");
-        } catch {
-          /* 调试端口还没起来，继续等 */
-        }
-      }
-      // 两个条件都要等：CDP 的页面目标会**早于**主进程那句 "desktop ready" 出现
-      // （实测抢跑过：页面目标有了、CSP 也放行了，但窗口/桥还没就绪）。
-      // 只等页面目标就往下走，会偶发地把一个其实正常的包判成坏的。
-      if (pageSeen && log.includes("desktop ready")) break;
-      await sleep(300);
-    }
-    if (!pageSeen) throw new Error(`60 秒内没等到渲染进程。日志尾部：\n${log.slice(-2000)}`);
-    if (!log.includes("desktop ready")) {
-      throw new Error(`渲染进程起来了，但 60 秒内主进程没有打出 "desktop ready"。日志尾部：\n${log.slice(-2000)}`);
-    }
-
-    // 复用仓库已有的 CDP 小工具读界面状态，而不是在这里再写一套 WebSocket。
-    const { stdout } = await capture(process.execPath, [
-      join(ROOT, "scripts", "cdp-eval.mjs"),
-      String(port),
-      "return { title: document.title, bridge: typeof window.opennote, root: document.getElementById('root')?.children.length ?? 0 }",
-    ]);
-    const state = JSON.parse(stdout.trim());
-    if (state.bridge !== "object" || state.root < 1) {
-      throw new Error(`界面没有真正渲染出来：${JSON.stringify(state)}`);
-    }
-    return state;
-  } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-      // 等它真的退出再删 userData：残留进程会占着单实例锁影响下一次打包。
-      await Promise.race([
-        new Promise((resolve) => child.once("exit", resolve)),
-        sleep(5000).then(() => child.kill("SIGKILL")),
-      ]);
-    }
-    await rm(userData, { recursive: true, force: true });
-  }
-}
-
 async function main() {
   if (process.platform !== "darwin") {
     console.error(
@@ -259,8 +182,8 @@ async function main() {
   console.log(`  PASS  codesign --verify --deep --strict；Signature=adhoc，flags=${flags}（无 runtime）`);
 
   step(4, "冒烟测试：真启动一次打包产物…");
-  const state = await smokeTest(APP);
-  console.log(`  PASS  渲染进程已就绪：title=${JSON.stringify(state.title)}，window.opennote=${state.bridge}，#root 子节点=${state.root}`);
+  const state = await smokePackagedApp({ executable: EXECUTABLE });
+  console.log(`  PASS  渲染进程已就绪：title=${JSON.stringify(state.title)}，window.opennote=${state.bridgeType}，#root 子节点=${state.rootChildren}`);
 
   step(5, "用 hdiutil 生成 DMG（内含 /Applications 软链接）…");
   await rm(DMG, { force: true });

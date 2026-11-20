@@ -41,6 +41,20 @@ pnpm release:build                # 一条命令出齐下面三样
 | `Opennote-clip-<版本>.zip` | 剪藏扩展用户 | 解压后在 `chrome://extensions` 打开「开发者模式」→「加载已解压的扩展程序」；也是商店上传用的同一份 zip |
 | `SHA256SUMS` | 所有人 | `sha256sum -c SHA256SUMS`（Windows 在 Git Bash 里跑） |
 
+Windows 包的启动检查可以单独跑（发布流水线就是这条命令）：
+
+```powershell
+pnpm build:desktop
+pnpm exec electron-builder --config electron-builder.yml --win --x64 --dir
+node scripts/smoke-desktop.mjs --executable release/win-unpacked/Opennote.exe
+```
+
+它用独立的 `--user-data-dir` 与本地 CDP 端口真启动 `Opennote.exe`，要求主进程打出
+`desktop ready`、`#root` 已有内容、`window.opennote` 及一次无副作用的窗口 IPC 可用，
+且启动日志里没有致命错误。CI 先只组装 `win-unpacked`，冒烟通过后再用
+`electron-builder --prepackaged release/win-unpacked` 把**同一份目录**归档成 zip；
+任何一步失败都不会生成或发布 Windows 资产。
+
 体积基线（0.4.0 实测，改体积前先看 [`electron-builder.yml`](electron-builder.yml) 文件头的说明）：
 
 | 指标 | 改动前 | 现在 |
@@ -90,8 +104,9 @@ git push origin main --tags
 1. `couchdb-e2e`（可复用 workflow）→ CouchDB 3.3 service + `OPENNOTE_TEST_REAL_COUCH=1` 的真实数据面 E2E；
    它失败时后面的构建与 Release 资产都不会开始。
 2. `release`（`windows-latest`，`needs: couchdb-e2e`）依次做：门禁（tag/版本/CHANGELOG）→ `pnpm verify`（类型、根测试、扩展、IPC、bridge）→
-   Windows 桌面 zip → 扩展 zip → SHA256SUMS → 存 Actions artifact → 建/更新 GitHub Release
-   （`--generate-notes`）。
+   `electron-builder --dir` 组装 `win-unpacked` → **真启动冒烟** → 只把这份目录归档成 Windows zip →
+   扩展 zip → SHA256SUMS → 存 Actions artifact → 建/更新 GitHub Release（`--generate-notes`）。
+   冒烟失败时 job 在这里停下，zip 与 Release 都不会产生。
 3. `release-mac`（`macos-15`，arm64，`needs: release`）→ `pnpm verify` → `pnpm package:mac`（含签名复验与
    启动冒烟）→ 存 Actions artifact → 把 mac 的 dmg/zip 追加进同一个 Release，并把
    Windows 资产一起重新算一遍 **SHA256SUMS 覆盖上传**（`SHA256SUMS` 必须一份覆盖全部资产）。
@@ -235,7 +250,8 @@ mac job 是**纯追加**的：它不碰 Windows 那条链路，所以 macOS 打�
 
 13. **打包产物的启动冒烟必须摘掉 `ELECTRON_RUN_AS_NODE`**：这个环境变量会让 Electron 二进制
     退化成纯 Node，连 `--user-data-dir` 都不认（报 `bad option: --user-data-dir=...`），
-    看起来像打包坏了。`scripts/build-mac.mjs` 的 `smokeTest()` 显式 `delete env.ELECTRON_RUN_AS_NODE`；
+    看起来像打包坏了。`scripts/smoke-desktop.mjs` 显式 `delete env.ELECTRON_RUN_AS_NODE`，
+    Windows 与 macOS 都经它启动；
     手工复现时用 `env -u ELECTRON_RUN_AS_NODE release/mac-arm64/Opennote.app/Contents/MacOS/Opennote`。
     （配合坑 #3：还要给独立 `--user-data-dir`，否则会被单实例锁静默顶掉。）
 
