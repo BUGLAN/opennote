@@ -56,6 +56,7 @@ import { ShareStore } from "./shares";
 import { SettingsStore } from "./settings";
 import { csrfGuard, isHttps, securityHeaders } from "./panelSecurity";
 import { createWebAppRoutes, resolveWebRoot } from "./webApp";
+import { bodyLimit } from "./bodyLimit";
 
 export interface AppOptions {
   config: ServerConfig;
@@ -194,6 +195,23 @@ export function createApp(options: AppOptions): BuiltApp {
       if (!c.res.headers.has(key)) c.res.headers.set(key, value);
     }
   });
+
+  /*
+   * 请求体闸门必须在**所有路由之前**：登录等未认证入口也会被超大流打满内存。
+   * 二进制上传只有两条路径，其余按 JSON 的小上限处理；`Content-Length` 与
+   * 实际流都会检查，避免分块请求绕过。
+   */
+  app.use(
+    "*",
+    bodyLimit({
+      limitFor: (c) => {
+        const rawUpload =
+          (c.req.method === "PUT" && c.req.path === "/v1/file") ||
+          (c.req.method === "POST" && c.req.path === "/v1/shares");
+        return rawUpload ? config.maxFileBytes : config.maxJsonBodyBytes;
+      },
+    }),
+  );
 
   const nowOption = options.now === undefined ? {} : { now: options.now };
   const audit = (event: Parameters<NotebookStore["audit"]>[0]): void => notebooks.audit(event);

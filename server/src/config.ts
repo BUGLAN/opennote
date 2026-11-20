@@ -47,6 +47,8 @@ export interface ServerConfig {
 
   /** 单文件上限（字节）。受边缘 30s 写超时约束（U18）。 */
   maxFileBytes: number;
+  /** JSON 请求体上限（字节）。登录、设置等不可能接近文件上传的大小。 */
+  maxJsonBodyBytes: number;
   /**
    * `POST /v1/files` 整批原始字节上限（base64 之前）。
    *
@@ -101,6 +103,7 @@ const DEFAULTS = {
   PROTOCOL_VERSION_EXPECTED: String(PROTOCOL_VERSION),
   SQLITE_PATH: "./data/control.db",
   MAX_FILE_BYTES: "33554432",
+  MAX_JSON_BODY_BYTES: "1048576",
   /** 8 MiB：正常客户端一批 ≤ 512 KiB，有 16 倍余量；最坏情况单请求内存不再随 did 数膨胀。 */
   FILES_BATCH_MAX_BYTES: String(FILES_BATCH_MAX_BYTES),
   DEFAULT_ACCOUNT_QUOTA_BYTES: "2147483648",
@@ -219,6 +222,7 @@ export function loadConfig(env: Env = process.env): ServerConfig {
   // 数值项也全部先读一遍（`readPositiveInt` 会把非法值记进 `problems`）。
   const port = readPositiveInt(env, "PORT", DEFAULTS.PORT, problems);
   const maxFileBytes = readPositiveInt(env, "MAX_FILE_BYTES", DEFAULTS.MAX_FILE_BYTES, problems);
+  const maxJsonBodyBytes = readPositiveInt(env, "MAX_JSON_BODY_BYTES", DEFAULTS.MAX_JSON_BODY_BYTES, problems);
   const filesBatchMaxBytes = readPositiveInt(env, "FILES_BATCH_MAX_BYTES", DEFAULTS.FILES_BATCH_MAX_BYTES, problems);
   const defaultAccountQuotaBytes = readPositiveInt(env, "DEFAULT_ACCOUNT_QUOTA_BYTES", DEFAULTS.DEFAULT_ACCOUNT_QUOTA_BYTES, problems);
   const defaultAccountQuotaNotebooks = readPositiveInt(env, "DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS", DEFAULTS.DEFAULT_ACCOUNT_QUOTA_NOTEBOOKS, problems);
@@ -262,6 +266,7 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     couchAdminPassword: required.get("COUCH_ADMIN_PASSWORD") ?? "",
     sqlitePath: env.SQLITE_PATH?.trim() || DEFAULTS.SQLITE_PATH,
     maxFileBytes,
+    maxJsonBodyBytes,
     filesBatchMaxBytes,
     defaultAccountQuotaBytes,
     defaultAccountQuotaNotebooks,
@@ -306,6 +311,7 @@ export function describeConfig(config: ServerConfig): Record<string, string | nu
     couchUrl: config.couchUrl,
     sqlitePath: config.sqlitePath,
     maxFileBytes: config.maxFileBytes,
+    maxJsonBodyBytes: config.maxJsonBodyBytes,
     filesBatchMaxBytes: config.filesBatchMaxBytes,
     sseHeartbeatMs: config.sseHeartbeatMs,
     trustedProxyHeaders: config.trustedProxyHeaders,
