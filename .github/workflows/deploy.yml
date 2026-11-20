@@ -32,14 +32,16 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # 最低支持版本单独钉住：服务端直接 import node:sqlite，22.13 起无需
+          # --experimental-sqlite。构建 job 继续用最新 Node 22。
+          node-version: 22.13.0
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Typecheck
-        run: pnpm typecheck
+        run: pnpm typecheck:all
 
       - name: Tests
         run: pnpm test

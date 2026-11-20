@@ -24,7 +24,7 @@
     "url": "git+https://github.com/BUGLAN/opennote.git"
   },
   "engines": {
-    "node": ">=20.19",
+    "node": ">=22.13.0",
     "pnpm": ">=11"
   },
   "scripts": {

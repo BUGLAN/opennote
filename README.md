@@ -98,7 +98,7 @@ IndexedDB 只在两处出现，都不存笔记内容：一是 Chrome 的文件�
 
 ## 快速开始
 
-需要 Node 20.19+ 与 pnpm 11+。
+需要 Node 22.13+（服务端直接使用内置 `node:sqlite`，22.13 起无需 `--experimental-sqlite`）与 pnpm 11+。
 
 ```shell
 pnpm install
