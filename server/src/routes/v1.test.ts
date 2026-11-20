@@ -1866,4 +1866,78 @@ describe("空间配额：超出就拒收让用量变多的写", () => {
     });
     expect(response.status).toBe(201);
   });
+
+  it("★ 并发写同一账号、总增长超过配额 ⇒ 只有一个成功（预占要原子）", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.accounts.setQuota(alice.id, 10);
+    // 把写入卡在「已经通过配额检查、还没落到 CouchDB」的窗口里。
+    world.fake.beforePutDoc = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    };
+    const put = (path: string) =>
+      call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath(path))}&path=${encodeURIComponent(path)}`, {
+        method: "PUT",
+        headers: auth(alice.token),
+        body: "12345678",
+      });
+
+    const [first, second] = await Promise.all([put("a.md"), put("b.md")]);
+    expect([first.status, second.status].sort()).toEqual([201, 413]);
+    expect(world.notebooks.bytesOwnedBy(alice.id)).toBe(8);
+    expect(world.notebooks.reservedBytesOf(alice.id)).toBe(0);
+  });
+
+  it("CouchDB 写入失败后预占被释放，重试不会被自己的预占挡住", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.accounts.setQuota(alice.id, 10);
+    const put = () =>
+      call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath("a.md"))}&path=a.md`, {
+        method: "PUT",
+        headers: auth(alice.token),
+        body: "12345678",
+      });
+
+    // 只让真正的 PUT 失败：先读文档的 GET 必须正常返回，预占才会发生。
+    world.fake.failNext = `PUT /${notebook.dbName}`;
+    const failed = await put();
+    expect(failed.status).toBe(502);
+    expect(world.notebooks.reservedBytesOf(alice.id)).toBe(0);
+
+    expect((await put()).status).toBe(201);
+    expect(world.notebooks.bytesOwnedBy(alice.id)).toBe(8);
+    expect(world.notebooks.reservedBytesOf(alice.id)).toBe(0);
+  });
+
+  it("CouchDB 延迟造成覆盖冲突时，409 的预占也会释放", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.accounts.setQuota(alice.id, 100);
+    const initial = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath("a.md"))}&path=a.md`, {
+      method: "PUT",
+      headers: auth(alice.token),
+      body: "12345678",
+    });
+    expect(initial.status).toBe(201);
+    const initialHash = ((await initial.json()) as { hash: string }).hash;
+
+    world.fake.beforePutDoc = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    };
+    const overwrite = () =>
+      call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath("a.md"))}&path=a.md`, {
+        method: "PUT",
+        headers: { ...auth(alice.token), "if-match": initialHash },
+        body: "1234567890123456",
+      });
+
+    const [first, second] = await Promise.all([overwrite(), overwrite()]);
+    expect([first.status, second.status].sort()).toEqual([200, 409]);
+    expect(world.notebooks.bytesOwnedBy(alice.id)).toBe(16);
+    expect(world.notebooks.reservedBytesOf(alice.id)).toBe(0);
+  });
 });

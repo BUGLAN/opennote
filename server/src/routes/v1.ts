@@ -289,17 +289,11 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
     return { account: auth, notebook };
   };
 
-  /**
-   * 再写 `growth` 字节会不会超出 `ownerId` 的配额；超了返回当前用量与配额，没超返回 null。
-   * 配额 = 账号自己设的，否则服务默认值；≤ 0 视为不限。
-   */
-  const quotaExceeded = (ownerId: string, growth: number): { used: number; limit: number } | null => {
+  /** 账号的空间配额：账号自己设的，否则服务默认值；≤ 0 视为不限。 */
+  const quotaLimitOf = (ownerId: string): number => {
     const owner = deps.accounts.findById(ownerId);
-    if (!owner) return null;
-    const limit = owner.quota_bytes ?? deps.settings?.get("defaultQuotaBytes") ?? deps.config.defaultAccountQuotaBytes;
-    if (!(limit > 0)) return null;
-    const used = deps.notebooks.bytesOwnedBy(ownerId);
-    return used + growth > limit ? { used, limit } : null;
+    if (!owner) return 0;
+    return owner.quota_bytes ?? deps.settings?.get("defaultQuotaBytes") ?? deps.config.defaultAccountQuotaBytes;
   };
 
   /**
@@ -747,6 +741,7 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
       return json({ error: "E2EE 模式必须带 X-Opennote-Hash 头（服务端算不出 ehash，红线 3）", code: "bad-request" }, 400);
     }
 
+    let quotaReservation: { id: string } | null = null;
     try {
       const existing = await deps.couch.getDoc(notebook.db_name, did);
       const currentId = existing ? contentIdOf(existing) : null;
@@ -778,17 +773,26 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
        */
       const previousSize = typeof existing?.size === "number" ? existing.size : 0;
       const growth = bytes.byteLength - previousSize;
-      const overQuota = growth > 0 ? quotaExceeded(notebook.owner_id, growth) : null;
-      if (overQuota !== null) {
-        return json(
-          {
-            error: `空间已满：已用 ${formatBytes(overQuota.used)}，配额 ${formatBytes(overQuota.limit)}，这个文件还要 ${formatBytes(growth)}`,
-            code: "quota",
-            bytesUsed: overQuota.used,
-            bytesLimit: overQuota.limit,
-          },
-          413,
-        );
+      if (growth > 0) {
+        /*
+         * ★ **配额检查与预占必须原子**：只在 Node 内存里串行化不够（多实例部署
+         * 各有各的内存），必须在 SQLite 的写锁里同时读已用量与未结算预占。
+         * 预占行在 `await deps.couch.putDoc()` 期间一直存在，后到的并发写会看见它。
+         */
+        const limit = quotaLimitOf(notebook.owner_id);
+        const reservation = deps.notebooks.reserveQuota({ accountId: notebook.owner_id, bytes: growth, limit });
+        if ("quotaExceeded" in reservation) {
+          return json(
+            {
+              error: `空间已满：已用 ${formatBytes(reservation.bytesUsed)}，配额 ${formatBytes(limit)}，这个文件还要 ${formatBytes(growth)}`,
+              code: "quota",
+              bytesUsed: reservation.bytesUsed,
+              bytesLimit: limit,
+            },
+            413,
+          );
+        }
+        quotaReservation = { id: reservation.reservation.id };
       }
 
       const written = await deps.couch.putDoc(
@@ -834,6 +838,10 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
         { baseRev: existing?._rev ?? null },
       );
       if ("conflict" in written) {
+        if (quotaReservation !== null) {
+          deps.notebooks.releaseQuotaReservation(quotaReservation.id);
+          quotaReservation = null;
+        }
         record(account.id, notebook.id, "conflict");
         return json({ error: "写入冲突（远端在我们读取之后又变了）", code: "conflict", current: written.current ? { hash: contentIdOf(written.current), rev: written.current._rev ?? null } : null }, 409);
       }
@@ -844,13 +852,26 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
        * 上一版的大小从文档的 `size` 字段读 —— 那是我们自己写的，形状可信。
        * 读不到就按 0 算（宁可少记，不可凭空多记一个账号的用量）。
        */
-      deps.notebooks.addNotebookBytes(notebook.id, growth);
+      if (quotaReservation !== null) {
+        deps.notebooks.settleQuotaReservation(quotaReservation.id, notebook.id, growth);
+        quotaReservation = null;
+      } else {
+        deps.notebooks.addNotebookBytes(notebook.id, growth);
+      }
       // 响应里回**这一版**的标识与 rev（客户端据此更新基线，§4.7: `-> 200/201 { hash?, ehash?, rev }`）。
       return json(
         { rev: written.rev, ...(cryptoMode === "none" ? { hash: newHash } : { ehash: newHash }) },
         existing ? 200 : 201,
       );
     } catch (error) {
+      if (quotaReservation !== null) {
+        try {
+          deps.notebooks.releaseQuotaReservation(quotaReservation.id);
+        } catch (releaseError) {
+          // 预占还有 `expires_at` 兜底；这里只记录，不能把写入错误盖掉。
+          console.warn("[opennote-server] 释放配额预占失败（等待过期清理）", releaseError);
+        }
+      }
       return couchError(error, { accountId: account.id, notebookId: notebook.id });
     }
   });

@@ -705,6 +705,80 @@ export class NotebookStore {
     return row?.total ?? 0;
   }
 
+  /**
+   * 原子预占一次写入需要的空间（账号级）。
+   *
+   * ## 为什么需要预占
+   *
+   * `PUT /v1/file` 在 CouchDB 写入**之前**检查配额，写入成功后才记账；两次网络
+   * 往返之间，多个并发写都会看到同一份旧用量。预占行把「正在进行、尚未结算」
+   * 的增长也算进配额，于是后来的请求要么看见它、要么等它结算。
+   *
+   * ## 崩溃兜底
+   *
+   * `BEGIN IMMEDIATE` 只保护预占本身，保护不了进程崩溃；`expires_at` 让下一次
+   * 预占能顺手清掉永远等不到结算的旧行。正常失败路径仍由路由立即释放。
+   */
+  reserveQuota(input: { accountId: string; bytes: number; limit: number; now?: number; ttlMs?: number }):
+    | { reservation: { id: string; accountId: string; bytes: number } }
+    | { quotaExceeded: true; bytesUsed: number } {
+    const bytes = Math.trunc(input.bytes);
+    if (!Number.isFinite(bytes) || bytes <= 0) throw new Error("预占字节数必须是正整数");
+    const now = input.now ?? Date.now();
+    const ttlMs = Math.max(1, Math.trunc(input.ttlMs ?? 10 * 60_000));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // 过期预占属于已经死掉的写入，不能继续占着配额。
+      this.db.prepare("DELETE FROM quota_reservations WHERE expires_at <= ?").run(now);
+      const reserved = this.db
+        .prepare("SELECT COALESCE(SUM(bytes), 0) AS total FROM quota_reservations WHERE account_id = ? AND expires_at > ?")
+        .get(input.accountId, now) as unknown as { total: number };
+      const bytesUsed = this.bytesOwnedBy(input.accountId) + (reserved?.total ?? 0);
+      if (input.limit > 0 && bytesUsed + bytes > input.limit) {
+        this.db.exec("COMMIT");
+        return { quotaExceeded: true, bytesUsed };
+      }
+      const id = newNotebookId();
+      this.db
+        .prepare("INSERT INTO quota_reservations (id, account_id, bytes, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+        .run(id, input.accountId, bytes, now, now + ttlMs);
+      this.db.exec("COMMIT");
+      return { reservation: { id, accountId: input.accountId, bytes } };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** 当前仍未结算的预占（控制台诊断 / 用例用；与 `bytesOwnedBy` 分开）。 */
+  reservedBytesOf(accountId: string, now = Date.now()): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(SUM(bytes), 0) AS total FROM quota_reservations WHERE account_id = ? AND expires_at > ?")
+      .get(accountId, now) as unknown as { total: number } | undefined;
+    return row?.total ?? 0;
+  }
+
+  /**
+   * 写入成功后结算：删除预占并把**实际增长**记进 `notebook_usage`，两步同一事务。
+   * 若预占已因超时被清理，仍要记账 —— 字节确实写进了 CouchDB。
+   */
+  settleQuotaReservation(id: string, notebookId: string, delta: number, now = Date.now()): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM quota_reservations WHERE id = ?").run(id);
+      this.addNotebookBytes(notebookId, delta, now);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** 写入失败 / 409 / 超时：只释放预占，不动已用量。 */
+  releaseQuotaReservation(id: string): void {
+    this.db.prepare("DELETE FROM quota_reservations WHERE id = ?").run(id);
+  }
+
   /* -------------------------------------------------------------- 用量记账 */
 
   /**

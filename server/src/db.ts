@@ -27,7 +27,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** 当前 schema 版本。加一条迁移就 +1（**只加不删**）。 */
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 interface Migration {
   version: number;
@@ -510,6 +510,33 @@ const MIGRATIONS: readonly Migration[] = [
        * 这个标记随账号行一起消失。
        */
       db.exec("ALTER TABLE accounts ADD COLUMN deletion_started_at INTEGER");
+    },
+  },
+  {
+    version: 12,
+    description: "账号级空间配额预占：quota_reservations",
+    up: (db) => {
+      /*
+       * 配额检查与 CouchDB 写入之间隔着一次网络往返。只读 `notebook_usage` 的话，
+       * 多个并发写会同时看到旧用量，全部通过检查后再一起写入，账号因此可以突破
+       * `quota_bytes`。
+       *
+       * 预占行是这段窗口里的**持久**证据：`BEGIN IMMEDIATE` 里同时读已用量与未结算
+       * 预占、插入本次增长，多实例也共用同一把 SQLite 写锁。CouchDB 成功后用实际
+       * 增长结算并删除预占；失败、409、超时则删除。`expires_at` 是进程崩溃时的
+       * 兜底：下一次预占会先清掉过期行，不会永久占住配额。
+       */
+      db.exec(`
+        CREATE TABLE quota_reservations (
+          id          TEXT PRIMARY KEY,
+          account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          bytes       INTEGER NOT NULL CHECK (bytes > 0),
+          created_at  INTEGER NOT NULL,
+          expires_at  INTEGER NOT NULL
+        );
+        CREATE INDEX idx_quota_reservations_account ON quota_reservations(account_id);
+        CREATE INDEX idx_quota_reservations_expires ON quota_reservations(expires_at);
+      `);
     },
   },
 ];

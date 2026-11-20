@@ -46,6 +46,11 @@ export class FakeCouch {
    * 「读完文档、还没读附件」之间的并发写入。
    */
   beforeAttachmentGet: ((request: { dbName: string; docId: string; name: string; rev: string | null }) => void | Promise<void>) | null = null;
+  /**
+   * 写文档前的注入点。用例可以在这里停顿，让多个请求走到「已通过配额检查、
+   * 还没完成 CouchDB 写入」的窗口，验证预占是否真的挡住了并发。
+   */
+  beforePutDoc: ((request: { dbName: string; docId: string }) => void | Promise<void>) | null = null;
   readonly revsLimits = new Map<string, number>();
   /** 设成真时下一次请求抛网络错误（测回滚）。 */
   failNext: string | null = null;
@@ -256,6 +261,7 @@ export class FakeCouch {
       return doc ? json(200, doc) : json(404, { error: "not_found" });
     }
     if (method === "PUT") {
+      if (this.beforePutDoc) await this.beforePutDoc({ dbName, docId });
       const existing = docs.get(docId);
       const payload = body ? (JSON.parse(body) as FakeDoc) : ({ _id: docId } as FakeDoc);
       /*

@@ -31,6 +31,7 @@ describe("首次打开", () => {
         "notebook_usage",
         "notebooks",
         "password_resets",
+        "quota_reservations",
         "quota_usage",
         "schema_version",
         "server_settings",

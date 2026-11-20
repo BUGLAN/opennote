@@ -569,6 +569,48 @@ describe("§4.11 · 配额：只拦写入，不拦读取", () => {
   });
 });
 
+describe("空间配额预占", () => {
+  it("未结算预占计入用量；过期预占会被下一次预占清理", () => {
+    const { accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+
+    const first = notebooks.reserveQuota({ accountId: alice.id, bytes: 8, limit: 10, now: 1_000, ttlMs: 100 });
+    expect("reservation" in first).toBe(true);
+    expect(notebooks.reservedBytesOf(alice.id, 1_000)).toBe(8);
+
+    // 已用 0 + 预占 8 + 新增长 3 > 10 ⇒ 拒绝，且报告的是含预占的用量。
+    expect(notebooks.reserveQuota({ accountId: alice.id, bytes: 3, limit: 10, now: 1_001 })).toEqual({
+      quotaExceeded: true,
+      bytesUsed: 8,
+    });
+
+    // 原预占过期：新预占先清理旧行，再重新占用，不会永久卡住配额。
+    const afterExpiry = notebooks.reserveQuota({ accountId: alice.id, bytes: 8, limit: 10, now: 1_101, ttlMs: 100 });
+    expect("reservation" in afterExpiry).toBe(true);
+    expect(notebooks.reservedBytesOf(alice.id, 1_101)).toBe(8);
+  });
+
+  it("结算把预占换成实际记账；释放只删预占，不动已用量", () => {
+    const { accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+    const notebook = notebooks.create({ ownerId: alice.id, name: "a", cryptoMode: "none" });
+
+    const settled = notebooks.reserveQuota({ accountId: alice.id, bytes: 5, limit: 100, now: 2_000 });
+    expect("reservation" in settled).toBe(true);
+    if (!("reservation" in settled)) throw new Error("unreachable");
+    notebooks.settleQuotaReservation(settled.reservation.id, notebook.id, 5, 2_001);
+    expect(notebooks.reservedBytesOf(alice.id, 2_001)).toBe(0);
+    expect(notebooks.notebookBytesOf(notebook.id)).toBe(5);
+
+    const released = notebooks.reserveQuota({ accountId: alice.id, bytes: 3, limit: 100, now: 2_002 });
+    expect("reservation" in released).toBe(true);
+    if (!("reservation" in released)) throw new Error("unreachable");
+    notebooks.releaseQuotaReservation(released.reservation.id);
+    expect(notebooks.reservedBytesOf(alice.id, 2_002)).toBe(0);
+    expect(notebooks.notebookBytesOf(notebook.id)).toBe(5);
+  });
+});
+
 /* ========================================================================== */
 
 describe("控制台取数：服务端自己记账的用量与同步活动", () => {
