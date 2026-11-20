@@ -41,7 +41,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 发版前先跑真实 CouchDB 3.3 的数据面 E2E；它失败就不产出任何 Release 资产。
+  couchdb-e2e:
+    uses: ./.github/workflows/couchdb-e2e.yml
+
   release:
+    needs: couchdb-e2e
     runs-on: windows-latest
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}

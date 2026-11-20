@@ -1,0 +1,83 @@
+# 真实 CouchDB 3.3 的数据面 E2E。
+#
+# 为什么不放进普通 PR：service container + 真实 _changes/SSE 会把每条 PR 拉长。
+# 这里覆盖 nightly、手动触发，以及 release.yml 的 workflow_call（发版前必须先过）。
+name: CouchDB E2E
+
+on:
+  workflow_call:
+  schedule:
+    # 每天 03:17 UTC（北京时间 11:17）跑一次。
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: couchdb-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  couchdb-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      couchdb:
+        image: couchdb:3.3
+        env:
+          COUCHDB_USER: admin
+          COUCHDB_PASSWORD: adminpw
+        ports:
+          - 5984:5984
+        options: >-
+          --health-cmd "curl -fsS -u admin:adminpw http://localhost:5984/_up"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      OPENNOTE_TEST_REAL_COUCH: "1"
+      OPENNOTE_TEST_COUCH_URL: http://127.0.0.1:5984
+      OPENNOTE_TEST_COUCH_ADMIN_USER: admin
+      OPENNOTE_TEST_COUCH_ADMIN_PASSWORD: adminpw
+      OPENNOTE_TEST_COUCH_SYNC_PASSWORD: sync-pw
+      LOG_LEVEL: error
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 与后面的协议测试分开：这一步失败是「环境没起来」，不是同步协议坏了。
+      - name: 等待 CouchDB 3.3（环境）
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -fsS -u admin:adminpw http://127.0.0.1:5984/_up >/dev/null; then
+              version="$(curl -fsS -u admin:adminpw http://127.0.0.1:5984/ | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))')"
+              echo "CouchDB ready: $version"
+              case "$version" in
+                3.3.*) exit 0 ;;
+                *) echo "::error::期望 CouchDB 3.3.x，实际 $version"; exit 1 ;;
+              esac
+            fi
+            sleep 2
+          done
+          echo "::error::CouchDB service 未在 60 秒内就绪（环境问题，不是协议失败）"
+          exit 1
+
+      - name: 真实 CouchDB 协议 E2E
+        run: pnpm exec vitest run tests/sync.e2e.test.ts --reporter=verbose

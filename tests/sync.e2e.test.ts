@@ -70,6 +70,11 @@ import type { FileSystemBackend } from "../src/fs/types";
    真实 CouchDB 模式（可选）
    ============================================================================ */
 
+/**
+ * CI 对应 `.github/workflows/couchdb-e2e.yml`：nightly、手动触发与 release 前都会
+ * 起 CouchDB 3.3 service 并设置 `OPENNOTE_TEST_REAL_COUCH=1`。本地想复跑时先启动
+ * CouchDB 3.3，再按下面四个 `OPENNOTE_TEST_COUCH_*` 变量传入地址与凭据。
+ */
 const REAL_COUCH = process.env.OPENNOTE_TEST_REAL_COUCH === "1";
 const REAL_COUCH_URL = process.env.OPENNOTE_TEST_COUCH_URL ?? "http://127.0.0.1:5984";
 /** 与 docker run 的 COUCHDB_USER/COUCHDB_PASSWORD 对齐（可用环境变量覆盖）。 */
