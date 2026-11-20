@@ -32,7 +32,10 @@ const REPO_ROOT = path.resolve(__dirname, '..')
 const MAIN_PATH = path.join(REPO_ROOT, 'electron', 'main.cjs')
 const PRELOAD_PATH = path.join(REPO_ROOT, 'electron', 'preload.cjs')
 
-/** 与 electron/main.cjs 的 CSP 基线逐字一致（冻结契约 + Lead 裁决：仅 style/font 放行 jsdelivr）。 */
+/**
+ * 与 electron/main.cjs 的 CSP 基线逐字一致（冻结契约 + Lead 裁决：仅 style/font 放行 jsdelivr）。
+ * `frame-src file:` 只用于加载 `dist/html-sandbox.html`；子框架导航另由 will-frame-navigate 限定。
+ */
 const BASE_CSP_SCRIPT_SRC = "script-src 'self' file:"
 const EXPECTED_CSP =
   "default-src 'none'; " +
@@ -42,7 +45,8 @@ const EXPECTED_CSP =
   "font-src 'self' file: data: https://cdn.jsdelivr.net; " +
   "connect-src 'self' file:; " +
   "media-src 'self' file: blob: data:; " +
-  "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; worker-src 'self' blob:"
+  "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; worker-src 'self' blob:; " +
+  'frame-src file:'
 
 /** 内联脚本哈希会被追加进 script-src（桌面构建的启动脚本需要它）。 */
 function expectedCsp(hashes = []) {
@@ -678,8 +682,13 @@ async function main() {
   })
 
   section('D29 remove 的 "." 等归一化写法不能删根目录')
-  await check('remove(root, ".", "./", ".//", ".\\\\", "././", "", undefined, null) 全部拒绝', async () => {
-    const variants = ['.', './', './/', '.\\', '././', '', undefined, null]
+  const rootAliases = ['.', './', './/', '././', '', undefined, null]
+  // 反斜杠只在 Windows 上是路径分隔符；POSIX 上它是普通文件名字符，不能拿 Windows 的
+  // 归一化结果要求一个不存在的文件。Windows 分支仍必须把它当根目录别名拒绝。
+  if (process.platform === 'win32') rootAliases.push('.\\')
+  const rootAliasLabels = rootAliases.map((item) => (item === undefined ? 'undefined' : JSON.stringify(item)))
+  await check(`remove(root, ${rootAliasLabels.join(', ')}) 全部拒绝`, async () => {
+    const variants = rootAliases
     for (const variant of variants) {
       await expectReject(
         () => callA('opennote:fs:remove', ws, variant, { recursive: true }),
@@ -690,8 +699,20 @@ async function main() {
     assert.equal(fs.existsSync(ws), true, '工作区目录必须保留')
     assert.equal(fs.readFileSync(path.join(ws, 'note.md'), 'utf8').includes('第一行'), true, '正文必须保留')
     assert.equal(fs.existsSync(path.join(ws, 'written.md')), true)
-    return `8 种写法全部拒绝`
+    return `${variants.length} 种根目录别名全部拒绝`
   })
+  if (process.platform !== 'win32') {
+    await check('POSIX 上 ".\\" 只是普通文件名，不能误删根目录', async () => {
+      const literal = '.\\'
+      const file = path.join(ws, literal)
+      fs.writeFileSync(file, 'literal filename', 'utf8')
+      await callA('opennote:fs:remove', ws, literal, { recursive: true })
+      assert.equal(fs.existsSync(file), false, '应只删除这个普通文件')
+      assert.equal(fs.existsSync(ws), true, '工作区目录必须保留')
+      assert.equal(fs.readFileSync(path.join(ws, 'note.md'), 'utf8').includes('第一行'), true, '正文必须保留')
+      return '反斜杠按 POSIX 文件名字符处理'
+    })
+  }
   await check('remove(root, "sub/..") 也被拒（.. 段词法校验仍在）', async () => {
     fs.mkdirSync(path.join(ws, 'sub'), { recursive: true })
     await expectReject(() => callA('opennote:fs:remove', ws, 'sub/..', { recursive: true }), /路径越界/)
@@ -924,20 +945,27 @@ async function main() {
   })
   await check('外部写入后收到去抖的 workspace-changed 通知', async () => {
     const contents = stateA.windows[0].webContents
-    const before = contents.sent.filter((item) => item.channel === 'opennote:fs:workspace-changed').length
+    const workspaceEvents = () =>
+      contents.sent.filter((item) => {
+        if (item.channel !== 'opennote:fs:workspace-changed') return false
+        const payload = item.args[0]
+        return payload && payload.v === 2 && payload.root === path.resolve(ws) && Array.isArray(payload.changes)
+      })
+    const before = workspaceEvents().length
     fs.writeFileSync(path.join(ws, 'external-change.md'), 'from outside', 'utf8')
     const deadline = Date.now() + 3000
     let events = []
     while (Date.now() < deadline) {
-      events = contents.sent.filter((item) => item.channel === 'opennote:fs:workspace-changed')
+      events = workspaceEvents()
       if (events.length > before) break
       await delay(25)
     }
-    assert.ok(events.length > before, '应收到 workspace-changed')
-    const sameRoot = events.filter((item) => item.args[0] === path.resolve(ws)).length
-    assert.ok(sameRoot >= 1, 'payload 应为工作区绝对路径')
-    assert.equal(contents.sent.filter((item) => item.channel === 'opennote:fs:workspace-changed').length - before, 1, '一次改动只通知一次（去抖）')
-    return `收到 ${events.length - before} 次通知`
+    assert.ok(events.length > before, '应收到 v2 workspace-changed（root + changes）')
+    // 去抖窗口是 450ms：等过一个完整窗口再断言只多了一条，避免在定时器尚未触发时抢跑。
+    await delay(700)
+    const total = workspaceEvents().length - before
+    assert.equal(total, 1, '一次改动只通知一次（去抖）')
+    return `收到 ${total} 次 v2 通知`
   })
   await check('unwatchWorkspace 生效（不再通知）', async () => {
     assert.equal(await callA('opennote:fs:unwatchWorkspace', ws), true)

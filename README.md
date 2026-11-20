@@ -208,7 +208,7 @@ macOS 用 ⌘，其他平台用 Ctrl。
 
 ### GitHub Pages
 
-仓库自带 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)：推送到 `main` 或手动触发 `workflow_dispatch` 时，用 Node 22 + pnpm 构建并发布 `dist/`。
+仓库自带 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)：推到 `main` 的 PR 会运行全量门禁（类型、单测、扩展、IPC、bridge、边界与忽略规则）并构建，但不部署；推送到 `main` 或手动触发 `workflow_dispatch` 时，只有全部门禁和构建都通过才会发布 `dist/`。
 
 启用方式：仓库 **Settings → Pages → Source** 选择 **GitHub Actions**，然后推一次 `main`。工作流用 `VITE_BASE=/${{ github.event.repository.name }}/` 指定子路径（默认 `/`）。
 
@@ -286,6 +286,7 @@ pnpm install
 pnpm dev             # web dev server
 pnpm build           # type-check + production build (dist/)
 pnpm test            # Vitest
+pnpm verify          # same CI gate: types, tests, extension, IPC, bridge
 pnpm dev:electron    # desktop development
 pnpm package:desktop # portable desktop zip
 pnpm release:check   # release gate: version / CHANGELOG / tag consistency

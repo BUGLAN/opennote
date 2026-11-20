@@ -81,16 +81,10 @@ jobs:
       - name: 门禁：tag / 版本号 / CHANGELOG 三者一致
         run: node scripts/release-version.mjs check --tag "$env:TAG"
 
-      # 注意：Windows runner 的默认 shell 是 pwsh，多行 run 只检查**最后一条**命令的退出码。
-      # 所以每个检查各占一个 step，别合并成一段。
-      - name: 单测（渲染层）
-        run: pnpm test
-
-      - name: 构建扩展
-        run: node extension/build.mjs
-
-      - name: 单测（扩展）
-        run: pnpm --dir extension test
+      # Windows runner 的默认 shell 是 pwsh：verify 内部用 && 串联六道检查，任一道非 0
+      # 都会让这个 step 失败；门禁与后续打包各占独立 step，避免后者掩盖前者。
+      - name: 门禁（类型检查 / 根测试 / 扩展 / IPC / bridge）
+        run: pnpm verify
 
       - name: 构建桌面资源（相对路径 + 关掉 Service Worker）
         run: pnpm build:desktop
@@ -172,8 +166,8 @@ jobs:
           echo "runner arch = $arch"
           test "$arch" = "arm64" || { echo "::error::期望 arm64 runner（macos-15），实际 $arch"; exit 1; }
 
-      - name: 单测（渲染层）
-        run: pnpm test
+      - name: 门禁（类型检查 / 根测试 / 扩展 / IPC / bridge）
+        run: pnpm verify
 
       # 一条命令 7 步：构建 → electron-builder → ad-hoc 签名 + 复验 → 启动冒烟 →
       # DMG（hdiutil）→ ZIP（ditto）→ SHA256SUMS。脚本自己会在签名不合规或产物起不来时

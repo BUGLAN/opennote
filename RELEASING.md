@@ -87,10 +87,10 @@ git push origin main --tags
 
 [`release.yml`](.github/workflows/release.yml) 两个 job：
 
-1. `release`（`windows-latest`）依次做：门禁（tag/版本/CHANGELOG）→ 单测（渲染层 + 扩展）→
+1. `release`（`windows-latest`）依次做：门禁（tag/版本/CHANGELOG）→ `pnpm verify`（类型、根测试、扩展、IPC、bridge）→
    Windows 桌面 zip → 扩展 zip → SHA256SUMS → 存 Actions artifact → 建/更新 GitHub Release
    （`--generate-notes`）。
-2. `release-mac`（`macos-15`，arm64，`needs: release`）→ 单测 → `pnpm package:mac`（含签名复验与
+2. `release-mac`（`macos-15`，arm64，`needs: release`）→ `pnpm verify` → `pnpm package:mac`（含签名复验与
    启动冒烟）→ 存 Actions artifact → 把 mac 的 dmg/zip 追加进同一个 Release，并把
    Windows 资产一起重新算一遍 **SHA256SUMS 覆盖上传**（`SHA256SUMS` 必须一份覆盖全部资产）。
 

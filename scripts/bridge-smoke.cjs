@@ -15,6 +15,7 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const http = require('node:http')
+const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
 const crypto = require('node:crypto')
@@ -292,9 +293,24 @@ function occupy(port) {
 /** 探测端口是否空闲（true = 没人监听）。 */
 function isFree(port) {
   return new Promise((resolve) => {
-    const server = http.createServer()
-    server.once('error', () => resolve(false))
-    server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)))
+    const socket = net.connect({ host: '127.0.0.1', port })
+    let settled = false
+    const finish = (free) => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      if (!free) {
+        resolve(false)
+        return
+      }
+      const server = http.createServer()
+      server.once('error', () => resolve(false))
+      server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)))
+    }
+    socket.setTimeout(500)
+    socket.once('connect', () => finish(false))
+    socket.once('timeout', () => finish(false))
+    socket.once('error', (error) => finish(error.code === 'ECONNREFUSED'))
   })
 }
 

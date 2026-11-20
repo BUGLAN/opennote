@@ -35,6 +35,7 @@
     "typecheck:shared": "tsc --noEmit -p shared/tsconfig.json",
     "typecheck:server": "tsc --noEmit -p server/tsconfig.json",
     "typecheck:all": "pnpm run typecheck && pnpm run typecheck:shared && pnpm run typecheck:server",
+    "verify": "pnpm run typecheck:all && pnpm test && node extension/build.mjs && pnpm --dir extension test && node scripts/ipc-safety-check.cjs && node scripts/bridge-smoke.cjs",
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "dev:server": "tsx watch server/src/index.ts",
     "cli:server": "tsx server/src/cli.ts",
