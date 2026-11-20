@@ -1,5 +1,5 @@
 /**
- * 设置 → 同步（`docs/sync/mockups/02-settings-sync.html`，取代 SyncDialog）。
+ * 设置 → 同步（取代 SyncDialog）。
  *
  * 一条旅程，按账号状态分两段：
  *

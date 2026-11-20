@@ -4,8 +4,8 @@
  * Opennote 0.2.0 · 独立契约验证器（Verifier 产物，只读驱动，绝不修改产品代码）
  * ============================================================================
  *
- * 用途：把 `docs/import/02-接口契约-导入信封与通道.md`（+ 00/01/03 号）里的**硬性要求**
- * 变成可复跑的断言。判据以 Lead 蒸馏的权威口径为准（见 docs/verify/V1-契约与安全.md）。
+ * 用途：把导入契约（原 docs/import/02 等号文档，已移出仓库）里的**硬性要求**
+ * 变成可复跑的断言。依赖契约文档原文的检查（C-6、C-6c、C-11d 等）读不到文档时记 SKIP。
  *
  * 语义：
  *   退出码 0  = 全部断言通过（FAIL 数 = 0；SKIP 不算通过，会在摘要里单独计数）
@@ -36,7 +36,7 @@ const { pathToFileURL } = require("url");
 
 const ROOT = path.resolve(__dirname, "..");
 /** 号段与文案的唯一真源：02 号附录 A.3。 */
-const CONTRACT_DOC = "docs/import/02-接口契约-导入信封与通道.md";
+const CONTRACT_DOC = "docs/import/02-接口契约-导入信封与通道.md"; // 已移出仓库：读不到时相关检查记 SKIP
 /**
  * 文案列是「一个格子覆盖多种分支」的码，本就不可能逐字相等，显式排除出逐字比对。
  * `IMP-4011`：同一格同时描述 append 目标缺失 / overwrite 降级 / skip 命中三种情形，
@@ -407,9 +407,6 @@ const INBOX_STATES = ["pending", "committing", "committed", "failed", "discarded
 /* ==================================================================== §1 */
 
 group("§1 环境与基线");
-
-check("ENV-1", "规范文档 00–04 齐全", ["00-项目简报与范围锁定.md", "01-PRD-剪藏与导入需求.md", "02-接口契约-导入信封与通道.md", "03-UI设计规范-剪藏与导入.md", "04-评审报告-一致性核查.md"].every((n) => exists(`docs/import/${n}`)),
-  "docs/import/00–04 均存在");
 
 check("ENV-2", `基线提交 ${BASELINE} 可解析`, git(["cat-file", "-t", BASELINE]) !== null && git(["cat-file", "-t", BASELINE]).trim() === "commit",
   `${BASELINE} 是 commit`);

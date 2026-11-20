@@ -999,7 +999,7 @@ function queuePathRefresh(target: FileSystemBackend, changes: WorkspaceFileChang
 }
 
 /**
- * **远端落盘之后显式驱动 UI 刷新**（P0；`docs/执行-三端同步…` §5.4 第 1、2 条）。
+ * **远端落盘之后显式驱动 UI 刷新**（P0）。
  *
  * 两条硬要求：
  * 1. **不能等 watcher** —— 桌面端的主进程 watcher 会把「应用自己经 IPC 写过的路径」

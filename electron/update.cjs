@@ -18,8 +18,8 @@
  *   4. 覆盖安装必须由用户点「重启并更新」触发，没有静默安装。
  *   5. 失败一律落成 `{ code, message }`（中文、可执行、不含绝对路径），绝不静默。
  *
- * 顶层只 require node 内建 + 同目录的 `./zip.cjs`（见 RELEASING.md 已知坑 #4：
- * 主进程不许 require 第三方包）。
+ * 顶层只 require node 内建 + 同目录的 `./zip.cjs`（主进程不许 require
+ * 第三方包：打包时 `files` 刻意排除了 `node_modules`）。
  */
 
 const { spawn } = require('node:child_process')

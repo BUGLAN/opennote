@@ -68,13 +68,12 @@ files:
   # 0.13.0 实测漏掉这条时：`app.asar` = **219 MB / 10001 个 node_modules 条目**，
   # 里面全是 mermaid / codemirror / katex / react / @fontsource 这些**只在 Vite 构建期用**
   # 的包（渲染层早就把它们打进 dist/ 了）。补上之后 asar 回到 ~11 MB 量级，
-  # 交付包体积直接掉一大截。RELEASING.md「已知坑」#4 说的就是这件事，别再删。
+  # 交付包体积直接掉一大截。这个坑踩过不止一次，别再删。
   - '!node_modules/**/*'
   # 见文件头「关于体积」：这些依赖只在构建期用，运行时不需要。
   # P1c-2 注：@parcel/watcher（工作区监听源）在 devDependencies——`pnpm dev` 直接用
   # 它；打包版 main.cjs require 不到时自动退化回 node:fs 递归 watch（同一内核事件源，
-  # 行为一致）。将来若要打包也带上它，按下面的配方放开（spike 结论见
-  # docs/设计-同步层与索引重构-2026-10-10.md §P1c-2）：
+  # 行为一致）。将来若要打包也带上它，按下面的配方放开（spike 结论）：
   #   1) 把 @parcel/watcher 与 @parcel/watcher-win32-x64 移回 dependencies
   #      （electron-builder 的 pnpm 收集器只走 package.json 直接依赖，.pnpm 通配不生效）；
   #   2) files 追加 'node_modules/@parcel/watcher/**/*' 与
@@ -130,14 +129,14 @@ mac:
   #   本机因此被签成了无关的自签证书 "Snow Shot Local Installer C8C84F83-…"：
   #   换台机器（没有那张证书）产物就完全不同，发布物不可复现。
   #   `null` 走的是 handleNullIdentity()，确定性跳过，不碰钥匙串。
-  # 正式发布要换成 Developer ID + 公证，见 RELEASING.md 第 5 节。
+  # 正式发布要换成 Developer ID + 公证。
   identity: null
   # ad-hoc 签名 + hardened runtime 会打开 library validation，应用起不来
   # （electron-builder 自己也会警告要补 com.apple.security.cs.disable-library-validation）。
   # 公证发布之前不要打开。
   hardenedRuntime: false
   # 不指定 arch：随构建机架构走（arm64 机器出 arm64）。上面 electronDist 指向的是
-  # node_modules 里那一份**单架构** Electron，跨架构构建需要另一份发行版，见 RELEASING.md。
+  # node_modules 里那一份**单架构** Electron，跨架构构建需要另一份发行版。
 
 linux:
   target: AppImage

@@ -8,8 +8,7 @@
  *
  * 它做的事：
  *   1. 把 `release/win-unpacked/` 复制到临时目录当作「安装目录」——**绝不**动真实安装目录，
- *      也绝不用真实 userData（`--user-data-dir` 指向临时目录，单实例锁因此互不干扰，
- *      见 RELEASING.md 已知坑 #3）。
+ *      也绝不用真实 userData（`--user-data-dir` 指向临时目录，单实例锁因此互不干扰）。
  *   2. 用 store 模式（不压缩）现场打一个 `Opennote-9.9.9-win-x64.zip`，内容 = 安装目录的
  *      全部文件 + 一个 `UPDATE-MARKER-9.9.9.txt`；流式写，不在内存里堆 380 MB。
  *   3. 起一个本地 HTTP 服务器冒充 GitHub Releases（`/repos/.../releases/latest`、
@@ -27,7 +26,7 @@
  *
  * 本脚本**没有**覆盖什么（如实列出，别把它当全绿）：真实 GitHub、真实发布包的 asar 版本号
  * 变化（这里的「新版本」是假包，所以覆盖后应用仍报 0.5.0）、只读安装目录、断电中断。
- * 「真包的版本号真的变了」只能靠发布日演练（RELEASING.md）。
+ * 「真包的版本号真的变了」只能靠发布日演练。
  */
 
 const fs = require('node:fs')
@@ -642,7 +641,7 @@ async function main() {
     }
   }
   console.log('本脚本没覆盖：真实 GitHub 网络、真实发布包的 asar 版本号变化（假包覆盖后应用仍报原版本）、')
-  console.log('只读安装目录、覆盖途中断电、以及「图标长什么样」（那需要人看，见 docs/update/00）。')
+  console.log('只读安装目录、覆盖途中断电、以及「图标长什么样」（那需要人看）。')
   return failCount > 0 ? 1 : 0
 }
 

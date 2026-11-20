@@ -1,5 +1,5 @@
 /**
- * **纯内存**的 `SyncProvider` fake（`docs/执行-三端同步…` §10.1 A、§4.10）。
+ * **纯内存**的 `SyncProvider` fake。
  *
  * ## 它为什么重要
  *

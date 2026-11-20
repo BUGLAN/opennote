@@ -18,7 +18,7 @@
 #                  （`needs: release` 保证顺序；它**不改动** Windows 那条链路，
 #                    所以 macOS 打包出问题最多是「这个版本没有 mac 产物」，
 #                    不会连带把 Windows 发布弄挂）
-# Linux 仍未验证，不发。签名现状与放行方式见 RELEASING.md「平台与签名」。
+# Linux 仍未验证，不发。
 #
 # 私有仓库也能跑：Release 与 Actions 产物只有协作者可见；仓库转公开后，
 # 同一批资产自动对公众可见，流水线一个字都不用改。
@@ -80,7 +80,6 @@ jobs:
       # 「打包 Windows 免安装 zip」会以
       #   The specified electronDist does not exist: ...\node_modules\electron\dist
       # 秒败。这里手动执行 electron 自带的同一条安装脚本（幂等，zip 走它自己的缓存）。
-      # 详见 RELEASING.md「已知坑」。
       - name: Electron 二进制就位（pnpm 11 不跑它的 postinstall，实测）
         run: node node_modules/electron/install.js
 
@@ -174,7 +173,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # 与 Windows job 同因：pnpm 11 全新安装不跑 electron 的 postinstall，
-      # 拿不到 node_modules/electron/dist 会让 electron-builder 秒败。见 RELEASING.md 坑 #9。
+      # 拿不到 node_modules/electron/dist 会让 electron-builder 秒败。
       - name: Electron 二进制就位（pnpm 11 不跑它的 postinstall，实测）
         run: node node_modules/electron/install.js
 

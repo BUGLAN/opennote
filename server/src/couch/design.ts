@@ -1,5 +1,5 @@
 /**
- * 每库的固定文档生成：`_design/opennote`、`syncinfo`、`_security`（`docs/执行-三端同步…` §3.2、§3.6、§3.8、§4.5）。
+ * 每库的固定文档生成：`_design/opennote`、`syncinfo`、`_security`。
  *
  * ## 这个文件里有一份**必须存在**的「第二实现」
  *

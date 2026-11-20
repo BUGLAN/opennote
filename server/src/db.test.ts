@@ -1,5 +1,5 @@
 /**
- * 控制面 schema 与迁移（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §4.3、§8.4）。
+ * 控制面 schema 与迁移。
  *
  * 迁移这件事**只在出事的时候才被看**，所以它的用例要钉住「出事时会怎样」：
  * 版本比代码新必须**拒绝启动**、迁移失败必须**整体回滚**、外键必须**真的强制**。
@@ -97,7 +97,7 @@ describe("schema 的安全相关约束", () => {
     db.close();
   });
 
-  it("`accounts` 只存密码哈希，没有明文密码或令牌列（v4，`docs/执行-同步重写-2026-11-02.md`）", () => {
+  it("`accounts` 只存密码哈希，没有明文密码或令牌列（v4）", () => {
     const db = openDatabase({ path: ":memory:" });
     const columns = (db.prepare("PRAGMA table_info(accounts)").all() as unknown as { name: string }[]).map((row) => row.name);
     for (const forbidden of ["password", "token", "auth_hash", "salt"]) {

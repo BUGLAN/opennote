@@ -1,7 +1,6 @@
 /* ============================================================================
    Opennote 剪藏扩展 · popup（UI-01）
-   规则来源：docs/import/mockups/01-extension-popup.html（视觉基准）与
-   03-UI设计规范-剪藏与导入.md §UI-01。
+   规则来源：设计稿 01-extension-popup.html（视觉基准）与 03 §UI-01（二者已移出仓库）。
    **本文件不定义任何设计令牌、不出现任何色值**：所有颜色/间距/字体/圆角/阴影
    一律 `var(--…)`，取自构建期整份复制的 src/styles/tokens.css。
    （唯一的例外是 `.seal` 的 1px 内高光，逐字复制自 mockup 的 base.css 层，

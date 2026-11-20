@@ -1,6 +1,6 @@
 /*
  * 不需要登录的四张单卡页：初始化、控制台登录、接受邀请（/join）、设置密码（/reset）。
- * 版式照 docs/sync/mockups/03-admin.html 的状态 1 与状态 10。
+ * 版式照同步重写时的控制台原型（03-admin）的状态 1 与状态 10。
  */
 
 import { get, post } from "./api.js";

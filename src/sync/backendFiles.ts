@@ -1,6 +1,6 @@
 /**
  * 把 `FileSystemBackend`（真实文件系统的统一接口）适配成同步引擎要的
- * `SyncFileBackend`（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §5.3、§3.11）。
+ * `SyncFileBackend`。
  *
  * ## 为什么是两层而不是一层
  *

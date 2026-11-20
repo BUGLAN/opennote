@@ -1,5 +1,5 @@
 /**
- * 导入信封的三个哈希（`docs/import/02-接口契约-导入信封与通道.md` §4.2）。
+ * 导入信封的三个哈希。
  *
  * ```text
  * sourceHash  = "sha256:" + hex(sha256(utf8(source.url ?? "")))[0..16]

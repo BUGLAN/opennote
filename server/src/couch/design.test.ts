@@ -1,6 +1,5 @@
 /**
- * `_design/opennote` 的 `validate_doc_update` —— **单仓下唯一无法靠类型系统消除的接缝**
- * （`docs/执行-三端同步-密钥即身份-2026-10-13.md` §1.6、§3.8、§10.1 C9/C13/F1、附录 A.1）。
+ * `_design/opennote` 的 `validate_doc_update` —— **单仓下唯一无法靠类型系统消除的接缝**。
  *
  * ## 这个文件为什么重要
  *

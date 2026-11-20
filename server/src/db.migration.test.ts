@@ -1,5 +1,5 @@
 /**
- * 迁移 2 的**升级路径**用例（`docs/执行-三端同步…` §8.4、§4.12）。
+ * 迁移 2 的**升级路径**用例。
  *
  * ## 为什么单独立一个文件
  *
@@ -232,7 +232,7 @@ describe("迁移 4 · 账号改为邮箱 + 密码（重建 accounts）", () => {
       expect(row.display_name).toBe("Alice");
       expect(row.status).toBe("active");
       expect(row.is_admin).toBe(1);
-      // 旧的密钥材料不带过来（不兼容旧账号，见 docs/执行-同步重写-2026-11-02.md）。
+      // 旧的密钥材料不带过来（不兼容旧账号）。
       expect(row).not.toHaveProperty("auth_hash");
       db.close();
     });

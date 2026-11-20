@@ -23,7 +23,7 @@ import {
 } from "./migrateAssets";
 
 /**
- * 旧附件迁移器的纯逻辑测试（`docs/asset-lifecycle-and-migration.md` §3.1 的 A→D）。
+ * 旧附件迁移器的纯逻辑测试（`migrateAssets.ts` 头注释里的 A→D 四步）。
  *
  * 判据盯的都是**用户看得见的事实**：磁盘上最终多了哪个文件、正文里的引用改成了什么、
  * 再跑一次还会不会动东西。三条硬性质各有一组用例：

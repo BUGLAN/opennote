@@ -3,8 +3,7 @@
  *
  * **为什么需要这一步**：渲染层（`src/`）走 Vite，import TypeScript 天经地义；但主进程是
  * 纯 CommonJS（`electron/main.cjs`、`electron/bridge.cjs`），**require 不了 `.ts`**。
- * 而 `docs/执行-三端同步-密钥即身份-2026-10-13.md` §3.11 要求「扫描与 watcher 共用同一个
- * 判定函数」——所以这里把那一份实现**机械地**编译出来，产物是 `electron/ignore-rules.cjs`。
+ * 而同步要求「扫描与 watcher 共用同一个判定函数」——所以这里把那一份实现**机械地**编译出来，产物是 `electron/ignore-rules.cjs`。
  *
  * **不是第二份实现**：产物不要手改，改 `src/sync/ignore.ts` 后重跑 `pnpm build:ignore`
  * （`dev:electron` 与 `build:desktop` 都会先跑一次，所以 `pnpm dev` 下也是最新的）。

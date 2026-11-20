@@ -10,18 +10,6 @@
 <!-- 截图：由 `pnpm preview` + 真实构建抓取 -->
 ![Opennote：文件夹树、标签页、行内渲染的正文与文档大纲](docs/screenshot.png)
 
-![暗色主题「夜读」](docs/screenshot-dark.png)
-
-<details>
-<summary>更多截图：命令面板 · 公式与图表 · 专注模式</summary>
-
-![命令面板](docs/screenshot-palette.png)
-
-![行内公式、块级公式与 Mermaid 图表](docs/screenshot-mermaid.png)
-
-![专注模式：只留光标所在的段落](docs/screenshot-focus.png)
-
-</details>
 
 ## 笔记放在哪里
 
@@ -78,23 +66,22 @@ IndexedDB 只在两处出现，都不存笔记内容：一是 Chrome 的文件�
     从网上下载的包带 quarantine 标记，首次打开会被 Gatekeeper 拦成「已损坏，无法打开」。
     放行方式：**右键图标 →「打开」→「打开」**，或者
     `xattr -dr com.apple.quarantine /Applications/Opennote.app`。
-    要彻底消除这一步只能上 Apple 开发者账号（$99/年）+ 公证，见 [RELEASING.md](RELEASING.md) 第 5 节。
+    要彻底消除这一步只能上 Apple 开发者账号（$99/年）+ 公证。
   - macOS 包目前只出 **Apple Silicon（arm64）**。Intel 机器要么用 Rosetta 跑不了原生包、
-    要么等后续补 x64 产物（跨架构构建要另一份 Electron 发行版，见 RELEASING.md）。
+    要么等后续补 x64 产物（跨架构构建要另一份 Electron 发行版）。
 - 桌面版**可以自己更新**（Windows x64 与 macOS）：启动时只读一次 GitHub Releases，有新版本就在左上角
   （「Opennote」与「新建」之间）出现一个**强调色**下载图标；点它下载并校验，图标变成重启图标后
   点「重启并更新」——应用先保存笔记，再关闭、覆盖当前目录、自动重开。设置 →「帮助」里也能手动检查。
   只读一次、不上传任何数据（GitHub 会看到你的 IP）；**没有**后台常驻检查，也不会静默安装。
-  你的笔记在自己的文件夹里，不受影响；机制与边界见 [docs/update/00-更新机制.md](docs/update/00-更新机制.md)。
+  你的笔记在自己的文件夹里，不受影响。
   - **macOS**：更新是**整包替换** `Opennote.app`（改 bundle 里任何文件都会让签名失效、应用打不开）。
     换包前会先验签，新版本起不来会**自动回滚**到旧版本。
     从 dmg 里直接试用、或应用还没被拖进「应用程序」时不会提供更新入口（那个位置只读）——
     先拖进「应用程序」再检查即可。**0.13.0 及更早的 mac 包没有这条链路**，需要手动换一次。
 - 剪藏扩展**没有自动更新**：它没上架任何商店，`chrome://extensions` 的「加载已解压的扩展」也没有
   更新通道。升级就是下载新的 `Opennote-clip-<版本>.zip` 解压覆盖后点「重新加载」。
-  将来上 Edge Add-ons（免费）或 Chrome Web Store 才有商店级自动更新，见 [RELEASING.md](RELEASING.md) 第 4 节。
+  将来上 Edge Add-ons（免费）或 Chrome Web Store 才有商店级自动更新。
 - 仓库目前是私有的：公开之前 Release 与 Actions 产物只对协作者可见，网页版也还没有可访问的部署地址。
-  打包与分发流程（版本门禁、产物清单、签名与商店路线、已知坑）见 [RELEASING.md](RELEASING.md)。
 
 ## 快速开始
 
@@ -133,7 +120,7 @@ pnpm package:mac      # macOS：出 .app + DMG + ZIP → release/Opennote-<版�
 - **macOS 的图标是另一套画布**：`build/icon.icns`（打包用）与 `build/icon-mac.png`（Electron 运行时 Dock 用）按 Apple 的 App Icon 网格出 —— 1024 画布里身体 824×824 居中、圆角 185.4、带一圈投影，而不是像 favicon / `.ico` 那样把印章铺满整张画布。满幅图在 Dock / Finder / ⌘Tab 里会比别的 App 大一圈（原生 App 的身体恒为 824/1024）。网格与阴影（σ15 / 向下 10 / 18% 黑，贴 Apple 模板的调子）参数写在 `scripts/make_icons.py` 的 `MAC_*` 常量里，`verify_mac_icon()` 生成时会自检，退回满幅就直接报错。
 - 安全基线保持默认：`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，所有 IPC 文件操作都必须落在你选定的笔记本目录内（`../../../package.json` 这类路径会被拒绝并报「路径越界」）。
 - preload 只暴露一层薄接口（`window.opennote`），渲染进程拿不到 Node 能力。macOS 上会保留一份只含系统角色的最小菜单（否则 ⌘C/⌘V/⌘Q 不生效），Windows/Linux 直接置空。
-- 打包目标只有免安装 zip（便携、无需安装器）。想要 NSIS 安装包，把 `electron-builder.yml` 里 `win.target` 换成 `nsis` 即可。当前 zip 151 MB（Electron 本体占大头，`app.asar` 只有 11 MB）；发布流程见 [RELEASING.md](RELEASING.md)。
+- 打包目标只有免安装 zip（便携、无需安装器）。想要 NSIS 安装包，把 `electron-builder.yml` 里 `win.target` 换成 `nsis` 即可。当前 zip 151 MB（Electron 本体占大头，`app.asar` 只有 11 MB）。
 
 ## 数据与备份
 
@@ -251,10 +238,7 @@ electron/
 ## 路线图
 
 - 元数据索引与正文懒加载：笔记本到万篇级时，打开只重读「变化过的文件」、正文按需加载
-  （最近打开的常驻，其余放回磁盘）、全文搜索改用持久化纯文本快照。设计与全部消费点
-  清单已定稿，见
-  [docs/设计-同步层与索引重构-2026-10-10.md](docs/设计-同步层与索引重构-2026-10-10.md)
-  的 §P2b（已裁定择期实施）。
+  （最近打开的常驻，其余放回磁盘）、全文搜索改用持久化纯文本快照（已裁定择期实施）。
 - File System Access 的授权体验优化（记住授权、一次性授权多个目录）。
 - 移动端布局优化。
 - 笔记加密（本地口令加密，密钥不出设备）。
@@ -279,7 +263,7 @@ Opennote is a Typora-flavoured Markdown notebook **whose notes are plain files i
 - **Seamless live preview** — syntax marks (`#`, `**`, `[]()`, code fences, `$$`) hide on the lines you are not editing and reappear under the cursor; images, tables, KaTeX formulas and Mermaid diagrams render inline.
 - **Organise** — multiple notebooks, folder tree with drag & drop, tabs, outline, fuzzy command palette, full-text search with snippets, tags, starred notes, a trash folder and per-note version snapshots.
 - **Desktop** — `pnpm dev:electron` for development, `pnpm package:desktop` for a portable zip. Native Chinese menu, `contextIsolation` + `sandbox` on, every path resolved inside the chosen workspace.
-- **Release** — `pnpm release:build` produces the portable desktop zip, the clipper extension zip and `SHA256SUMS`; pushing a `vX.Y.Z` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml) and publishes them to a GitHub Release. Details in [RELEASING.md](RELEASING.md).
+- **Release** — `pnpm release:build` produces the portable desktop zip, the clipper extension zip and `SHA256SUMS`; pushing a `vX.Y.Z` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml) and publishes them to a GitHub Release.
 
 ```shell
 pnpm install

@@ -3,7 +3,7 @@
 本项目按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 记录，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-发布流程见 [RELEASING.md](RELEASING.md)。注意：`pnpm release:check` 会检查**当前版本**
+注意：`pnpm release:check` 会检查**当前版本**
 在这个文件里有条目 —— 没有条目就说明「这个版本要发什么」没人写过，发布流水线会拦下来。
 
 ## [Unreleased]
@@ -100,6 +100,13 @@
 - **Windows 包发布前真启动冒烟**：`electron-builder --dir` 后先用独立 `--user-data-dir` 与本地 CDP
   启动 `Opennote.exe`，断言 `desktop ready`、`#root` 渲染、`window.opennote` 与窗口 IPC 可用、
   启动日志无致命错误；通过后再用 `--prepackaged` 只归档同一份 `win-unpacked`，失败不产出 Release。
+
+### 文档
+
+- **清理过程文档**：`docs/` 下的设计 / 执行 / 调研文档、剪藏导入规范与设计稿、更新机制说明以及
+  `RELEASING.md` 移出仓库（原文仍在 git 历史里），README 只留一张主截图；代码注释与 README、DESIGN 里
+  指向它们的引用同步删除。原先运行时读文档的检查改为就地冻结：扩展的错误码号段测试直接列出 39 个
+  `IMP-xxxx`，`bridge-smoke` 的 R1 选项名与令牌区文案检查只比对实现。
 
 ## [0.16.1] - 2026-11-17
 

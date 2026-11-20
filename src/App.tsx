@@ -628,7 +628,7 @@ export default function App(): ReactNode {
 
   /*
    * 入库完成后的刷新：**不订阅 `opennote:import:notice`** —— 主进程从来没有发过它的发送方，
-   * 而它想做的三件事都已经各有产地（判读见 `docs/import/00-项目简报与范围锁定.md`）：
+   * 而它想做的三件事都已经各有产地：
    *   ① 文件变化后重扫 → `opennote:fs:workspace-changed`（`library.ts:startWatching`，去抖重扫）
    *   ② 收件箱徽标与列表 → 下面的 `opennote:inbox:changed`（`.opennote/**` 被工作区 watcher
    *      跳过，所以那是一条独立链路，main.cjs 确实在发）

@@ -1,5 +1,5 @@
 /**
- * GitHub 登录（OAuth App）的两块零件（`docs/执行-同步重写-2026-11-02.md` 阶段 ③）：
+ * GitHub 登录（OAuth App）的两块零件：
  *
  * 1. `GithubApi`：和 github.com 说话的三四个请求（换令牌、读用户、读邮箱、读组织）。
  *    测试注入假实现，所以路由层从不直接 `fetch` GitHub。

@@ -162,7 +162,7 @@ task-3（本轮）删除：`src/clip/clip.html` + `src/clip/clip.js`（被网页
 - 页面侧只校验 `event.source === window` + 同源 + 形状 + `reqId` + 信封校验；
   **订正**：契约原文第 2 条要求页面看到 `event.origin === chrome-extension://<id>` —— 这条在
   `postMessage` 上**不可实现**（内容脚本与页面共享同一个窗口，同窗口消息的 origin 必然是页面自己的
-  origin，Chrome 官方文档明说两个方向都只能走共享 DOM）。订正已写进 `docs/import/02` §5.7 与
+  origin，Chrome 官方文档明说两个方向都只能走共享 DOM）。订正已写进当时的 `docs/import/02` §5.7 与
   `src/lib/clip/inpageBridge.ts` 的模块注释；
 - 注入脚本**自包含**（只有一个顶层声明，不 import 任何东西 —— `executeScript({func})` 传的是源码副本），
   因此协议字面量在两处各写一份，`verify.mjs` 的 **V21** 逐字比对。
@@ -416,7 +416,7 @@ V7 逐字文案 76 → 92 条；`verify.mjs` 顶部 V1–V20 不变。新增反�
 到临时目录后重跑同一个测试文件），**正是这 4 条红、其余 17 条绿** —— 守卫能红，不是恒绿的装饰。
 
 **一个字都没碰的**：用户可见文案（V7 的逐字清单不变）、`tokens.css`（55 个令牌，V5/V19 兜底）、
-扩展版本号（发版时按 `RELEASING.md` §1 用 `pnpm release:version --extension` 两处一起写）。
+扩展版本号（发版时用 `pnpm release:version --extension` 两处一起写）。
 
 ### 12.1 0.3.2（M1 极简 + M2 清死代码）
 

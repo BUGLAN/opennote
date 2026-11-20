@@ -27,7 +27,7 @@ import { ensureStoragePersistence } from "./storagePersistence";
 const STORAGE_KEY = "opennote.workspaces.v1";
 
 /**
- * 工作区的同步配置（`docs/执行-三端同步-密钥即身份-2026-10-13.md` §5.3「后端/同步选择的唯一接缝」）。
+ * 工作区的同步配置。
  *
  * ## 三条纪律
  *

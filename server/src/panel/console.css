@@ -2,7 +2,7 @@
    Opennote 同步 · 控制台、/join、/reset 的样式
    ----------------------------------------------------------------------------
    颜色 / 字体 / 间距 / 圆角 / 动效全部来自 ./tokens.css（src/styles/tokens.css 的副本），
-   组件形状按 docs/sync/mockups/03-admin.html 定稿的样子写。
+   组件形状按同步重写时的控制台原型（03-admin）定稿的样子写。
 
    CSP 是 style-src 'self'：页面里**没有一个 style="…"**。需要按数据变化的只有进度条宽度，
    由 JS 用 element.style（CSSOM，不受 CSP 限制）设置。

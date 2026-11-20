@@ -155,7 +155,7 @@ function printReport(report, result, options) {
   out.push("");
   out.push(options.apply ? "已写盘。再跑一次应当是 0 处改动（幂等）。" : "以上为 dry-run 结果：未写任何文件。加 --apply 才会真的迁移。");
   out.push("");
-  out.push("口径对照（t5 报告 docs/asset-lifecycle-and-migration.md §1.5 的实测值 → 本次读数）");
+  out.push("口径对照（2026-10-09 调研时的实测值 → 本次读数）");
   out.push(
     `  附件总数        234 → ${report.totalFiles + report.referencedSharedFiles.length + report.unreferencedSharedFiles}`,
   );

@@ -7,7 +7,7 @@
  * 用户点「导入」时由应用内联成**单个** `.html` 文件，应用内只读渲染。
  *
  * 两条通道，走的是同一份契约 `opennote.import/v1`
- * （`docs/import/02-接口契约-导入信封与通道.md`）：
+ *：
  *
  *   1. `--channel inbox`（默认）**外部投递**：把条目写进
  *      `<笔记本>/.opennote/inbox/<UTC 时间戳>-<importId 前 8 位>/`

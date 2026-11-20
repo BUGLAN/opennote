@@ -3,7 +3,7 @@
  * `''` is the workspace root, `日记/2025-05.md` a nested note, `assets/a.png`
  * an image. Absolute paths and `..` never leave this module unresolved.
  *
- * ▍实现不在这里（2026-10-13 单仓改造，`docs/执行-三端同步…` §1.6）
+ * ▍实现不在这里（2026-10-13 单仓改造）
  *
  * 路径的纯函数（归一化、`assertSafeRelative`、`isHiddenPath`、`joinPath` / `parentPath` /
  * `baseName` / `extName` / `stripExtension`、`sanitizeName` / `uniquePath`、`sameBytes`）

@@ -51,7 +51,7 @@ const INBOX_LIST_CHANNEL = 'opennote:inbox:list'
 const INBOX_COMMIT_CHANNEL = 'opennote:inbox:commit'
 const INBOX_DISCARD_CHANNEL = 'opennote:inbox:discard'
 /** 入库完成后的 `opennote:import:notice` 广播**已删除**（同上：主进程从未发过它）。
- * 它想做的那三件事都已经各有产地，逐条比对见 `docs/import/00-项目简报与范围锁定.md`：
+ * 它想做的那三件事都已经各有产地：
  *   ① 文件变化后重扫 → `opennote:fs:workspace-changed`（`library.ts:startWatching` → 去抖重扫）
  *   ② 收件箱计数与列表刷新 → `opennote:inbox:changed`（main.cjs 的独立 watcher，去抖 450ms）
  *   ③ 入库成功提示与撤销入口 → L2 的 `announce()`（`src/lib/clip/receive.ts`，唯一一份实现）

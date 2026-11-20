@@ -19,7 +19,7 @@ concurrency:
 jobs:
   checks:
     # pnpm verify 覆盖类型、单测、扩展、IPC 与 bridge；本 job 再守住单仓边界规则
-    # （`docs/执行-三端同步-密钥即身份-2026-10-13.md` §1.6、§10.1 F）和忽略规则产物同步。
+    # 和忽略规则产物同步。
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

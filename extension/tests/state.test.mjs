@@ -1,6 +1,6 @@
 /**
  * 连接状态机与视图文案单测：证明「6 态可区分」是机械可验证的，而不是靠人工看。
- * 逐字文案基准：03 §UI-01「中文文案（逐字）」表 + docs/import/mockups/01-extension-popup.html。
+ * 逐字文案基准：03 §UI-01「中文文案（逐字）」表 + 设计稿 01-extension-popup.html（已移出仓库，冻结值就在本文件的断言里）。
  */
 
 import test from "node:test";

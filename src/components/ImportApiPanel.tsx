@@ -1,8 +1,8 @@
 /**
  * UI-04「设置 · 文件 → 导入与接口」。
  *
- * 逐字文案基准：`docs/import/03-UI设计规范-剪藏与导入.md`（UI-04 与 §6.1 文案表）
- * 与 `docs/import/mockups/03-settings-import-api.html`。中文全角，无 emoji。
+ * 逐字文案基准：03 号 UI 规范的 UI-04 与 §6.1 文案表、设计稿 03-settings-import-api.html
+ * （二者已移出仓库，现以本文件为准）。中文全角，无 emoji。
  *
  * 硬约束：
  *   - 桥状态**只经 IPC 读**（`lib/importBridge.ts`），页面绝不 `fetch 127.0.0.1`，

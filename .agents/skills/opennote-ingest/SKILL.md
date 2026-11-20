@@ -7,7 +7,7 @@ whenToUse: 用户要求把本次会话产出的文档、报告、分析、笔记
 # 把生成的文档入库到 Opennote
 
 把文档送进用户本机的 Opennote 笔记本。走的是仓库里已经冻结的导入契约
-`opennote.import/v1`（`docs/import/02-接口契约-导入信封与通道.md`），
+`opennote.import/v1`，
 **不自己发明写盘格式**。
 
 **默认通道 = 收件箱（`.opennote/inbox/`）**：文档先变成收件箱里的一条**待确认**条目，

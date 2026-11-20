@@ -1,6 +1,5 @@
 /**
- * `opennote` provider —— 真实 `/v1/*` 的 `SyncProvider` 实现
- * （`docs/执行-三端同步-密钥即身份-2026-10-13.md` §4.7、§3.3、§3.5、§6.4、§10.1 A/G）。
+ * `opennote` provider —— 真实 `/v1/*` 的 `SyncProvider` 实现。
  *
  * ## 这一层是**纯适配**：它不做任何语义决定
  *

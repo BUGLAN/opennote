@@ -5,7 +5,7 @@
  *
  * 为什么自己写：
  *   1. 主进程**不许** require 第三方包（`electron-builder.yml` 的 `files` 刻意排除
- *      `node_modules`，见 RELEASING.md 已知坑 #4）；渲染层那份 `jszip` 会把 380 MB
+ *      `node_modules`）；渲染层那份 `jszip` 会把 380 MB
  *      解压结果全堆在内存里，不能用于 151 MB 的免安装包。
  *   2. Windows 自带的 `tar.exe` / `Expand-Archive` 是**系统工具**：版本、可用性、
  *      中文路径编码都不由我们掌握，而且没法在 vitest 里真跑。

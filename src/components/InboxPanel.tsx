@@ -1,6 +1,6 @@
 /**
- * UI-03 导入收件箱面板（`docs/import/03-UI设计规范-剪藏与导入.md` §4 UI-03，
- * 视觉与逐字文案基准 `docs/import/mockups/02-import-inbox.html` 260–437 行）。
+ * UI-03 导入收件箱面板（视觉与逐字文案原以 03 号 UI 规范和设计稿 02-import-inbox.html 为基准，
+ * 二者已移出仓库，现以本文件为准）。
  *
  * 结构逐字照 mockup：`.dialog > .dialog__head + .inbox__bar + .dialog__body + .dialog__foot`。
  * 这里没有复用 `Modal`，因为 `Modal` 的固定结构里没有 `.inbox__bar` 的位置（它只有 head /

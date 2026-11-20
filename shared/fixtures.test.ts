@@ -1,6 +1,5 @@
 /**
- * 共享夹具的**第一半**：`shared/paths.ts` 对每条用例的判定必须等于期望
- * （`docs/执行-三端同步…` §10.1 F1）。
+ * 共享夹具的**第一半**：`shared/paths.ts` 对每条用例的判定必须等于期望。
  *
  * 另一半在 `server/src/couch/design.test.ts`（`_design` 的 JS 跑同一批用例）。
  * 两份都从 `shared/fixtures/path-rules.cases.json` 读，所以「改了一边忘了另一边」必然红。

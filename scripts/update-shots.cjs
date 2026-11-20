@@ -2,7 +2,7 @@
 'use strict'
 
 /**
- * 给「红框处那个更新图标」拍真图（docs/update/shots/ 里那四张就是这么来的）。
+ * 给「红框处那个更新图标」拍真图，写到 `docs/update/shots/`（供人眼核对，目录不存在会自动创建）。
  *
  *   node scripts/update-shots.cjs        # 或 pnpm update:shots
  *
@@ -15,7 +15,7 @@
  * 这两条需求的**肉眼证据**，改样式之后要能一条命令重新生成，而不是靠谁手点一遍。
  *
  * 依赖：本机已 `pnpm build:desktop && npx electron-builder --config electron-builder.yml --dir`
- * （与 RELEASING.md 第 2 节的打包命令一致）。
+ * （与发布用的打包命令一致）。
  */
 
 const fs = require('node:fs')
