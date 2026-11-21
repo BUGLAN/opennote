@@ -49,7 +49,7 @@ import {
 } from "../panelSecurity";
 import type { SettingsStore } from "../settings";
 import { authenticateAdminRequest } from "./adminGate";
-import { accountErrorResponse, attemptPasswordLogin, LoginThrottle, meOf } from "./auth";
+import { accountErrorResponse, attemptPasswordLogin, LoginThrottle, meOf, withKdfSlot } from "./auth";
 
 export interface PanelRoutesDeps {
   accounts: AccountStore;
@@ -184,7 +184,11 @@ export function createPanelRoutes(deps: PanelRoutesDeps): Hono {
       return json({ error: "registration 必须是 invite / open / closed", code: "bad-request" }, 400);
     }
     try {
-      const account = await deps.accounts.setup({ email: parsed.data.email, password: parsed.data.password, displayName: parsed.data.displayName ?? null, now: now() });
+      const outcome = await withKdfSlot(deps.throttle.kdfGate, () =>
+        deps.accounts.setup({ email: parsed.data.email, password: parsed.data.password, displayName: parsed.data.displayName ?? null, now: now() }),
+      );
+      if (!outcome.ok) return outcome.response;
+      const account = outcome.value;
       if (registration !== undefined) deps.settings.set({ registration }, now());
       deps.audit?.({ actorId: account.id, action: "setup_admin", target: account.id, ip: ipOf(c), detail: null });
       const { token } = deps.accounts.createSession({ accountId: account.id, kind: "panel", ip: ipOf(c), now: now() });

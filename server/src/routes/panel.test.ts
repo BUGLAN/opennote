@@ -20,11 +20,11 @@ import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper"
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
 import { csrfGuard, PANEL_COOKIE } from "../panelSecurity";
 import { panelAssetNames, loadPanelAsset } from "../panelAssets";
-import { createAuthRoutes, LoginThrottle } from "./auth";
+import { createAuthRoutes, KdfGate, LoginThrottle } from "./auth";
 import { createAdminRoutes } from "./admin";
 import { createAdminViewRoutes } from "./adminView";
 import { createPanelRoutes } from "./panel";
-import { holdAccountLogins, waitUntil } from "./loginConcurrency.test-helper";
+import { holdAccountLogins, holdAccountMethod, waitUntil } from "./loginConcurrency.test-helper";
 
 const ENV: Record<string, string> = {
   EXTERNAL_BASE_URL: "https://notes.example.com",
@@ -142,6 +142,27 @@ describe("初始化", () => {
     const setup = await world.call("/v1/panel/setup", { body: { email: "admin@example.com", password: PASSWORD }, headers: CSRF });
     expect(setup.headers.get("set-cookie")).not.toContain("Secure");
   });
+
+  it("控制台初始化与客户端初始化共用同一份 KDF 名额", async () => {
+    const gate = new KdfGate(1);
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, gate);
+    const world = makeWorld(ENV, { throttle });
+    const held = holdAccountMethod(world.accounts, "setup");
+    try {
+      const panel = world.call("/v1/panel/setup", { body: { email: "admin@example.com", password: PASSWORD }, headers: CSRF });
+      await waitUntil(() => held.entered() >= 1, "控制台初始化占住唯一 KDF 名额");
+      const api = await world.call("/v1/auth/setup", { body: { email: "other@example.com", password: PASSWORD } });
+      expect(api.status).toBe(429);
+      expect(api.body?.code).toBe("busy");
+      held.release();
+      expect((await panel).status).toBe(201);
+      expect(held.entered()).toBe(1);
+      expect(world.accounts.count()).toBe(1);
+      expect(gate.size).toBe(0);
+    } finally {
+      held.restore();
+    }
+  });
 });
 
 describe("登录与退出", () => {
@@ -210,6 +231,28 @@ describe("登录与退出", () => {
       expect(held.entered()).toBe(2);
       expect(results.filter((result) => result.status === 401)).toHaveLength(2);
       expect(results.filter((result) => result.status === 429 && result.body?.code === "busy")).toHaveLength(4);
+    } finally {
+      held.restore();
+    }
+  });
+
+  it("控制台登录与客户端登录共用同一份 KDF 名额", async () => {
+    const gate = new KdfGate(1);
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, gate);
+    const world = makeWorld(ENV, { throttle });
+    await world.accounts.create({ email: "admin@example.com", password: PASSWORD, isAdmin: true });
+    const held = holdAccountLogins(world.accounts);
+    try {
+      const panel = world.call("/v1/panel/login", { body: { email: "admin@example.com", password: PASSWORD }, headers: CSRF });
+      await waitUntil(() => held.entered() >= 1, "控制台登录占住唯一 KDF 名额");
+      const device = { deviceId: "a".repeat(32), name: "Mac", platform: "desktop" };
+      const client = await world.call("/v1/auth/login", { body: { email: "admin@example.com", password: PASSWORD, device } });
+      expect(client.status).toBe(429);
+      expect(client.body?.code).toBe("busy");
+      held.release();
+      expect((await panel).status).toBe(200);
+      expect(held.entered()).toBe(1);
+      expect(gate.size).toBe(0);
     } finally {
       held.restore();
     }

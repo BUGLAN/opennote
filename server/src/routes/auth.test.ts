@@ -12,10 +12,10 @@ import { NotebookStore } from "../notebooks";
 import { SettingsStore } from "../settings";
 import { ShareStore } from "../shares";
 import { testAccountStore } from "../auth/testAccounts.test-helper";
-import { createAuthRoutes, LoginThrottle } from "./auth";
+import { createAuthRoutes, KdfGate, LoginThrottle, withKdfSlot } from "./auth";
 import { createAdminRoutes } from "./admin";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
-import { holdAccountLogins, waitUntil } from "./loginConcurrency.test-helper";
+import { holdAccountLogins, holdAccountMethod, waitUntil } from "./loginConcurrency.test-helper";
 
 const ENV: Record<string, string> = {
   EXTERNAL_BASE_URL: "https://notes.example.com",
@@ -69,6 +69,32 @@ describe("初始化", () => {
     const second = await world.call("/v1/auth/setup", { body: { email: "x@example.com", password: PASSWORD } });
     expect(second.status).toBe(409);
     expect(second.body?.code).toBe("setup-done");
+  });
+
+  it("并发初始化共用 KDF 名额：只有一个进入哈希，其余 429 busy", async () => {
+    const gate = new KdfGate(1);
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, gate);
+    const world = makeWorld({ throttle });
+    const held = holdAccountMethod(world.accounts, "setup");
+    try {
+      const requests = Array.from({ length: 4 }, (_, index) =>
+        world.call("/v1/auth/setup", { body: { email: `admin-${index}@example.com`, password: PASSWORD } }),
+      );
+      await waitUntil(() => held.entered() >= 1, "一个初始化请求进入账号操作");
+      const rejected = await world.call("/v1/auth/setup", { body: { email: "late@example.com", password: PASSWORD } });
+      expect(rejected.status).toBe(429);
+      expect(rejected.body?.code).toBe("busy");
+      held.release();
+      const results = await Promise.all(requests);
+
+      expect(held.entered()).toBe(1);
+      expect(results.filter((result) => result.status === 201)).toHaveLength(1);
+      expect(results.filter((result) => result.status === 429 && result.body?.code === "busy")).toHaveLength(3);
+      expect(world.accounts.count()).toBe(1);
+      expect(gate.size).toBe(0);
+    } finally {
+      held.restore();
+    }
   });
 });
 
@@ -333,6 +359,36 @@ describe("LoginThrottle", () => {
   });
 });
 
+describe("KdfGate", () => {
+  it("同步占位、拒绝超限，释放可重复调用", () => {
+    const gate = new KdfGate(2);
+    const first = gate.tryAcquire();
+    const second = gate.tryAcquire();
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(gate.tryAcquire()).toBeNull();
+    expect(gate.size).toBe(2);
+
+    first!();
+    first!();
+    expect(gate.size).toBe(1);
+    const third = gate.tryAcquire();
+    expect(third).not.toBeNull();
+    second!();
+    expect(gate.size).toBe(1);
+    third!();
+    expect(gate.size).toBe(0);
+  });
+
+  it("业务异常时也释放名额", async () => {
+    const gate = new KdfGate(1);
+    await expect(withKdfSlot(gate, async () => {
+      throw new Error("boom");
+    })).rejects.toThrow("boom");
+    expect(gate.size).toBe(0);
+  });
+});
+
 describe("开放注册", () => {
   it("默认只接受邀请；改成开放后可以直接注册并登录", async () => {
     const world = makeWorld();
@@ -353,6 +409,80 @@ describe("开放注册", () => {
     expect(response.status).toBe(403);
     expect(response.body?.code).toBe("password-login-disabled");
     expect(world.accounts.findByEmail("new@example.com")).toBeNull();
+  });
+
+  it("并发注册不同邮箱共用 KDF 名额：超出的 429 busy、不建号、不计登录失败", async () => {
+    const gate = new KdfGate(2);
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, gate);
+    const world = makeWorld({ throttle });
+    world.settings.set({ registration: "open" });
+    const held = holdAccountMethod(world.accounts, "create");
+    try {
+      const requests = Array.from({ length: 6 }, (_, index) =>
+        world.call("/v1/auth/register", {
+          body: {
+            email: `new-${index}@example.com`,
+            password: PASSWORD,
+            device: { ...DEVICE_A, deviceId: index.toString(16).padStart(32, "0") },
+          },
+        }),
+      );
+      await waitUntil(() => held.entered() >= 2, "两个注册请求进入账号操作");
+      held.release();
+      const results = await Promise.all(requests);
+
+      expect(held.entered()).toBe(2);
+      expect(results.filter((result) => result.status === 200)).toHaveLength(2);
+      expect(results.filter((result) => result.status === 429 && result.body?.code === "busy")).toHaveLength(4);
+      expect(world.accounts.count()).toBe(2);
+      expect(throttle.size).toBe(0);
+      expect(gate.size).toBe(0);
+    } finally {
+      held.restore();
+    }
+  });
+
+  it("注册和登录共用同一份 KDF 名额", async () => {
+    const gate = new KdfGate(1);
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, gate);
+    const world = makeWorld({ throttle });
+    await world.accounts.create({ email: "lan@example.com", password: PASSWORD });
+    world.settings.set({ registration: "open" });
+    const heldCreate = holdAccountMethod(world.accounts, "create");
+    const heldLogin = holdAccountMethod(world.accounts, "login");
+    try {
+      const registration = world.call("/v1/auth/register", {
+        body: { email: "new@example.com", password: PASSWORD, device: { ...DEVICE_A, deviceId: "c".repeat(32) } },
+      });
+      await waitUntil(() => heldCreate.entered() >= 1, "注册请求占住唯一 KDF 名额");
+      const login = await world.login("lan@example.com");
+      expect(login.status).toBe(429);
+      expect(login.body?.code).toBe("busy");
+      expect(heldLogin.entered()).toBe(0);
+      heldCreate.release();
+      expect((await registration).status).toBe(200);
+    } finally {
+      heldLogin.restore();
+      heldCreate.restore();
+    }
+  });
+
+  it("注册业务失败也释放 KDF 名额", async () => {
+    const gate = new KdfGate(1);
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, gate);
+    const world = makeWorld({ throttle });
+    world.settings.set({ registration: "open" });
+    const invalid = await world.call("/v1/auth/register", {
+      body: { email: "not-an-email", password: PASSWORD, device: DEVICE_A },
+    });
+    expect(invalid.status).toBe(400);
+    expect(gate.size).toBe(0);
+    expect(throttle.size).toBe(0);
+
+    const valid = await world.call("/v1/auth/register", {
+      body: { email: "new@example.com", password: PASSWORD, device: DEVICE_B },
+    });
+    expect(valid.status).toBe(200);
   });
 });
 
@@ -396,6 +526,32 @@ describe("邀请链接", () => {
 
     world.settings.set({ passwordLogin: true });
     expect((await world.call(`/v1/auth/invites/${code}`, { body: { email: "chen@example.com", password: PASSWORD } })).status).toBe(201);
+  });
+
+  it("并发接受邀请共用 KDF 名额：超出的 429 busy 且不消耗邀请", async () => {
+    const gate = new KdfGate(1);
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, gate);
+    const world = makeWorld({ throttle });
+    const admin = await world.accounts.setup({ email: "admin@example.com", password: PASSWORD });
+    const { code } = world.accounts.createInvite({ createdBy: admin.id, maxUses: 3 });
+    const held = holdAccountMethod(world.accounts, "acceptInvite");
+    try {
+      const requests = Array.from({ length: 3 }, (_, index) =>
+        world.call(`/v1/auth/invites/${code}`, { body: { email: `invitee-${index}@example.com`, password: PASSWORD } }),
+      );
+      await waitUntil(() => held.entered() >= 1, "一个接受邀请请求进入账号操作");
+      held.release();
+      const results = await Promise.all(requests);
+
+      expect(held.entered()).toBe(1);
+      expect(results.filter((result) => result.status === 201)).toHaveLength(1);
+      expect(results.filter((result) => result.status === 429 && result.body?.code === "busy")).toHaveLength(2);
+      expect(world.accounts.count()).toBe(2);
+      expect(world.accounts.inviteInfo(code).email).toBeNull();
+      expect(gate.size).toBe(0);
+    } finally {
+      held.restore();
+    }
   });
 });
 
@@ -441,6 +597,31 @@ describe("重置密码链接", () => {
     expect((await world.call("/v1/me", { token: oldSession })).status).toBe(401);
     expect((await world.login("mia@example.com", "brand-new-password", DEVICE_B)).status).toBe(200);
   });
+
+  it("并发重置共用 KDF 名额：只有一个进入哈希，其余 429 busy", async () => {
+    const gate = new KdfGate(1);
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, gate);
+    const world = makeWorld({ throttle });
+    const member = await world.accounts.create({ email: "mia@example.com", password: "old-password-1" });
+    const { code } = world.accounts.createPasswordReset({ accountId: member.id, createdBy: null });
+    const held = holdAccountMethod(world.accounts, "resetPassword");
+    try {
+      const requests = Array.from({ length: 3 }, () =>
+        world.call(`/v1/auth/password-resets/${code}`, { body: { password: "brand-new-password" } }),
+      );
+      await waitUntil(() => held.entered() >= 1, "一个重置请求进入账号操作");
+      held.release();
+      const results = await Promise.all(requests);
+
+      expect(held.entered()).toBe(1);
+      expect(results.filter((result) => result.status === 204)).toHaveLength(1);
+      expect(results.filter((result) => result.status === 429 && result.body?.code === "busy")).toHaveLength(2);
+      expect((await world.login("mia@example.com", "brand-new-password", DEVICE_B)).status).toBe(200);
+      expect(gate.size).toBe(0);
+    } finally {
+      held.restore();
+    }
+  });
 });
 
 describe("我的设备", () => {
@@ -474,6 +655,31 @@ describe("我的设备", () => {
     expect(ok.status).toBe(204);
     expect((await world.call("/v1/me", { token: here })).status).toBe(200);
     expect((await world.call("/v1/me", { token: there })).status).toBe(401);
+  });
+
+  it("并发改密共用 KDF 名额：只有一个进入校验，其余 429 busy", async () => {
+    const gate = new KdfGate(1);
+    const throttle = new LoginThrottle(5, 15 * 60_000, 100, 5, gate);
+    const world = makeWorld({ throttle });
+    await world.accounts.create({ email: "lan@example.com", password: PASSWORD });
+    const token = (await world.login("lan@example.com")).body!.token as string;
+    const held = holdAccountMethod(world.accounts, "changePassword");
+    try {
+      const requests = Array.from({ length: 3 }, () =>
+        world.call("/v1/me/password", { token, body: { currentPassword: PASSWORD, newPassword: "next-password-1" } }),
+      );
+      await waitUntil(() => held.entered() >= 1, "一个改密请求进入账号操作");
+      held.release();
+      const results = await Promise.all(requests);
+
+      expect(held.entered()).toBe(1);
+      expect(results.filter((result) => result.status === 204)).toHaveLength(1);
+      expect(results.filter((result) => result.status === 429 && result.body?.code === "busy")).toHaveLength(2);
+      expect((await world.login("lan@example.com", "next-password-1")).status).toBe(200);
+      expect(gate.size).toBe(0);
+    } finally {
+      held.restore();
+    }
   });
 });
 

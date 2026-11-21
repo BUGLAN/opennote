@@ -17,23 +17,31 @@ export async function waitUntil(predicate: () => boolean, description: string, t
   }
 }
 
-/** 把真实账号校验挡在闸门前，用来确定性地制造并发请求。 */
-export function holdAccountLogins(accounts: AccountStore): {
+export type HeldAccountMethod = "login" | "create" | "setup" | "acceptInvite" | "resetPassword" | "changePassword" | "setPassword";
+
+/** 把真实的账号操作挡在入口，用来确定性地制造多个 KDF 同时在途。 */
+export function holdAccountMethod(accounts: AccountStore, method: HeldAccountMethod): {
   entered: () => number;
   release: () => void;
   restore: () => void;
 } {
   const gate = deferred<void>();
-  const original = accounts.login.bind(accounts);
+  const holder = accounts as unknown as Record<HeldAccountMethod, (...args: never[]) => Promise<unknown>>;
+  const original = holder[method].bind(accounts);
   let entered = 0;
-  const spy = vi.spyOn(accounts, "login").mockImplementation(async (email, password) => {
+  const spy = vi.spyOn(holder, method).mockImplementation(async (...args) => {
     entered += 1;
     await gate.promise;
-    return original(email, password);
+    return original(...args);
   });
   return {
     entered: () => entered,
     release: () => gate.resolve(undefined),
     restore: () => spy.mockRestore(),
   };
+}
+
+/** 把真实账号校验挡在闸门前，用来确定性地制造并发登录。 */
+export function holdAccountLogins(accounts: AccountStore): ReturnType<typeof holdAccountMethod> {
+  return holdAccountMethod(accounts, "login");
 }

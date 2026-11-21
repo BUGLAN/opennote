@@ -166,11 +166,43 @@ export type LoginAdmission =
   | { admitted: false; reason: "locked" | "busy"; retryAfterSeconds: number };
 
 /**
- * 登录失败计数 + 在途预占：同一邮箱 15 分钟内失败 5 次就锁到窗口结束。
+ * 密码 KDF 的全局在途闸门。
+ *
+ * scrypt 每次要占几十 MiB，入口再多也只能同时跑有限个。这个闸门只管全局名额；
+ * 登录按邮箱的失败窗口和单邮箱在途名额仍由 `LoginThrottle` 管。
+ */
+export class KdfGate {
+  private inFlight = 0;
+
+  constructor(private readonly maxInFlight = 16) {}
+
+  /** 当前在途的 KDF 数（测试与排障用）。 */
+  get size(): number {
+    return this.inFlight;
+  }
+
+  /**
+   * 同步占一个名额。调用方必须在真正开始哈希 / 校验之前调用，
+   * 并在 `finally` 里执行返回的释放函数。
+   */
+  tryAcquire(): (() => void) | null {
+    if (this.inFlight >= this.maxInFlight) return null;
+    this.inFlight += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.inFlight = Math.max(0, this.inFlight - 1);
+    };
+  }
+}
+
+/**
+ * 登录失败计数 + 单邮箱在途预占：同一邮箱 15 分钟内失败 5 次就锁到窗口结束。
  *
  * 密码校验是慢 KDF，不能等算完才记账：请求进入 KDF 前先同步 `reserve()` 一个名额，
  * 失败时把名额结算成失败，成功时释放并清零。这样并发请求也无法一起越过失败上限。
- * 单邮箱和全局的在途数量都有上限，避免大量并发 KDF 同时吃掉内存。
+ * 全局在途名额由调用方传入的 `KdfGate` 管，登录、注册、初始化等入口共用同一份。
  *
  * 只在内存里：服务重启会清零，这对「挡在线爆破」足够了（攻击者拿不到重启开关），
  * 也免得为一张临时表加迁移。按邮箱而不是按 IP 计，是因为爆破一个账号可以换 IP，换不了邮箱。
@@ -181,14 +213,18 @@ export type LoginAdmission =
 export class LoginThrottle {
   private readonly failures = new Map<string, number[]>();
   private readonly inFlightByKey = new Map<string, number>();
-  private inFlightTotal = 0;
+  readonly kdfGate: KdfGate;
+
   constructor(
     private readonly maxFailures = 5,
     private readonly windowMs = 15 * 60_000,
     private readonly maxKeys = 100_000,
     private readonly maxInFlightPerKey = maxFailures,
-    private readonly maxInFlight = 16,
-  ) {}
+    /** 第五个参数是共享闸门；数字是旧调用方式，等价于新建该上限的闸门。 */
+    maxInFlightOrGate: number | KdfGate = 16,
+  ) {
+    this.kdfGate = typeof maxInFlightOrGate === "number" ? new KdfGate(maxInFlightOrGate) : maxInFlightOrGate;
+  }
 
   /** 当前记着的邮箱数（测试与排障用）。 */
   get size(): number {
@@ -234,16 +270,14 @@ export class LoginThrottle {
 
     const recent = this.recent(key, now).length;
     const inFlightForKey = this.inFlightByKey.get(key) ?? 0;
-    if (
-      inFlightForKey >= this.maxInFlightPerKey ||
-      this.inFlightTotal >= this.maxInFlight ||
-      recent + inFlightForKey >= this.maxFailures
-    ) {
+    if (inFlightForKey >= this.maxInFlightPerKey || recent + inFlightForKey >= this.maxFailures) {
       return { admitted: false, reason: "busy", retryAfterSeconds: 1 };
     }
 
+    const releaseKdf = this.kdfGate.tryAcquire();
+    if (!releaseKdf) return { admitted: false, reason: "busy", retryAfterSeconds: 1 };
+
     this.inFlightByKey.set(key, inFlightForKey + 1);
-    this.inFlightTotal += 1;
     let settled = false;
     const release = (): boolean => {
       if (settled) return false;
@@ -251,7 +285,7 @@ export class LoginThrottle {
       const current = this.inFlightByKey.get(key) ?? 1;
       if (current <= 1) this.inFlightByKey.delete(key);
       else this.inFlightByKey.set(key, current - 1);
-      this.inFlightTotal = Math.max(0, this.inFlightTotal - 1);
+      releaseKdf();
       return true;
     };
 
@@ -293,18 +327,40 @@ export class LoginThrottle {
   }
 }
 
+function busyResponse(message = "服务器正忙，请稍后再试"): Response {
+  return new Response(JSON.stringify({ error: message, code: "busy", retryAfterSeconds: 1 }), {
+    status: 429,
+    headers: { "content-type": "application/json; charset=utf-8", "retry-after": "1" },
+  });
+}
+
 function loginThrottleResponse(admission: Extract<LoginAdmission, { admitted: false }>): Response {
-  const locked = admission.reason === "locked";
+  if (admission.reason === "busy") return busyResponse("登录尝试过多，请稍后再试");
   return new Response(
     JSON.stringify({
-      error: locked
-        ? `登录失败次数太多，请 ${Math.ceil(admission.retryAfterSeconds / 60)} 分钟后再试`
-        : "登录尝试过多，请稍后再试",
+      error: `登录失败次数太多，请 ${Math.ceil(admission.retryAfterSeconds / 60)} 分钟后再试`,
       code: admission.reason,
       retryAfterSeconds: admission.retryAfterSeconds,
     }),
     { status: 429, headers: { "content-type": "application/json; charset=utf-8" } },
   );
+}
+
+/**
+ * 给不是登录流程的密码入口（初始化、注册、邀请、重置、改密）共用同一个 KDF 名额。
+ * 取名额是同步的；业务函数即使抛错，`finally` 也会释放。
+ */
+export async function withKdfSlot<T>(
+  gate: KdfGate,
+  work: () => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; response: Response }> {
+  const release = gate.tryAcquire();
+  if (!release) return { ok: false, response: busyResponse() };
+  try {
+    return { ok: true, value: await work() };
+  } finally {
+    release();
+  }
 }
 
 /**
@@ -338,8 +394,10 @@ export async function attemptPasswordLogin<T>(input: {
       }
       return { ok: false, response: accountErrorResponse(error) };
     }
-    admission.attempt.release();
     throw error;
+  } finally {
+    // 成功 / 业务失败已经结算过；这里兜住异常路径，释放函数是幂等的。
+    admission.attempt.release();
   }
 }
 
@@ -390,7 +448,11 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     const body = await readBody(c, setupRequestSchema);
     if (body instanceof Response) return body;
     try {
-      const row = await deps.accounts.setup({ email: body.email, password: body.password, displayName: body.displayName ?? null, now: now() });
+      const outcome = await withKdfSlot(throttle.kdfGate, () =>
+        deps.accounts.setup({ email: body.email, password: body.password, displayName: body.displayName ?? null, now: now() }),
+      );
+      if (!outcome.ok) return outcome.response;
+      const row = outcome.value;
       deps.audit?.({ actorId: row.id, action: "setup_admin", target: row.id, ip: ipOf(c), detail: null });
       return json({ me: meOf(deps, row, null) }, 201);
     } catch (error) {
@@ -432,7 +494,11 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     const body = await readBody(c, loginRequestSchema.extend({ displayName: setupRequestSchema.shape.displayName }));
     if (body instanceof Response) return body;
     try {
-      const account = await deps.accounts.create({ email: body.email, password: body.password, displayName: body.displayName ?? null, now: now() });
+      const outcome = await withKdfSlot(throttle.kdfGate, () =>
+        deps.accounts.create({ email: body.email, password: body.password, displayName: body.displayName ?? null, now: now() }),
+      );
+      if (!outcome.ok) return outcome.response;
+      const account = outcome.value;
       deps.audit?.({ actorId: account.id, action: "register", target: account.id, ip: ipOf(c), detail: null });
       return openDeviceSession(account, body.device, ipOf(c));
     } catch (error) {
@@ -486,7 +552,11 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     const body = await readBody(c, inviteAcceptRequestSchema);
     if (body instanceof Response) return body;
     try {
-      const account = await deps.accounts.acceptInvite(c.req.param("code"), { email: body.email, password: body.password, displayName: body.displayName ?? null }, now());
+      const outcome = await withKdfSlot(throttle.kdfGate, () =>
+        deps.accounts.acceptInvite(c.req.param("code"), { email: body.email, password: body.password, displayName: body.displayName ?? null }, now()),
+      );
+      if (!outcome.ok) return outcome.response;
+      const account = outcome.value;
       deps.audit?.({ actorId: account.id, action: "accept_invite", target: account.id, ip: ipOf(c), detail: accountLabel(account) });
       return json({ me: meOf(deps, account, null) }, 201);
     } catch (error) {
@@ -516,7 +586,9 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     const body = await readBody(c, passwordResetRequestSchema);
     if (body instanceof Response) return body;
     try {
-      const account = await deps.accounts.resetPassword(c.req.param("code"), body.password, now());
+      const outcome = await withKdfSlot(throttle.kdfGate, () => deps.accounts.resetPassword(c.req.param("code"), body.password, now()));
+      if (!outcome.ok) return outcome.response;
+      const account = outcome.value;
       deps.audit?.({ actorId: account.id, action: "reset_password", target: account.id, ip: ipOf(c), detail: null });
       return json(null, 204);
     } catch (error) {
@@ -635,7 +707,10 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     const body = await readBody(c, passwordChangeRequestSchema);
     if (body instanceof Response) return body;
     try {
-      await deps.accounts.changePassword(auth.account.id, body.currentPassword, body.newPassword, { keepSessionId: auth.session.id });
+      const outcome = await withKdfSlot(throttle.kdfGate, () =>
+        deps.accounts.changePassword(auth.account.id, body.currentPassword, body.newPassword, { keepSessionId: auth.session.id }),
+      );
+      if (!outcome.ok) return outcome.response;
       deps.audit?.({ actorId: auth.account.id, action: "change_password", target: auth.account.id, ip: ipOf(c), detail: null });
       return json(null, 204);
     } catch (error) {
