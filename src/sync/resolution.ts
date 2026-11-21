@@ -9,7 +9,7 @@
  * | --- | --- | --- |
  * | 采用远端 | `provider.read` → `writeLocal` → 基线对齐远端 | 与引擎拉取同一条路径（`writeLocal` 会解密），绝不把密文写盘 |
  * | 采用远端（远端已删） | `removeLocal` → 账本去掉这一条 | 与引擎「远端删了 → 删本地」同一形状 |
- * | 保留本地 | `provider.put`（CAS 基准 = 当前远端哈希）→ 基线对齐这次写入 | 是**用户显式选择**的覆盖（界面上写明「用我的版本覆盖远端」），不是静默默认 |
+ * | 保留本地 | `provider.put`（CAS 基准 = 当前远端哈希；远端已删时用 `null` 显式重建）→ 基线对齐这次写入 | 是**用户显式选择**的覆盖（界面上写明「用我的版本覆盖远端」），不是静默默认 |
  * | 保留本地（本地已删） | `provider.delete`（同样以当前远端为 CAS 基准）→ 账本去掉这一条 | 同上：用户点的就是「按我这边，删掉远端」 |
  *
  * ## 两个出口都必须真的能走通
@@ -124,14 +124,18 @@ export async function resolveConflictWithLocal(session: SyncSession, path: strin
     hash: file.hash,
     baseHash: session.ledger.files[path]?.remoteHash ?? null,
   });
-  if ("conflict" in result && result.conflict.current) {
+  if ("conflict" in result) {
     /*
      * 账本里的 CAS 基准是**上次同步时**的远端 —— 冲突挂在账上往往意味着它已经旧了。
      * 用户点的是「用我的版本覆盖远端」，这是一个**明确的覆盖决定**：
      * 以服务端刚刚返回的当前值为基准重试一次（L1 的 revision tree 不丢 leaf，
      * 输掉的那一版仍在远端历史里），而不是把用户再踢回去点一次。
+     *
+     * 当前值为 `null` 表示远端已经删除。此时继续用旧基准只会永远 409；只有这里
+     * （用户明确选择保留本地）才允许用 `baseHash: null` **显式重建**一次。普通同步
+     * 的推送路径绝不能这样做，否则墓碑会被静默撤销。
      */
-    result = await session.provider.put({ did, bytes, hash: file.hash, baseHash: result.conflict.current.hash });
+    result = await session.provider.put({ did, bytes, hash: file.hash, baseHash: result.conflict.current?.hash ?? null });
   }
   if ("conflict" in result) {
     return { path, ok: false, error: "远端在我们读取之后又变了。请「立即同步」一次拿到最新状态再试。" };

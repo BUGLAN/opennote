@@ -851,6 +851,37 @@ describe("§4.7 设计点 3 · `If-Match` 语义", () => {
     expect(response.status).toBe(409);
   });
 
+  it("文档不存在时带任意 `If-Match` → 409 + `current: null`，且**不创建** CouchDB 文档", async () => {
+    for (const cryptoMode of ["none", "user-key"] as const) {
+      const world = makeWorld();
+      const alice = world.account();
+      const notebook = world.notebook(alice.id, cryptoMode === "none" ? "笔记本" : "加密", cryptoMode);
+      const did = cryptoMode === "none" ? idForPath("deleted.md") : `h:${"a".repeat(32)}`;
+      const docs = world.fake.databases.get(notebook.dbName)!;
+      let writes = 0;
+      world.fake.beforePutDoc = () => {
+        writes += 1;
+      };
+
+      const response = await call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(did)}`, {
+        method: "PUT",
+        headers: {
+          ...auth(alice.token),
+          "if-match": "d".repeat(64),
+          "x-opennote-hash": cryptoMode === "none" ? hashOf("must not be written") : "e".repeat(64),
+        },
+        body: "must not be written",
+      });
+
+      expect(response.status, cryptoMode).toBe(409);
+      const body = (await response.json()) as { code: string; current: unknown };
+      expect(body.code).toBe("conflict");
+      expect(body.current).toBeNull();
+      expect(writes, cryptoMode).toBe(0);
+      expect(docs.size, cryptoMode).toBe(0);
+    }
+  });
+
   it("超过上限 → 413（受边缘 30s 写超时约束的那个上限）", async () => {
     const world = makeWorld();
     const alice = world.account();

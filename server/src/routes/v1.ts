@@ -807,11 +807,23 @@ export function createV1Routes(deps: V1RoutesDeps): Hono {
        * `If-Match` 与当前内容标识不一致 ⇒ 直接 409 + 当前值，连写都不试。
        * 一致 ⇒ 用当前 `_rev` 去写（真正的 CAS 交给 CouchDB：万一在我们读完之后
        * 又有人写，它会返回 409，我们再把它转成同一个形状）。
+        *
+        * ★ **远端不存在时 `currentId` 是 `null`，不是「任意值都匹配」**。带旧
+        * `If-Match` 的请求必须得到冲突，否则一次删除会被客户端的过期基线静默撤销。
+        * 需要重建的调用方（冲突裁决里用户明确选择「保留本地」）必须显式不带
+        * `If-Match` 再发一次；普通同步不会走这条路径。
        */
-      if (ifMatch !== null && currentId !== null && ifMatch !== currentId) {
+      if (ifMatch !== null && ifMatch !== currentId) {
         // 冲突也是一条**事实**（控制台要能看到「哪一端在持续制造冲突」）。
         record(account.id, notebook.id, "conflict");
-        return json({ error: "内容标识对不上（远端已变）", code: "conflict", current: { hash: currentId, rev: existing?._rev ?? null } }, 409);
+        return json(
+          {
+            error: "内容标识对不上（远端已变或已删除）",
+            code: "conflict",
+            current: existing !== null && currentId !== null ? { hash: currentId, rev: existing._rev ?? null } : null,
+          },
+          409,
+        );
       }
       if (ifMatch === null && existing) {
         // 缺省 = 允许**新建**；但远端已有这一条 ⇒ 对不上。

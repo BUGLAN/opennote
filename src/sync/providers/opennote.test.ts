@@ -154,13 +154,14 @@ class StubV1 {
 
     if (url.pathname === "/v1/file" && request.method === "GET") {
       const doc = this.docs.get(query.get("did") ?? "");
-      if (!doc) return this.response(404, { error: "这一条不存在", code: "not-found" });
+      if (!doc || doc.deleted === true) return this.response(404, { error: "这一条不存在", code: "not-found" });
       return { status: 200, headers: { "x-opennote-hash": doc.hash, "x-opennote-rev": doc.rev }, bytes: doc.bytes };
     }
 
     if (url.pathname === "/v1/file" && request.method === "PUT") {
       const did = query.get("did") ?? "";
-      const existing = this.docs.get(did);
+      const stored = this.docs.get(did);
+      const existing = stored?.deleted === true ? undefined : stored;
       const ifMatch = request.headers["if-match"] ?? null;
       const current = existing ? existing.hash : null;
       if (ifMatch !== current) {
@@ -255,6 +256,22 @@ describe.each(IMPLEMENTATIONS)("§10.1 A 可移植契约 · %s", (_name, make) =
       expect(result.conflict.current).not.toBeNull();
       expect(result.conflict.current!.hash).toBe(id("h1"));
     }
+  });
+
+  it("C2b · 远端已删 + 旧 baseline ⇒ conflict current: null；只有 baseHash: null 才重建", async () => {
+    const provider = make();
+    const did = didFor("a.md");
+    await provider.put({ did, bytes: enc("v1"), hash: id("h1"), baseHash: null });
+    await provider.delete({ did, baseHash: id("h1") });
+
+    const stale = await provider.put({ did, bytes: enc("v2"), hash: id("h2"), baseHash: id("h1") });
+    expect("conflict" in stale).toBe(true);
+    if ("conflict" in stale) expect(stale.conflict.current).toBeNull();
+    expect(await provider.read(did)).toBeNull();
+
+    const rebuilt = await provider.put({ did, bytes: enc("v2"), hash: id("h2"), baseHash: null });
+    expect("conflict" in rebuilt).toBe(false);
+    expect((await provider.read(did))?.hash).toBe(id("h2"));
   });
 
   it("C4 · 删除之后**树里没有它**、`changes` 报 delete（墓碑优先于「树里没有」）", async () => {

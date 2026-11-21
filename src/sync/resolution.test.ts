@@ -125,6 +125,53 @@ describe("采用远端", () => {
   });
 });
 
+describe("保留本地 · 远端已删", () => {
+  it("显式选择保留本地 ⇒ 以 `baseHash: null` 重建一次，并记录新基线", async () => {
+    const provider = createMemoryProvider();
+    const backendA = memoryBackend({ "notes/x.md": "base" });
+    const a = sessionFor(backendA, provider);
+    await a.syncNow();
+    const backendB = memoryBackend({});
+    const b = sessionFor(backendB, provider);
+    await b.syncNow();
+
+    await backendA.remove("notes/x.md");
+    await a.syncNow();
+    await backendB.write("notes/x.md", new TextEncoder().encode("B 的最终版"));
+    const conflicted = await b.syncNow();
+    expect(conflicted!.conflicts.map((item) => item.kind)).toEqual(["deleted-remotely-modified-locally"]);
+    expect(b.ledger.files["notes/x.md"]?.pendingConflict).toBeDefined();
+
+    const staleBase = b.ledger.files["notes/x.md"]?.remoteHash ?? null;
+    expect(staleBase).not.toBeNull();
+    const putBases: (string | null)[] = [];
+    const originalPut = provider.put.bind(provider);
+    provider.put = async (input) => {
+      putBases.push(input.baseHash);
+      return originalPut(input);
+    };
+
+    const outcome = await resolveConflictWithLocal(b, "notes/x.md");
+    expect(outcome.ok).toBe(true);
+    // 第一次以旧基线撞上「远端已删」，第二次才是用户点头后的显式重建。
+    expect(putBases).toEqual([staleBase, null]);
+
+    const remote = await provider.read(b.deps.didOf("notes/x.md"));
+    expect(remote).not.toBeNull();
+    expect(new TextDecoder().decode(remote!.bytes)).toBe("B 的最终版");
+    expect(b.ledger.files["notes/x.md"]).toMatchObject({ remoteHash: remote!.hash, rev: remote!.rev });
+    expect(b.ledger.files["notes/x.md"]?.pendingConflict).toBeUndefined();
+
+    const again = await b.syncNow();
+    expect(again!.pushed).toBe(0);
+    expect(again!.conflicts).toHaveLength(0);
+
+    // 另一端能看到重建后的文档，并把它拉回本地。
+    await a.syncNow();
+    expect(new TextDecoder().decode(await a.deps.readLocal("notes/x.md"))).toBe("B 的最终版");
+  });
+});
+
 describe("保留本地（显式覆盖远端）", () => {
   it("覆盖时账本基准过期 ⇒ 以服务端当前值重试；另一台设备裁决「采用远端」后两端收敛", async () => {
     const { a, b } = await conflictedPair();
