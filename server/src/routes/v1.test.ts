@@ -1504,6 +1504,55 @@ describe("§4.7 · `/v1/events`（SSE 中继）", () => {
     expect(chunk).toContain("heartbeatMs");
   });
 
+  it("★ 首帧游标查询挂起时断开 ⇒ 计数立即释放，连续 4 次后第 5 条仍可建立", async () => {
+    /*
+     * 旧实现把 `abort` 监听放在 `await currentCursor(...)` 之后。客户端在游标查询
+     * 期间断开时，abort 事件已经发完，再监听也不会补发 —— 计数会永久泄漏。
+     */
+    const world = makeWorld();
+    const account = world.account();
+    const notebook = world.notebook(account.id);
+    const hangingInfo = vi.spyOn(world.couch, "databaseInfo").mockImplementation(() => new Promise(() => {}));
+
+    try {
+      for (let index = 0; index < 4; index += 1) {
+        const controller = new AbortController();
+        const response = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`, { signal: controller.signal });
+        expect(response.status).toBe(200);
+        const reader = response.body!.getReader();
+        const closed = reader.read();
+        controller.abort();
+        await expect(closed).resolves.toMatchObject({ done: true });
+      }
+    } finally {
+      hangingInfo.mockRestore();
+    }
+
+    const accepted = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`);
+    expect(accepted.status).toBe(200);
+    expect(await firstChunk(accepted)).toContain("event: ready");
+  });
+
+  it("★ 监听注册前 signal 就已 aborted ⇒ 不查询游标、不占名额", async () => {
+    const world = makeWorld();
+    const account = world.account();
+    const notebook = world.notebook(account.id);
+    const databaseInfo = vi.spyOn(world.couch, "databaseInfo");
+
+    for (let index = 0; index < 4; index += 1) {
+      const controller = new AbortController();
+      controller.abort();
+      const response = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`, { signal: controller.signal });
+      expect(response.status).toBe(200);
+      await expect(response.body!.getReader().read()).resolves.toMatchObject({ done: true });
+    }
+
+    expect(databaseInfo).not.toHaveBeenCalled();
+    const accepted = await world.app.request(`/v1/events?nb=${notebook.id}&authToken=${account.token}`);
+    expect(accepted.status).toBe(200);
+    expect(await firstChunk(accepted)).toContain("event: ready");
+  });
+
   it("★ 连接被中途掐断（enqueue 抛错、没有 abort）⇒ 计数必须释放（M4）", async () => {
     /*
      * 旧实现里 `send` 失败只置 `closed = true`，而 `cleanup` 第一行是 `if (closed) return` ——

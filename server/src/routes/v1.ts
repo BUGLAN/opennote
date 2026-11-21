@@ -1161,14 +1161,13 @@ function sseRoutes(deps: V1RoutesDeps, routes: Hono, json: (body: unknown, statu
     const membership = notebook ? deps.notebooks.resolveMembership(notebook.id, account.id) : null;
     if (!notebook || !membership) return json({ error: "笔记本不存在", code: "not-found" }, 404);
 
+    const signal = c.req.raw.signal;
     // 连接数上限（超出就明确拒绝，不是静默把旧的踢掉）。
     const limit = sseMaxConnectionsOf(deps);
     const used = sseConnections.get(account.id) ?? 0;
-    if (used >= limit) {
+    if (!signal.aborted && used >= limit) {
       return json({ error: `这个账号的实时连接太多了（上限 ${limit}）`, code: "too-many-connections" }, 429);
     }
-    sseConnections.set(account.id, used + 1);
-
     const heartbeatMs = sseHeartbeatMsOf(deps);
     const encoder = new TextEncoder();
     /** 客户端的期望起点（可作为「服务端当前游标取不到」时的退路）。 */
@@ -1185,24 +1184,40 @@ function sseRoutes(deps: V1RoutesDeps, routes: Hono, json: (body: unknown, statu
          * 泄漏几次之后，这个账号的所有实时连接都会被判成「太多了」并 429
          * （直到进程重启）。计数、定时器、关流现在都收敛在 `release()` 里，且只做一次。
          */
+        let reserved = false;
         let released = false;
         let timer: ReturnType<typeof setTimeout> | null = null;
         const release = (): void => {
           if (released) return;
           released = true;
+          signal.removeEventListener("abort", release);
           if (timer !== null) {
             clearTimeout(timer);
             timer = null;
           }
-          const left = (sseConnections.get(account.id) ?? 1) - 1;
-          if (left <= 0) sseConnections.delete(account.id);
-          else sseConnections.set(account.id, left);
+          if (reserved) {
+            const left = (sseConnections.get(account.id) ?? 1) - 1;
+            if (left <= 0) sseConnections.delete(account.id);
+            else sseConnections.set(account.id, left);
+          }
           try {
             controller.close();
           } catch {
             /* 已经关了 */
           }
         };
+        /*
+         * abort 监听必须在任何 `await` 之前注册：否则客户端在首帧游标查询期间断开，
+         * 事件已经发完，事后再监听也不会补发，计数就会永久泄漏。
+         */
+        signal.addEventListener("abort", release);
+        if (signal.aborted) {
+          release();
+          return;
+        }
+        // 真正预占计数放在流生命周期里，确保「已断开」的连接不会占用一个名额。
+        sseConnections.set(account.id, (sseConnections.get(account.id) ?? 0) + 1);
+        reserved = true;
         const send = (chunk: string): void => {
           if (released) return;
           try {
@@ -1219,6 +1234,7 @@ function sseRoutes(deps: V1RoutesDeps, routes: Hono, json: (body: unknown, statu
          * （空笔记本 + 本地有待推文件时，首轮同步永远不会发生）。
          */
         const readyCursor = await currentCursor(deps, notebook.db_name);
+        if (released) return;
         send(`event: ready
 data: ${JSON.stringify({ cursor: readyCursor, heartbeatMs })}
 
@@ -1268,9 +1284,6 @@ data: ${JSON.stringify({ at: Date.now() })}
           timer = setTimeout(() => void tick(), 2000);
         };
         void tick();
-
-        // 客户端断开 ⇒ 收尾（**一定要减计数**，否则连接数会只增不减）。
-        c.req.raw.signal.addEventListener("abort", release);
       },
     });
 
