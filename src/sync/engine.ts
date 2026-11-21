@@ -29,8 +29,9 @@
  * 这也是「E2EE 放 P4 不会造成迁移」的结构性原因（§9 末段）。
  */
 
+import { findCaseFoldCollisions } from "../../shared/paths";
 import { assertSafeRelative } from "../fs/paths";
-import { applyTruncationGuard, assertDeletionBudget, planPull, planPush, type BaselineLike } from "./diff";
+import { applyTruncationGuard, assertDeletionBudget, planPull, planPush, type BaselineLike, type PullPlan } from "./diff";
 import type { ConflictKind } from "./conflicts";
 import { isSameUpToFormatting } from "./textDiff";
 import type { SyncLedger } from "./state";
@@ -286,6 +287,33 @@ async function scanLocal(deps: SyncEngineDeps): Promise<LocalScan> {
   return { files: scan.files.filter((file) => !isIgnored(file.path)), unreadable: scan.unreadable };
 }
 
+/** 折叠碰撞组里的**每一条**路径。改名是用户的事，这里只负责把整组隔离。 */
+function caseFoldCollisionPaths(paths: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  for (const collision of findCaseFoldCollisions(paths)) {
+    out.add(collision.a);
+    out.add(collision.b);
+  }
+  return out;
+}
+
+/** 合并两份拉取计划；同一路径以先出现的那份为准。 */
+function mergePullPlans(primary: PullPlan, extra: PullPlan): PullPlan {
+  const downloads = new Map(primary.download.map((item) => [item.path, item]));
+  for (const item of extra.download) if (!downloads.has(item.path)) downloads.set(item.path, item);
+  const inSync = new Map((primary.inSync ?? []).map((item) => [item.path, item]));
+  for (const item of extra.inSync ?? []) if (!inSync.has(item.path)) inSync.set(item.path, item);
+  const removeLocal = [...new Set([...primary.removeLocal, ...extra.removeLocal])];
+  const conflicts = new Map(primary.conflicts.map((item) => [item.path, item]));
+  for (const item of extra.conflicts) if (!conflicts.has(item.path)) conflicts.set(item.path, item);
+  return {
+    download: [...downloads.values()],
+    ...(inSync.size > 0 ? { inSync: [...inSync.values()] } : {}),
+    removeLocal,
+    conflicts: [...conflicts.values()],
+  };
+}
+
 /**
  * 跑**一次**同步。
  *
@@ -449,6 +477,32 @@ async function syncOnceWithScan(input: SyncOnceInput, scan: LocalScan): Promise<
   const treeEntryByPath = new Map(remoteTree.entries.map((entry) => [entry.path, entry]));
 
   /*
+   * ★ 折叠碰撞是**落盘之前的硬闸门**，不是普通的“两边都改”。
+   *
+   * macOS / Windows 的磁盘把 `README.md` 与 `readme.md` 指向同一个物理文件；
+   * 若逐条拉取，后一条会覆盖前一条，而账本仍会留下两条。检测必须同时看远端树、
+   * 本地扫描与账本：任一侧单独看都可能漏掉。
+   *
+   * 改名完成后的旧占位不再代表任何现存文件时，先清掉它；否则它会在账本里
+   * 与改名后的另一条继续“碰撞”，让冲突永远解不开。
+   */
+  const remoteFullyKnown = !remoteUnchanged && partial === null;
+  for (const [path, file] of Object.entries(ledger.files)) {
+    const pending = file.pendingConflict;
+    if (pending?.kind !== "case-fold-collision") continue;
+    if (localByPath.has(path) || treeEntryByPath.has(path)) continue;
+    // `remoteUnchanged` 没有树可看，只能信冲突发现时记下的远端身份：
+    // `remoteId === null` 才说明它当时只存在于本地。
+    const remoteAbsenceKnown = (remoteFullyKnown && !tree.truncated) || (remoteUnchanged && pending.remoteId === null);
+    if (remoteAbsenceKnown) delete ledger.files[path];
+  }
+  const caseFoldPaths = caseFoldCollisionPaths([
+    ...remoteTree.entries.map((entry) => entry.path),
+    ...localFiles.map((file) => file.path),
+    ...Object.keys(ledger.files).filter((path) => !ignored(path)),
+  ]);
+
+  /*
    * ★★ **还没裁决的冲突**（N1）：它们只该被"列出来"，绝不能被推/拉/删。
    *
    * 账本里的 `pendingConflict` 是上一轮（或更早）判出来的冲突。这里做两件事：
@@ -459,11 +513,26 @@ async function syncOnceWithScan(input: SyncOnceInput, scan: LocalScan): Promise<
    * ⚠️ 「远端这轮不完整」时**不做**过期判断：`remoteUnchanged` / `partialRemote` 都没有权威的
    * 远端视图，拿它比会把有效的标记误删。
    */
-  const remoteFullyKnown = !remoteUnchanged && partial === null;
   const blockedPaths = new Set<string>();
+  /** 本轮因改名/删除而解除的折叠冲突里，仍然存在于远端的路径。 */
+  const resolvedCaseFoldRemote = new Map<string, string>();
   for (const [path, file] of Object.entries(ledger.files)) {
     const pending = file.pendingConflict;
     if (pending === undefined) continue;
+    if (pending.kind === "case-fold-collision") {
+      // 碰撞是**路径集合**的事实，不看内容；仍在碰撞组里就一直挡住。
+      if (caseFoldPaths.has(path)) {
+        blockedPaths.add(path);
+        continue;
+      }
+      // 用户改名/删除后集合已经变化：记在路径上的旧冲突自然解除，不靠内容碰巧改回。
+      const placeholder = file.localHash === null && file.remoteHash === null && !localByPath.has(path);
+      delete file.pendingConflict;
+      // 冲突时新建的空占位不是真实基线；留着会让远端现存文件被误判成“本地删了”。
+      if (placeholder) delete ledger.files[path];
+      if (pending.remoteId !== null) resolvedCaseFoldRemote.set(path, pending.remoteId);
+      continue;
+    }
     if (remoteFullyKnown) {
       const currentLocal = localByPath.get(path)?.hash ?? null;
       const currentRemote = treeEntryByPath.get(path)?.hash ?? null;
@@ -499,14 +568,14 @@ async function syncOnceWithScan(input: SyncOnceInput, scan: LocalScan): Promise<
   const baselineView: BaselineLike = {
     files: Object.fromEntries(Object.entries(ledger.files).filter(([path]) => !ignored(path))),
   };
-  const pushPlan = planPush(baselineView, localFiles);
+  const rawPushPlan = planPush(baselineView, localFiles);
   /*
    * ★ 远端没变时**不跑 `planPull`**。
    *
    * 为什么不是「拿空树去跑」：`planPull` 把「树里没有」解释成「远端删了它」，
    * 空树会让它把账本里每一条都判成待删 —— 那是灾难。所以这里直接给一个空计划。
    */
-  const pullPlan = remoteUnchanged
+  const rawPullPlan = remoteUnchanged
     ? ({
         download: [] as { path: string; sha: string }[],
         removeLocal: [] as string[],
@@ -520,6 +589,51 @@ async function syncOnceWithScan(input: SyncOnceInput, scan: LocalScan): Promise<
          */
         pullable: () => true,
       });
+
+  /*
+   * `remoteUnchanged` / `partialRemote` 本来不会重新比较没变的远端路径；
+   * 但折叠冲突刚解除时，远端那一份可能正是被冲突挡下、从未落盘的。只对这批路径
+   * 做一份小子计划：远端自上次同步未变时用冲突里记下的 `remoteId`，其余以当前树为准。
+   */
+  const resolvedCaseFoldPlan = resolvedCaseFoldRemote.size === 0 || (!remoteUnchanged && partial === null)
+    ? null
+    : (() => {
+        const paths = new Set(resolvedCaseFoldRemote.keys());
+        const entries = [...resolvedCaseFoldRemote].map(([path, pendingRemote]) => ({
+          path,
+          hash: treeEntryByPath.get(path)?.hash ?? pendingRemote,
+        }));
+        const files = Object.fromEntries(entries.flatMap(({ path }) => {
+          const file = ledger.files[path];
+          return file === undefined ? [] : [[path, file]];
+        }));
+        return planPull(
+          { files },
+          { truncated: false, entries },
+          localFiles.filter((file) => paths.has(file.path)),
+          { pullable: () => true },
+        );
+      })();
+  const plannedPullPlan = resolvedCaseFoldPlan === null ? rawPullPlan : mergePullPlans(rawPullPlan, resolvedCaseFoldPlan);
+
+  /*
+   * 计划本身按路径独立计算；碰撞组必须**在计划与执行之间**统一剔除，不能只拦下载：
+   * 同一组还可能同时出现在推送、删除和 `inSync` 里。这里保留计划形状，只摘掉整组路径。
+   */
+  const pushPlan = {
+    added: rawPushPlan.added.filter((file) => !caseFoldPaths.has(file.path)),
+    modified: rawPushPlan.modified.filter((file) => !caseFoldPaths.has(file.path)),
+    deleted: rawPushPlan.deleted.filter((path) => !caseFoldPaths.has(path)),
+  };
+  const pullPlan = {
+    ...plannedPullPlan,
+    download: plannedPullPlan.download.filter((item) => !caseFoldPaths.has(item.path)),
+    removeLocal: plannedPullPlan.removeLocal.filter((path) => !caseFoldPaths.has(path)),
+    conflicts: plannedPullPlan.conflicts.filter((item) => !caseFoldPaths.has(item.path)),
+    ...(plannedPullPlan.inSync === undefined
+      ? {}
+      : { inSync: plannedPullPlan.inSync.filter((item) => !caseFoldPaths.has(item.path)) }),
+  };
 
   /**
    * 把一条冲突**记进账本**（N1：远端没变的那几轮也不能让它从列表里消失、更不能被推出去）。
@@ -635,7 +749,7 @@ async function syncOnceWithScan(input: SyncOnceInput, scan: LocalScan): Promise<
     log,
   });
 
-  const conflictedPaths = new Set(effectiveConflicts.map((item) => item.path));
+  const conflictedPaths = new Set([...effectiveConflicts.map((item) => item.path), ...caseFoldPaths]);
   // 刚在账本里收敛掉的路径这一轮也不推：本地那份与远端只差格式，推上去只会把对方的字节换掉。
   const pushAdded = pushPlan.added.filter(
     (file) => !conflictedPaths.has(file.path) && !settledPaths.has(file.path) && !ignored(file.path) && !blockedPaths.has(file.path),
@@ -711,6 +825,21 @@ async function syncOnceWithScan(input: SyncOnceInput, scan: LocalScan): Promise<
     pullPlan.removeLocal.length;
   const tick = (): void => onProgress?.({ done: progressDone, total: progressTotal });
   tick();
+
+  // 碰撞组的每一条都单独进清单：用户能同时看到两个需要处理的名字。
+  for (const path of [...caseFoldPaths].sort()) {
+    const local = localByPath.get(path);
+    const remote = treeEntryByPath.get(path);
+    const entry: EngineConflict = {
+      path,
+      kind: "case-fold-collision",
+      localId: local?.hash ?? null,
+      remoteId: remote?.hash ?? null,
+    };
+    conflicts.push(entry);
+    recordPendingConflict(path, entry.kind, entry.localId, entry.remoteId);
+    log("conflict", { path, reason: entry.kind });
+  }
 
   for (const item of effectiveConflicts) {
     const local = localByPath.get(item.path);
@@ -1205,7 +1334,7 @@ export async function hasPendingLocalChanges(ledger: SyncLedger, deps: SyncEngin
   const plan = planPush(baselineView, localFiles);
   const pushable = (path: string): boolean => ledger.files[path]?.pendingConflict === undefined;
   return (
-    plan.added.length > 0 ||
+    plan.added.some((file) => pushable(file.path)) ||
     plan.modified.some((file) => pushable(file.path)) ||
     plan.deleted.some(pushable)
   );

@@ -57,6 +57,21 @@ describe("冲突面板", () => {
     expect(html).toContain("重新核对");
   });
 
+  it("大小写折叠冲突只能改名，不给自动覆盖出口", () => {
+    const html = render([
+      { path: "README.md", kind: "case-fold-collision" },
+      { path: "readme.md", kind: "case-fold-collision" },
+    ]);
+    expect(html).toContain("README.md");
+    expect(html).toContain("readme.md");
+    expect(html).toContain("文件名大小写冲突");
+    expect(html).toContain("请改名后重新同步");
+    // 单条没有「用我的 / 用远端」，批量按钮也不可点。
+    expect(html).not.toContain(">用我的<");
+    expect(html).not.toContain(">用远端<");
+    expect(html).toContain('disabled=""');
+  });
+
   it("默认**不**展开对比（一上来就是 109 份全文会把面板撑爆）", () => {
     const html = render([{ path: "a.md", kind: "both-modified" }]);
     expect(html).not.toContain("并排");

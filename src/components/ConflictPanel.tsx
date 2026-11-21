@@ -38,9 +38,16 @@ function kindLabel(kind: string): string {
       return "本地已删 · 远端改过";
     case "deleted-remotely-modified-locally":
       return "远端已删 · 本地改过";
+    case "case-fold-collision":
+      return "文件名大小写冲突";
     default:
       return kind;
   }
+}
+
+/** 折叠碰撞只能由用户改名解决：自动覆盖任何一边都可能丢掉另一篇。 */
+function requiresRename(kind: string): boolean {
+  return kind === "case-fold-collision";
 }
 
 export function ConflictPanel({ conflicts }: { conflicts: ConflictItem[] }): ReactNode {
@@ -53,6 +60,8 @@ export function ConflictPanel({ conflicts }: { conflicts: ConflictItem[] }): Rea
 
   /** 只看得见的那些类型才值得画 diff；删除类冲突没有两份正文。 */
   const canDiff = (kind: string): boolean => kind === "both-modified";
+  const resolvable = conflicts.filter((item) => !requiresRename(item.kind));
+  const renameCount = conflicts.length - resolvable.length;
 
   const open = (path: string) => {
     if (openPath === path) {
@@ -97,7 +106,8 @@ export function ConflictPanel({ conflicts }: { conflicts: ConflictItem[] }): Rea
     ).length;
 
   const bulk = async (direction: "remote" | "local") => {
-    const total = conflicts.length;
+    const total = resolvable.length;
+    if (total === 0) return;
     const deletes = deletesFor(direction);
     const ok = await askConfirm({
       title: `把 ${total} 条冲突全部${direction === "local" ? "改成你的版本" : "改成远端版本"}？`,
@@ -113,6 +123,7 @@ export function ConflictPanel({ conflicts }: { conflicts: ConflictItem[] }): Rea
         deletes > 0
           ? { k: "删除", v: `${deletes} 篇${direction === "local" ? "远端" : "本机"}内容（另一边已经删了它）` }
           : { k: "不会", v: "删任何文件" },
+        ...(renameCount > 0 ? [{ k: "保留", v: `${renameCount} 条大小写冲突，需改名后单独处理` }] : []),
         { k: "不会", v: "动其余的笔记" },
         { k: "可撤销", v: "每篇都有前像，可以从「历史」逐篇恢复" },
       ],
@@ -122,7 +133,7 @@ export function ConflictPanel({ conflicts }: { conflicts: ConflictItem[] }): Rea
     if (!ok) return;
     setError(null);
     // 逐条裁决：`resolveConflict` 一次只处理一条，串行避免把限流桶打满。
-    for (const item of conflicts) {
+    for (const item of resolvable) {
       setBusy(item.path);
       // eslint-disable-next-line no-await-in-loop
       const outcome = await resolveConflict(item.path, direction);
@@ -147,7 +158,7 @@ export function ConflictPanel({ conflicts }: { conflicts: ConflictItem[] }): Rea
         <Icon name="edit" size={13} /> 冲突（{conflicts.length}）
       </h3>
       <p className="dialog__note">
-        两边都改过、引擎绝不替你猜。选定一边之后，另一台设备会在下一轮同步里收敛到同一份。
+        两边都改过、引擎绝不替你猜。文件名大小写冲突不会被自动覆盖，请改名后重新同步。
       </p>
       <div className="cf-bar">
         <span className="muted">待处理 {conflicts.length} 条</span>
@@ -155,10 +166,10 @@ export function ConflictPanel({ conflicts }: { conflicts: ConflictItem[] }): Rea
         <button type="button" className="btn btn--sm" disabled={busy !== null} onClick={recheck}>
           重新核对
         </button>
-        <button type="button" className="btn btn--sm" disabled={busy !== null} onClick={() => void bulk("local")}>
+        <button type="button" className="btn btn--sm" disabled={busy !== null || resolvable.length === 0} onClick={() => void bulk("local")}>
           全部用我的
         </button>
-        <button type="button" className="btn btn--sm" disabled={busy !== null} onClick={() => void bulk("remote")}>
+        <button type="button" className="btn btn--sm" disabled={busy !== null || resolvable.length === 0} onClick={() => void bulk("remote")}>
           全部用远端
         </button>
       </div>
@@ -170,17 +181,23 @@ export function ConflictPanel({ conflicts }: { conflicts: ConflictItem[] }): Rea
               <span className="cf-path" title={item.path}>{item.path}</span>
               <span className="cf-kind">{kindLabel(item.kind)}</span>
               <span className="cf-acts">
-                {canDiff(item.kind) ? (
-                  <button type="button" className="btn btn--sm" onClick={() => open(item.path)}>
-                    {openPath === item.path ? "收起" : "对比"}
-                  </button>
-                ) : null}
-                <button type="button" className="btn btn--sm" disabled={busy !== null} onClick={() => act(item.path, "local")}>
-                  用我的
-                </button>
-                <button type="button" className="btn btn--sm" disabled={busy !== null} onClick={() => act(item.path, "remote")}>
-                  用远端
-                </button>
+                {requiresRename(item.kind) ? (
+                  <span className="muted">请改名后重新同步</span>
+                ) : (
+                  <>
+                    {canDiff(item.kind) ? (
+                      <button type="button" className="btn btn--sm" onClick={() => open(item.path)}>
+                        {openPath === item.path ? "收起" : "对比"}
+                      </button>
+                    ) : null}
+                    <button type="button" className="btn btn--sm" disabled={busy !== null} onClick={() => act(item.path, "local")}>
+                      用我的
+                    </button>
+                    <button type="button" className="btn btn--sm" disabled={busy !== null} onClick={() => act(item.path, "remote")}>
+                      用远端
+                    </button>
+                  </>
+                )}
               </span>
             </div>
 

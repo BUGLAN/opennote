@@ -41,8 +41,12 @@
 
 import { isHiddenPath } from "../fs/paths";
 
-/** 冲突的种类（与 §6.2 判定表一一对应）。 */
-export type ConflictKind = "both-modified" | "deleted-locally-modified-remotely" | "deleted-remotely-modified-locally";
+/** 冲突的种类（与 §6.2 判定表一一对应；折叠碰撞是额外的落盘前保护）。 */
+export type ConflictKind =
+  | "both-modified"
+  | "deleted-locally-modified-remotely"
+  | "deleted-remotely-modified-locally"
+  | "case-fold-collision";
 
 export interface ConflictEntry {
   /** 工作区相对路径 —— 冲突是**按路径**报的，用户看到的就是他认识的那个文件名。 */
@@ -61,6 +65,7 @@ export const CONFLICT_REASON_TEXT: Record<ConflictKind, string> = {
   "both-modified": "两边都改了这一篇，内容不同",
   "deleted-locally-modified-remotely": "本地删了它，远端又改了它",
   "deleted-remotely-modified-locally": "远端删了它，本地又改了它",
+  "case-fold-collision": "文件名大小写折叠后重复，需要改名",
 };
 
 const entries = new Map<string, ConflictEntry>();

@@ -327,3 +327,29 @@ describe("★ M8 · E2EE 下冲突预览必须是明文", () => {
     expect(preview.remote).toBe("A 的版本");
   });
 });
+
+describe("★ 大小写折叠冲突不能被自动裁决", () => {
+  it("点「用我的 / 用远端」也只返回改名提示，两边内容都不动", async () => {
+    const provider = createMemoryProvider();
+    const upper = new TextEncoder().encode("UPPER");
+    const lower = new TextEncoder().encode("lower");
+    provider.seed(idForPath("README.md"), "upper-hash", upper);
+    provider.seed(idForPath("readme.md"), "lower-hash", lower);
+    const session = sessionFor(memoryBackend({}), provider);
+
+    const synced = await session.syncNow();
+    expect(synced!.conflicts.map((item) => item.kind)).toEqual([
+      "case-fold-collision",
+      "case-fold-collision",
+    ]);
+
+    const keepLocal = await resolveConflictWithLocal(session, "README.md");
+    const keepRemote = await resolveConflictWithRemote(session, "README.md");
+    expect(keepLocal.ok).toBe(false);
+    expect(keepRemote.ok).toBe(false);
+    expect(keepLocal.error).toContain("改名");
+    expect(keepRemote.error).toContain("改名");
+    expect((await provider.read(idForPath("README.md")))?.bytes).toEqual(upper);
+    expect((await provider.read(idForPath("readme.md")))?.bytes).toEqual(lower);
+  });
+});

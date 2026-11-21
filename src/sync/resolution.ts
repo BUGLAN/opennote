@@ -42,6 +42,12 @@ function allocateBid(session: SyncSession, path: string): number {
   return bid;
 }
 
+/** 折叠碰撞没有“哪一边赢”的答案：两条路径在同一块磁盘上是同一个文件。 */
+function caseFoldCollisionError(session: SyncSession, path: string): ResolutionOutcome | null {
+  if (session.ledger.files[path]?.pendingConflict?.kind !== "case-fold-collision") return null;
+  return { path, ok: false, error: "文件名大小写折叠后重复，不能自动覆盖；请先改名，再重新同步。" };
+}
+
 
 /** 冲突两边的可读版本（界面画 diff 用）。 */
 export interface ConflictPreview {
@@ -85,6 +91,8 @@ export async function previewConflict(session: SyncSession, path: string): Promi
 }
 /** 「采用远端」：远端那一份覆盖本地，基线对齐远端（与引擎拉取同一形状）。 */
 export async function resolveConflictWithRemote(session: SyncSession, path: string): Promise<ResolutionOutcome> {
+  const blocked = caseFoldCollisionError(session, path);
+  if (blocked !== null) return blocked;
   const did = session.deps.didOf(path);
   const remote = await session.provider.read(did);
   if (remote === null) {
@@ -113,6 +121,8 @@ export async function resolveConflictWithRemote(session: SyncSession, path: stri
 
 /** 「保留本地」：本地那一份以显式覆盖写上远端（CAS 基准 = 当前远端哈希）。 */
 export async function resolveConflictWithLocal(session: SyncSession, path: string): Promise<ResolutionOutcome> {
+  const blocked = caseFoldCollisionError(session, path);
+  if (blocked !== null) return blocked;
   const locals = await session.deps.listLocal();
   const file = locals.find((item) => item.path === path);
   const did = session.deps.didOf(path);

@@ -61,6 +61,8 @@ async function makeHarness(
     ignore?: (path: string) => boolean;
     /** 模拟「某些目录读不到」（H3）：给了它就相当于后端支持 `listWithIssues`。 */
     unreadable?: { path: string; message: string }[];
+    /** 模拟 macOS / Windows：不同大小写的路径落到同一个物理文件。 */
+    caseInsensitiveLocal?: boolean;
   } = {},
 ): Promise<Harness> {
   const provider = options.provider ?? createMemoryProvider();
@@ -78,6 +80,13 @@ async function makeHarness(
 
   for (const [path, text] of Object.entries(options.seedLocal ?? {})) local.set(path, enc(text));
 
+  const physicalPath = (path: string): string => {
+    if (!options.caseInsensitiveLocal) return path;
+    const folded = path.toLowerCase();
+    for (const key of local.keys()) if (key.toLowerCase() === folded) return key;
+    return path;
+  };
+
   const deps: SyncEngineDeps = {
     async listLocal(): Promise<EngineLocalFile[]> {
       const out: EngineLocalFile[] = [];
@@ -86,7 +95,7 @@ async function makeHarness(
     },
     hashOf,
     async hashOfLocal(path) {
-      const bytes = local.get(path);
+      const bytes = local.get(physicalPath(path));
       if (!bytes) throw new Error(`本地没有这一条：${path}`);
       return hashOf(bytes);
     },
@@ -100,17 +109,17 @@ async function makeHarness(
     },
     async readLocal(path) {
       reads.push(path);
-      const bytes = local.get(path);
+      const bytes = local.get(physicalPath(path));
       if (!bytes) throw new Error(`本地没有这一条：${path}`);
       return bytes;
     },
     async writeLocal(path, bytes) {
       writes.push(path);
-      local.set(path, new Uint8Array(bytes));
+      local.set(physicalPath(path), new Uint8Array(bytes));
     },
     async removeLocal(path) {
       removes.push(path);
-      local.delete(path);
+      local.delete(physicalPath(path));
     },
     ...(options.ignore === undefined ? {} : { isIgnored: options.ignore }),
     ...(options.unreadable === undefined
@@ -133,10 +142,10 @@ async function makeHarness(
     removes,
     logs,
     async writeLocalFile(path, text) {
-      local.set(path, enc(text));
+      local.set(physicalPath(path), enc(text));
     },
     deleteLocalFile(path) {
-      local.delete(path);
+      local.delete(physicalPath(path));
     },
   };
 }
@@ -1365,5 +1374,134 @@ describe("★ 大文件拉取", () => {
     expect(secondRoundReads).toBe(8 - written);
     expect(result.pulled).toBe(8 - written);
     expect(Object.keys(ledgerBefore.files)).toHaveLength(8);
+  });
+});
+
+/* ============================================================================
+   大小写折叠：同一物理文件不能被两条远端路径轮流覆盖
+   ============================================================================ */
+
+describe("★ 大小写折叠冲突", () => {
+  async function seedRemoteCollision(): Promise<{ harness: Harness; upper: Uint8Array; lower: Uint8Array }> {
+    const harness = await makeHarness({ caseInsensitiveLocal: true });
+    const upper = enc("# README 的大写版本");
+    const lower = enc("# readme 的小写版本");
+    harness.provider.seed(idForPath("README.md"), await hashOf(upper), upper);
+    harness.provider.seed(idForPath("readme.md"), await hashOf(lower), lower);
+    return { harness, upper, lower };
+  }
+
+  it("★ 远端同时有 README.md / readme.md ⇒ 一条都不落盘，两条都进冲突清单", async () => {
+    const { harness } = await seedRemoteCollision();
+    const before = harness.provider.snapshot();
+
+    const result = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    expect(result.pulled).toBe(0);
+    expect(result.pushed).toBe(0);
+    expect(harness.writes).toEqual([]);
+    // 大小写不敏感的后端上，任何一次写都会落到已有文件上；一条都不能发生。
+    expect(harness.local.size).toBe(0);
+    expect(result.conflicts.map(({ path, kind }) => ({ path, kind }))).toEqual([
+      { path: "README.md", kind: "case-fold-collision" },
+      { path: "readme.md", kind: "case-fold-collision" },
+    ]);
+    // 不改名、不覆盖、不删除远端。
+    expect(harness.provider.snapshot()).toEqual(before);
+    expect(harness.removes).toEqual([]);
+    expect(harness.ledger.files["README.md"]?.pendingConflict?.kind).toBe("case-fold-collision");
+    expect(harness.ledger.files["readme.md"]?.pendingConflict?.kind).toBe("case-fold-collision");
+
+    // 远端没变的那一轮也必须继续列出冲突（N1），不能因为不跑 planPull 就消失。
+    const again = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps, remoteUnchanged: true });
+    expect(again.conflicts.map((item) => item.path)).toEqual(["README.md", "readme.md"]);
+    expect(harness.writes).toEqual([]);
+  });
+
+  it("本地 readme.md 撞远端 README.md ⇒ 两边都保留，不推也不覆盖", async () => {
+    const harness = await makeHarness({ caseInsensitiveLocal: true, seedLocal: { "readme.md": "# 本地版本" } });
+    const remote = enc("# 远端版本");
+    harness.provider.seed(idForPath("README.md"), await hashOf(remote), remote);
+
+    const result = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    expect(result.pushed).toBe(0);
+    expect(result.pulled).toBe(0);
+    expect(harness.writes).toEqual([]);
+    expect(harness.removes).toEqual([]);
+    expect(new TextDecoder().decode(harness.local.get("readme.md")!)).toBe("# 本地版本");
+    expect(await harnessText(harness.provider, "README.md")).toBe("# 远端版本");
+    expect(result.conflicts.map((item) => item.path)).toEqual(["README.md", "readme.md"]);
+
+    // 用户只改了本地的名字：远端没有变化时，下一轮也要立刻拉下被挡住的远端那一份。
+    harness.deleteLocalFile("readme.md");
+    await harness.writeLocalFile("renamed.md", "# 本地版本");
+    const resolved = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps, remoteUnchanged: true });
+    expect(resolved.conflicts).toEqual([]);
+    expect(resolved.pushed).toBe(1);
+    expect(resolved.pulled).toBe(1);
+    expect(new TextDecoder().decode(harness.local.get("README.md")!)).toBe("# 远端版本");
+    expect(new TextDecoder().decode(harness.local.get("renamed.md")!)).toBe("# 本地版本");
+  });
+
+  it("账本里已有折叠重复路径 ⇒ 不推送、不删除其中任一条", async () => {
+    const harness = await makeHarness();
+    harness.ledger.files["Notes/A.md"] = {
+      bid: 1,
+      localHash: "old-a",
+      remoteHash: null,
+      rev: null,
+      imported: true,
+      syncedAt: 0,
+    };
+    harness.ledger.files["notes/a.md"] = {
+      bid: 2,
+      localHash: "old-b",
+      remoteHash: null,
+      rev: null,
+      imported: true,
+      syncedAt: 0,
+    };
+
+    const result = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    expect(result.remoteDeleted).toBe(0);
+    expect(result.deleted).toBe(0);
+    expect(harness.provider.tombstones()).toEqual([]);
+    expect(harness.removes).toEqual([]);
+    expect(result.conflicts.map((item) => item.path)).toEqual(["Notes/A.md", "notes/a.md"]);
+  });
+
+  it("★ 用户改名后下一轮自然收敛，不自动改名", async () => {
+    const { harness, lower } = await seedRemoteCollision();
+    const first = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+    expect(first.conflicts).toHaveLength(2);
+
+    // 另一端把 readme.md 改名成 renamed.md（删除旧 did、写入新 did）。
+    await harness.provider.delete({ did: idForPath("readme.md"), baseHash: null });
+    harness.provider.seed(idForPath("renamed.md"), await hashOf(lower), lower);
+
+    const second = await syncOnce({ provider: harness.provider, ledger: harness.ledger, deps: harness.deps });
+
+    expect(second.conflicts).toEqual([]);
+    expect(second.pushed).toBe(0);
+    expect(second.pulled).toBe(2);
+    expect([...harness.local.keys()].sort()).toEqual(["README.md", "renamed.md"]);
+    expect(new TextDecoder().decode(harness.local.get("README.md")!)).toBe("# README 的大写版本");
+    expect(new TextDecoder().decode(harness.local.get("renamed.md")!)).toBe("# readme 的小写版本");
+    // 远端仍是用户改过的名字；引擎没有替用户改任何一条路径。
+    expect(Object.keys(harness.provider.snapshot()).sort()).toEqual([idForPath("README.md"), idForPath("renamed.md")].sort());
+  });
+
+  it("普通不冲突路径保持原有大小写并正常往返", async () => {
+    const provider = createMemoryProvider();
+    const a = await makeHarness({ provider, seedLocal: { "Notes/README.MD": "# 大小写照旧" } });
+    await syncOnce({ provider: a.provider, ledger: a.ledger, deps: a.deps });
+
+    const b = await makeHarness({ provider });
+    const result = await syncOnce({ provider: b.provider, ledger: b.ledger, deps: b.deps });
+    expect(result.conflicts).toEqual([]);
+    expect([...b.local.keys()]).toEqual(["Notes/README.MD"]);
+    expect(new TextDecoder().decode(b.local.get("Notes/README.MD")!)).toBe("# 大小写照旧");
   });
 });
