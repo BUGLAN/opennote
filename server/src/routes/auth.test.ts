@@ -11,7 +11,7 @@ import { loadConfig } from "../config";
 import { NotebookStore } from "../notebooks";
 import { SettingsStore } from "../settings";
 import { ShareStore } from "../shares";
-import { testAccountStore } from "../auth/testAccounts.test-helper";
+import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
 import { createAuthRoutes, KdfGate, LoginThrottle, withKdfSlot } from "./auth";
 import { createAdminRoutes } from "./admin";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
@@ -57,7 +57,7 @@ function makeWorld(options: { throttle?: LoginThrottle } = {}) {
     return { status: response.status, text, body: text ? (JSON.parse(text) as Record<string, any>) : null };
   };
   const login = (email: string, password = PASSWORD, device: object = DEVICE_A) => call("/v1/auth/login", { body: { email, password, device } });
-  return { db, accounts, notebooks, settings, throttle, call, login };
+  return { db, accounts, notebooks, shares, settings, throttle, call, login };
 }
 
 describe("初始化", () => {
@@ -116,6 +116,20 @@ describe("登录", () => {
     expect(devices.body?.devices).toEqual([
       expect.objectContaining({ deviceId: DEVICE_A.deviceId, name: DEVICE_A.name, os: "macos", clientVersion: "0.16.0", current: true, active: true }),
     ]);
+  });
+
+  it("/me 的用量把笔记本、活跃分享与未结算预占合在一起", async () => {
+    const world = makeWorld();
+    const alice = seedAccount(world.accounts);
+    const notebook = world.notebooks.create({ ownerId: alice.id, name: "a", cryptoMode: "none" });
+    world.notebooks.addNotebookBytes(notebook.id, 4);
+    world.shares.create({ accountId: alice.id, name: "a.txt", contentType: "text/plain", size: 4, sha256: "x", now: Date.now() });
+    const reserved = world.notebooks.reserveQuota({ accountId: alice.id, bytes: 2, limit: 100, now: Date.now() });
+    expect("reservation" in reserved).toBe(true);
+
+    const me = await world.call("/v1/me", { token: alice.token });
+    expect(me.status).toBe(200);
+    expect(me.body?.quota).toMatchObject({ bytesUsed: 10 });
   });
 
   it("★ 同一台电脑换账号登录 ⇒ 设备跟到新账号（真机：Windows 换账号后设置页只列出 Mac）", async () => {

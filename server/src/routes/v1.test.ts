@@ -2147,6 +2147,32 @@ describe("空间配额：超出就拒收让用量变多的写", () => {
     expect(response.status).toBe(201);
   });
 
+  it("公开分享占用同一账号配额：分享 8B 后笔记本写 3B 被拒，撤销后放行", async () => {
+    const world = makeWorld();
+    const alice = world.account();
+    const notebook = world.notebook(alice.id);
+    world.accounts.setQuota(alice.id, 10);
+    world.accounts.db
+      .prepare("INSERT INTO shares (id, account_id, name, content_type, size, sha256, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)")
+      .run("share-occupies-quota", alice.id, "a.txt", "text/plain", 8, "hash", Date.now());
+
+    const put = () =>
+      call(world, `/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath("a.md"))}&path=a.md`, {
+        method: "PUT",
+        headers: auth(alice.token),
+        body: "abc",
+      });
+
+    const denied = await put();
+    expect(denied.status).toBe(413);
+    expect(await denied.json()).toMatchObject({ code: "quota", bytesUsed: 8, bytesLimit: 10 });
+    expect(world.notebooks.bytesOwnedBy(alice.id)).toBe(0);
+
+    world.accounts.db.prepare("UPDATE shares SET revoked_at = ? WHERE id = ?").run(Date.now(), "share-occupies-quota");
+    expect((await put()).status).toBe(201);
+    expect(world.notebooks.bytesOwnedBy(alice.id)).toBe(3);
+  });
+
   it("★ 并发写同一账号、总增长超过配额 ⇒ 只有一个成功（预占要原子）", async () => {
     const world = makeWorld();
     const alice = world.account();

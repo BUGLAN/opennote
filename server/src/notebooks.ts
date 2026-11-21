@@ -33,6 +33,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { CryptoMode, Role } from "../../shared/contract";
 import { newNotebookId } from "./auth/accounts";
 import { databaseNameFor } from "./couch/design";
+import { QuotaLedger, type ReserveQuotaInput, type ReserveQuotaResult } from "./quota";
 
 export interface NotebookRow {
   id: string;
@@ -98,7 +99,11 @@ export interface CreateNotebookInput {
 }
 
 export class NotebookStore {
-  constructor(private readonly db: DatabaseSync) {}
+  private readonly quota: QuotaLedger;
+
+  constructor(private readonly db: DatabaseSync) {
+    this.quota = new QuotaLedger(db);
+  }
 
   /* ------------------------------------------------------------ 笔记本 */
 
@@ -660,24 +665,18 @@ export class NotebookStore {
   /* ---------------------------------------------------------------- 配额 */
 
   /**
-   * 配额缓存（§4.11：`quota_usage` 是缓存，定期从 CouchDB 重算）。
+   * 账号的空间用量（§4.11）。
    *
-   * 这里只做**记账**，不做判定；判定在 `assertQuota()` 里（读写分开：超限时
-   * **读取仍可用**，只有写入被拒，§10.1 M9）。
+   * `bytesUsed` 来自账号级账本（笔记本 + 活跃分享 + 未结算预占），与
+   * `reserveQuota()`、`/me`、控制台看到的是同一个数；`notebooks` 仍然读缓存，
+   * 因为库数量在本地就能算准，而且建/删库时都会刷新。
+   *
+   * 这里只做**记账**，不做判定；判定在 `assertQuota()` 与 `reserveQuota()` 里
+   * （读写分开：超限时**读取仍可用**，只有写入被拒，§10.1 M9）。
    */
   quotaOf(accountId: string): { bytesUsed: number; notebooks: number; bytesLimit: number; notebooksLimit: number } {
-    /*
-     * ★ `bytesUsed` 现在由**账本**算，不再读 `quota_usage.bytes_used`。
-     *
-     * 那一列从注册起就是 0，之后没有任何代码更新它 —— 于是控制台的用量条永远是
-     * 空的、台账的「占用」永远是 0 B，而库里明明有数据。真正的字节数在
-     * `notebook_usage`（服务端在每一次写/删正文时记账，见 `addNotebookBytes`），
-     * 所以这里按「这个人拥有的、未被删掉的库」求和 —— 一个聚合查询，不会比原来贵。
-     *
-     * `notebooks` 仍然读缓存：它是**本地就能算准**的那一半，而且建/删库时都会刷。
-     */
     return {
-      bytesUsed: this.bytesOwnedBy(accountId),
+      bytesUsed: this.quota.usageOf(accountId).bytesUsed,
       notebooks: 0,
       bytesLimit: 0,
       notebooksLimit: 0,
@@ -692,70 +691,22 @@ export class NotebookStore {
     return row ?? null;
   }
 
-  /** 这个人拥有的、未被删除的库合计占用了多少字节（`notebook_usage` 的聚合）。 */
+  /** 这个人拥有的、未被删除的库合计占用了多少字节（不含分享与预占）。 */
   bytesOwnedBy(accountId: string): number {
-    const row = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(u.bytes_used), 0) AS total
-           FROM notebook_usage u
-           JOIN notebooks n ON n.id = u.notebook_id
-          WHERE n.owner_id = ? AND n.deleted_at IS NULL`,
-      )
-      .get(accountId) as unknown as { total: number } | undefined;
-    return row?.total ?? 0;
+    return this.quota.usageOf(accountId).notebookBytes;
   }
 
   /**
-   * 原子预占一次写入需要的空间（账号级）。
-   *
-   * ## 为什么需要预占
-   *
-   * `PUT /v1/file` 在 CouchDB 写入**之前**检查配额，写入成功后才记账；两次网络
-   * 往返之间，多个并发写都会看到同一份旧用量。预占行把「正在进行、尚未结算」
-   * 的增长也算进配额，于是后来的请求要么看见它、要么等它结算。
-   *
-   * ## 崩溃兜底
-   *
-   * `BEGIN IMMEDIATE` 只保护预占本身，保护不了进程崩溃；`expires_at` 让下一次
-   * 预占能顺手清掉永远等不到结算的旧行。正常失败路径仍由路由立即释放。
+   * 原子预占一次写入需要的空间（账号级）。具体账本与原子性见 `quota.ts`；
+   * 这里保留这个方法是因为笔记本写路径的调用点只关心「预占 / 超限」两件事。
    */
-  reserveQuota(input: { accountId: string; bytes: number; limit: number; now?: number; ttlMs?: number }):
-    | { reservation: { id: string; accountId: string; bytes: number } }
-    | { quotaExceeded: true; bytesUsed: number } {
-    const bytes = Math.trunc(input.bytes);
-    if (!Number.isFinite(bytes) || bytes <= 0) throw new Error("预占字节数必须是正整数");
-    const now = input.now ?? Date.now();
-    const ttlMs = Math.max(1, Math.trunc(input.ttlMs ?? 10 * 60_000));
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      // 过期预占属于已经死掉的写入，不能继续占着配额。
-      this.db.prepare("DELETE FROM quota_reservations WHERE expires_at <= ?").run(now);
-      const reserved = this.db
-        .prepare("SELECT COALESCE(SUM(bytes), 0) AS total FROM quota_reservations WHERE account_id = ? AND expires_at > ?")
-        .get(input.accountId, now) as unknown as { total: number };
-      const bytesUsed = this.bytesOwnedBy(input.accountId) + (reserved?.total ?? 0);
-      if (input.limit > 0 && bytesUsed + bytes > input.limit) {
-        this.db.exec("COMMIT");
-        return { quotaExceeded: true, bytesUsed };
-      }
-      const id = newNotebookId();
-      this.db
-        .prepare("INSERT INTO quota_reservations (id, account_id, bytes, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
-        .run(id, input.accountId, bytes, now, now + ttlMs);
-      this.db.exec("COMMIT");
-      return { reservation: { id, accountId: input.accountId, bytes } };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+  reserveQuota(input: ReserveQuotaInput): ReserveQuotaResult {
+    return this.quota.reserve(input);
   }
 
   /** 当前仍未结算的预占（控制台诊断 / 用例用；与 `bytesOwnedBy` 分开）。 */
   reservedBytesOf(accountId: string, now = Date.now()): number {
-    const row = this.db
-      .prepare("SELECT COALESCE(SUM(bytes), 0) AS total FROM quota_reservations WHERE account_id = ? AND expires_at > ?")
-      .get(accountId, now) as unknown as { total: number } | undefined;
-    return row?.total ?? 0;
+    return this.quota.reservedBytesOf(accountId, now);
   }
 
   /**
@@ -763,20 +714,12 @@ export class NotebookStore {
    * 若预占已因超时被清理，仍要记账 —— 字节确实写进了 CouchDB。
    */
   settleQuotaReservation(id: string, notebookId: string, delta: number, now = Date.now()): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db.prepare("DELETE FROM quota_reservations WHERE id = ?").run(id);
-      this.addNotebookBytes(notebookId, delta, now);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    this.quota.settle(id, () => this.addNotebookBytes(notebookId, delta, now));
   }
 
   /** 写入失败 / 409 / 超时：只释放预占，不动已用量。 */
   releaseQuotaReservation(id: string): void {
-    this.db.prepare("DELETE FROM quota_reservations WHERE id = ?").run(id);
+    this.quota.release(id);
   }
 
   /* -------------------------------------------------------------- 用量记账 */

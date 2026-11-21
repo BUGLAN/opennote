@@ -138,7 +138,7 @@ export function createShareRoutes(deps: ShareRoutesDeps): Hono {
         sha256: sha256Hex(bytes),
         now: createdAt,
       },
-      { limit, usedBytes: () => deps.notebooks.bytesOwnedBy(account.id) },
+      { limit },
     );
     if ("quotaExceeded" in reserved) {
       return json(
@@ -151,7 +151,19 @@ export function createShareRoutes(deps: ShareRoutesDeps): Hono {
         413,
       );
     }
-    const share = reserved.share;
+    const { share, reservationId } = reserved;
+    /*
+     * 先在账本事务里把预占换成 shares 行（删预占 + 插行原子完成），再去写快照。
+     *
+     * 行先于字节存在意味着写入期间用量**只会偏高、不会低估**，并发读写都看得见
+     * 这次分享；任何后续失败都会撤销这一行并把快照 id 持久化进清理队列。
+     */
+    try {
+      deps.shares.settleCreation({ share, reservationId });
+    } catch (error) {
+      deps.shares.releaseQuotaReservation(reservationId);
+      throw error;
+    }
     const ip = clientIpFrom(c.req.raw.headers, deps.config);
     /*
      * 占位行提交后，SQLite 与 CouchDB 没有共同事务：Couch 可能在回复超时前已经落盘。

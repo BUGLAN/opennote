@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import { shareCreatedSchema } from "../../../shared/contract";
+import { idForPath } from "../../../shared/paths";
 import { openDatabase } from "../db";
 import { loadConfig } from "../config";
 import { NotebookStore } from "../notebooks";
@@ -20,6 +21,7 @@ import { CouchClient } from "../couch/client";
 import { SHARE_DATABASE, ShareStore, cleanShareName, contentTypeFor } from "../shares";
 import { createShareRoutes, contentDisposition, type ShareRoutesDeps } from "./shares";
 import { createAdminRoutes } from "./admin";
+import { createV1Routes } from "./v1";
 
 const ENV: Record<string, string> = {
   EXTERNAL_BASE_URL: "https://notes.example.com",
@@ -60,6 +62,7 @@ function makeWorld(options: WorldOptions = {}) {
     "/",
     createShareRoutes({ accounts, notebooks, shares, config, couch, couchAdmin: couch, settings, audit, now: options.now }),
   );
+  app.route("/v1", createV1Routes({ accounts, notebooks, config, couch, couchAdmin: couch, settings, audit }));
   app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, shares, config, couch, couchAdmin: couch, settings, audit }));
   const request = (path: string, init: RequestInit = {}) => Promise.resolve(app.request(`http://localhost${path}`, init));
   const share = async (token: string, name: string, body: string | Uint8Array) => {
@@ -71,7 +74,7 @@ function makeWorld(options: WorldOptions = {}) {
     return { status: response.status, body: (await response.json()) as Record<string, any> };
   };
   const admin = seedAccount(accounts, { isAdmin: true });
-  return { db, accounts, shares, fake, request, share, admin };
+  return { db, accounts, notebooks, shares, fake, request, share, admin };
 }
 
 describe("创建", () => {
@@ -272,6 +275,93 @@ describe("创建", () => {
     expect(share.revoked_at).not.toBeNull();
     expect(world.fake.attachments.has(`${SHARE_DATABASE}/${share.id}/blob`)).toBe(false);
     expect(world.shares.pendingSnapshotCleanupCount()).toBe(0);
+  });
+
+  it("★ 笔记本写与分享创建并发：共用账号配额，只有一个成功且失败方不留数据", async () => {
+    const world = makeWorld();
+    const { id, token } = seedAccount(world.accounts);
+    world.db.prepare("UPDATE accounts SET quota_bytes = 12 WHERE id = ?").run(id);
+    const notebook = world.notebooks.create({ ownerId: id, name: "a", cryptoMode: "none" });
+    world.fake.databases.set(notebook.db_name, new Map());
+    // 两边都在「已经预占、还没落到 CouchDB」的窗口里停一下，确保真正竞争。
+    world.fake.beforePutDoc = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    };
+
+    const put = world.request(`/v1/file?nb=${notebook.id}&did=${encodeURIComponent(idForPath("a.md"))}&path=a.md`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token}` },
+      body: "12345678",
+    });
+    const [note, share] = await Promise.all([put, world.share(token, "a.txt", "12345678")]);
+    expect([note.status, share.status].sort()).toEqual([201, 413]);
+
+    const losingBody = note.status === 413 ? ((await note.json()) as { code: string }) : share.body;
+    expect(losingBody.code).toBe("quota");
+    expect(world.notebooks.bytesOwnedBy(id) + world.shares.activeBytesOf(id)).toBe(8);
+    expect(world.notebooks.reservedBytesOf(id)).toBe(0);
+    if (note.status === 413) {
+      expect(world.notebooks.notebookBytesOf(notebook.id)).toBe(0);
+      expect(world.shares.activeBytesOf(id)).toBe(8);
+      expect((world.db.prepare("SELECT COUNT(*) AS n FROM shares").get() as { n: number }).n).toBe(1);
+    } else {
+      expect(world.notebooks.bytesOwnedBy(id)).toBe(8);
+      expect(world.shares.activeBytesOf(id)).toBe(0);
+      expect((world.db.prepare("SELECT COUNT(*) AS n FROM shares").get() as { n: number }).n).toBe(0);
+    }
+  });
+
+  it("笔记本已用计入分享配额：笔记本 8B + 分享 3B 超过 10B → 413", async () => {
+    const world = makeWorld();
+    const { id, token } = seedAccount(world.accounts);
+    world.db.prepare("UPDATE accounts SET quota_bytes = 10 WHERE id = ?").run(id);
+    const notebook = world.notebooks.create({ ownerId: id, name: "a", cryptoMode: "none" });
+    world.notebooks.addNotebookBytes(notebook.id, 8);
+
+    const denied = await world.share(token, "a.txt", "abc");
+    expect(denied.status).toBe(413);
+    expect(denied.body).toMatchObject({ code: "quota", bytesUsed: 8, bytesLimit: 10 });
+    // 失败方不留下行；预占也释放了，腾出空间后同样的上传能成功。
+    expect((world.db.prepare("SELECT COUNT(*) AS n FROM shares").get() as { n: number }).n).toBe(0);
+    expect(world.notebooks.reservedBytesOf(id)).toBe(0);
+
+    world.notebooks.addNotebookBytes(notebook.id, -8);
+    expect((await world.share(token, "a.txt", "12345678")).status).toBe(201);
+    expect(world.shares.activeBytesOf(id)).toBe(8);
+  });
+
+  it("快照写入失败后释放预占，重试不会被自己的预占挡住", async () => {
+    const fake = new FakeCouch();
+    const baseFetch = fake.fetchImpl;
+    let failSnapshot = true;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const segments = url.pathname.split("/").filter(Boolean);
+      const snapshotDoc = segments.length === 2 && segments[0] === SHARE_DATABASE && !segments[1]!.startsWith("_");
+      if (failSnapshot && (init?.method ?? "GET") === "PUT" && snapshotDoc) {
+        failSnapshot = false;
+        throw new Error("ECONNREFUSED snapshot（fake）");
+      }
+      return baseFetch(input, init);
+    }) as typeof fetch;
+    const world = makeWorld({ fake, fetchImpl });
+    const { id, token } = seedAccount(world.accounts);
+    world.db.prepare("UPDATE accounts SET quota_bytes = 10 WHERE id = ?").run(id);
+
+    const failed = await world.request("/v1/shares?name=a.txt", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/octet-stream" },
+      body: "12345678",
+    });
+    expect(failed.status).toBeGreaterThanOrEqual(500);
+    expect(world.notebooks.reservedBytesOf(id)).toBe(0);
+    // 失败收尾按 #60：行保留但已撤销，不计入活跃用量。
+    expect(world.shares.activeBytesOf(id)).toBe(0);
+    expect((world.db.prepare("SELECT COUNT(*) AS n FROM shares").get() as { n: number }).n).toBe(1);
+
+    expect((await world.share(token, "a.txt", "12345678")).status).toBe(201);
+    expect(world.shares.activeBytesOf(id)).toBe(8);
+    expect(world.notebooks.reservedBytesOf(id)).toBe(0);
   });
 });
 

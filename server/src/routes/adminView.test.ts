@@ -60,7 +60,7 @@ function makeWorld() {
     notebooks.addNotebookBytes(row.id, bytes, NOW - 3600_000);
     return row;
   };
-  return { db, accounts, notebooks, settings, call, notebook };
+  return { db, accounts, notebooks, shares, settings, call, notebook };
 }
 
 describe("闸门", () => {
@@ -107,6 +107,24 @@ describe("概览", () => {
     expect(body!.noteworthy).toMatchObject({ staleDevices: 1, conflictsThisWeek: 1 });
     expect(body!.server).toMatchObject({ uptimeSeconds: 3600, externalBaseUrl: "https://notes.example.com" });
     expect(body!.recent.length).toBeGreaterThan(0);
+  });
+
+  it("账号视图与概览的用量把公开分享算进去（与 /me 同一个账本）", async () => {
+    const world = makeWorld();
+    const admin = seedAccount(world.accounts, { isAdmin: true, now: NOW - 30 * DAY });
+    const mia = seedAccount(world.accounts, { email: "mia-share@example.com", now: NOW - 30 * DAY });
+    world.accounts.setQuota(mia.id, 10);
+    world.notebook(mia.id, "摄影", 6);
+    world.shares.create({ accountId: mia.id, name: "a.txt", contentType: "text/plain", size: 4, sha256: "x", now: NOW - 1_000 });
+
+    const list = await world.call("/v1/admin/accounts", { token: admin.token });
+    const row = (list.body!.accounts as { accountId: string; quota: { bytesUsed: number; bytesLimit: number } }[]).find((x) => x.accountId === mia.id);
+    expect(row!.quota).toMatchObject({ bytesUsed: 10, bytesLimit: 10 });
+
+    const overview = await world.call("/v1/admin/overview", { token: admin.token });
+    expect(overview.body!.attention).toEqual([
+      expect.objectContaining({ kind: "quota", accountId: mia.id, bytesUsed: 10, bytesLimit: 10 }),
+    ]);
   });
 });
 

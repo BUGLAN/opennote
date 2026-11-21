@@ -228,7 +228,8 @@ const MIGRATIONS: readonly Migration[] = [
        * 而 v2 的 schema 里没有地方存答案：
        *
        * - `quota_usage.bytes_used` 只在注册时写过一次 0，之后**没有任何代码更新它**
-       *   （`quotaOf()` 读到的永远是 0）—— 用量条、台账的「占用」都是 0 B。
+       *   （当时 `quotaOf()` 读到的永远是 0）—— 用量条、台账的「占用」都是 0 B。
+       *   现在 `quotaOf()` 改读 `quota.ts` 的账号级账本，这一列仍保留为历史缓存。
        * - `client_stats` 是**客户端上报**的计数，而当前客户端没有上报调用
        *   （`POST /v1/stats` 在生产路径上没人调）—— 流量图永远是空的。
        *

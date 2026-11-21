@@ -26,6 +26,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { CouchClient } from "./couch/client";
 import { buildSecurityDoc } from "./couch/design";
+import { QuotaLedger } from "./quota";
 
 /** 存快照字节的 CouchDB 库（与笔记本的 `nb-<uuid>` 不同名，不会撞）。 */
 export const SHARE_DATABASE = "opennote-shares";
@@ -52,7 +53,13 @@ export interface ShareReservationInput {
   now: number;
 }
 
-export type ShareReservationResult = { share: ShareRow } | { quotaExceeded: true; bytesUsed: number };
+/** 预占成功但还没落行：`reservationId` 为 null 只可能是 0 字节的快照。 */
+export interface ShareCreation {
+  share: ShareRow;
+  reservationId: string | null;
+}
+
+export type ShareReservationResult = ShareCreation | { quotaExceeded: true; bytesUsed: number };
 
 export interface ShareSnapshotCleanupResult {
   deleted: number;
@@ -137,7 +144,11 @@ export async function deleteShareSnapshot(couch: CouchClient, shareId: string): 
 }
 
 export class ShareStore {
-  constructor(private readonly db: DatabaseSync) {}
+  private readonly quota: QuotaLedger;
+
+  constructor(private readonly db: DatabaseSync) {
+    this.quota = new QuotaLedger(db);
+  }
 
   create(input: ShareReservationInput): ShareRow {
     const row = this.makeRow(input);
@@ -146,33 +157,35 @@ export class ShareStore {
   }
 
   /**
-   * 在同一写事务里重算配额并插入占位行。
+   * 在账号级账本里预占这次快照的空间。
    *
-   * 事务外的「先读用量、再插入」会在两个并发请求之间留下窗口：两边都读到同一份
-   * 剩余额度，最后都插入成功。`BEGIN IMMEDIATE` 让本实例和多实例部署共用同一把
-   * SQLite 写锁，后到者一定看见先到者提交的占位行。
+   * 预占与笔记本写共用 `quota_reservations`，所以两边在 CouchDB 写入期间都能看见
+   * 对方；`limit <= 0` 表示不限。快照行**不在这里插入** —— 路由拿到预占后先调用
+   * `settleCreation()` 在同一事务里删预占、插行，再去写 CouchDB。行先于字节存在
+   * 只会让用量偏高，不会低估；任何写入失败都会按 #60 撤销行并把快照 id 入清理队列。
    *
-   * `usedBytes` 在拿锁后执行；路由用它把笔记本占用与分享占用合在一起算。
-   * `limit <= 0` 表示不限，仍走同一插入路径。
+   * 0 字节快照没有增长，不需要预占；`settleCreation()` 仍然会插入行。
    */
-  createWithinQuota(input: ShareReservationInput, options: { limit: number; usedBytes: () => number }): ShareReservationResult {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      if (options.limit > 0) {
-        const bytesUsed = options.usedBytes() + this.activeBytesOf(input.accountId);
-        if (bytesUsed + input.size > options.limit) {
-          this.db.exec("ROLLBACK");
-          return { quotaExceeded: true, bytesUsed };
-        }
-      }
-      const row = this.makeRow(input);
-      this.insert(row);
-      this.db.exec("COMMIT");
-      return { share: row };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+  createWithinQuota(input: ShareReservationInput, options: { limit: number }): ShareReservationResult {
+    const row = this.makeRow(input);
+    if (row.size === 0) return { share: row, reservationId: null };
+    const reserved = this.quota.reserve({ accountId: input.accountId, bytes: row.size, limit: options.limit, now: input.now });
+    if ("quotaExceeded" in reserved) return reserved;
+    return { share: row, reservationId: reserved.reservation.id };
+  }
+
+  /**
+   * 把预占换成分享行：删除预占并插入分享行（公开页与 `activeBytesOf` 都以
+   * 这一行为准），两步在同一个 SQLite 事务里。
+   */
+  settleCreation(creation: ShareCreation): ShareRow {
+    this.quota.settle(creation.reservationId, () => this.insert(creation.share));
+    return creation.share;
+  }
+
+  /** 只用于 `settleCreation()` 之前/失败：分享行还没插入，释放预占即可。 */
+  releaseQuotaReservation(reservationId: string | null): void {
+    if (reservationId !== null) this.quota.release(reservationId);
   }
 
   private makeRow(input: ShareReservationInput): ShareRow {
