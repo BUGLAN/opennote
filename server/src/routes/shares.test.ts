@@ -16,8 +16,9 @@ import { NotebookStore } from "../notebooks";
 import { SettingsStore } from "../settings";
 import { seedAccount, testAccountStore } from "../auth/testAccounts.test-helper";
 import { FakeCouch, couchClient } from "../couch/fakeCouch.test-helper";
+import { CouchClient } from "../couch/client";
 import { SHARE_DATABASE, ShareStore, cleanShareName, contentTypeFor } from "../shares";
-import { createShareRoutes, contentDisposition } from "./shares";
+import { createShareRoutes, contentDisposition, type ShareRoutesDeps } from "./shares";
 import { createAdminRoutes } from "./admin";
 
 const ENV: Record<string, string> = {
@@ -29,18 +30,36 @@ const ENV: Record<string, string> = {
   COUCH_ADMIN_PASSWORD: "apw",
 };
 
-function makeWorld() {
+interface WorldOptions {
+  fake?: FakeCouch;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+  audit?: NonNullable<ShareRoutesDeps["audit"]>;
+}
+
+function makeWorld(options: WorldOptions = {}) {
   const db = openDatabase({ path: ":memory:" });
   const config = loadConfig(ENV);
   const accounts = testAccountStore(db);
   const notebooks = new NotebookStore(db);
   const shares = new ShareStore(db);
   const settings = new SettingsStore(db, config);
-  const fake = new FakeCouch();
-  const couch = couchClient(fake);
+  const fake = options.fake ?? new FakeCouch();
+  const couch = options.fetchImpl
+    ? new CouchClient({
+        baseUrl: ENV.COUCH_URL,
+        user: ENV.COUCH_USER,
+        password: ENV.COUCH_PASSWORD,
+        fetchImpl: options.fetchImpl,
+      })
+    : couchClient(fake);
   const app = new Hono();
-  const audit = (event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event);
-  app.route("/", createShareRoutes({ accounts, notebooks, shares, config, couch, couchAdmin: couch, settings, audit }));
+  const audit =
+    options.audit ?? ((event: Parameters<NotebookStore["audit"]>[0]) => notebooks.audit(event));
+  app.route(
+    "/",
+    createShareRoutes({ accounts, notebooks, shares, config, couch, couchAdmin: couch, settings, audit, now: options.now }),
+  );
   app.route("/v1/admin", createAdminRoutes({ accounts, notebooks, shares, config, couch, couchAdmin: couch, settings, audit }));
   const request = (path: string, init: RequestInit = {}) => Promise.resolve(app.request(`http://localhost${path}`, init));
   const share = async (token: string, name: string, body: string | Uint8Array) => {
@@ -68,6 +87,8 @@ describe("创建", () => {
     expect(body.size).toBe(new TextEncoder().encode("# 你好\n\n正文").byteLength);
     expect(world.fake.databases.has(SHARE_DATABASE)).toBe(true);
     expect(world.fake.security.get(SHARE_DATABASE)).toMatchObject({ members: { names: ["sync-service"] } });
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${body.id}/blob`)).toBe(true);
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(0);
   });
 
   it("没登录 401；文件名缺失 / 只有路径 400", async () => {
@@ -116,6 +137,141 @@ describe("创建", () => {
     expect(world.shares.activeBytesOf(id)).toBe(8);
     expect(world.fake.databases.get(SHARE_DATABASE)?.size).toBe(1);
     expect(world.fake.attachments.size).toBe(1);
+  });
+
+  it("CouchDB 已写入后报错：撤销分享，清理失败时留队列并可继续删快照", async () => {
+    const fake = new FakeCouch();
+    const baseFetch = fake.fetchImpl;
+    let throwAfterCommittedWrite = true;
+    let failImmediateCleanup = true;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+      const snapshotDoc = url.pathname.split("/").filter(Boolean).length === 2 && url.pathname.startsWith(`/${SHARE_DATABASE}/`);
+
+      if ((init?.method ?? "GET") === "PUT" && snapshotDoc && body?._attachments) {
+        const response = await baseFetch(input, init);
+        if (throwAfterCommittedWrite) {
+          throwAfterCommittedWrite = false;
+          throw new Error("ECONNRESET after commit（fake）");
+        }
+        return response;
+      }
+      if ((init?.method ?? "GET") === "PUT" && snapshotDoc && body?._deleted === true && failImmediateCleanup) {
+        failImmediateCleanup = false;
+        throw new Error("ECONNREFUSED immediate cleanup（fake）");
+      }
+      return baseFetch(input, init);
+    }) as typeof fetch;
+    const world = makeWorld({ fake, fetchImpl });
+    const owner = seedAccount(world.accounts);
+
+    const created = await world.request("/v1/shares?name=a.md", {
+      method: "POST",
+      headers: { authorization: `Bearer ${owner.token}` },
+      body: "secret",
+    });
+    expect(created.status).toBe(500);
+
+    const share = world.db.prepare("SELECT id, revoked_at FROM shares").get() as { id: string; revoked_at: number | null };
+    expect(share.revoked_at).not.toBeNull();
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${share.id}/blob`)).toBe(true);
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(1);
+    expect(world.db.prepare("SELECT action, target, detail FROM audit WHERE action = ?").get("share_create_snapshot_cleanup_failed")).toMatchObject({
+      action: "share_create_snapshot_cleanup_failed",
+      target: share.id,
+      detail: "pending=1",
+    });
+
+    const cleaned = await world.request("/v1/admin/share-snapshots/cleanup", {
+      method: "POST",
+      headers: { authorization: `Bearer ${world.admin.token}` },
+    });
+    expect(cleaned.status).toBe(200);
+    expect(await cleaned.json()).toEqual({ deleted: 1, pending: 0 });
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${share.id}/blob`)).toBe(false);
+  });
+
+  it("CouchDB 冲突也撤销分享并留下可重试的清理记录", async () => {
+    const fake = new FakeCouch();
+    const baseFetch = fake.fetchImpl;
+    let snapshotReads = 0;
+    let failCleanupReads = true;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+      const snapshotDoc = url.pathname.split("/").filter(Boolean).length === 2 && url.pathname.startsWith(`/${SHARE_DATABASE}/`);
+
+      if ((init?.method ?? "GET") === "PUT" && snapshotDoc && body?._attachments) {
+        return new Response(JSON.stringify({ error: "conflict" }), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if ((init?.method ?? "GET") === "GET" && snapshotDoc) {
+        snapshotReads += 1;
+        // 第一次是 putDoc 读冲突文档；之后的读取属于失败收尾的立即删除。
+        if (snapshotReads > 1 && failCleanupReads) throw new Error("ECONNREFUSED immediate cleanup（fake）");
+      }
+      return baseFetch(input, init);
+    }) as typeof fetch;
+    const world = makeWorld({ fake, fetchImpl });
+    const owner = seedAccount(world.accounts);
+
+    const created = await world.request("/v1/shares?name=a.md", {
+      method: "POST",
+      headers: { authorization: `Bearer ${owner.token}` },
+      body: "secret",
+    });
+    expect(created.status).toBe(500);
+    const share = world.db.prepare("SELECT id, revoked_at FROM shares").get() as { id: string; revoked_at: number | null };
+    expect(share.revoked_at).not.toBeNull();
+    expect(snapshotReads).toBeGreaterThan(1);
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(1);
+
+    failCleanupReads = false;
+    const cleaned = await world.request("/v1/admin/share-snapshots/cleanup", {
+      method: "POST",
+      headers: { authorization: `Bearer ${world.admin.token}` },
+    });
+    expect(cleaned.status).toBe(200);
+    expect(await cleaned.json()).toEqual({ deleted: 1, pending: 0 });
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(0);
+  });
+
+  it("响应契约失败发生在任何分享行或快照写入之前", async () => {
+    const world = makeWorld({ now: () => -1 });
+    const owner = seedAccount(world.accounts);
+
+    const created = await world.request("/v1/shares?name=a.md", {
+      method: "POST",
+      headers: { authorization: `Bearer ${owner.token}` },
+      body: "secret",
+    });
+    expect(created.status).toBe(500);
+    expect(world.db.prepare("SELECT COUNT(*) AS n FROM shares").get()).toEqual({ n: 0 });
+    expect(world.fake.databases.has(SHARE_DATABASE)).toBe(false);
+    expect(world.fake.attachments.size).toBe(0);
+  });
+
+  it("审计抛错也撤销分享并删掉已写入的快照", async () => {
+    const world = makeWorld({
+      audit: () => {
+        throw new Error("audit unavailable（fake）");
+      },
+    });
+    const owner = seedAccount(world.accounts);
+
+    const created = await world.request("/v1/shares?name=a.md", {
+      method: "POST",
+      headers: { authorization: `Bearer ${owner.token}` },
+      body: "secret",
+    });
+    expect(created.status).toBe(500);
+    const share = world.db.prepare("SELECT id, revoked_at FROM shares").get() as { id: string; revoked_at: number | null };
+    expect(share.revoked_at).not.toBeNull();
+    expect(world.fake.attachments.has(`${SHARE_DATABASE}/${share.id}/blob`)).toBe(false);
+    expect(world.shares.pendingSnapshotCleanupCount()).toBe(0);
   });
 });
 

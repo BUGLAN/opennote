@@ -28,6 +28,7 @@ import {
   SHARE_DATABASE,
   cleanShareName,
   contentTypeFor,
+  newShareId,
   sha256Hex,
   shareDatabaseProvisioner,
   type ShareRow,
@@ -111,15 +112,31 @@ export function createShareRoutes(deps: ShareRoutesDeps): Hono {
 
     /* 快照算进作者的空间配额（与笔记本同一个上限；≤ 0 视为不限）。 */
     const limit = account.quota_bytes ?? deps.settings?.get("defaultQuotaBytes") ?? deps.config.defaultAccountQuotaBytes;
+    const createdAt = now();
+    const shareId = newShareId();
+    /* 响应契约是服务端自己产出的东西；在写 SQLite / CouchDB 前先校验，失败时现场干净。 */
+    const body = parseContract(
+      shareCreatedSchema,
+      {
+        id: shareId,
+        url: publicUrl(shareId),
+        rawUrl: `${publicUrl(shareId)}/raw`,
+        name,
+        size: bytes.byteLength,
+        createdAt,
+      },
+      "POST /v1/shares",
+    );
     await ensureDatabase();
     const reserved = deps.shares.createWithinQuota(
       {
+        id: shareId,
         accountId: account.id,
         name,
         contentType: contentTypeFor(name),
         size: bytes.byteLength,
         sha256: sha256Hex(bytes),
-        now: now(),
+        now: createdAt,
       },
       { limit, usedBytes: () => deps.notebooks.bytesOwnedBy(account.id) },
     );
@@ -135,7 +152,37 @@ export function createShareRoutes(deps: ShareRoutesDeps): Hono {
       );
     }
     const share = reserved.share;
-    /* 正文与元数据一次写进同一个 revision（与 `PUT /v1/file` 同一做法）。写失败就把行撤掉，不留一个打不开的链接。 */
+    const ip = clientIpFrom(c.req.raw.headers, deps.config);
+    /*
+     * 占位行提交后，SQLite 与 CouchDB 没有共同事务：Couch 可能在回复超时前已经落盘。
+     * 所以任何后续失败都先撤销并把 id 持久化进清理队列，再尽力立即删一次；删不掉就留给后台清扫。
+     */
+    const cleanUpFailedCreate = async (): Promise<void> => {
+      try {
+        deps.shares.revokeAndQueueSnapshotCleanup(share, now());
+      } catch (queueError) {
+        console.warn("[opennote-server] 创建分享失败后撤销并登记快照清理失败", queueError);
+        return;
+      }
+      try {
+        await deps.shares.cleanupQueuedSnapshot(deps.couch, share.id, now());
+      } catch (cleanupError) {
+        try {
+          deps.audit?.({
+            actorId: account.id,
+            action: "share_create_snapshot_cleanup_failed",
+            target: share.id,
+            ip,
+            detail: `pending=${deps.shares.pendingSnapshotCleanupCount()}`,
+          });
+        } catch (auditError) {
+          console.warn("[opennote-server] 创建分享失败后记录快照清理失败审计时出错", auditError);
+        }
+        console.warn("[opennote-server] 创建分享失败后删快照字节失败（已留在清理队列）", cleanupError);
+      }
+    };
+
+    /* 正文与元数据一次写进同一个 revision（与 `PUT /v1/file` 同一做法）。 */
     try {
       const written = await deps.couch.putDoc(SHARE_DATABASE, {
         _id: share.id,
@@ -145,17 +192,12 @@ export function createShareRoutes(deps: ShareRoutesDeps): Hono {
         _attachments: { blob: { content_type: "application/octet-stream", data: Buffer.from(bytes).toString("base64") } },
       });
       if ("conflict" in written) throw new Error("分享 id 撞车（极不可能）");
+      deps.audit?.({ actorId: account.id, action: "share_create", target: share.id, ip, detail: `size=${share.size}` });
     } catch (error) {
-      deps.shares.revoke(share.id, now());
+      await cleanUpFailedCreate();
       throw error;
     }
 
-    deps.audit?.({ actorId: account.id, action: "share_create", target: share.id, ip: clientIpFrom(c.req.raw.headers, deps.config), detail: `size=${share.size}` });
-    const body = parseContract(
-      shareCreatedSchema,
-      { id: share.id, url: publicUrl(share.id), rawUrl: `${publicUrl(share.id)}/raw`, name: share.name, size: share.size, createdAt: share.created_at },
-      "POST /v1/shares",
-    );
     return json(body, 201);
   });
 

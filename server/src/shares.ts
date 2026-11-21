@@ -42,6 +42,8 @@ export interface ShareRow {
 }
 
 export interface ShareReservationInput {
+  /** 路由可预先选好 id，以便在任何持久化之前校验完整响应契约。 */
+  id?: string;
   accountId: string;
   name: string;
   contentType: string;
@@ -175,7 +177,7 @@ export class ShareStore {
 
   private makeRow(input: ShareReservationInput): ShareRow {
     const row: ShareRow = {
-      id: newShareId(),
+      id: input.id ?? newShareId(),
       account_id: input.accountId,
       name: input.name,
       content_type: input.contentType,
