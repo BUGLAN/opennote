@@ -244,6 +244,25 @@ a {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/*
+ * iOS（Safari / WKWebView / 主屏 PWA）：文本控件计算字号 < 16px 时，聚焦会把
+ * 整个视口放大。应用的输入框是 13.5px、命令面板是 15px，都会触发；这里把文本控件
+ * 统一提到 16px，桌面端保持原字号。
+ *
+ * 选择器套一层 `:is()` 是为了拿到里面 `input:not(...)` 的 0,3,1 特异性：否则
+ * `textarea` / `select` 的 0,0,1 压不过 `.field`、画布编辑框、剪藏编辑器这些
+ * 按类写死的字号，聚焦照样会放大。按本仓库的房规，不滥用 `!important`。
+ */
+@supports (-webkit-touch-callout: none) {
+  :is(
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+    textarea,
+    select
+  ) {
+    font-size: 16px;
+  }
+}
+
 kbd {
   display: inline-flex;
   align-items: center;
