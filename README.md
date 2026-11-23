@@ -193,6 +193,28 @@ macOS 用 ⌘，其他平台用 Ctrl。
 
 ## 部署
 
+### 自托管同步服务器（同源托管网页版 / PWA）
+
+需要手机同步时，不要另发一套静态站点：同步服务器会在 `/` 下同源托管同一个网页版，`/v1/*`、控制台与公开分享继续由同一服务提供。网页版因此直接使用相对 `/v1`，不需要 CORS，也不会把同步令牌暴露给第三方域名。
+
+```sh
+pnpm install --frozen-lockfile
+pnpm build:server:web
+```
+
+`build:server:web` 先构建网页版，再把 `dist/` 拷到 `server/dist/web/`；产物里应同时有 `server/dist/index.js`、`server/dist/web/index.html`、`manifest.webmanifest`、`sw.js` 和 PWA 图标。运行时直接执行 `node server/dist/index.js`，默认就托管同层的 `web/`；用别的目录时设 `WEB_ROOT`。
+
+用 Docker 部署时，`docker compose up -d --build` 会通过 `server/Dockerfile` 的 `web` 阶段完成同一件事。`EXTERNAL_BASE_URL` 必须是外部实际使用的 HTTPS 地址（反向代理或 Cloudflare Tunnel 终结 TLS），并且网页版构建保持默认根路径，不要设 `VITE_BASE`。部署后至少检查：
+
+```sh
+curl -fsS https://你的同步地址/v1/health
+curl -fsSI https://你的同步地址/
+curl -fsSI https://你的同步地址/manifest.webmanifest
+curl -fsSI https://你的同步地址/sw.js
+```
+
+根路径应返回网页版 HTML；manifest、Service Worker 与图标应为 200。手机从该地址打开并登录后，在「设置 → 同步」里选择云端已有的笔记本即可完成首轮同步、浏览全部笔记。Service Worker 的导航回落刻意排除 `/v1`、`/admin`、`/panel`、`/join`、`/reset`、`/auth`、`/s`，这些地址始终由服务端路由回答，不会被笔记应用接管。
+
 ### GitHub Pages
 
 仓库自带 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)：推到 `main` 的 PR 会运行全量门禁（类型、单测、扩展、IPC、bridge、边界与忽略规则）并构建，但不部署；推送到 `main` 或手动触发 `workflow_dispatch` 时，只有全部门禁和构建都通过才会发布 `dist/`。
