@@ -39,7 +39,9 @@ import {
 import {
   assetFinalName,
   assetsDirFor,
+  legacyAssetsDirFor,
   markdownRef,
+  rebaseLegacyAssetRefs,
   rebaseSharedAssetRefs,
   relativeAssetRef,
   sharedAssetFilesIn,
@@ -2129,6 +2131,66 @@ async function moveCaseOnly(target: FileSystemBackend, id: Id, nextPath: Id): Pr
   }
 }
 
+interface LegacyAssetsMovePlan {
+  from: Id;
+  to: Id;
+  caseOnly: boolean;
+}
+
+/**
+ * 在搬笔记**之前**确认旧布局附件目录跟着它去哪，以及终点有没有冲突。
+ *
+ * 冲突必须在笔记移动前抛错：否则笔记已经换了路径，目录却留在原处，正文引用立刻指空。
+ * 目标存在时不合并、不覆盖 —— 那个目录可能属于同名的另一篇笔记。
+ */
+async function planLegacyAssetsMove(
+  target: FileSystemBackend,
+  fromNote: Id,
+  toNote: Id,
+): Promise<LegacyAssetsMovePlan | null> {
+  const from = legacyAssetsDirFor(fromNote);
+  const to = legacyAssetsDirFor(toNote);
+  if (from === to || !(await target.exists(from))) return null;
+  const caseOnly = from.toLowerCase() === to.toLowerCase();
+  if (!caseOnly && (await target.exists(to))) {
+    throw new Error(`旧附件目录已存在，未覆盖：${to}`);
+  }
+  return { from, to, caseOnly };
+}
+
+/** 把已经预检过的旧布局附件目录搬到新笔记旁边。失败只报告，不回滚已经落位的笔记。 */
+async function moveLegacyAssets(
+  target: FileSystemBackend,
+  plan: LegacyAssetsMovePlan | null,
+): Promise<{ moved: boolean; warning: string | null }> {
+  if (!plan) return { moved: false, warning: null };
+  try {
+    await target.mkdir(parentPath(plan.to)).catch(() => undefined);
+    if (plan.caseOnly) {
+      const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      const temp = joinPath(parentPath(plan.from), `.opennote-tmp-${token}.assets`);
+      await target.move(plan.from, temp);
+      try {
+        await target.move(temp, plan.to);
+      } catch (error) {
+        await target.move(temp, plan.from).catch(() => undefined);
+        throw error;
+      }
+    } else {
+      await target.move(plan.from, plan.to);
+    }
+    return { moved: true, warning: null };
+  } catch (error) {
+    console.warn("[opennote] 旧布局附件目录未能跟随笔记", plan.from, error);
+    return { moved: false, warning: `旧附件目录没能移动到 ${plan.to}` };
+  }
+}
+
+function combineWarnings(...warnings: Array<string | null>): string | null {
+  const values = warnings.filter((warning): warning is string => Boolean(warning));
+  return values.length ? values.join("；") : null;
+}
+
 /**
  * Snapshot directories are keyed by the note's path, so a rename/move has to
  * take the directory along: otherwise the history is orphaned and a brand-new
@@ -2214,10 +2276,16 @@ export async function renameNote(id: Id, title: string): Promise<void> {
   try {
     await flushNote(id);
     const nextPath = caseOnly ? requested : await resolveAvailablePath(target, requested, taken, id);
+    const legacyPlan = await planLegacyAssetsMove(target, id, nextPath);
     if (caseOnly) await moveCaseOnly(target, id, nextPath);
     else await target.move(id, nextPath);
     remapIds(id, nextPath);
     await moveHistory(target, id, nextPath);
+    const legacy = await moveLegacyAssets(target, legacyPlan);
+    const assets = await rebaseNoteAssets(target, id, nextPath, legacy.moved);
+    if (assets.content) patchNoteContent(nextPath, assets.content);
+    const warning = combineWarnings(legacy.warning, assets.warning);
+    if (warning) reportError(new Error(warning), "重命名已完成，但附件未完全处理");
     // 引用跟随：所有画布里 file===旧路径 的文件卡片改写到新路径（详见 rewriteCanvasRefs）。
     rewriteCanvasRefs(id, nextPath);
     // 显示名就是文件名：`remapIds` 已按落盘名（撞名时是 `系统设计 2`）重算了 `title`。
@@ -2281,15 +2349,17 @@ export async function moveNote(id: Id, folderId: Id | null): Promise<MoveNoteRes
     const nextPath = await resolveAvailablePath(target, requested, taken, id);
     // Same file, only the folder name differs in casing: it is already there.
     if (nextPath.toLowerCase() === id.toLowerCase()) return NO_MOVE;
+    const legacyPlan = await planLegacyAssetsMove(target, id, nextPath);
     await target.move(id, nextPath);
     remapIds(id, nextPath);
     await moveHistory(target, id, nextPath);
+    const legacy = await moveLegacyAssets(target, legacyPlan);
     // 换目录 = 引用前缀变了 ⇒ 把指向共享 `.assets/` 的引用按新位置重算（图片本身不搬）。
-    const assets = await rebaseNoteAssets(target, id, nextPath);
+    const assets = await rebaseNoteAssets(target, id, nextPath, legacy.moved);
     if (assets.content) patchNoteContent(nextPath, assets.content);
     // 引用跟随：目录层数变了，卡片里的路径要落到新位置。
     rewriteCanvasRefs(id, nextPath);
-    return { path: nextPath, assetsWarning: assets.warning };
+    return { path: nextPath, assetsWarning: combineWarnings(legacy.warning, assets.warning) };
   } catch (error) {
     reportError(error, "移动笔记失败");
     return NO_MOVE;
@@ -2332,10 +2402,12 @@ export function touchNoteOpened(id: Id): void {
  * 取而代之的是**改写正文引用**：笔记换了目录层数，`../../.assets/x.png` 这段前缀就得跟着变，
  * 否则「编辑器里能显示、搬一次变裂图」——而且不报错。
  *
- * 两条护栏：
- *   1. **同目录改名不动一个字**（层数没变、前缀没变）——绝大多数改名走这条，零风险；
- *   2. 只改**字面指向 `.assets/`** 的引用（`rebaseSharedAssetRefs`）：旧布局
- *      （`<笔记名>.assets/…`、公共 `assets/<笔记名>/…`）一格不碰，旧数据零迁移。
+ * 共享 `.assets/` 的护栏：
+ *   1. **同目录改名不动共享引用**（层数没变、前缀没变）——绝大多数改名走这条，零风险；
+ *   2. 只改**字面指向共享 `.assets/`** 的引用（`rebaseSharedAssetRefs`）：公共
+ *      `assets/<笔记名>/…` 一格不碰。
+ * 只有当这篇笔记自己的旧布局目录真的跟着搬了（`legacyAssetsMoved`）时，才改写
+ * `<旧 stem>.assets/…`；目录没搬却先改字面量只会把引用指向不存在的路径。
  *
  * 返回值：`content` = **新的正文**（没变 = `null`）；`warning` = 必须如实告诉用户的那句话
  * （写盘/读盘失败时非空，绝不假装成功）。
@@ -2344,6 +2416,7 @@ async function rebaseNoteAssets(
   target: FileSystemBackend,
   fromNote: Id,
   toNote: Id,
+  legacyAssetsMoved = false,
 ): Promise<{ content: string | null; warning: string | null }> {
   const nothing = { content: null, warning: null };
   if (fromNote === toNote) return nothing;
@@ -2351,13 +2424,15 @@ async function rebaseNoteAssets(
   // 把 JSON 正文送进 rebaseSharedAssetRefs 只会白读白写一次。
   // HTML 页面同理：入库时资源已内联，没有 `.assets/` 引用要跟着目录层数重算。
   if (!isMarkdownPath(fromNote) || !isMarkdownPath(toNote)) return nothing;
-  if (parentPath(fromNote) === parentPath(toNote)) return nothing;
+  const sharedMoved = parentPath(fromNote) !== parentPath(toNote);
+  if (!sharedMoved && !legacyAssetsMoved) return nothing;
   const content = await readOptionalText(target, toNote).catch(() => undefined);
   if (content === undefined) {
     // 读不到就什么都不做：笔记文件已经搬好了，引用最多维持原样，不会更坏。
     return { content: null, warning: `图片引用没能随笔记更新（读不到 ${toNote}）` };
   }
-  const next = rebaseSharedAssetRefs(content, toNote);
+  let next = sharedMoved ? rebaseSharedAssetRefs(content, toNote) : content;
+  if (legacyAssetsMoved) next = rebaseLegacyAssetRefs(next, fromNote, toNote);
   if (next === content) return nothing;
   try {
     await target.writeText(toNote, next);
@@ -2378,11 +2453,15 @@ export async function trashNote(id: Id): Promise<void> {
     cancelAutoRename(id);
     await flushNote(id);
     const trashPath = await resolveAvailablePath(target, requested, taken, id);
+    const legacyPlan = await planLegacyAssetsMove(target, id, trashPath);
     await target.move(id, trashPath);
     await moveHistory(target, id, trashPath);
+    const legacy = await moveLegacyAssets(target, legacyPlan);
     // 回收站比工作区深两层 ⇒ 指向共享 `.assets/` 的引用要跟着加前缀，
     // 否则「删了再恢复」或「在回收站里看一眼」时图片全是裂图（而且不报错）。
-    const assets = await rebaseNoteAssets(target, id, trashPath);
+    const assets = await rebaseNoteAssets(target, id, trashPath, legacy.moved);
+    const warning = combineWarnings(legacy.warning, assets.warning);
+    if (warning) reportError(new Error(warning), "已移入回收站，但附件未完全处理");
     // 画布视口跟到回收站路径下：恢复时还要用（restoreNote 会把它搬到最终路径）。
     moveCanvasViewport(id, trashPath);
     const current = libraryStore.get().notes[id] ?? note;
@@ -2421,6 +2500,7 @@ export async function restoreNote(id: Id): Promise<void> {
     cancelAutoRename(id);
     await flushAll();
     const nextPath = await resolveAvailablePath(target, original, taken, id);
+    const legacyPlan = await planLegacyAssetsMove(target, id, nextPath);
     await target.move(id, nextPath);
     await moveHistory(target, id, nextPath);
     // 引用跟随（恢复）：进回收站时引用没改写过，所以既有引用仍是 original —— 把它
@@ -2433,8 +2513,11 @@ export async function restoreNote(id: Id): Promise<void> {
     if (await target.exists(sourceAssets) && !(await target.exists(restoredAssets))) {
       await target.move(sourceAssets, restoredAssets);
     }
+    const legacy = await moveLegacyAssets(target, legacyPlan);
     // 共享 `.assets/` 的引用按恢复后的路径重算前缀（回收站深两层，回来就要去掉）。
-    const assets = await rebaseNoteAssets(target, id, nextPath);
+    const assets = await rebaseNoteAssets(target, id, nextPath, legacy.moved);
+    const warning = combineWarnings(legacy.warning, assets.warning);
+    if (warning) reportError(new Error(warning), "已恢复，但附件未完全处理");
     // 恢复后的路径可能带序号（`第一章 2.md`）：视口的键跟着落到最终路径上。
     moveCanvasViewport(id, nextPath);
     setState((prev) => {
@@ -2475,8 +2558,9 @@ export async function restoreNote(id: Id): Promise<void> {
       });
     }
   } catch (error) {
-    reportError(error, "恢复失败");
     await rescanWorkspace().catch(() => undefined);
+    // 重扫会按「扫描期间的新错误」清理旧 error；恢复失败本身必须留在界面上。
+    reportError(error, "恢复失败");
   }
 }
 
@@ -2521,8 +2605,7 @@ async function removeNoteArtifacts(target: FileSystemBackend, id: Id, purging?: 
   if (await target.exists(history)) await target.remove(history, { recursive: true });
 
   // 旧布局的自有附件目录（按笔记名派生）：笔记真删了它就该消失，否则回收站里永远留着孤儿图片。
-  const stem = sanitizeName(stripExtension(baseName(id)), "未命名");
-  const legacyOwn = joinPath(parentPath(id), `${stem}.assets`);
+  const legacyOwn = legacyAssetsDirFor(id);
   if (await target.exists(legacyOwn)) await target.remove(legacyOwn, { recursive: true });
 
   await removeSharedAssetsOfNote(target, id, purging);

@@ -24,14 +24,24 @@ import {
   assetFinalName,
   assetsDirFor,
   dedupeAssetName,
+  legacyAssetsDirFor,
   markdownRef,
+  rebaseLegacyAssetRefs,
   relativeAssetRef,
   SHARED_ASSETS_DIR,
 } from "../../data/assetPaths";
 import { resolveAvailablePath } from "../../data/library";
 import { ImportRejection, importProblem, normalizeFolder } from "./envelope";
 
-export { assetFinalName, assetsDirFor, markdownRef, relativeAssetRef, SHARED_ASSETS_DIR };
+export {
+  assetFinalName,
+  assetsDirFor,
+  legacyAssetsDirFor,
+  markdownRef,
+  rebaseLegacyAssetRefs,
+  relativeAssetRef,
+  SHARED_ASSETS_DIR,
+};
 
 /**
  * 请求路径 = `joinPath(folder, sanitizeName(title, "未命名") + ".md")`（契约 §3.1）。

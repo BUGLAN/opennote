@@ -12,7 +12,15 @@
  * 本模块只依赖 `../fs/paths` 与 `./hash`，所以渲染进程与命令行都能用。
  */
 
-import { extName, normalizePath, parentPath, sanitizeName } from "../fs/paths";
+import {
+  baseName,
+  extName,
+  joinPath,
+  normalizePath,
+  parentPath,
+  sanitizeName,
+  stripExtension,
+} from "../fs/paths";
 import { contentUuid } from "../lib/clip/hash";
 
 /**
@@ -32,6 +40,60 @@ export const SHARED_ASSETS_DIR = ".assets";
 /** 附件目录（唯一产地）。不带参数：落点与笔记路径无关了。 */
 export function assetsDirFor(): string {
   return SHARED_ASSETS_DIR;
+}
+
+/** 旧布局自有附件目录的 stem：`故事/第一章.md` → `第一章`。 */
+function legacyAssetsStemFor(notePath: string): string {
+  return sanitizeName(stripExtension(baseName(notePath)), "未命名");
+}
+
+/**
+ * 旧布局的自有附件目录：与笔记同级、按文件名 stem 派生（`故事/第一章.assets/`）。
+ *
+ * 共享 `.assets/` 的生命周期与笔记位置无关；这个目录**只属于一篇笔记**，所以移动、回收、
+ * 恢复、改名和永久删除都必须让它跟着笔记走。路径派生只留在这里，避免五个入口各写一遍。
+ */
+export function legacyAssetsDirFor(notePath: string): string {
+  return joinPath(parentPath(notePath), `${legacyAssetsStemFor(notePath)}.assets`);
+}
+
+/**
+ * 笔记改路径时，同步改写正文里指向**这篇笔记自己的旧布局附件目录**的相对引用。
+ *
+ * 只处理与笔记同级的 `<旧 stem>.assets/`（`./第一章.assets/a.png`、`第一章.assets/a.png`、
+ * 内联 `<img src="./第一章.assets/a.png">`）。公共 `assets/`、远程地址、别的笔记的同名目录
+ * 一格不动。新 stem 含空格时按 CommonMark 要求补角括号，避免链接目标被空格截断。
+ */
+export function rebaseLegacyAssetRefs(content: string, fromNotePath: string, toNotePath: string): string {
+  const fromStem = legacyAssetsStemFor(fromNotePath);
+  const toStem = legacyAssetsStemFor(toNotePath);
+  if (fromStem === toStem) return String(content ?? "");
+  const escaped = fromStem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const retarget = (path: string): string => {
+    const dotSlash = path.startsWith("./") ? "./" : "";
+    return `${dotSlash}${toStem}.assets/${path.slice(dotSlash.length + fromStem.length + ".assets/".length)}`;
+  };
+  let next = String(content ?? "");
+  // Markdown 行内目标：`](./旧.assets/a.png)`、`](<./旧.assets/a b.png> "标题")`。
+  next = next.replace(
+    new RegExp(
+      `\\]\\((?:<((?:\\.\\/)?${escaped}\\.assets\\/[^>\\n]+)>|((?:\\.\\/)?${escaped}\\.assets\\/[^\\s)"']+))(?:\\s+("[^"]*"|'[^']*'))?\\)`,
+      "g",
+    ),
+    (_match, anglePath: string | undefined, barePath: string | undefined, title: string | undefined) => {
+      const path = anglePath ?? barePath ?? "";
+      return `](${markdownRef(retarget(path))}${title ? ` ${title}` : ""})`;
+    },
+  );
+  // 内联 HTML：`<img src="./旧.assets/a.png">`。
+  next = next.replace(
+    new RegExp(
+      `(<img\\b[^>]*?\\bsrc\\s*=\\s*["'])((?:\\.\\/)?${escaped}\\.assets\\/[^"']+)(["'])`,
+      "gi",
+    ),
+    (_match, head: string, path: string, tail: string) => `${head}${retarget(path)}${tail}`,
+  );
+  return next;
 }
 
 /**

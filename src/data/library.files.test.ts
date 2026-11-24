@@ -412,6 +412,128 @@ describe("共享 .assets/ 的引用：删除 / 恢复 / 移动时按新层数重
 });
 
 /**
+ * 共享 `.assets/` 之前的自有目录布局：附件与笔记同级，目录名跟着文件名走。
+ * 迁移器是手动 CLI，工作区里完全可能还留着这种数据；四条路径必须自己把目录带走，
+ * 否则移动/回收/恢复/改名任一步都会让相对引用指空，永久删除还会留下孤儿目录。
+ */
+describe("旧布局自有附件目录：移动 / 回收 / 恢复 / 改名", () => {
+  const NOTE = "故事/第一章.md";
+  const LEGACY_ASSETS = "故事/第一章.assets";
+  const LEGACY_IMAGE = `${LEGACY_ASSETS}/图.png`;
+  const BODY = "# 第一章\n\n![图](./第一章.assets/图.png)\n";
+
+  beforeEach(async () => {
+    testBackend.seed(NOTE, BODY);
+    testBackend.seed(LEGACY_IMAGE, "legacy-pixels");
+    await rescanWorkspace();
+  });
+
+  it("跨目录移动：目录跟着笔记走，正文里的相对引用仍能解析", async () => {
+    testBackend.seed("资料/别的.md", "# 别的");
+    await rescanWorkspace();
+
+    const result = await moveNote(NOTE, "资料");
+    expect(result).toEqual({ path: "资料/第一章.md", assetsWarning: null });
+    expect(testBackend.files.get("资料/第一章.md")).toBe(BODY);
+    expect(testBackend.files.get("资料/第一章.assets/图.png")).toBe("legacy-pixels");
+    await expect(testBackend.exists("故事/第一章.assets")).resolves.toBe(false);
+  });
+
+  it("跨目录移动撞名：按落盘后的新 stem 搬目录并改写引用", async () => {
+    testBackend.seed("资料/第一章.md", "# 已有笔记");
+    await rescanWorkspace();
+
+    const result = await moveNote(NOTE, "资料");
+    expect(result).toEqual({ path: "资料/第一章 2.md", assetsWarning: null });
+    expect(testBackend.files.get("资料/第一章 2.md")).toBe(
+      "# 第一章\n\n![图](<./第一章 2.assets/图.png>)\n",
+    );
+    expect(testBackend.files.get("资料/第一章 2.assets/图.png")).toBe("legacy-pixels");
+    expect(await testBackend.exists("资料/第一章.assets")).toBe(false);
+  });
+
+  it("进回收站再恢复：目录与正文一起往返", async () => {
+    await trashNote(NOTE);
+    const trashed = ".opennote/trash/故事/第一章.md";
+    expect(testBackend.files.get(trashed)).toBe(BODY);
+    expect(testBackend.files.get(".opennote/trash/故事/第一章.assets/图.png")).toBe("legacy-pixels");
+    expect(await testBackend.exists(LEGACY_ASSETS)).toBe(false);
+
+    await restoreNote(trashed);
+    expect(testBackend.files.get(NOTE)).toBe(BODY);
+    expect(testBackend.files.get(LEGACY_IMAGE)).toBe("legacy-pixels");
+    expect(await testBackend.exists(".opennote/trash/故事/第一章.assets")).toBe(false);
+  });
+
+  it("改名：目录跟着新 stem 走、引用改写；永久删除清掉新目录且不残留旧目录", async () => {
+    await renameNote(NOTE, "改名 篇");
+    const renamed = "故事/改名 篇.md";
+    expect(testBackend.files.get(renamed)).toBe("# 第一章\n\n![图](<./改名 篇.assets/图.png>)\n");
+    expect(testBackend.files.get("故事/改名 篇.assets/图.png")).toBe("legacy-pixels");
+    expect(await testBackend.exists(LEGACY_ASSETS)).toBe(false);
+
+    await trashNote(renamed);
+    await purgeNote(".opennote/trash/故事/改名 篇.md");
+    expect(await testBackend.exists("故事/改名 篇.assets")).toBe(false);
+    expect(await testBackend.exists(".opennote/trash/故事/改名 篇.assets")).toBe(false);
+  });
+
+  it("目标附件目录已存在：移动不覆盖、笔记保持原状并报错", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    testBackend.seed("资料/第一章.assets/已有.png", "existing");
+    testBackend.seed("资料/别的.md", "# 别的");
+    await rescanWorkspace();
+
+    const result = await moveNote(NOTE, "资料");
+    expect(result.path).toBeNull();
+    expect(testBackend.files.get(NOTE)).toBe(BODY);
+    expect(testBackend.files.get(LEGACY_IMAGE)).toBe("legacy-pixels");
+    expect(testBackend.files.get("资料/第一章.assets/已有.png")).toBe("existing");
+    expect(getLibrary().error).toContain("旧附件目录已存在");
+    error.mockRestore();
+  });
+
+  it("目标附件目录已存在：改名不覆盖、笔记保持原名并报错", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    testBackend.seed("故事/改名.assets/已有.png", "existing");
+
+    await renameNote(NOTE, "改名");
+    expect(testBackend.files.get(NOTE)).toBe(BODY);
+    expect(testBackend.files.get(LEGACY_IMAGE)).toBe("legacy-pixels");
+    expect(testBackend.files.get("故事/改名.assets/已有.png")).toBe("existing");
+    expect(getLibrary().error).toContain("旧附件目录已存在");
+    error.mockRestore();
+  });
+
+  it("回收站目标附件目录已存在：不覆盖、笔记留在工作区并报错", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    testBackend.seed(".opennote/trash/故事/第一章.assets/已有.png", "existing");
+
+    await trashNote(NOTE);
+    expect(testBackend.files.get(NOTE)).toBe(BODY);
+    expect(testBackend.files.get(LEGACY_IMAGE)).toBe("legacy-pixels");
+    expect(testBackend.files.get(".opennote/trash/故事/第一章.assets/已有.png")).toBe("existing");
+    expect(getLibrary().error).toContain("旧附件目录已存在");
+    error.mockRestore();
+  });
+
+  it("恢复目标附件目录已存在：不覆盖、笔记留在回收站并报错", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await trashNote(NOTE);
+    const trashed = ".opennote/trash/故事/第一章.md";
+    testBackend.seed("故事/第一章.assets/已有.png", "existing");
+
+    await restoreNote(trashed);
+    expect(testBackend.files.get(trashed)).toBe(BODY);
+    expect(testBackend.files.get(".opennote/trash/故事/第一章.assets/图.png")).toBe("legacy-pixels");
+    expect(testBackend.files.get("故事/第一章.assets/已有.png")).toBe("existing");
+    expect(error).toHaveBeenCalled();
+    expect(getLibrary().error).toContain("旧附件目录已存在");
+    error.mockRestore();
+  });
+});
+
+/**
  * 「移动到…」选择器的候选项（`folderChoiceList()`）。
  *
  * 判据盯的是**顺序与身份**，不是长相：选择器里第 n 项必须和左栏文件树里第 n 行指向
