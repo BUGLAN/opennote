@@ -28,29 +28,6 @@
   overflow: hidden;
 }
 
-/*
- * iOS 26/27 主屏 PWA：系统会在页面顶部叠一层 Liquid Glass 模糊，范围不止状态栏，
- * 会向下盖住顶栏。那一层由系统绘制，`backdrop-filter: none` 关不掉；贴着视口顶边
- * 铺一条实色（不能是渐变 / 半透明）、至少 6px 高的 fixed 背景后，iOS 会拿它当状态栏
- * 底色，不再画模糊。
- *
- * `-webkit-touch-callout` 把规则收在 iOS：Android 的 standalone PWA / 桌面安装版
- * 不命中。高度跟随 `--inset-top`，无刘海设备也保留 6px 的最小触发高度。
- */
-@supports (-webkit-touch-callout: none) {
-  @media (display-mode: standalone) {
-    .app::before {
-      content: "";
-      position: fixed;
-      inset: 0 0 auto 0;
-      height: max(6px, var(--inset-top));
-      background: var(--paper);
-      z-index: 30;
-      pointer-events: none;
-    }
-  }
-}
-
 /* ===================== frameless title bar (desktop) =================== */
 /* 桌面端窗口没有系统标题栏：应用自己的头部就是标题栏。
    头部空白处可拖动窗口；其中的按钮与输入框必须 no-drag，否则点不动。

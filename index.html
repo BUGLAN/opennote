@@ -156,6 +156,9 @@
       <div class="boot__name">Opennote</div>
       <div class="boot__hint">开源笔记 · 正在打开你的书桌</div>
     </div>
+    <!-- iOS 主屏 PWA 顶边实色条，消掉系统顶部模糊；样式与原因见 base.css 的 .ios-top-edge。
+         必须是真实元素：WebKit 取样时把伪元素当成它的宿主，宿主不是 fixed 就不算数。 -->
+    <div class="ios-top-edge" aria-hidden="true"></div>
     <noscript>
       <div class="boot__noscript">
         Opennote 是一个纯前端应用，需要启用 JavaScript 才能运行。你的笔记只保存在本机浏览器中。
