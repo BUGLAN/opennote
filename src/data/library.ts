@@ -2551,12 +2551,30 @@ async function removeSharedAssetsOfNote(target: FileSystemBackend, id: Id): Prom
   if (!note) return;
   const dir = assetsDirFor();
   if (!(await target.exists(dir))) return;
-  const mine = sharedAssetFilesIn(note.content);
-  if (!mine.length) return;
+  /*
+   * 正文可以来自磁盘或同步，**不能信**：`![x](.assets/../../secret.md)` 的捕获会交给
+   * `joinPath` 归一，`..` 一解析就落到 `.assets/` 外的工作区根（甚至 `.opennote/`）。
+   * 只认解析后仍严格落在共享目录里的引用 —— 空路径和 `.assets` 自己也不行。
+   * 同一文件的不同写法（`sub/../x.png` 与 `x.png`）先归一，再和别的笔记比对；
+   * 否则它们能绕过「别的笔记也引用就不删」这条判断。
+   */
+  const insideSharedDir = (file: string): string | null => {
+    const targetPath = joinPath(dir, file);
+    return targetPath.startsWith(`${dir}/`) ? targetPath.slice(dir.length + 1) : null;
+  };
+  const mine = new Set<string>();
+  for (const file of sharedAssetFilesIn(note.content)) {
+    const relative = insideSharedDir(file);
+    if (relative) mine.add(relative);
+  }
+  if (!mine.size) return;
   const others = new Set<string>();
   for (const item of [...Object.values(state.notes), ...Object.values(state.trash)]) {
     if (item.id === id) continue;
-    for (const file of sharedAssetFilesIn(item.content)) others.add(file);
+    for (const file of sharedAssetFilesIn(item.content)) {
+      const relative = insideSharedDir(file);
+      if (relative) others.add(relative);
+    }
   }
   for (const file of mine) {
     if (others.has(file)) continue;

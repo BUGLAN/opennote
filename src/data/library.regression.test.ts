@@ -765,6 +765,62 @@ describe("D27 数据侧死代码与持久化", () => {
     expect(await emptyTrash()).toBe(0);
   });
 
+  it("purgeNote 不会删除解析后越出 .assets 的引用", async () => {
+    const backend = await openSingle((b) => {
+      b.seed(
+        "笔记.md",
+        [
+          "# 笔记",
+          "![一](.assets/../../secret.md)",
+          "![二](.assets/../../../secret.md)",
+          "![三](.assets/sub/../../../secret.md)",
+          "![四](.assets/..\\..\\secret.md)",
+          "![状态](.assets/../../.opennote/state.json)",
+          "![正常](.assets/图/甲.png)",
+        ].join("\n"),
+      );
+      b.seed("secret.md", "机密");
+      b.seed(".opennote/state.json", '{"version":1}\n');
+      b.seed(".assets/图/甲.png", "png");
+      b.seed(".assets/别人的.png", "png");
+    });
+    await trashNote("笔记.md");
+    await purgeNote(".opennote/trash/笔记.md");
+
+    expect(backend.text("secret.md")).toBe("机密");
+    expect(backend.text(".opennote/state.json")).toBe('{"version":1}\n');
+    expect(backend.has(".assets/图/甲.png")).toBe(false);
+    expect(backend.text(".assets/别人的.png")).toBe("png");
+    expect(backend.has(".opennote/trash/笔记.md")).toBe(false);
+  });
+
+  it("emptyTrash 也不会删除解析后越出 .assets 的引用，且保留被存活笔记引用的附件", async () => {
+    const backend = await openSingle((b) => {
+      b.seed(
+        "甲.md",
+        [
+          "# 甲",
+          "![一](.assets/../../secret.md)",
+          "![二](.assets/..\\..\\..\\secret.md)",
+          "![正常](.assets/甲.png)",
+        ].join("\n"),
+      );
+      b.seed("乙.md", "# 乙\n![共用](.assets/共用.png)");
+      b.seed("secret.md", "机密");
+      b.seed(".opennote/state.json", '{"version":1}\n');
+      b.seed(".assets/甲.png", "png");
+      b.seed(".assets/共用.png", "png");
+    });
+    await trashNote("甲.md");
+    expect(await emptyTrash()).toBe(1);
+
+    expect(backend.text("secret.md")).toBe("机密");
+    expect(backend.text(".opennote/state.json")).toBe('{"version":1}\n');
+    expect(backend.has(".assets/甲.png")).toBe(false);
+    expect(backend.text(".assets/共用.png")).toBe("png");
+    expect(backend.has(".opennote/trash")).toBe(false);
+  });
+
   it("关闭标签释放不再使用的图片 blob URL，关闭笔记本释放全部", async () => {
     const revoked: string[] = [];
     vi.spyOn(URL, "revokeObjectURL").mockImplementation((url: string) => { revoked.push(url); });
