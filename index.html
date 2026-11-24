@@ -20,6 +20,32 @@
     <meta name="apple-mobile-web-app-title" content="Opennote" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="mask-icon" href="./favicon.svg" color="#b23a2e" />
+    <!-- iOS 26/27 主屏 PWA 顶部的系统级模糊（Liquid Glass，会往下糊住标签栏）：CSS 关不掉，
+         theme-color / status-bar-style 也已失效；唯一管用的是贴顶铺一条实色 fixed 元素，iOS 就拿它
+         当状态栏底色、不再画模糊（要 fixed、贴顶、宽 ≥80%、高 ≥6px、实色）。
+         - 必须是 body 里的真实元素（.ios-top-edge），不能是伪元素：WebKit 顶边取样命中伪元素时记下的是
+           宿主，宿主不是 fixed 就不算；
+         - 样式内联在这里，首帧就在，不等样式包；
+         - z-index 高于 base.css 里 z-index 9999 的全屏纸纹理（body::before），否则取样先命中它；
+         - iOS 只在某些时候重新认这一层（首次打开仍糊、滑一下才好），src/lib/iosTopBar.ts 在启动、
+           切回前台时再让它动一下。
+         `-webkit-touch-callout` 只有 iOS 的 WebKit 认：Safari 普通页、Android、桌面都不显示。
+         颜色 = 当前主题的 --paper；样式包还没到时按上面脚本写好的 data-appearance 先给浅 / 深底色。 -->
+    <style>
+      .ios-top-edge { display: none; }
+      @media (display-mode: standalone) {
+        @supports (-webkit-touch-callout: none) {
+          .ios-top-edge {
+            display: block; position: fixed; top: 0; left: 0; right: 0; z-index: 10000;
+            height: max(6px, env(safe-area-inset-top, 0px));
+            background: var(--paper, #fbf8f3);
+            pointer-events: none;
+          }
+          .ios-top-edge.is-nudge { height: calc(max(6px, env(safe-area-inset-top, 0px)) + 1px); }
+          html[data-appearance="dark"] .ios-top-edge { background: var(--paper, #14120f); }
+        }
+      }
+    </style>
     <script>
       // Two jobs, both of which must run before the app module:
       // 1. apply the persisted theme before first paint (no flash of the wrong palette);
@@ -150,15 +176,13 @@
     </script>
   </head>
   <body>
+    <div class="ios-top-edge" aria-hidden="true"></div>
     <div id="root"></div>
     <div id="boot" class="boot">
       <div class="boot__seal" aria-hidden="true">記</div>
       <div class="boot__name">Opennote</div>
       <div class="boot__hint">开源笔记 · 正在打开你的书桌</div>
     </div>
-    <!-- iOS 主屏 PWA 顶边实色条，消掉系统顶部模糊；样式与原因见 base.css 的 .ios-top-edge。
-         必须是真实元素：WebKit 取样时把伪元素当成它的宿主，宿主不是 fixed 就不算数。 -->
-    <div class="ios-top-edge" aria-hidden="true"></div>
     <noscript>
       <div class="boot__noscript">
         Opennote 是一个纯前端应用，需要启用 JavaScript 才能运行。你的笔记只保存在本机浏览器中。

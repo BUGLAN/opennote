@@ -414,44 +414,6 @@ kbd {
   }
 }
 
-/* ---- iOS 主屏 PWA 顶边 ------------------------------------------------- */
-/*
- * iOS 26/27 主屏 PWA 的顶部系统模糊（Liquid Glass）：standalone 下系统在页面顶部叠一层
- * 模糊，范围不止状态栏，会向下糊住标签栏。CSS 关不掉它（`backdrop-filter: none`、
- * theme-color、status-bar-style 都无效）；唯一管用的是让 WebKit 在视口顶边取样到一个
- * **实色的 fixed 元素**，它就改用该元素的颜色铺状态栏、不再画模糊。
- *
- * WebKit 的取样是在顶边做一次命中测试（首轮忽略 `pointer-events`），再从命中元素往上找
- * fixed / sticky 的容器。所以这条必须：
- * - 是 index.html 里的真实元素：命中伪元素时 WebKit 记下的是宿主（`.app::before` → `.app`，
- *   `.app` 不是 fixed，上一版就是这样失效的）；
- * - 压在最上层：`body::before` 的纸纹理是 z-index 9999 的全屏 fixed 伪元素，命中它就等于
- *   命中 `body`，同样不算；
- * - 实色、贴顶、全宽、只占安全区：不挡任何控件，颜色跟主题走。
- *
- * `-webkit-touch-callout` 把规则收在 iOS；Android / 桌面安装版 / Safari 普通页都不显示。
- * 横屏时安全区为 0，这条自然为 0 高（系统横屏也不画这层模糊）。
- */
-.ios-top-edge {
-  display: none;
-}
-
-@supports (-webkit-touch-callout: none) {
-  @media (display-mode: standalone) {
-    .ios-top-edge {
-      display: block;
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: var(--inset-top);
-      background: var(--paper);
-      z-index: 10000;
-      pointer-events: none;
-    }
-  }
-}
-
 /* ---- boot splash ------------------------------------------------------- */
 .boot {
   position: fixed;

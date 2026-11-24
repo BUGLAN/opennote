@@ -18,6 +18,7 @@ import "./styles/editor.css";
 import "./styles/app.css";
 
 import App from "./App";
+import { installIosTopBar } from "./lib/iosTopBar";
 import { noticeStack } from "./lib/noticeStack";
 import { applySystemThemeOnFirstVisit, applyUi, getUi, storageBlockedReason } from "./data/ui";
 
@@ -33,6 +34,8 @@ declare global {
 // First visit: follow the operating system instead of forcing a light page.
 applySystemThemeOnFirstVisit();
 applyUi(getUi());
+// iOS 主屏安装版：让 iOS 认出 index.html 里的顶部实色层、不画系统级模糊（其他环境什么都不做）
+installIosTopBar(window);
 
 const container = document.getElementById("root");
 if (!container) throw new Error("#root is missing from index.html");
