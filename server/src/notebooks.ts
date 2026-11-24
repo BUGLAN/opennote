@@ -93,6 +93,8 @@ export interface CreateNotebookInput {
   ownerId: string;
   name: string;
   cryptoMode: CryptoMode;
+  /** 账号可拥有的未删除笔记本上限；不传表示不限（管理/测试夹具用）。 */
+  notebookLimit?: number;
   /** 覆盖自动生成的 id（测试用；生产不传）。 */
   notebookId?: string;
   now?: number;
@@ -123,6 +125,16 @@ export class NotebookStore {
       if (!owner) throw new NotebookError("not-found", "账号不存在");
       if (owner.deletion_started_at !== null) throw new NotebookError("deletion-in-progress", "账号正在删除，暂时不能新建笔记本");
 
+      /*
+       * 数量判定必须与三张新建行共用同一个写事务。事务外的「重算 → 检查」
+       * 在多个实例共享 control.db 时会让两个请求都读到「还差一本」，再先后提交；
+       * BEGIN IMMEDIATE 则让后到的实例在这里看到前一个实例已提交的数量。
+       */
+      const current = this.db
+        .prepare("SELECT COUNT(*) AS n FROM notebooks WHERE owner_id = ? AND deleted_at IS NULL")
+        .get(input.ownerId) as unknown as { n: number };
+      if (input.notebookLimit !== undefined) assertNotebookQuota(current.n, input.notebookLimit);
+
       this.db
         .prepare("INSERT INTO notebooks (id, owner_id, name, db_name, crypto_mode, created_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, NULL)")
         .run(id, input.ownerId, input.name, dbName, input.cryptoMode, now);
@@ -130,6 +142,7 @@ export class NotebookStore {
       //   而「授权真源」查不到行 ⇒ 连创建者自己都 404。
       this.db.prepare("INSERT INTO memberships (notebook_id, account_id, role, created_at) VALUES (?, ?, 'owner', ?)").run(id, input.ownerId, now);
       this.db.prepare("INSERT INTO notebook_provisioning (notebook_id, design_ok, revs_limit, sync_info_ok, last_checked) VALUES (?, 0, NULL, 0, NULL)").run(id);
+      this.recomputeNotebookCount(input.ownerId, now);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

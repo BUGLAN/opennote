@@ -36,7 +36,7 @@ import {
 } from "../../../shared/contract";
 import { AccountError, AccountStore, generateCode, hashCode, type AccountRow } from "../auth/accounts";
 import type { CouchClient } from "../couch/client";
-import { NotebookError, NotebookStore, assertNotebookQuota, type NotebookRow } from "../notebooks";
+import { NotebookError, NotebookStore, type NotebookRow } from "../notebooks";
 import { DEFAULT_REVS_LIMIT, ProvisioningError, provisionNotebook } from "../provisioning";
 import type { ServerConfig } from "../config";
 import { bearerToken } from "./auth";
@@ -117,7 +117,7 @@ export function createNotebookRoutes(deps: NotebookRoutesDeps): Hono {
   /**
    * 建笔记本。**先建行、再置备、失败都撤回**（见模块头）。
    *
-   * 配额：`assertNotebookQuota` **只拦写入**（超限时读取仍然可用，§10.1 M9）。
+   * 配额：数量判定在 `create()` 的写事务内完成，**只拦写入**（超限时读取仍然可用，§10.1 M9）。
    */
   routes.post("/notebooks", async (c) => {
     const auth = authenticate(c as never);
@@ -131,18 +131,15 @@ export function createNotebookRoutes(deps: NotebookRoutesDeps): Hono {
       return json({ error: error instanceof ContractError ? error.message : String(error), code: "bad-request" }, 400);
     }
 
-    const current = deps.notebooks.recomputeNotebookCount(auth.id);
-    try {
-      assertNotebookQuota(current, deps.config.defaultAccountQuotaNotebooks);
-    } catch (error) {
-      if (error instanceof NotebookError) return notebookErrorResponse(error);
-      throw error;
-    }
-
     // ① 先建行（这一层可回滚）。
     let notebook: NotebookRow;
     try {
-      notebook = deps.notebooks.create({ ownerId: auth.id, name: input.name, cryptoMode: input.cryptoMode });
+      notebook = deps.notebooks.create({
+        ownerId: auth.id,
+        name: input.name,
+        cryptoMode: input.cryptoMode,
+        notebookLimit: deps.config.defaultAccountQuotaNotebooks,
+      });
     } catch (error) {
       if (error instanceof NotebookError) return notebookErrorResponse(error);
       throw error;

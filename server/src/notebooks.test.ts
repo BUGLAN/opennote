@@ -567,6 +567,34 @@ describe("§4.11 · 配额：只拦写入，不拦读取", () => {
     notebooks.markDeleted(third.id);
     expect(notebooks.recomputeNotebookCount(alice.id)).toBe(2);
   });
+
+  it("数量判定与三张新建行同事务：第二次超限无残留，计数同步", () => {
+    const { db, accounts, notebooks } = makeWorld();
+    const alice = makeAccount(accounts);
+
+    notebooks.create({ ownerId: alice.id, name: "第一本", cryptoMode: "none", notebookLimit: 1 });
+    expect(notebooks.quotaOf(alice.id).notebooks).toBe(1);
+
+    let quotaError: unknown;
+    try {
+      notebooks.create({ ownerId: alice.id, name: "第二本", cryptoMode: "none", notebookLimit: 1 });
+    } catch (error) {
+      quotaError = error;
+    }
+    expect(quotaError).toBeInstanceOf(NotebookError);
+    expect((quotaError as NotebookError).code).toBe("quota");
+
+    const rowCount = (table: "notebooks" | "memberships" | "notebook_provisioning"): number =>
+      (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as unknown as { n: number }).n;
+    expect(rowCount("notebooks")).toBe(1);
+    expect(rowCount("memberships")).toBe(1);
+    expect(rowCount("notebook_provisioning")).toBe(1);
+    expect(notebooks.quotaOf(alice.id).notebooks).toBe(1);
+
+    // 不传上限仍是不限：管理/测试夹具的既有调用不受影响，计数照样同步。
+    notebooks.create({ ownerId: alice.id, name: "不限", cryptoMode: "none" });
+    expect(notebooks.quotaOf(alice.id).notebooks).toBe(2);
+  });
 });
 
 describe("空间配额预占", () => {
