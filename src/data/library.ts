@@ -2492,11 +2492,11 @@ function ancestorPaths(path: Id): Id[] {
 }
 
 /** Notes still living in (or trashed from) `dir`, so a purge keeps their images (D16). */
-function otherNoteInFolder(dir: Id, except: Id): boolean {
+function otherNoteInFolder(dir: Id, except: Id, purging?: ReadonlySet<Id>): boolean {
   const state = libraryStore.get();
   const inside = (path: Id) => (dir ? path.startsWith(`${dir}/`) : true);
   for (const note of [...Object.values(state.notes), ...Object.values(state.trash)]) {
-    if (note.id === except) continue;
+    if (note.id === except || purging?.has(note.id)) continue;
     if ((note.folderId ?? "") === dir) return true;
     // A trashed note keeps the path it came from; it may be restored later.
     if (inside(note.id) || inside(note.id.slice(`${TRASH_DIR}/`.length))) return true;
@@ -2516,7 +2516,7 @@ function otherNoteInFolder(dir: Id, except: Id): boolean {
  *      所以必须按引用挑（`sharedAssetFilesIn`），而且别的笔记也引用同一个文件时**不删**。
  *   4. 老的公共 `<目录>/assets/`：只有那个目录里没有别的笔记时才收（图可能是邻居的）。
  */
-async function removeNoteArtifacts(target: FileSystemBackend, id: Id): Promise<void> {
+async function removeNoteArtifacts(target: FileSystemBackend, id: Id, purging?: ReadonlySet<Id>): Promise<void> {
   const history = joinPath(HISTORY_DIR, id);
   if (await target.exists(history)) await target.remove(history, { recursive: true });
 
@@ -2525,7 +2525,7 @@ async function removeNoteArtifacts(target: FileSystemBackend, id: Id): Promise<v
   const legacyOwn = joinPath(parentPath(id), `${stem}.assets`);
   if (await target.exists(legacyOwn)) await target.remove(legacyOwn, { recursive: true });
 
-  await removeSharedAssetsOfNote(target, id);
+  await removeSharedAssetsOfNote(target, id, purging);
 
   const folders = new Set<Id>([parentPath(id)]);
   // A trashed note keeps the path it came from, and its images stay there.
@@ -2533,7 +2533,7 @@ async function removeNoteArtifacts(target: FileSystemBackend, id: Id): Promise<v
   for (const dir of folders) {
     const assets = joinPath(dir, ASSETS_DIR);
     if (!(await target.exists(assets))) continue;
-    if (otherNoteInFolder(dir, id)) continue;
+    if (otherNoteInFolder(dir, id, purging)) continue;
     await target.remove(assets, { recursive: true });
   }
 }
@@ -2545,7 +2545,7 @@ async function removeNoteArtifacts(target: FileSystemBackend, id: Id): Promise<v
  * 指向同一个文件，按引用删就会把还活着的那篇的图删掉。邻居的正文就在内存里（`content`），
  * 判断是白拿的。
  */
-async function removeSharedAssetsOfNote(target: FileSystemBackend, id: Id): Promise<void> {
+async function removeSharedAssetsOfNote(target: FileSystemBackend, id: Id, purging?: ReadonlySet<Id>): Promise<void> {
   const state = libraryStore.get();
   const note = state.notes[id] ?? state.trash[id];
   if (!note) return;
@@ -2570,7 +2570,7 @@ async function removeSharedAssetsOfNote(target: FileSystemBackend, id: Id): Prom
   if (!mine.size) return;
   const others = new Set<string>();
   for (const item of [...Object.values(state.notes), ...Object.values(state.trash)]) {
-    if (item.id === id) continue;
+    if (item.id === id || purging?.has(item.id)) continue;
     for (const file of sharedAssetFilesIn(item.content)) {
       const relative = insideSharedDir(file);
       if (relative) others.add(relative);
@@ -2614,9 +2614,10 @@ export async function emptyTrash(): Promise<number> {
   const target = backend;
   if (!target) return 0;
   const ids = Object.keys(libraryStore.get().trash);
+  const purging = new Set(ids);
   const count = ids.length;
   try {
-    for (const id of ids) await removeNoteArtifacts(target, id);
+    for (const id of ids) await removeNoteArtifacts(target, id, purging);
     if (await target.exists(TRASH_DIR)) await target.remove(TRASH_DIR, { recursive: true });
     dropAutoRenameState((path) => path === TRASH_DIR || path.startsWith(`${TRASH_DIR}/`));
     dropCanvasViewport((path) => path === TRASH_DIR || path.startsWith(`${TRASH_DIR}/`));

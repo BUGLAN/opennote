@@ -821,6 +821,30 @@ describe("D27 数据侧死代码与持久化", () => {
     expect(backend.has(".opennote/trash")).toBe(false);
   });
 
+  it("emptyTrash 批量清空时不再把待删邻居当成存活引用者", async () => {
+    const backend = await openSingle((b) => {
+      b.seed("甲.md", "# 甲\n![共用](.assets/共用.png)\n![仅待删](.assets/仅待删.png)");
+      b.seed("乙.md", "# 乙\n![共用](.assets/共用.png)\n![仅待删](.assets/仅待删.png)");
+      b.seed("存活.md", "# 存活\n![共用](.assets/共用.png)");
+      b.seed("资料/丙.md", "# 丙");
+      b.seed("资料/丁.md", "# 丁");
+      b.seed("资料/assets/旧布局.png", "png");
+      b.seed(".assets/共用.png", "png");
+      b.seed(".assets/仅待删.png", "png");
+    });
+    await trashNote("甲.md");
+    await trashNote("乙.md");
+    await trashNote("资料/丙.md");
+    await trashNote("资料/丁.md");
+
+    expect(await emptyTrash()).toBe(4);
+
+    expect(backend.has(".assets/仅待删.png")).toBe(false);
+    expect(backend.text(".assets/共用.png")).toBe("png");
+    expect(backend.has("资料/assets")).toBe(false);
+    expect(backend.has(".opennote/trash")).toBe(false);
+  });
+
   it("关闭标签释放不再使用的图片 blob URL，关闭笔记本释放全部", async () => {
     const revoked: string[] = [];
     vi.spyOn(URL, "revokeObjectURL").mockImplementation((url: string) => { revoked.push(url); });
