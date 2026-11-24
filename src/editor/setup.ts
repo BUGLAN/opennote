@@ -100,9 +100,6 @@ const typewriterScroll = ViewPlugin.fromClass(
   },
 );
 
-/** Lets the host toggle spellcheck without rebuilding the editor. */
-export const spellcheckCompartment = new Compartment();
-
 /**
  * 只读锁（0.4.0 标签栏的锁按钮）：`EditorState.readOnly` 挡住一切改动事务，
  * `EditorView.editable:false` 连光标都不显示 —— 是「查看」而不是「待输入」。
@@ -114,14 +111,13 @@ export function readOnlyExtensions(locked: boolean): Extension {
   return readOnlyCompartment.of([EditorState.readOnly.of(locked), EditorView.editable.of(!locked)]);
 }
 
-function contentAttributes(spellcheck: boolean): Extension {
-  return spellcheckCompartment.of(
-    EditorView.contentAttributes.of({
-      spellcheck: String(spellcheck),
-      autocapitalize: "off",
-      "data-placeholder": "开始写下这一刻…",
-    }),
-  );
+function contentAttributes(): Extension {
+  return EditorView.contentAttributes.of({
+    // 拼写检查始终关闭：正文里的英文、路径和代码标识符不该出现红色波浪线。
+    spellcheck: "false",
+    autocapitalize: "off",
+    "data-placeholder": "开始写下这一刻…",
+  });
 }
 
 export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
@@ -178,7 +174,7 @@ export function buildEditorExtensions(hooks: EditorHooks): Extension[] {
     EditorState.tabSize.of(2),
     EditorView.lineWrapping,
     readOnlyExtensions(hooks.readOnly()),
-    contentAttributes(hooks.settings.spellcheck ?? true),
+    contentAttributes(),
     editorSettingsField,
     autocompletion({
       override: [

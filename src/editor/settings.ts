@@ -8,6 +8,7 @@ export interface EditorSettings {
   focus: boolean;
   typewriter: boolean;
   imageMode: "asset" | "inline";
+  /** @deprecated 拼写检查已固定关闭；保留字段只为兼容旧设置。 */
   spellcheck: boolean;
   /**
    * 光标所在行要不要露出 Markdown 标记。默认 `false`（不露）——

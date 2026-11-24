@@ -1,4 +1,5 @@
 import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 import type { EditorHooks } from "./setup";
 import { buildEditorExtensions } from "./setup";
@@ -67,5 +68,13 @@ describe("buildEditorExtensions", () => {
     expect(locked.facet(EditorState.readOnly)).toBe(true);
     const unlocked = makeState({ readOnly: () => false });
     expect(unlocked.facet(EditorState.readOnly)).toBe(false);
+  });
+
+  it("始终关闭拼写检查，不受旧设置值影响", () => {
+    for (const spellcheck of [true, false]) {
+      const state = makeState({ settings: { spellcheck } });
+      const attributes = state.facet(EditorView.contentAttributes);
+      expect(attributes).toContainEqual(expect.objectContaining({ spellcheck: "false" }));
+    }
   });
 });

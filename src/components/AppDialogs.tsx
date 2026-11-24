@@ -395,14 +395,6 @@ export function SettingsDialog({
                     />
                     字数统计
                   </label>
-                  <label className="switch">
-                    <input
-                      type="checkbox"
-                      checked={settings.spellcheck}
-                      onChange={(event) => patchUi({ spellcheck: event.target.checked })}
-                    />
-                    拼写检查
-                  </label>
                   <label
                     className="switch"
                     title="允许在英文单词、链接、代码标识符的中间断行，把每一行填满。默认关闭：中文和英文混排时（例如「而如使用Flutter/dark,」），Flutter/dark, 这种不可断的长词放不进行尾就会整块折行，行尾空出两三个字宽；打开后行尾几乎填满，代价是英文词可能被劈成 Fl|utter。"

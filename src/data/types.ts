@@ -178,6 +178,7 @@ export interface UiSettings {
   lineHeight: number;
   typewriter: boolean;
   focus: boolean;
+  /** @deprecated 拼写检查已固定关闭；保留字段只为兼容旧设置。 */
   spellcheck: boolean;
   /**
    * 光标所在行要不要露出 Markdown 标记（`# `、`**`、`> `、`` ` ``、链接的 `[..](..)`）。

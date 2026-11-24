@@ -7,7 +7,7 @@ import { onIdsRemapped } from "../data/library";
 import type { Id, UiSettings } from "../data/types";
 import { minimalReplace } from "../editor/externalReplace";
 import { editorSettingsField, refreshDecorations, setEditorSettings, type EditorSettings } from "../editor/settings";
-import { buildEditorExtensions, readOnlyCompartment, spellcheckCompartment } from "../editor/setup";
+import { buildEditorExtensions, readOnlyCompartment } from "../editor/setup";
 import { notify } from "../lib/toast";
 import { cn } from "../lib/utils";
 
@@ -125,7 +125,7 @@ interface EditorHostProps {
 
 /**
  * 一个标签 = 一个 CodeMirror 实例。挂载时用当下内容建文档，之后**只做两类同步**：
- * 外部内容变化（磁盘赢、快照恢复、导入）整篇替换；设置（主题/锁/拼写检查）经
+ * 外部内容变化（磁盘赢、快照恢复、导入）整篇替换；设置（主题/锁）经
  * Compartment/Effect 下推。切换标签只是 `display` 的开与关。
  */
 function EditorHost(props: EditorHostProps): ReactNode {
@@ -239,20 +239,6 @@ function EditorHost(props: EditorHostProps): ReactNode {
     props.settings.showMarks,
     props.id,
   ]);
-
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({
-      effects: spellcheckCompartment.reconfigure(
-        EditorView.contentAttributes.of({
-          spellcheck: String(props.settings.spellcheck),
-          autocapitalize: "off",
-          "data-placeholder": "开始写下这一刻…",
-        }),
-      ),
-    });
-  }, [props.settings.spellcheck]);
 
   /* 只读锁切换：用 Compartment 换掉 readOnly/editable，不重建编辑器（undo 历史保留）。 */
   useEffect(() => {
