@@ -52,9 +52,9 @@ export function collectImagePaths(markdown: string): string[] {
   return [...out];
 }
 
-export async function ensureImageUrl(path: string, candidates: string[] = []): Promise<string | null> {
+function requestImageUrl(path: string, candidates: string[] = []): Promise<string | null> {
   const cached = imageUrlStore.get()[path];
-  if (cached) return cached;
+  if (cached) return Promise.resolve(cached);
   const running = inflight.get(path);
   if (running) return running;
   const task = (async () => {
@@ -71,7 +71,6 @@ export async function ensureImageUrl(path: string, candidates: string[] = []): P
           URL.revokeObjectURL(url);
           return null;
         }
-        imageUrlStore.set((prev) => ({ ...prev, [path]: url }));
         return url;
       } catch {
         /* try the next candidate */
@@ -81,6 +80,51 @@ export async function ensureImageUrl(path: string, candidates: string[] = []): P
   })().finally(() => inflight.delete(path));
   inflight.set(path, task);
   return task;
+}
+
+function publishImageUrls(entries: ReadonlyArray<readonly [string, string]>): void {
+  if (entries.length === 0) return;
+  imageUrlStore.set((prev) => {
+    let changed = false;
+    const next = { ...prev };
+    for (const [path, url] of entries) {
+      if (next[path] === url) continue;
+      next[path] = url;
+      changed = true;
+    }
+    return changed ? next : prev;
+  });
+}
+
+export async function ensureImageUrl(path: string, candidates: string[] = []): Promise<string | null> {
+  const url = await requestImageUrl(path, candidates);
+  if (url) publishImageUrls([[path, url]]);
+  return url;
+}
+
+/**
+ * 同步拉取落地后，一批图片已经能从磁盘读到了。
+ *
+ * 这一条是「图片未找到」占位符的自愈入口：`ImageWidget` 解析失败后会停住，
+ * 只有成功 URL 写进 store 才会让 EditorPane 重建装饰并重试。批量读取后用**一次**
+ * store 更新发布，避免一次同步落地几十张图时逐文件 dispatch。
+ */
+export async function ensureImageUrls(paths: readonly string[]): Promise<void> {
+  const unique = [...new Set(paths)];
+  if (unique.length === 0) return;
+  const epoch = assetEpoch;
+  const loaded = await Promise.all(
+    unique.map(async (path) => [path, await requestImageUrl(path)] as const),
+  );
+  const fresh = loaded.filter(
+    (entry): entry is readonly [string, string] => entry[1] !== null && imageUrlStore.get()[entry[0]] !== entry[1],
+  );
+  if (fresh.length === 0) return;
+  if (epoch !== assetEpoch) {
+    for (const [, url] of fresh) revoke(url);
+    return;
+  }
+  publishImageUrls(fresh);
 }
 
 /** Turn whatever sits inside `![]()` into something an `<img>` can display. */

@@ -1,5 +1,5 @@
 import { EditorView, WidgetType } from "@codemirror/view";
-import { resolveImageSrc } from "../data/assets";
+import { imageUrl, resolveImageSrc, resolveWorkspacePath } from "../data/assets";
 import type { ThemeId } from "../data/types";
 import { parentPath } from "../fs";
 import { blockHeightFor, rememberBlockHeight } from "./blockHeight";
@@ -53,6 +53,9 @@ function estimatedBlockHeight(key: string, fallback: number): number {
 /* ------------------------------------------------------------------ images */
 
 export class ImageWidget extends WidgetType {
+  /** 建 widget 时是否已经有 blob URL。见 {@link eq}。 */
+  private readonly cachedUrl: string | undefined;
+
   constructor(
     readonly raw: string,
     readonly alt: string,
@@ -63,11 +66,24 @@ export class ImageWidget extends WidgetType {
     readonly blockKey: string = "",
   ) {
     super();
+    const value = raw.trim().replace(/^<|>$/g, "");
+    if (/^(https?:|data:|blob:)/i.test(value)) this.cachedUrl = undefined;
+    else if (value.startsWith("asset://")) this.cachedUrl = imageUrl(value);
+    else this.cachedUrl = imageUrl(resolveWorkspacePath(value, parentPath(notePath)) ?? "");
   }
 
   eq(other: ImageWidget): boolean {
     return (
-      other.raw === this.raw && other.alt === this.alt && other.block === this.block && other.notePath === this.notePath
+      other.raw === this.raw &&
+      other.alt === this.alt &&
+      other.block === this.block &&
+      other.notePath === this.notePath &&
+      /*
+       * CodeMirror 在 `eq()` 为 true 时直接复用旧 DOM，连 `toDOM()` 都不重跑。
+       * 图片解析失败后占位符会停住；只有把「建它时有没有缓存 URL」也算进身份，
+       * 同步落地补上 URL 后的重建才会换掉旧的「图片未找到」节点。
+       */
+      other.cachedUrl === this.cachedUrl
     );
   }
 

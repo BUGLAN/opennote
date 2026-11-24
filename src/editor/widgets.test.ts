@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { imageUrlStore } from "../data/assets";
 import { clearBlockHeights, rememberBlockHeight } from "./blockHeight";
 import { HrWidget, ImageWidget, MathWidget, MermaidWidget, TableWidget } from "./widgets";
 
@@ -41,5 +42,21 @@ describe("块级 widget 的估算高度（estimatedHeight）", () => {
   it("行内 widget 返回 -1：它们不是块级装饰，不该参与块级高度估算", () => {
     expect(new MathWidget("a+b", false, "").estimatedHeight).toBe(-1);
     expect(new ImageWidget("./a.png", "图", false, "note.md", "").estimatedHeight).toBe(-1);
+  });
+});
+
+describe("图片 widget 的 DOM 复用", () => {
+  it("图片 URL 到位后，新 widget 不会复用「图片未找到」的旧 DOM", () => {
+    const raw = "./笔记.assets/图.png";
+    const missing = new ImageWidget(raw, "图", true, "笔记.md", "![图](./笔记.assets/图.png)");
+
+    imageUrlStore.set({ "笔记.assets/图.png": "blob:ready" });
+    try {
+      const ready = new ImageWidget(raw, "图", true, "笔记.md", "![图](./笔记.assets/图.png)");
+      expect(missing.eq(ready)).toBe(false);
+      expect(ready.eq(new ImageWidget(raw, "图", true, "笔记.md", "![图](./笔记.assets/图.png)"))).toBe(true);
+    } finally {
+      imageUrlStore.set({});
+    }
   });
 });

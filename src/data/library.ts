@@ -10,6 +10,7 @@ import {
   isCanvasPath,
   isHiddenPath,
   isHtmlPath,
+  isImagePath,
   isMarkdownPath,
   joinPath,
   normalizePath,
@@ -1043,9 +1044,24 @@ async function refreshPaths(target: FileSystemBackend, changes: WorkspaceFileCha
   // 画布与笔记同集：外部新建的 .canvas 若掉进下面的「目录」分支，会被当成
   // 文件夹节点挂进树里（exists() 对文件也答 true）。
   const md = changes.filter((change) => isNoteFilePath(change.path));
-  const dirs = changes.filter(
-    (change) => !isNoteFilePath(change.path) && !isHiddenPath(change.path) && change.type !== "delete",
+  const images = changes.filter(
+    (change) =>
+      change.type !== "delete" && isImagePath(change.path) && !change.path.startsWith(`${META_DIR}/`),
   );
+  const dirs = changes.filter(
+    (change) =>
+      !isNoteFilePath(change.path) &&
+      !isImagePath(change.path) &&
+      !isHiddenPath(change.path) &&
+      change.type !== "delete",
+  );
+  // 图片落地不会改笔记正文：必须主动预热 URL，才能让已显示「图片未找到」的 widget 重试。
+  // 批量发布一次，避免同步落地几十张图时逐个触发编辑器装饰重建。
+  if (images.length > 0) {
+    const { ensureImageUrls } = await import("./assets");
+    if (myGen !== generation || backend !== target) return;
+    await ensureImageUrls([...new Set(images.map((change) => change.path))]);
+  }
   if (md.length > PATH_REFRESH_LIMIT) {
     await rescanWorkspace();
     return;
